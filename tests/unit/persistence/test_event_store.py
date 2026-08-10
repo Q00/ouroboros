@@ -124,6 +124,43 @@ class TestEventStoreInitialization:
             await store.append_durable(sample_event, timeout=0.01)
         assert asyncio.get_running_loop().time() - started_at < 0.05
 
+    async def test_durable_append_keeps_committed_authority_when_cleanup_fails(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A post-commit driver cleanup error cannot report the append as absent."""
+        from aiosqlite import Connection
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'post-commit-cleanup.db'}")
+        await store.initialize()
+        original_set_progress_handler = Connection.set_progress_handler
+
+        async def fail_when_removing_progress_handler(
+            connection: Connection,
+            handler,
+            steps: int,
+        ) -> None:
+            if handler is None:
+                raise RuntimeError("simulated post-commit cleanup failure")
+            await original_set_progress_handler(connection, handler, steps)
+
+        monkeypatch.setattr(
+            Connection,
+            "set_progress_handler",
+            fail_when_removing_progress_handler,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await store.append_durable(sample_event, timeout=1.0)
+
+        events = await store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
+        assert [event.id for event in events] == [sample_event.id]
+        assert "event_store.append.post_commit_cleanup_failed" in caplog.text
+        await store.close()
+
     async def test_repeated_initialize_settles_schema_transaction_before_cancellation(
         self,
         monkeypatch,

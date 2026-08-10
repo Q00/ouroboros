@@ -119,6 +119,8 @@ async def append_with_sqlite_deadline(
     settlement_reserve = min(0.25, remaining / 2)
     operation_deadline = time.monotonic() + (remaining - settlement_reserve)
     deadline_reached = False
+    committed = False
+    post_commit_cleanup_error: BaseException | None = None
 
     def interrupt_long_sql() -> int:
         nonlocal deadline_reached
@@ -141,17 +143,66 @@ async def append_with_sqlite_deadline(
                     max(0.0, operation_deadline - time.monotonic()),
                     lambda: asyncio.create_task(driver.interrupt()),
                 )
+                operation_error: BaseException | None = None
                 try:
                     async with conn.begin():
                         await insert_event(conn, event, picker_projection_ready)
+                    committed = True
+                except BaseException as exc:
+                    operation_error = exc
+                    raise
                 finally:
                     interrupt_handle.cancel()
-                    await driver.set_progress_handler(None, 0)
-                    restore_cursor = await driver.execute("PRAGMA busy_timeout=30000")
-                    await restore_cursor.close()
+                    cleanup_error: BaseException | None = None
+                    try:
+                        await driver.set_progress_handler(None, 0)
+                    except Exception as exc:
+                        cleanup_error = exc
+                    try:
+                        restore_cursor = await driver.execute("PRAGMA busy_timeout=30000")
+                        await restore_cursor.close()
+                    except Exception as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                        else:
+                            logger.warning(
+                                "event_store.append.secondary_cleanup_failed",
+                                exc_info=exc,
+                            )
+                    if cleanup_error is not None:
+                        try:
+                            await conn.invalidate(cleanup_error)
+                        except Exception as exc:
+                            logger.warning(
+                                "event_store.append.connection_invalidation_failed",
+                                exc_info=exc,
+                            )
+                        if committed:
+                            post_commit_cleanup_error = cleanup_error
+                        elif operation_error is None:
+                            raise cleanup_error
+                        else:
+                            logger.warning(
+                                "event_store.append.rollback_cleanup_failed",
+                                exc_info=cleanup_error,
+                            )
+        if post_commit_cleanup_error is not None:
+            logger.warning(
+                "event_store.append.post_commit_cleanup_failed",
+                exc_info=post_commit_cleanup_error,
+            )
     except TimeoutError:
+        if committed:
+            logger.warning("event_store.append.post_commit_cleanup_timed_out")
+            return
         raise
     except OperationalError as exc:
+        if committed:
+            logger.warning(
+                "event_store.append.post_commit_cleanup_failed",
+                exc_info=exc,
+            )
+            return
         if deadline_reached or loop.time() >= overall_deadline - settlement_reserve:
             raise TimeoutError("durable append exceeded its persistence deadline") from exc
         raise PersistenceError(
@@ -161,6 +212,12 @@ async def append_with_sqlite_deadline(
             details={"event_id": event.id, "event_type": event.type},
         ) from exc
     except Exception as exc:
+        if committed:
+            logger.warning(
+                "event_store.append.post_commit_cleanup_failed",
+                exc_info=exc,
+            )
+            return
         if deadline_reached:
             raise TimeoutError("durable append exceeded its persistence deadline") from exc
         if isinstance(exc, PersistenceError):

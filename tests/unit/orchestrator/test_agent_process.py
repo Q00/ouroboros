@@ -225,6 +225,28 @@ def _directives(events: list[BaseEvent]) -> list[str]:
     return [e.data["directive"] for e in events if e.type == "control.directive.emitted"]
 
 
+def _fail_sqlite_progress_handler_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every real durable append fail only after its transaction commits."""
+    from aiosqlite import Connection
+
+    original_set_progress_handler = Connection.set_progress_handler
+
+    async def fail_when_removing_progress_handler(
+        connection: Connection,
+        handler: Any,
+        steps: int,
+    ) -> None:
+        if handler is None:
+            raise RuntimeError("simulated post-commit cleanup failure")
+        await original_set_progress_handler(connection, handler, steps)
+
+    monkeypatch.setattr(
+        Connection,
+        "set_progress_handler",
+        fail_when_removing_progress_handler,
+    )
+
+
 async def _wait_for_status(handle, status: AgentProcessStatus) -> None:
     for _ in range(100):
         if handle.status() is status:
@@ -2894,6 +2916,108 @@ async def test_real_event_store_cancel_after_resume_commit_releases_live_waiter(
         ]
     finally:
         release_append.set()
+        finish_work.set()
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_real_event_store_post_commit_cleanup_failure_preserves_initial_and_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed initial and terminal rows keep journal and live authority aligned."""
+    _fail_sqlite_progress_handler_cleanup(monkeypatch)
+    process_id = "durable-post-commit-cleanup-initial-terminal"
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+    handle_box: list[AgentProcessHandle] = []
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        return "done"
+
+    try:
+        assert (
+            await run_with_agent_process(
+                event_store=store,
+                intent="durable",
+                work_fn=work,
+                process_id=process_id,
+            )
+            == "done"
+        )
+
+        events = await store.replay("agent_process", process_id)
+        assert _directives(events) == ["continue", "converge"]
+        snapshot = project_agent_process_snapshot(events, process_id=process_id)
+        assert snapshot is not None
+        assert snapshot.status is AgentProcessStatus.COMPLETED
+        assert handle_box[0].status() is AgentProcessStatus.COMPLETED
+        assert handle_box[0].failure() is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_real_event_store_post_commit_cleanup_failure_preserves_resume_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed resume releases the waiter without a duplicate CONTINUE."""
+    _fail_sqlite_progress_handler_cleanup(monkeypatch)
+    process_id = "durable-post-commit-cleanup-resume"
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+    work_released = asyncio.Event()
+    finish_work = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        reached_pause.set()
+        await handle.wait_unpaused()
+        work_released.set()
+        await finish_work.wait()
+        return "done"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+            process_id=process_id,
+        )
+    )
+    try:
+        await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+        handle = handle_box[0]
+        await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+        await handle.resume()
+        await asyncio.wait_for(work_released.wait(), timeout=1.0)
+        events = await store.replay("agent_process", process_id)
+        assert _directives(events) == ["continue", "wait", "continue"]
+        snapshot = project_agent_process_snapshot(events, process_id=process_id)
+        assert snapshot is not None
+        assert snapshot.status is AgentProcessStatus.RUNNING
+        assert handle.status() is AgentProcessStatus.RUNNING
+
+        finish_work.set()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == "done"
+        assert _directives(await store.replay("agent_process", process_id)) == [
+            "continue",
+            "wait",
+            "continue",
+            "converge",
+        ]
+        assert handle.status() is AgentProcessStatus.COMPLETED
+        assert handle.failure() is None
+    finally:
         finish_work.set()
         if not run_task.done():
             run_task.cancel()
