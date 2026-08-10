@@ -137,6 +137,68 @@ _ASYNC_SUBMISSION_TOOLS = frozenset(
 _TOOL_NAME_PATTERN = re.compile(r"^ouroboros_[a-z0-9_]{1,64}$")
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
+# The audited privacy contract for `tool`/`command`: every SHIPPED built-in
+# ouroboros_* MCP tool name, and nothing else. Deliberately a static literal
+# set, NOT the adapter's mutable tool registry -- `register_tool()` accepts
+# arbitrary names (extensions, custom tools registered by a plugin/host),
+# and a registered-but-not-ours name is exactly as caller-controlled as an
+# unregistered one from telemetry's point of view. The charset backstop
+# above only rejects garbage shapes; this rejects anything that merely
+# *looks* like a real tool but isn't one of the ones this project ships and
+# has actually audited for privacy-safe naming.
+#
+# Derived by enumerating BOTH real composition entry points, not guessed:
+# 1. create_ouroboros_server()'s default tool_handlers assembly
+#    (src/ouroboros/mcp/server/adapter.py) -- the primary `ouroboros mcp
+#    serve` path, read via `{h.definition.name for h in tool_handlers}`.
+# 2. runtime_tool_composition.py's explicit tuple -- a second, narrower
+#    composition path (used for a different runtime mode) that additionally
+#    registers `ouroboros_checklist_verify`, a genuine top-level tool absent
+#    from (1)'s default composition.
+# _TOOL_FUNNEL/_POLLING_TOOLS/_ASYNC_SUBMISSION_TOOLS keys are all subsets
+# of this set (test_telemetry.py asserts it, so the sets can't drift apart).
+_CANONICAL_TOOL_NAMES = frozenset(
+    {
+        "ouroboros_ac_dashboard",
+        "ouroboros_ac_tree_hud",
+        "ouroboros_auto",
+        "ouroboros_brownfield",
+        "ouroboros_cancel_execution",
+        "ouroboros_cancel_job",
+        "ouroboros_checklist_verify",
+        "ouroboros_evaluate",
+        "ouroboros_evolve_rewind",
+        "ouroboros_evolve_step",
+        "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
+        "ouroboros_generate_seed",
+        "ouroboros_interview",
+        "ouroboros_job_result",
+        "ouroboros_job_status",
+        "ouroboros_job_wait",
+        "ouroboros_lateral_think",
+        "ouroboros_lineage_status",
+        "ouroboros_measure_drift",
+        "ouroboros_pm_interview",
+        "ouroboros_project_status",
+        "ouroboros_qa",
+        "ouroboros_query_events",
+        "ouroboros_query_projection",
+        "ouroboros_ralph",
+        "ouroboros_record_conductor_decision",
+        "ouroboros_session_signal",
+        "ouroboros_session_signal_targets",
+        "ouroboros_session_status",
+        "ouroboros_start_auto",
+        "ouroboros_start_evaluate",
+        "ouroboros_start_evolve_step",
+        "ouroboros_start_execute_seed",
+        "ouroboros_start_ralph",
+        "ouroboros_submit_fanout_results",
+    }
+)
+_EXTENSION_TOOL_NAME = "ouroboros_extension_tool"
+
 _JOB_FUNNEL: dict[str, str] = {
     "execute_seed": "run",
     "evolve_step": "evolve",
@@ -846,10 +908,11 @@ def capture_tool_call(
 
     `name` is caller-controlled and only loosely gated by the
     "ouroboros_" prefix check below -- see _TOOL_NAME_PATTERN for the
-    strict charset backstop that follows: a name that doesn't look like a
-    real registered tool is replaced with a fixed literal before it can
-    become the `tool`/`command` property values, rather than dropped or
-    forwarded verbatim.
+    strict charset backstop, and _CANONICAL_TOOL_NAMES for the audited
+    allowlist that follows it: a name that doesn't look like a real tool,
+    or looks right but isn't one this project ships, is replaced with a
+    fixed literal before it can become the `tool`/`command` property
+    values, rather than dropped or forwarded verbatim.
     """
     try:
         if not name.startswith("ouroboros_"):
@@ -862,6 +925,13 @@ def capture_tool_call(
             # failures are deliberately counted, just never under a caller
             # string that could be a path, an identifier, or anything else.
             name = _UNKNOWN_TOOL_NAME
+        elif name != _UNKNOWN_TOOL_NAME and name not in _CANONICAL_TOOL_NAMES:
+            # Charset-valid but not an audited built-in name: a real
+            # registered extension/custom tool (register_tool() accepts
+            # anything), not a lookup failure -- keep the two literals
+            # distinct rather than collapsing both into "unknown". Still
+            # counted, never under the caller's identifying name.
+            name = _EXTENSION_TOOL_NAME
         sample_rate = 1
         if name in _POLLING_TOOLS:
             if _poll_rng.random() >= 1.0 / _POLL_SAMPLE_RATE:

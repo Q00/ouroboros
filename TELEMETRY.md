@@ -106,6 +106,11 @@ Notes:
   1/50 regardless of how long a given process lives; sampled events carry a
   `sample_rate` property so counts can be re-weighted. Everything else is
   captured 1:1.
+- `tool`/`command` on an MCP `command_run` event only ever carry a name from
+  the audited, static list of built-in Ouroboros tools: an unrecognized
+  lookup appears as `ouroboros_unknown_tool`, and a registered third-party
+  or custom tool (extensions can register arbitrary names) appears as
+  `ouroboros_extension_tool` — the identifying name itself is never sent.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
 - Start-tool `command_run` events are submission receipts. They intentionally

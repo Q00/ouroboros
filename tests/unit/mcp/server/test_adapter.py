@@ -1552,6 +1552,41 @@ class TestMCPServerAdapterTools:
         assert capture.call_args.args[0] == "ouroboros_registered_probe"
         assert capture.call_args.kwargs["ok"] is True
 
+    async def test_call_tool_registered_extension_tool_name_is_folded_to_canonical_literal(
+        self,
+    ) -> None:
+        """A genuinely registered but non-canonical (extension) tool name still
+        never reaches PostHog verbatim. Being registered in the adapter's
+        handler map is not the same as being one of the audited, shipped
+        ouroboros_* tools -- only telemetry.py's _CANONICAL_TOOL_NAMES set
+        earns a verbatim ``tool``/``command``; everything else (including a
+        real registered extension tool) folds to the audited
+        ``ouroboros_extension_tool`` literal so an identifying suffix like a
+        customer/project name never becomes a property value.
+
+        Unlike the boundary-only tests above, this patches the real sink
+        (``ouroboros.telemetry.capture``) rather than ``capture_tool_call``
+        itself, so the actual canonical-set gate inside capture_tool_call
+        runs and its output is what gets asserted on.
+        """
+        adapter = MCPServerAdapter()
+        extension_name = "ouroboros_acme_private_project"
+        adapter.register_tool(MockToolHandler(extension_name))
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            result = await adapter.call_tool(extension_name, {"input": "safe"})
+
+        assert result.is_ok
+        capture.assert_called_once()
+        event, props = capture.call_args.args
+        assert event == "command_run"
+        assert props["tool"] == "ouroboros_extension_tool"
+        assert props["command"] == "extension_tool"
+        assert props["ok"] is True
+        for value in props.values():
+            assert "acme" not in str(value)
+            assert "private_project" not in str(value)
+
     async def test_call_tool_security_denial_is_captured_once(self) -> None:
         """A pre-handler security return is a visible failed invocation."""
         adapter = MCPServerAdapter()
@@ -1580,6 +1615,31 @@ class TestMCPServerAdapterTools:
         assert result.is_err
         assert "Handler failed" in str(result.error)
         assert any(event["event"] == "mcp.server.call_tool.error" for event in logs)
+
+
+class TestCanonicalToolNameSyncGuard:
+    """Guard the SSOT pairing between the shipped tool registry and telemetry.
+
+    telemetry.py's capture_tool_call folds any non-canonical (including a
+    genuinely registered but unaudited extension) tool name to the fixed
+    ``ouroboros_extension_tool`` literal. If a future built-in tool ships
+    without a matching entry in ``_CANONICAL_TOOL_NAMES``, it would silently
+    report as an anonymous extension tool -- losing its real funnel step --
+    instead of failing loudly. This test makes that omission fail CI.
+    """
+
+    def test_every_shipped_tool_is_in_the_canonical_set(self) -> None:
+        from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+        from ouroboros.telemetry import _CANONICAL_TOOL_NAMES
+
+        shipped_names = {tool.definition.name for tool in get_ouroboros_tools()}
+        missing = shipped_names - _CANONICAL_TOOL_NAMES
+
+        assert not missing, (
+            f"Shipped tool(s) missing from telemetry._CANONICAL_TOOL_NAMES: "
+            f"{sorted(missing)} -- add them or they will silently report as "
+            f"ouroboros_extension_tool in telemetry."
+        )
 
 
 class TestMCPServerAdapterResources:
@@ -2151,6 +2211,33 @@ class TestServeTransport:
         for value in (*capture.call_args.args, *capture.call_args.kwargs.values()):
             assert "/home/alice" not in str(value)
             assert "private-project" not in str(value)
+
+    async def test_sdk_call_tool_registered_extension_tool_name_is_folded_to_canonical_literal(
+        self,
+    ) -> None:
+        """Same registered-but-non-canonical fold as the typed-adapter path,
+        through the SDK entry point. Patches the real ``ouroboros.telemetry.capture``
+        sink so the canonical-set gate inside capture_tool_call actually runs.
+        """
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        extension_name = "ouroboros_acme_private_project"
+        adapter.register_tool(MockToolHandler(extension_name))
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            await call_sdk_tool(adapter, extension_name, {"input": "safe"})
+
+        capture.assert_called_once()
+        event, props = capture.call_args.args
+        assert event == "command_run"
+        assert props["tool"] == "ouroboros_extension_tool"
+        assert props["command"] == "extension_tool"
+        assert props["ok"] is True
+        for value in props.values():
+            assert "acme" not in str(value)
+            assert "private_project" not in str(value)
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

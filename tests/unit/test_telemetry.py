@@ -666,6 +666,49 @@ class TestCapture:
         assert sent[0]["properties"]["command"] == "unknown_tool"
         assert overlong not in repr(sent[0])
 
+    def test_registered_extension_tool_name_is_replaced_not_forwarded(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        """A name that is charset-valid AND shaped exactly like a real tool
+        -- but isn't one this project actually ships -- is a REGISTERED
+        extension/custom tool (register_tool() accepts arbitrary names), not
+        a lookup failure. It must still never carry an identifying name
+        through `tool`/`command`."""
+        hostile = "ouroboros_acme_private_project"
+        telemetry.capture_tool_call(hostile, ok=True)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["properties"]["tool"] == "ouroboros_extension_tool"
+        assert event["properties"]["command"] == "extension_tool"
+        assert "acme" not in repr(event)
+        assert "private_project" not in repr(event)
+        assert hostile not in repr(event)
+
+    def test_unknown_and_extension_literals_stay_distinct(self, sent: list[dict[str, Any]]) -> None:
+        """ouroboros_unknown_tool (charset-invalid -- a lookup failure) and
+        ouroboros_extension_tool (charset-valid but not audited -- a real
+        registered non-Ouroboros tool) must not collapse into each other:
+        the literal ouroboros_unknown_tool itself is charset-valid and not
+        in the canonical set, so the extension-tool check must special-case
+        it rather than re-mapping it a second time."""
+        telemetry.capture_tool_call(telemetry._UNKNOWN_TOOL_NAME, ok=True)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["properties"]["tool"] == "ouroboros_unknown_tool"
+        assert sent[0]["properties"]["command"] == "unknown_tool"
+
+    def test_canonical_tool_names_are_subsets_of_the_audited_set(self) -> None:
+        """The funnel/polling/submission maps must never name a tool that
+        isn't in the audited canonical set -- if they drift apart, a real
+        tool could silently start getting extension-tool-mangled, or a
+        typo'd/renamed entry in one of the smaller sets would go unnoticed."""
+        assert set(telemetry._TOOL_FUNNEL) <= telemetry._CANONICAL_TOOL_NAMES
+        assert telemetry._POLLING_TOOLS <= telemetry._CANONICAL_TOOL_NAMES
+        assert telemetry._ASYNC_SUBMISSION_TOOLS <= telemetry._CANONICAL_TOOL_NAMES
+
     def test_polling_tools_sampled(self, sent: list[dict[str, Any]]) -> None:
         # Sampling is a per-call random draw (see telemetry._poll_rng), not a
         # deterministic 1-in-50 counter, so the batch needs a seed that is
