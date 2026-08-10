@@ -13,6 +13,7 @@ import time
 import tomllib
 from urllib import error as urlerror
 from urllib import request as urlrequest
+import uuid
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape as xml_escape
 
@@ -21,6 +22,8 @@ _RUNNER_NAME = "ouroboros-mcp-http.ps1"
 _READINESS_TIMEOUT_SECONDS = 10.0
 _READINESS_POLL_INTERVAL_SECONDS = 0.1
 _RUNNER_MARKER = "# Ouroboros MCP HTTP generated runner"
+_RUNNER_GENERATION_PREFIX = "# Ouroboros MCP HTTP generation: "
+_TASK_GENERATION_PREFIX = "Ouroboros MCP HTTP generation: "
 _CODEX_MCP_HTTP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 # Keep Ouroboros runtime settings and per-role model overrides in
 # ~/.ouroboros/config.yaml (for example: clarification.default_model,
@@ -155,11 +158,136 @@ def _is_setup_managed_task(task_xml: str, runner_path: Path) -> bool:
     ) == _task_arguments(runner_path)
 
 
+def _runner_generation(contents: bytes) -> tuple[bool, str | None]:
+    """Return whether a runner claim exists and its valid non-empty value."""
+    if not _is_generated_runner(contents):
+        return False, None
+    try:
+        lines = contents.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return True, None
+    if len(lines) < 2:
+        return False, None
+    if not lines[1].startswith(_RUNNER_GENERATION_PREFIX):
+        return True, None
+    return True, lines[1][len(_RUNNER_GENERATION_PREFIX) :] or None
+
+
+def _task_generation(task_xml: str) -> tuple[bool, str | None]:
+    """Return whether a task claim exists and its valid non-empty value."""
+    try:
+        root = ElementTree.fromstring(task_xml)
+    except ElementTree.ParseError:
+        return True, None
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] == "Description" and element.text:
+            if element.text.startswith(_TASK_GENERATION_PREFIX):
+                return True, element.text[len(_TASK_GENERATION_PREFIX) :] or None
+    return False, None
+
+
+def _read_runner(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
+
+
+def _unchanged(
+    schtasks: str, runner_path: Path, task_xml: str | None, runner: bytes | None
+) -> bool:
+    """Check that neither observed artifact changed before a destructive operation."""
+    return _task_xml(schtasks) == task_xml and _read_runner(runner_path) == runner
+
+
+def _owns_generation(schtasks: str, runner_path: Path, generation: str, runner: bytes) -> bool:
+    """Check the exact task and runner created by this invocation still exist."""
+    task_xml = _task_xml(schtasks)
+    return (
+        task_xml is not None
+        and _is_setup_managed_task(task_xml, runner_path)
+        and _task_generation(task_xml) == (True, generation)
+        and _runner_generation(_read_runner(runner_path) or b"") == (True, generation)
+        and _read_runner(runner_path) == runner
+    )
+
+
+def _is_coherent_managed_pair(
+    task_xml: str | None, runner: bytes | None, runner_path: Path
+) -> bool:
+    """Return whether the reserved artifacts have one unambiguous ownership claim."""
+    if task_xml is None and runner is None:
+        return True
+    if task_xml is None or runner is None:
+        return False
+    if not _is_setup_managed_task(task_xml, runner_path) or not _is_generated_runner(runner):
+        return False
+    task_claimed, task_generation = _task_generation(task_xml)
+    runner_claimed, runner_generation = _runner_generation(runner)
+    if not task_claimed and not runner_claimed:
+        return True
+    return (
+        task_claimed
+        and runner_generation is not None
+        and task_generation is not None
+        and task_generation == runner_generation
+    )
+
+
+def _restore_prior_task(
+    schtasks: str,
+    prior_task_xml: str | None,
+    prior_running: bool,
+    runner_path: Path,
+    prior_runner: bytes | None,
+    generated_runner: bytes,
+) -> str | None:
+    """Restore a prior generation after a failure before replacement registration."""
+    try:
+        current_runner = _read_runner(runner_path)
+        if _task_xml(schtasks) != prior_task_xml or current_runner not in {
+            prior_runner,
+            generated_runner,
+        }:
+            return "Task or runner changed ownership before rollback."
+        if current_runner == generated_runner:
+            _restore_file(runner_path, prior_runner)
+        if prior_running:
+            if (
+                subprocess.run(
+                    [schtasks, "/Run", "/TN", _TASK_NAME],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).returncode
+                != 0
+            ):
+                return "Could not restart the previous scheduled task."
+            if (
+                not _scheduled_task_is_running()
+                or not _wait_for_http_readiness()
+                or not _unchanged(schtasks, runner_path, prior_task_xml, prior_runner)
+            ):
+                return "The restored scheduled task did not become ready."
+    except OSError as exc:
+        return f"Could not restore the previous scheduled task: {_bounded_error(str(exc))}"
+    return None
+
+
 def _restore_file(path: Path, contents: bytes | None) -> None:
     if contents is None:
         path.unlink(missing_ok=True)
     else:
         path.write_bytes(contents)
+
+
+def _restore_absent_file(path: Path, contents: bytes | None) -> bool:
+    """Restore a missing file without overwriting a concurrent owner."""
+    if contents is None:
+        return not path.exists()
+    try:
+        with path.open("xb") as restored:
+            restored.write(contents)
+    except FileExistsError:
+        return False
+    return True
 
 
 def _create_private_task_xml(config_dir: Path, contents: str) -> Path:
@@ -295,20 +423,24 @@ def _rollback_task(
     task_xml_path: Path,
     prior_task_xml: str | None,
     prior_task_was_running: bool,
-    replacement_created: bool,
+    generation: str,
     runner_path: Path,
+    generated_runner: bytes,
     prior_runner: bytes | None,
 ) -> str | None:
-    """Restore the task and runner state after a failed provisioning attempt."""
+    """Restore only the generation created by this invocation."""
     try:
-        if replacement_created:
+        if not _owns_generation(schtasks, runner_path, generation, generated_runner):
+            return "Replacement task or runner changed ownership before rollback."
+        if _scheduled_task_is_running():
             ended = subprocess.run(
                 [schtasks, "/End", "/TN", _TASK_NAME], capture_output=True, text=True, check=False
             )
             if ended.returncode != 0:
                 return "Could not end the replacement scheduled task during rollback."
+        if not _owns_generation(schtasks, runner_path, generation, generated_runner):
+            return "Replacement task or runner changed ownership during rollback."
         if prior_task_xml is None:
-            _restore_file(runner_path, prior_runner)
             deleted = subprocess.run(
                 [schtasks, "/Delete", "/TN", _TASK_NAME, "/F"],
                 capture_output=True,
@@ -316,10 +448,14 @@ def _rollback_task(
                 check=False,
             )
             if deleted.returncode != 0:
-                return "Could not remove the replacement scheduled task."
+                return "Could not remove the replacement scheduled task during rollback."
+            if _task_xml(schtasks) is not None or _read_runner(runner_path) != generated_runner:
+                return "Replacement ownership changed before runner rollback."
+            _restore_file(runner_path, prior_runner)
             return None
         task_xml_path.write_text(prior_task_xml, encoding="utf-16")
-        _restore_file(runner_path, prior_runner)
+        if not _owns_generation(schtasks, runner_path, generation, generated_runner):
+            return "Replacement task or runner changed ownership before task restoration."
         created = subprocess.run(
             [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path), "/F"],
             capture_output=True,
@@ -328,13 +464,20 @@ def _rollback_task(
         )
         if created.returncode != 0:
             return "Could not restore the previous scheduled task."
+        if _task_xml(schtasks) != prior_task_xml or _read_runner(runner_path) != generated_runner:
+            return "Replacement ownership changed before runner rollback restoration."
+        _restore_file(runner_path, prior_runner)
         if prior_task_was_running:
             started = subprocess.run(
                 [schtasks, "/Run", "/TN", _TASK_NAME], capture_output=True, text=True, check=False
             )
             if started.returncode != 0:
                 return "Could not restart the previous scheduled task."
-            if not _wait_for_http_readiness():
+            if (
+                not _scheduled_task_is_running()
+                or not _wait_for_http_readiness()
+                or not _unchanged(schtasks, runner_path, prior_task_xml, prior_runner)
+            ):
                 return "The restored scheduled task did not become ready."
     except OSError as exc:
         return f"Could not restore the previous scheduled task: {_bounded_error(str(exc))}"
@@ -344,14 +487,12 @@ def _rollback_task(
 def provision_windows_codex_mcp_http(
     config_dir: Path, launcher: tuple[str, list[str]]
 ) -> str | None:
-    """Install, start, and verify the per-user HTTP MCP task transactionally."""
+    """Install, start, and verify a claimed per-user HTTP MCP task."""
     schtasks = shutil.which("schtasks")
     identity = _current_windows_identity()
     if schtasks is None or identity is None:
         return "Could not find the Ouroboros MCP launcher, Windows Task Scheduler, or current user."
-
-    command, args = launcher
-    server_args = list(args)
+    command, server_args = launcher[0], list(launcher[1])
     for option, value in (
         ("--runtime", "codex"),
         ("--llm-backend", "codex"),
@@ -361,89 +502,137 @@ def provision_windows_codex_mcp_http(
     ):
         server_args = _append_missing_mcp_option(server_args, option, value)
     runner_path = config_dir / _RUNNER_NAME
-    task_arguments = _task_arguments(runner_path)
-    runner_lines = [
-        _RUNNER_MARKER,
-        "$ErrorActionPreference = 'Stop'",
-        "$arguments = @(",
-        *[
-            f"    {_powershell_literal(argument)}{',' if index < len(server_args) - 1 else ''}"
-            for index, argument in enumerate(server_args)
-        ],
-        ")",
-        f"& {_powershell_literal(command)} @arguments",
-        "exit $LASTEXITCODE",
-        "",
-    ]
-    runner_contents = "\n".join(runner_lines)
+    generation = uuid.uuid4().hex
+    runner_contents = "\n".join(
+        [
+            _RUNNER_MARKER,
+            _RUNNER_GENERATION_PREFIX + generation,
+            "$ErrorActionPreference = 'Stop'",
+            "$arguments = @(",
+            *[
+                f"    {_powershell_literal(arg)}{',' if i < len(server_args) - 1 else ''}"
+                for i, arg in enumerate(server_args)
+            ],
+            ")",
+            f"& {_powershell_literal(command)} @arguments",
+            "exit $LASTEXITCODE",
+            "",
+        ]
+    )
+    generated_runner = runner_contents.encode()
     task_xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>{_TASK_GENERATION_PREFIX}{generation}</Description></RegistrationInfo>
   <Triggers><LogonTrigger><UserId>{xml_escape(identity)}</UserId><Enabled>true</Enabled></LogonTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>{xml_escape(identity)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>true</Hidden><Enabled>true</Enabled></Settings>
-  <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>{xml_escape(task_arguments)}</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>{xml_escape(_task_arguments(runner_path))}</Arguments></Exec></Actions>
 </Task>
 """
+    task_xml_path: Path | None = None
     prior_runner: bytes | None = None
     prior_task_xml: str | None = None
-    prior_task_was_running = False
-    task_xml_path: Path | None = None
-    mutation_started = False
+    prior_running = False
     replacement_created = False
+    prior_ended = False
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
-        prior_runner = runner_path.read_bytes() if runner_path.exists() else None
-        prior_task_xml = _task_xml(schtasks)
+        prior_runner, prior_task_xml = _read_runner(runner_path), _task_xml(schtasks)
         if prior_task_xml is not None and not _is_setup_managed_task(prior_task_xml, runner_path):
             return "Refusing to overwrite a reserved task not managed by Ouroboros MCP HTTP setup."
         if prior_runner is not None and not _is_generated_runner(prior_runner):
             return "Refusing to overwrite a runner not managed by Ouroboros MCP HTTP setup."
+        if not _is_coherent_managed_pair(prior_task_xml, prior_runner, runner_path):
+            return (
+                "Refusing to modify task and runner with mismatched Ouroboros MCP ownership claims."
+            )
+        if prior_task_xml is None and _wait_for_http_readiness():
+            return (
+                "Refusing to provision while an existing Ouroboros MCP HTTP endpoint is listening."
+            )
         task_xml_path = _create_private_task_xml(config_dir, task_xml)
         if prior_task_xml is not None:
-            prior_task_was_running = _scheduled_task_is_running()
-            if prior_task_was_running:
-                ended = subprocess.run(
-                    [schtasks, "/End", "/TN", _TASK_NAME],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if ended.returncode != 0:
+            prior_running = _scheduled_task_is_running()
+            if prior_running:
+                if not _unchanged(schtasks, runner_path, prior_task_xml, prior_runner):
+                    raise OSError("Scheduled task or runner changed ownership before replacement.")
+                if (
+                    subprocess.run(
+                        [schtasks, "/End", "/TN", _TASK_NAME],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    ).returncode
+                    != 0
+                ):
                     raise OSError("Could not end the previous scheduled task.")
-        mutation_started = True
-        runner_path.write_text(runner_contents, encoding="utf-8")
-        created = subprocess.run(
-            [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path), "/F"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if created.returncode != 0:
+                prior_ended = True
+                if _wait_for_http_readiness():
+                    raise OSError(
+                        "Refusing to provision while an existing Ouroboros MCP HTTP endpoint is listening."
+                    )
+            elif _wait_for_http_readiness():
+                return "Refusing to provision while an existing Ouroboros MCP HTTP endpoint is listening."
+        if not _unchanged(schtasks, runner_path, prior_task_xml, prior_runner):
+            raise OSError("Scheduled task or runner changed ownership before replacement.")
+        runner_path.write_bytes(generated_runner)
+        if _task_xml(schtasks) != prior_task_xml or _read_runner(runner_path) != generated_runner:
+            raise OSError("Scheduled task or runner changed ownership before task replacement.")
+        if (
+            subprocess.run(
+                [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path), "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            != 0
+        ):
             raise OSError("Could not provision the Ouroboros MCP HTTP scheduled task.")
         replacement_created = True
-        started = subprocess.run(
-            [schtasks, "/Run", "/TN", _TASK_NAME], capture_output=True, text=True, check=False
-        )
-        if started.returncode != 0:
+        if not _owns_generation(schtasks, runner_path, generation, generated_runner):
+            raise OSError("Could not establish ownership of the new scheduled task generation.")
+        if (
+            subprocess.run(
+                [schtasks, "/Run", "/TN", _TASK_NAME], capture_output=True, text=True, check=False
+            ).returncode
+            != 0
+        ):
             raise OSError("Could not start the Ouroboros MCP HTTP scheduled task.")
-        if not _wait_for_http_readiness():
+        if (
+            not _wait_for_http_readiness()
+            or not _owns_generation(schtasks, runner_path, generation, generated_runner)
+            or not _scheduled_task_is_running()
+        ):
             raise OSError("The Ouroboros MCP HTTP scheduled task did not become ready.")
     except OSError as exc:
-        if mutation_started:
+        if replacement_created:
             assert task_xml_path is not None
             rollback_error = _rollback_task(
                 schtasks,
                 task_xml_path,
                 prior_task_xml,
-                prior_task_was_running,
-                replacement_created,
+                prior_running,
+                generation,
                 runner_path,
+                generated_runner,
                 prior_runner,
             )
-            if rollback_error is not None:
+            if rollback_error:
                 return (
                     f"{_bounded_error(str(exc))} Rollback failed: {_bounded_error(rollback_error)}"
                 )
+        elif prior_ended:
+            rollback_error = _restore_prior_task(
+                schtasks, prior_task_xml, prior_running, runner_path, prior_runner, generated_runner
+            )
+            if rollback_error:
+                return (
+                    f"{_bounded_error(str(exc))} Rollback failed: {_bounded_error(rollback_error)}"
+                )
+        elif (
+            _task_xml(schtasks) == prior_task_xml and _read_runner(runner_path) == generated_runner
+        ):
+            _restore_file(runner_path, prior_runner)
         return _bounded_error(str(exc))
     finally:
         if task_xml_path is not None:
@@ -487,23 +676,49 @@ def finalize_windows_codex_mcp_service(
 
 
 def remove_windows_codex_mcp_http(config_dir: Path) -> str | None:
-    """Remove the reserved task and only a runner generated by setup."""
+    """Transactionally remove only unchanged setup-owned task artifacts."""
     schtasks = shutil.which("schtasks")
     if schtasks is None:
         return "Could not find Windows Task Scheduler."
     runner_path = config_dir / _RUNNER_NAME
     task_xml_path: Path | None = None
+    prior_task_xml: str | None = None
+    runner: bytes | None = None
+    prior_running = False
+    task_deleted = False
     try:
-        prior_task_xml = _task_xml(schtasks)
-        runner = runner_path.read_bytes() if runner_path.exists() else None
+        prior_task_xml, runner = _task_xml(schtasks), _read_runner(runner_path)
         managed_task = prior_task_xml is not None and _is_setup_managed_task(
             prior_task_xml, runner_path
         )
         managed_runner = runner is not None and _is_generated_runner(runner)
-        if managed_task:
-            subprocess.run(
-                [schtasks, "/End", "/TN", _TASK_NAME], capture_output=True, text=True, check=False
+        if not managed_task and not managed_runner:
+            return None
+        if managed_task != managed_runner:
+            return (
+                "Refusing to remove task and runner with mismatched Ouroboros MCP ownership claims."
             )
+        if not _is_coherent_managed_pair(prior_task_xml, runner, runner_path):
+            return (
+                "Refusing to remove task and runner with mismatched Ouroboros MCP ownership claims."
+            )
+        if managed_task:
+            prior_running = _scheduled_task_is_running()
+            if not _unchanged(schtasks, runner_path, prior_task_xml, runner):
+                return "Refusing to remove task or runner whose ownership changed."
+            if prior_running:
+                ended = subprocess.run(
+                    [schtasks, "/End", "/TN", _TASK_NAME],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if ended.returncode != 0:
+                    return (
+                        "Could not end the Ouroboros MCP HTTP scheduled task; nothing was removed."
+                    )
+            if not _unchanged(schtasks, runner_path, prior_task_xml, runner):
+                return "Refusing to remove task or runner whose ownership changed during removal."
             deleted = subprocess.run(
                 [schtasks, "/Delete", "/TN", _TASK_NAME, "/F"],
                 capture_output=True,
@@ -511,35 +726,87 @@ def remove_windows_codex_mcp_http(config_dir: Path) -> str | None:
                 check=False,
             )
             if deleted.returncode != 0:
-                subprocess.run(
-                    [schtasks, "/Run", "/TN", _TASK_NAME],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                return "Could not remove the Ouroboros MCP HTTP scheduled task."
+                current_task_xml = _task_xml(schtasks)
+                current_runner = _read_runner(runner_path)
+                if current_task_xml is None and current_runner == runner:
+                    assert prior_task_xml is not None
+                    task_xml_path = _create_private_task_xml(config_dir, prior_task_xml)
+                    restored = subprocess.run(
+                        [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if restored.returncode != 0 or _task_xml(schtasks) != prior_task_xml:
+                        return "Could not remove the Ouroboros MCP HTTP scheduled task. Rollback failed to restore task."
+                    current_task_xml = prior_task_xml
+                if current_task_xml != prior_task_xml or current_runner != runner:
+                    return "Could not remove the Ouroboros MCP HTTP scheduled task. Rollback failed: task or runner ownership changed."
+                if prior_running:
+                    if not _unchanged(schtasks, runner_path, prior_task_xml, runner):
+                        return "Could not remove the Ouroboros MCP HTTP scheduled task. Rollback failed: task or runner ownership changed."
+                    restarted = subprocess.run(
+                        [schtasks, "/Run", "/TN", _TASK_NAME],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if (
+                        restarted.returncode != 0
+                        or not _scheduled_task_is_running()
+                        or not _wait_for_http_readiness()
+                        or not _unchanged(schtasks, runner_path, prior_task_xml, runner)
+                    ):
+                        return "Could not remove the Ouroboros MCP HTTP scheduled task. Rollback failed to restore the running task."
+                return "Could not remove the Ouroboros MCP HTTP scheduled task; previous state was restored."
+            task_deleted = True
         if managed_runner:
+            expected_task = None if managed_task else prior_task_xml
+            if _task_xml(schtasks) != expected_task or _read_runner(runner_path) != runner:
+                raise OSError("Task or runner changed ownership before runner removal.")
             runner_path.unlink()
     except OSError as exc:
-        if "managed_task" in locals() and managed_task:
+        if task_deleted:
             try:
+                if _task_xml(schtasks) is not None or _read_runner(runner_path) not in {
+                    runner,
+                    None,
+                }:
+                    return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed: task or runner ownership changed."
+                if _read_runner(runner_path) is None and not _restore_absent_file(
+                    runner_path, runner
+                ):
+                    return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed: runner ownership changed."
+                if _task_xml(schtasks) is not None or _read_runner(runner_path) != runner:
+                    return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed: task or runner ownership changed."
+                assert prior_task_xml is not None
                 task_xml_path = _create_private_task_xml(config_dir, prior_task_xml)
-                subprocess.run(
-                    [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path), "/F"],
+                restored = subprocess.run(
+                    [schtasks, "/Create", "/TN", _TASK_NAME, "/XML", str(task_xml_path)],
                     capture_output=True,
                     text=True,
                     check=False,
                 )
-                subprocess.run(
-                    [schtasks, "/Run", "/TN", _TASK_NAME],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if "runner" in locals():
-                    _restore_file(runner_path, runner)
-            except OSError:
-                pass
+                if restored.returncode != 0 or not _unchanged(
+                    schtasks, runner_path, prior_task_xml, runner
+                ):
+                    return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed to restore task."
+                if prior_running:
+                    restarted = subprocess.run(
+                        [schtasks, "/Run", "/TN", _TASK_NAME],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if (
+                        restarted.returncode != 0
+                        or not _scheduled_task_is_running()
+                        or not _wait_for_http_readiness()
+                        or not _unchanged(schtasks, runner_path, prior_task_xml, runner)
+                    ):
+                        return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed to restore running task."
+            except OSError as rollback_exc:
+                return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}. Rollback failed: {rollback_exc}"
         return f"Could not remove the Ouroboros MCP HTTP scheduled task: {exc}"
     finally:
         if task_xml_path is not None:
