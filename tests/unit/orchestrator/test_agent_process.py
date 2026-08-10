@@ -107,6 +107,19 @@ class _BlockingWaitEventStore(_FakeEventStore):
             await self.release_wait_append.wait()
 
 
+class _BlockingInitializeReplayStore(_FakeEventStore):
+    """Store whose first-use readiness is controlled by the test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.initialize_started = asyncio.Event()
+        self.release_initialize = asyncio.Event()
+
+    async def initialize(self) -> None:
+        self.initialize_started.set()
+        await self.release_initialize.wait()
+
+
 def _types(events: list[BaseEvent]) -> list[str]:
     return [e.type for e in events]
 
@@ -2155,6 +2168,105 @@ async def test_run_with_agent_process_separates_lifecycle_id_from_cancel_key(tmp
 
     assert fresh_result == "fresh"
     assert fresh_called is True
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_waits_for_durable_journal_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work must not start before the initial lifecycle row is durable."""
+    from ouroboros.orchestrator import agent_process as agent_process_module
+
+    monkeypatch.setattr(agent_process_module, "_DIRECTIVE_EMIT_TIMEOUT_SECONDS", 0.01)
+    store = _BlockingInitializeReplayStore()
+    work_started = asyncio.Event()
+
+    async def work(handle):  # noqa: ARG001
+        work_started.set()
+        return "done"
+
+    task = asyncio.create_task(
+        run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+    )
+    await asyncio.wait_for(store.initialize_started.wait(), timeout=1.0)
+    await asyncio.sleep(0.05)
+
+    assert work_started.is_set() is False
+    assert task.done() is False
+
+    store.release_initialize.set()
+    assert await asyncio.wait_for(task, timeout=1.0) == "done"
+    assert _directives(store.appended) == ["continue", "converge"]
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_bounds_durable_journal_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged required journal fails closed without starting work."""
+    from ouroboros.orchestrator import agent_process as agent_process_module
+
+    monkeypatch.setattr(
+        agent_process_module,
+        "_DURABLE_DIRECTIVE_EMIT_TIMEOUT_SECONDS",
+        0.01,
+    )
+    store = _BlockingInitializeReplayStore()
+    work_called = False
+
+    async def work(handle):  # noqa: ARG001
+        nonlocal work_called
+        work_called = True
+        return "must not run"
+
+    with pytest.raises(TimeoutError):
+        await run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+        )
+
+    assert store.initialize_started.is_set()
+    assert work_called is False
+    assert store.appended == []
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_surfaces_initial_journal_failure_before_work() -> None:
+    """A required RUNNING row must fail spawn instead of being dropped."""
+    work_called = False
+
+    async def work(handle):  # noqa: ARG001
+        nonlocal work_called
+        work_called = True
+        return "must not run"
+
+    with pytest.raises(RuntimeError, match="simulated append failure"):
+        await run_with_agent_process(
+            event_store=_FailingAppendReplayStore(),
+            intent="durable",
+            work_fn=work,
+        )
+
+    assert work_called is False
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_surfaces_terminal_journal_failure() -> None:
+    """Durable mode cannot return success with a missing terminal row."""
+    store = _DropAfterFirstAppendReplayStore()
+
+    async def work(handle):  # noqa: ARG001
+        return "result"
+
+    with pytest.raises(RuntimeError, match="simulated later append failure"):
+        await run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+        )
+
+    assert _directives(store.appended) == ["continue"]
 
 
 @pytest.mark.asyncio
