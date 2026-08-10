@@ -100,8 +100,8 @@ a new default after GitHub ships new models.
 ### Hyphen versus dotted model IDs
 
 Ouroboros' defaults use the hyphenated Anthropic SDK form
-(`claude-opus-4-8`, `claude-sonnet-4-5`). Copilot CLI expects the dotted form
-(`claude-opus-4.8`, `claude-sonnet-4.5`). The adapter resolves these forms
+(`claude-opus-4-8`, `claude-sonnet-4-6`). Copilot CLI expects the dotted form
+(`claude-opus-4.8`, `claude-sonnet-4.6`). The adapter resolves these forms
 against the discovered Copilot catalog rather than rewriting arbitrary model
 names.
 

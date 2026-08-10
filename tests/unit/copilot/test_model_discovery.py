@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import subprocess
 from typing import Any
 from unittest.mock import patch
 
-from ouroboros.config._model_defaults import DEFAULT_CONSENSUS_OPUS_MODEL, DEFAULT_OPUS_MODEL
+import pytest
+
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.copilot import model_discovery as md
 
 _FAKE_API_PAYLOAD: dict[str, Any] = {
@@ -39,6 +46,26 @@ _FAKE_API_PAYLOAD: dict[str, Any] = {
         },
     ]
 }
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    "guide_path",
+    (
+        "docs/runtime-guides/copilot.md",
+        "docs/runtime-guides/copilot.ko.md",
+    ),
+)
+def test_runtime_guide_documents_current_anthropic_default_mappings(guide_path: str) -> None:
+    guide = (_REPO_ROOT / guide_path).read_text(encoding="utf-8")
+
+    assert f"`{DEFAULT_OPUS_MODEL}`" in guide
+    assert "`claude-opus-4.8`" in guide
+    assert f"`{DEFAULT_SONNET_MODEL}`" in guide
+    assert "`claude-sonnet-4.6`" in guide
+    assert "`claude-sonnet-4-5`" not in guide
+    assert "`claude-sonnet-4.5`" not in guide
 
 
 class _FakeUrlResponse:

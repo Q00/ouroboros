@@ -70,7 +70,7 @@ setup은 고른 기본 모델을 출력하고, `~/.ouroboros/config.yaml`의 지
 
 ### 하이픈 표기와 점 표기 모델 ID
 
-Ouroboros 기본값은 하이픈 붙은 Anthropic SDK 형식(`claude-opus-4-8`, `claude-sonnet-4-5`)을 씁니다. Copilot CLI는 점 표기(`claude-opus-4.8`, `claude-sonnet-4.5`)를 기대합니다. 어댑터는 임의의 모델 이름을 바꾸지 않고 발견된 Copilot catalog를 기준으로 이 형식들을 해석합니다.
+Ouroboros 기본값은 하이픈 붙은 Anthropic SDK 형식(`claude-opus-4-8`, `claude-sonnet-4-6`)을 씁니다. Copilot CLI는 점 표기(`claude-opus-4.8`, `claude-sonnet-4.6`)를 기대합니다. 어댑터는 임의의 모델 이름을 바꾸지 않고 발견된 Copilot catalog를 기준으로 이 형식들을 해석합니다.
 
 `map_to_copilot_model()`([`copilot/model_discovery.py`](../../src/ouroboros/copilot/model_discovery.py))은 명시적인 점 표기 Copilot ID를 그대로 통과시키고, 알려진 `openrouter/anthropic/` 접두사 제거, 기존의 정확한 정적 별칭, 또는 마지막 숫자 버전 구분자만 점으로 바꾸는 방식으로 후보를 만듭니다. 예를 들어 `claude-opus-4-8`은 `claude-opus-4.8` 후보가 됩니다. `claude-opus` 안의 하이픈은 건드리지 않습니다. 접두사를 제거했거나 정적 매핑으로 만든 값을 포함한 모든 변환 후보는 발견된 catalog나 번들 catalog에 정확히 같은 ID가 있을 때만 반환됩니다.
 
