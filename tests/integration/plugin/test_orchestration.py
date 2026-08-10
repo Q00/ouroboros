@@ -8,7 +8,7 @@ Tests cover:
 import asyncio
 from pathlib import Path
 import tempfile
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -245,7 +245,9 @@ class TestAgentPoolIntegration:
             for task_id in (running_id, queued_id)
         ]
         await asyncio.sleep(0)
-        await pool.stop()
+        queue_join = AsyncMock(wraps=pool._task_queue.join)
+        with patch.object(pool._task_queue, "join", queue_join):
+            await pool.stop()
 
         results = await asyncio.gather(*result_waiters)
         assert [result.task_id for result in results] == [running_id, queued_id]
@@ -259,6 +261,51 @@ class TestAgentPoolIntegration:
         assert pool._dispatcher_task is None
         assert pool._scaler_task is None
         assert pool._health_task is None
+        queue_join.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_rejects_submissions_during_and_after_shutdown(self) -> None:
+        """The shutdown boundary permanently closes task acceptance."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        await pool.start()
+
+        stopping = asyncio.create_task(pool.stop())
+        while not pool._shutdown:
+            await asyncio.sleep(0)
+
+        with pytest.raises(RuntimeError, match="cannot accept new tasks"):
+            await pool.submit_task(agent_type="executor", prompt="during shutdown")
+
+        await stopping
+
+        with pytest.raises(RuntimeError, match="cannot accept new tasks"):
+            await pool.submit_task(agent_type="executor", prompt="after shutdown")
+
+        assert pool._pending_task_ids == set()
+        assert pool._task_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_dispatcher_exception_settles_acquired_task(self) -> None:
+        """An acquired item becomes a terminal failure if dispatch raises."""
+        pool = AgentPool(
+            adapter=MagicMock(),
+            config=AgentPoolConfig(
+                min_instances=0,
+                max_instances=0,
+                enable_auto_scaling=False,
+            ),
+        )
+
+        with patch.object(pool, "_wait_for_agent", side_effect=RuntimeError("dispatch broke")):
+            await pool.start()
+            task_id = await pool.submit_task(agent_type="executor", prompt="settle me")
+            result = await pool.get_task_result(task_id, timeout=0.5)
+
+        assert result.success is False
+        assert result.error_message == "Task dispatch failed: dispatch broke"
+        assert task_id not in pool._pending_task_ids
+        await asyncio.wait_for(pool._task_queue.join(), timeout=0.1)
+        await pool.stop()
 
     @pytest.mark.asyncio
     async def test_agent_pool_stop_acknowledges_dispatcher_owned_queue_item(self) -> None:
@@ -354,25 +401,42 @@ class TestAgentPoolIntegration:
 
     @pytest.mark.asyncio
     async def test_agent_pool_running_task_cleanup_is_generation_safe(self) -> None:
-        """An older done callback cannot discard a replacement tracked generation."""
-        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        """An older execution finalizer cannot discard a replacement generation."""
+        adapter = MagicMock()
+        first_started = asyncio.Event()
         first_gate = asyncio.Event()
-        replacement_gate = asyncio.Event()
-        first = asyncio.create_task(first_gate.wait())
-        replacement = asyncio.create_task(replacement_gate.wait())
-        task_id = "task-reused-tracking-key"
-        pool._track_running_task(task_id, first)
-        pool._track_running_task(task_id, replacement)
 
-        first.cancel()
-        await asyncio.gather(first, return_exceptions=True)
+        async def execute_first(*args, **kwargs):
+            first_started.set()
+            await first_gate.wait()
+            if False:  # pragma: no cover - keep this an async generator
+                yield None
+
+        adapter.execute_task = execute_first
+        pool = AgentPool(adapter=adapter, config=AgentPoolConfig(min_instances=0))
+        agent = await pool._spawn_agent("agent-generation-safe")
+        request = TaskRequest(
+            id="task-reused-tracking-key",
+            agent_type="executor",
+            prompt="old generation",
+            context={},
+        )
+        replacement_gate = asyncio.Event()
+        first = asyncio.create_task(pool._execute_task(agent, request))
+        await asyncio.wait_for(first_started.wait(), timeout=0.5)
+        replacement = asyncio.create_task(replacement_gate.wait())
+        pool._track_running_task(request.id, first)
+        pool._track_running_task(request.id, replacement)
+
+        first_gate.set()
+        await first
         await asyncio.sleep(0)
-        assert pool._running_tasks[task_id] is replacement
+        assert pool._running_tasks[request.id] is replacement
 
         replacement.cancel()
         await asyncio.gather(replacement, return_exceptions=True)
         await asyncio.sleep(0)
-        assert task_id not in pool._running_tasks
+        assert request.id not in pool._running_tasks
 
 
 class TestAgentRegistryIntegration:

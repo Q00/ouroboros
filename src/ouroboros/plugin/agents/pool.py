@@ -50,6 +50,8 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+_QUEUE_DRAIN_TIMEOUT_SECONDS = 1.0
+
 
 # =============================================================================
 # Agent State Enum
@@ -385,6 +387,14 @@ class AgentPool:
             else:
                 self._task_queue.task_done()
 
+        # Queue ownership must be balanced before shutdown returns. Bound the
+        # wait so a future accounting regression fails closed instead of
+        # hanging shutdown indefinitely.
+        await asyncio.wait_for(
+            self._task_queue.join(),
+            timeout=_QUEUE_DRAIN_TIMEOUT_SECONDS,
+        )
+
         # Terminate all agents
         for agent_id in list(self._agents.keys()):
             await self._terminate_agent(agent_id)
@@ -417,7 +427,18 @@ class AgentPool:
 
         Returns:
             Task ID for tracking.
+
+        Raises:
+            RuntimeError: If shutdown has started.
         """
+        # ``PriorityQueue.put`` is non-blocking for this unbounded queue, so
+        # the shutdown gate and acceptance bookkeeping form one event-loop
+        # critical section. A task is either rejected here or accepted in time
+        # for ``stop()`` to terminalize it.
+        if self._shutdown:
+            msg = "Agent pool is shutting down and cannot accept new tasks"
+            raise RuntimeError(msg)
+
         task_id = f"task-{uuid4().hex[:12]}"
 
         task = TaskRequest(
@@ -617,6 +638,8 @@ class AgentPool:
 
         while not self._shutdown:
             queue_item_acquired = False
+            queue_item_transferred = False
+            task: TaskRequest | None = None
             try:
                 # Get next task with timeout
                 priority, task = await asyncio.wait_for(
@@ -635,6 +658,7 @@ class AgentPool:
                     )
                     # Requeue
                     await self._task_queue.put((priority, task))
+                    queue_item_transferred = True
                     await asyncio.sleep(1.0)
                     continue
 
@@ -646,10 +670,23 @@ class AgentPool:
 
                 task_coro = self._execute_task(agent, task)
                 self._track_running_task(task.id, asyncio.create_task(task_coro))
+                queue_item_transferred = True
 
             except TimeoutError:
                 continue
             except Exception as e:
+                # Once acquired, the dispatcher owns settlement until it
+                # explicitly transfers the item back to the queue or to an
+                # execution task. Never acknowledge an accepted task while
+                # leaving it pending.
+                if queue_item_acquired and not queue_item_transferred and task is not None:
+                    self._publish_task_result(
+                        TaskResult(
+                            task_id=task.id,
+                            success=False,
+                            error_message=f"Task dispatch failed: {e}",
+                        )
+                    )
                 log.exception(
                     "agents.pool.dispatcher_error",
                     error=str(e),
@@ -715,6 +752,7 @@ class AgentPool:
         start_time = time.time()
         messages: list[str] = []
         result: TaskResult | None = None
+        execution_task = asyncio.current_task()
 
         try:
             log.debug(
@@ -828,8 +866,10 @@ class AgentPool:
             agent.last_activity = time.time()
             task.completed_at = time.time()
 
-            # Remove from running tasks
-            self._running_tasks.pop(task.id, None)
+            # A stale execution must not remove a replacement generation that
+            # is now authoritative for the same tracking key.
+            if execution_task is not None:
+                self._forget_running_task(task.id, execution_task)
 
             # Emit completion event
             await self._emit_event(
