@@ -12,7 +12,7 @@ would turn a truncated stream into a successful request.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import math
@@ -40,6 +40,13 @@ _TOKEN_USAGE_KEYS = frozenset(
         "total_tokens",
     }
 )
+_TOKEN_SPEND_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+_PRIMARY_TOKEN_KEYS = frozenset({"input_tokens", "output_tokens"})
 # Stay well below CPython's configurable 4,300-digit default so hostile JSON
 # cannot escape this boundary as an interpreter-level ``ValueError``.
 _MAX_JSON_INTEGER_DIGITS = 1024
@@ -280,16 +287,37 @@ def _result_usage(
     events: Sequence[dict[str, Any]], final: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     raw_usage = final.get("usage")
-    if raw_usage is None:
-        for event in reversed(events[:-1]):
-            raw_usage = event.get("usage")
-            message = event.get("message")
-            if raw_usage is None and isinstance(message, Mapping):
-                raw_usage = message.get("usage")
-            if raw_usage is not None:
-                break
-    if raw_usage is None:
+    if raw_usage is not None:
+        # Claude's terminal result usage is the request-wide total.  It is
+        # authoritative when present, so adding assistant-event usage here
+        # would count the same work twice.
+        return _validated_usage(raw_usage)
+
+    turn_usages: list[dict[str, Any]] = []
+    for index, event in enumerate(events[:-1]):
+        top_level = event.get("usage")
+        message = event.get("message")
+        nested = message.get("usage") if isinstance(message, Mapping) else None
+        if top_level is not None and nested is not None and top_level != nested:
+            raise ClaudeCliOutputError(
+                f"assistant event {index} has conflicting top-level and nested usage"
+            )
+        event_usage = top_level if top_level is not None else nested
+        if event_usage is None:
+            continue
+        if event.get("type") != "assistant":
+            raise ClaudeCliOutputError(f"non-assistant event {index} cannot supply fallback usage")
+        turn_usages.append(_validated_usage(event_usage))
+
+    if not turn_usages:
         return None
+    if len(turn_usages) == 1:
+        return turn_usages[0]
+    return _aggregate_turn_usages(turn_usages)
+
+
+def _validated_usage(raw_usage: Any) -> dict[str, Any]:
+    """Copy one usage object after validating every token-shaped counter."""
     if not isinstance(raw_usage, Mapping):
         raise ClaudeCliOutputError("usage must be a JSON object")
 
@@ -304,6 +332,109 @@ def _result_usage(
         ):
             raise ClaudeCliOutputError(f"usage.{key} must be a bounded non-negative integer")
     return usage
+
+
+def _aggregate_turn_usages(turn_usages: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate event-local assistant usage into one request-wide usage object.
+
+    Each assistant event is one billed model turn.  ``total_tokens`` is
+    authoritative for that turn when supplied; otherwise the two primary
+    counters plus Anthropic's additive cache counters determine its spend.
+    Partial event telemetry is rejected because summing only the fields that
+    happen to be present could manufacture a smaller request total.
+    """
+    spend_by_turn: list[int] = []
+    all_turns_have_components = True
+    for usage in turn_usages:
+        fallback_keys = {key for key in _TOKEN_SPEND_KEYS if key in usage}
+        has_components = _PRIMARY_TOKEN_KEYS.issubset(fallback_keys)
+        all_turns_have_components = all_turns_have_components and has_components
+        total = usage.get("total_tokens")
+
+        if total is not None:
+            if fallback_keys and not has_components:
+                raise ClaudeCliOutputError(
+                    "fallback usage with total_tokens has incomplete additive counters"
+                )
+            if has_components:
+                component_total = _bounded_usage_sum(
+                    (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
+                    key="additive token counters",
+                )
+                if total != component_total:
+                    raise ClaudeCliOutputError(
+                        "fallback usage total_tokens disagrees with additive counters"
+                    )
+            spend_by_turn.append(total)
+            continue
+
+        if not has_components:
+            raise ClaudeCliOutputError(
+                "fallback usage must include total_tokens or both input_tokens and output_tokens"
+            )
+        spend_by_turn.append(
+            _bounded_usage_sum(
+                (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
+                key="additive token counters",
+            )
+        )
+
+    token_keys = {
+        key
+        for usage in turn_usages
+        for key in usage
+        if key in _TOKEN_USAGE_KEYS or key.endswith("_tokens")
+    }
+    aggregated = {
+        key: _bounded_usage_sum(
+            (usage[key] for usage in turn_usages if key in usage),
+            key=key,
+        )
+        for key in token_keys
+    }
+
+    if all_turns_have_components:
+        # A total present on only some turns is a partial total, not a request
+        # total.  Drop it so consumers use the complete additive breakdown.
+        if not all("total_tokens" in usage for usage in turn_usages):
+            aggregated.pop("total_tokens", None)
+    else:
+        # Some turns expose only their authoritative total, so a complete
+        # per-counter breakdown cannot be reconstructed.  Preserve the exact
+        # request spend as a total and omit partial additive components.
+        for key in _TOKEN_SPEND_KEYS:
+            aggregated.pop(key, None)
+        aggregated["total_tokens"] = _bounded_usage_sum(
+            spend_by_turn,
+            key="total_tokens",
+        )
+
+    # Preserve stable non-token metadata (for example ``service_tier``) only
+    # when every turn reports the same value.  Selecting one turn's metadata
+    # would be the same last-event attribution bug as selecting one usage.
+    common_metadata = set.intersection(
+        *(
+            {key for key in usage if key not in _TOKEN_USAGE_KEYS and not key.endswith("_tokens")}
+            for usage in turn_usages
+        )
+    )
+    for key in common_metadata:
+        first = turn_usages[0][key]
+        if all(usage[key] == first for usage in turn_usages[1:]):
+            aggregated[key] = first
+    return aggregated
+
+
+def _bounded_usage_sum(values: Iterable[int], *, key: str) -> int:
+    """Add already validated token counters without crossing the wire bound."""
+    total = 0
+    for value in values:
+        if value > _MAX_TOKEN_COUNT - total:
+            raise ClaudeCliOutputError(
+                f"aggregated usage.{key} exceeds the bounded token-count limit"
+            )
+        total += value
+    return total
 
 
 def _result_text(final: Mapping[str, Any], *, is_error: bool) -> str:

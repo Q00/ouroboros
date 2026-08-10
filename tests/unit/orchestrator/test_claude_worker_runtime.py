@@ -401,6 +401,47 @@ class TestRuntimeWiring:
         assert harvest_token_spend(messages) is None
 
     @pytest.mark.asyncio
+    async def test_multi_turn_cli_usage_reaches_frugality_as_request_total(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                [
+                    {
+                        "type": "assistant",
+                        "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+                    },
+                    {
+                        "type": "assistant",
+                        "message": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+                    },
+                    {
+                        "type": "result",
+                        "is_error": False,
+                        "result": "ok",
+                    },
+                ]
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == {"input_tokens": 110, "output_tokens": 22}
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == {"input_tokens": 110, "output_tokens": 22}
+        assert harvest_token_spend(messages) == (
+            132.0,
+            {"input_tokens": 110.0, "output_tokens": 22.0},
+        )
+
+    @pytest.mark.asyncio
     async def test_bounded_all_counter_usage_preserves_spend_semantics(self) -> None:
         usage = {
             "input_tokens": 5,

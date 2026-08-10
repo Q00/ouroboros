@@ -240,6 +240,191 @@ def test_usage_falls_back_to_nested_assistant_usage() -> None:
     assert normalized.usage == {"input_tokens": 3, "output_tokens": 1}
 
 
+def test_missing_terminal_usage_aggregates_every_assistant_turn() -> None:
+    final = _result()
+    final.pop("usage")
+    events = _events(final)
+    events.insert(
+        -1,
+        {
+            "type": "assistant",
+            "session_id": "session-1",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 7,
+                "reasoning_tokens": 4,
+            },
+        },
+    )
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.usage == {
+        "input_tokens": 103,
+        "output_tokens": 21,
+        "cache_read_input_tokens": 7,
+        "reasoning_tokens": 4,
+    }
+
+
+def test_terminal_usage_is_authoritative_and_never_double_counted() -> None:
+    events = _events(_result(usage={"input_tokens": 110, "output_tokens": 22}))
+    events.insert(
+        -1,
+        {
+            "type": "assistant",
+            "session_id": "session-1",
+            "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+        },
+    )
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.usage == {"input_tokens": 110, "output_tokens": 22}
+
+
+def test_fallback_aggregates_reconciled_per_turn_totals_and_metadata() -> None:
+    final = _result()
+    final.pop("usage")
+    events = [
+        {
+            "type": "assistant",
+            "session_id": "session-1",
+            "message": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 3,
+                    "total_tokens": 123,
+                    "service_tier": "standard",
+                }
+            },
+        },
+        {
+            "type": "assistant",
+            "session_id": "session-1",
+            "message": {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 4,
+                    "total_tokens": 16,
+                    "service_tier": "standard",
+                }
+            },
+        },
+        final,
+    ]
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.usage == {
+        "input_tokens": 110,
+        "output_tokens": 22,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4,
+        "total_tokens": 139,
+        "service_tier": "standard",
+    }
+
+
+def test_fallback_synthesizes_only_total_when_a_turn_has_no_breakdown() -> None:
+    final = _result()
+    final.pop("usage")
+    events = [
+        {"type": "assistant", "usage": {"total_tokens": 120}},
+        {
+            "type": "assistant",
+            "message": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+        },
+        final,
+    ]
+
+    normalized = normalize_claude_cli_output(json.dumps(events))
+
+    assert normalized.usage == {"total_tokens": 132}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param(
+            [
+                {
+                    "type": "assistant",
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                    "message": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+                }
+            ],
+            id="conflicting-sources",
+        ),
+        pytest.param(
+            [
+                {"type": "assistant", "usage": {"input_tokens": 100}},
+                {
+                    "type": "assistant",
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                },
+            ],
+            id="partial-turn",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "assistant",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "total_tokens": 1,
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                },
+            ],
+            id="inconsistent-total",
+        ),
+    ],
+)
+def test_rejects_ambiguous_or_incomplete_multi_turn_fallback_usage(
+    events: list[dict[str, object]],
+) -> None:
+    final = _result()
+    final.pop("usage")
+
+    with pytest.raises(ClaudeCliOutputError, match="usage|token"):
+        normalize_claude_cli_output(json.dumps([*events, final]))
+
+
+def test_rejects_multi_turn_counter_sum_overflow() -> None:
+    final = _result()
+    final.pop("usage")
+    events = [
+        {
+            "type": "assistant",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "reasoning_tokens": (1 << 63) - 1,
+            },
+        },
+        {
+            "type": "assistant",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "reasoning_tokens": 1,
+            },
+        },
+        final,
+    ]
+
+    with pytest.raises(ClaudeCliOutputError, match="aggregated usage.reasoning_tokens"):
+        normalize_claude_cli_output(json.dumps(events))
+
+
 @pytest.mark.parametrize(
     "events",
     [
