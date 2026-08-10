@@ -258,6 +258,11 @@ Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNIN
 
 > **Python >= 3.12 required.** LiteLLM-bearing profiles support Python 3.12-3.13. See [Platform Support](./docs/platform-support.md#python-profile-matrix) and [pyproject.toml](./pyproject.toml).
 
+<p align="center">
+  <sub>If the interview asked you something you could not answer, that is the part worth telling people about.<br/>
+  <a href="https://github.com/Q00/ouroboros"><strong>Star the repo</strong></a> so it finds the next person who is tired of reviewing code they did not ask for.</sub>
+</p>
+
 ---
 
 ## What You Get

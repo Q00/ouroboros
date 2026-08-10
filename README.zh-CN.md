@@ -215,6 +215,12 @@ ouroboros uninstall
 
 > **需要 Python >= 3.12**。包含 LiteLLM 的 profile 支持 Python 3.12-3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix) 和 [pyproject.toml](./pyproject.toml)。
 
+
+<p align="center">
+  <sub>如果访谈问到了你答不上来的地方，那一条才是值得说给别人听的。<br/>
+  给仓库<a href="https://github.com/Q00/ouroboros"><strong>点个 star</strong></a>，它就能找到下一个正在审自己没要过的代码的人。</sub>
+</p>
+
 ---
 
 ## 你能得到什么
