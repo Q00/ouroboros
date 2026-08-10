@@ -107,6 +107,17 @@ _prompt() {
 # telemetry keys are read, and an already-set real process environment
 # value always wins over the file, no matter how many times a key repeats
 # in it (mirrors config/loader.py).
+#
+# Grammar covered exactly like dotenv_values(): bare/export-prefixed
+# bindings, single- and double-quoted values (with an inline `# comment`
+# after a closing quote), one layer of matching quotes around the KEY
+# itself, and last-wins on duplicate keys. Grammar this single-line shell
+# reader genuinely cannot follow -- a physically MULTILINE quoted value, or
+# an ESCAPE sequence inside a double-quoted value -- is never guessed at:
+# `_TELEMETRY_USER_ENV_AMBIGUOUS` is set instead, and `_telemetry_enabled`
+# treats that as an unconditional opt-out. A real parse error dotenv itself
+# also rejects (trailing garbage after a legitimate closing quote) stays a
+# plain skip -- both loaders already agree there's nothing to trust there.
 _telemetry_load_user_env() {
   local f="$HOME/.ouroboros/.env" line key value rest after trailing
   local preset_var parsed_var
@@ -168,12 +179,23 @@ _telemetry_load_user_env() {
         # python-dotenv). This is what makes a normal persisted opt-out like
         # `OUROBOROS_TELEMETRY="0" # persisted opt-out` parse to "0" instead
         # of falling into the unquoted branch below and keeping its quotes.
-        # No closing quote, or anything but whitespace/comment after it, is
-        # a parse error in python-dotenv -- skip the binding entirely.
+        # A missing closing quote and trailing garbage after a real closing
+        # quote are NOT the same situation in dotenv, even though both look
+        # like "unparseable" to a single-line shell reader:
+        #   - trailing garbage after a legitimate closing quote (e.g.
+        #     `OUROBOROS_TELEMETRY="0"x`) IS a parse error in python-dotenv
+        #     too -- both sides skip the binding, no disagreement possible.
+        #   - a MISSING closing quote is not an error to dotenv at all: it
+        #     is the start of a value that continues reading subsequent
+        #     PHYSICAL LINES until a closing quote is found (a genuinely
+        #     multiline value), which this single-line reader cannot
+        #     follow. Silently skipping here left telemetry ON while the
+        #     application resolved a real (stripped) value -- fail closed
+        #     instead, same posture as the escape-bearing case below.
         rest="${value#\"}"
         case "$rest" in
           *\"*) ;;
-          *) continue ;;
+          *) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
         esac
         after="${rest#*\"}"
         trailing="${after#"${after%%[![:space:]]*}"}"
@@ -199,10 +221,14 @@ _telemetry_load_user_env() {
         esac
         ;;
       \'*)
+        # Single-quoted values are literal (no escape decoding, matching
+        # today's handling already), but a missing closing quote has the
+        # SAME multiline-continuation meaning in dotenv as the double-quote
+        # case above -- fail closed for the same reason, not a plain skip.
         rest="${value#\'}"
         case "$rest" in
           *\'*) ;;
-          *) continue ;;
+          *) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
         esac
         after="${rest#*\'}"
         trailing="${after#"${after%%[![:space:]]*}"}"

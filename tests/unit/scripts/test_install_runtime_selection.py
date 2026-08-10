@@ -463,7 +463,17 @@ def test_installer_honors_quoted_user_env_opt_out_without_comment(tmp_path: Path
     assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
-def test_installer_user_env_unclosed_quote_is_skipped(tmp_path: Path) -> None:
+def test_installer_fails_closed_on_unclosed_quote_at_eof(tmp_path: Path) -> None:
+    """Round-7 (`test_installer_user_env_unclosed_quote_is_skipped`)
+    established this as a plain skip -- telemetry stayed on, since the
+    binding was just "unrecognized". Round-21 flips that contract: a
+    missing closing quote is not a dotenv parse error at all -- it's the
+    start of a value dotenv keeps reading across subsequent physical
+    lines (a multiline value), which this single-line shell reader cannot
+    follow. Silently skipping left telemetry ON while the application
+    could resolve a real (stripped) opt-out from the exact same file, so
+    this now fails closed instead.
+    """
     user_env = tmp_path / "home" / ".ouroboros" / ".env"
     user_env.parent.mkdir(parents=True)
     user_env.write_text('OUROBOROS_TELEMETRY="0\n', encoding="utf-8")
@@ -476,10 +486,72 @@ def test_installer_user_env_unclosed_quote_is_skipped(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    captures = _wait_for_telemetry(tmp_path)
-    assert "capture-before-notice" not in captures
-    assert '"event":"install_completed"' in captures
-    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_fails_closed_on_genuinely_multiline_telemetry_opt_out(
+    tmp_path: Path,
+) -> None:
+    """A REAL two-physical-line dotenv value (`OUROBOROS_TELEMETRY="0` then
+    a bare `"` on the next line) is exactly the shape dotenv_values()
+    decodes to `"0\\n"`, strips, and resolves to disabled -- the reviewer's
+    reproduction. Same fail-closed outcome as the truncated-at-EOF case.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0\n"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_fails_closed_on_genuinely_multiline_do_not_track(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('DO_NOT_TRACK="1\n"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_fails_closed_on_multiline_value_that_looks_enabling(
+    tmp_path: Path,
+) -> None:
+    """Safe-direction asymmetry (matches round-20's escape-bearing case):
+    a multiline value that LOOKS like an enable (`"1` / `"`) still
+    disables the installer run rather than being trusted as an enable.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="1\n"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
 def test_installer_user_env_trailing_garbage_after_quote_is_skipped(tmp_path: Path) -> None:
