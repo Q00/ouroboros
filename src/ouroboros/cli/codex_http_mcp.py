@@ -1257,7 +1257,25 @@ def _compensate_disabled_transition(
     return f"{shutdown_error} Prior HTTP service was restored."
 
 
-def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str) -> str | None:
+def _require_commit_authorization(commit_authorized: Callable[[], bool] | None) -> None:
+    """Fail the transition when its configuration authority no longer holds."""
+    if commit_authorized is None:
+        return
+    try:
+        authorized = commit_authorized()
+    except Exception as exc:
+        raise OSError("Could not revalidate Codex MCP config authorization.") from exc
+    if not authorized:
+        raise OSError("Codex MCP config changed; lifecycle transition was not committed.")
+
+
+def _operate(
+    config_dir: Path,
+    launcher: tuple[str, list[str]] | None,
+    mode: str,
+    *,
+    commit_authorized: Callable[[], bool] | None = None,
+) -> str | None:
     schtasks, identity = (shutil.which("schtasks"), _current_windows_identity())
     if schtasks is None or identity is None:
         return "Could not find Windows Task Scheduler or current user."
@@ -1296,6 +1314,7 @@ def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str
                 )
             generation, token = _publish_generation(root, mode, launcher)
             if mode == "disabled":
+                _require_commit_authorization(commit_authorized)
                 _commit_generation(root, generation)
                 stopped = True
                 if prior is not None and prior_identity is not None:
@@ -1350,6 +1369,7 @@ def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str
                 or not _wait_for_http_readiness()
             ):
                 raise OSError("MCP generation did not become ready.")
+            _require_commit_authorization(commit_authorized)
             _commit_generation(root, generation)
     except OSError as exc:
         recovery_error: str | None = None
@@ -1386,13 +1406,20 @@ def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str
 
 
 def provision_windows_codex_mcp_http(
-    config_dir: Path, launcher: tuple[str, list[str]]
+    config_dir: Path,
+    launcher: tuple[str, list[str]],
+    *,
+    commit_authorized: Callable[[], bool] | None = None,
 ) -> str | None:
-    return _operate(config_dir, launcher, "serve")
+    return _operate(config_dir, launcher, "serve", commit_authorized=commit_authorized)
 
 
-def remove_windows_codex_mcp_http(config_dir: Path) -> str | None:
-    return _operate(config_dir, None, "disabled")
+def remove_windows_codex_mcp_http(
+    config_dir: Path,
+    *,
+    commit_authorized: Callable[[], bool] | None = None,
+) -> str | None:
+    return _operate(config_dir, None, "disabled", commit_authorized=commit_authorized)
 
 
 def finalize_windows_codex_mcp_service(
@@ -1409,17 +1436,33 @@ def finalize_windows_codex_mcp_service(
         parsed = tomllib.loads(raw)
     except FileNotFoundError:
         return None
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         return f"Could not inspect final Codex MCP config: {exc}"
+
+    def commit_authorized() -> bool:
+        try:
+            return codex_config.read_text(encoding="utf-8") == raw
+        except (OSError, UnicodeError):
+            return False
+
     servers = parsed.get("mcp_servers")
     entry = servers.get("ouroboros") if isinstance(servers, dict) else None
-    if not isinstance(entry, dict) or not is_setup_managed_entry(entry, raw):
+    if not isinstance(entry, dict):
+        return None
+    managed = is_setup_managed_entry(entry, raw)
+    if not commit_authorized():
+        return "Codex MCP config changed during finalization; lifecycle transition was not started."
+    if not managed:
         return None
     if "url" not in entry:
-        return remove_windows_codex_mcp_http(config_dir)
+        return remove_windows_codex_mcp_http(config_dir, commit_authorized=commit_authorized)
     launcher = resolve_launcher()
+    if not commit_authorized():
+        return "Codex MCP config changed during finalization; lifecycle transition was not started."
     return (
         "Could not find the Ouroboros MCP launcher, Windows Task Scheduler, or current user."
         if launcher is None
-        else provision_windows_codex_mcp_http(config_dir, launcher)
+        else provision_windows_codex_mcp_http(
+            config_dir, launcher, commit_authorized=commit_authorized
+        )
     )

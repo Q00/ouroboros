@@ -509,7 +509,78 @@ class TestCodexSetup:
         ) as remove:
             assert setup_cmd._finalize_windows_codex_mcp_service(tmp_path / ".ouroboros")
 
-        remove.assert_called_once_with(tmp_path / ".ouroboros")
+        remove.assert_called_once()
+        assert remove.call_args.args == (tmp_path / ".ouroboros",)
+        assert remove.call_args.kwargs["commit_authorized"]()
+
+    def test_final_windows_http_entry_does_not_provision_after_launcher_changes_config(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            "# Ouroboros MCP hookup for Codex CLI.\n"
+            "# Keep Ouroboros runtime settings and per-role model overrides in\n"
+            "# ~/.ouroboros/config.yaml (for example: clarification.default_model,\n"
+            "# llm.qa_model, evaluation.semantic_model, consensus.*).\n"
+            "# This file is only for the Codex MCP/env registration block.\n\n"
+            "[mcp_servers.ouroboros]\n"
+            'url = "http://127.0.0.1:8765/mcp"\n'
+            "enabled = true\n",
+            encoding="utf-8",
+        )
+
+        def resolve_launcher() -> tuple[str, list[str]]:
+            config_path.write_text(
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:9999/mcp"\n',
+                encoding="utf-8",
+            )
+            return ("ouroboros.exe", ["mcp", "serve"])
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                side_effect=resolve_launcher,
+            ),
+            patch("ouroboros.cli.codex_http_mcp.provision_windows_codex_mcp_http") as provision,
+        ):
+            assert not setup_cmd._finalize_windows_codex_mcp_service(tmp_path / ".ouroboros")
+
+        provision.assert_not_called()
+
+    def test_final_windows_stdio_entry_does_not_disable_after_ownership_changes_config(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines='command = "uvx"\nargs = ["ouroboros", "mcp", "serve"]'
+            ),
+            encoding="utf-8",
+        )
+
+        def managed_entry(_entry: dict[str, object], **_kwargs: object) -> bool:
+            config_path.write_text(
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:9999/mcp"\n',
+                encoding="utf-8",
+            )
+            return True
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._is_setup_managed_codex_mcp_entry",
+                side_effect=managed_entry,
+            ),
+            patch("ouroboros.cli.codex_http_mcp.remove_windows_codex_mcp_http") as remove,
+        ):
+            assert not setup_cmd._finalize_windows_codex_mcp_service(tmp_path / ".ouroboros")
+
+        remove.assert_not_called()
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path

@@ -361,6 +361,63 @@ def test_provision_waits_for_standby_before_prior_stop(tmp_path: Path) -> None:
     assert stopped.called
 
 
+def test_serve_commit_authorization_failure_aborts_new_generation(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prior, _ = _generation(root)
+    mcp._commit_generation(root, prior)
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._bootstrap"),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=None),
+        patch("ouroboros.cli.codex_http_mcp._ensure_task", return_value="new-task"),
+        patch(
+            "ouroboros.cli.codex_http_mcp.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_receipt", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_http_readiness", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp._raw_standby_identity", return_value=(42, 99)),
+        patch("ouroboros.cli.codex_http_mcp._process_identity_alive", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._restart_prior", return_value=True),
+    ):
+        error = mcp._operate(tmp_path, LAUNCHER, "serve", commit_authorized=lambda: False)
+
+    assert error == "Codex MCP config changed; lifecycle transition was not committed."
+    assert mcp._desired_generation(root)[0] == prior
+    aborted = [path for path in (root / mcp._GENERATIONS_NAME).iterdir() if path.name != prior]
+    assert len(aborted) == 1
+    assert (aborted[0] / "abort.json").is_file()
+
+
+def test_disabled_commit_authorization_failure_aborts_new_generation(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prior, _ = _generation(root)
+    mcp._commit_generation(root, prior)
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._bootstrap"),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=(42, 99)),
+        patch("ouroboros.cli.codex_http_mcp._restart_prior", return_value=True),
+    ):
+        error = mcp._operate(tmp_path, None, "disabled", commit_authorized=lambda: False)
+
+    assert error == "Codex MCP config changed; lifecycle transition was not committed."
+    assert mcp._desired_generation(root)[0] == prior
+    aborted = [path for path in (root / mcp._GENERATIONS_NAME).iterdir() if path.name != prior]
+    assert len(aborted) == 1
+    assert (aborted[0] / "abort.json").is_file()
+
+
 @pytest.mark.parametrize(
     ("death_proven", "restart", "ready", "expected"),
     [
