@@ -42,6 +42,7 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
     _project_dir_from_seed,
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
+from ouroboros.mcp.server.resource_lifecycle import ServerResourceLifecycle
 from ouroboros.mcp.server.security import (
     AuthConfig,
     AuthContext,
@@ -72,7 +73,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
-from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
+from ouroboros.orchestrator.control_bus import ControlBus
 
 if TYPE_CHECKING:
     from ouroboros.mcp.job_manager import JobManager
@@ -725,12 +726,9 @@ class MCPServerAdapter:
         self._resource_handlers: dict[str, ResourceHandler] = {}
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
-        self._owned_resources: list[Any] = []  # objects with async close()
-        self._startup_resources: list[Any] = []  # objects with async initialize()
-        self._lifecycle_lock = asyncio.Lock()
-        self._startup_complete = False
-        self._startup_error: Exception | None = None
-        self._shutdown_complete = False
+        self._resource_lifecycle = ServerResourceLifecycle(server_name=name)
+        self._owned_resources = self._resource_lifecycle.owned_resources
+        self._startup_resources = self._resource_lifecycle.startup_resources
         self._runtime_context: AgentRuntimeContext | None = None
         self._job_manager: JobManager | None = None
         self._last_tool_activity = time.monotonic()
@@ -1412,35 +1410,14 @@ class MCPServerAdapter:
         initialize_on_startup: bool = False,
     ) -> None:
         """Register a resource owned across explicit startup and shutdown."""
-        if self._startup_complete or self._startup_error is not None:
-            raise RuntimeError("Cannot register resources after server startup")
-        if self._shutdown_complete:
-            raise RuntimeError("Cannot register resources after server shutdown")
-        if initialize_on_startup and not callable(getattr(resource, "initialize", None)):
-            raise TypeError("Startup resources must provide initialize()")
-        self._owned_resources.append(resource)
-        if initialize_on_startup:
-            self._startup_resources.append(resource)
+        self._resource_lifecycle.register(
+            resource,
+            initialize_on_startup=initialize_on_startup,
+        )
 
     async def startup(self) -> None:
         """Initialize startup-owned resources exactly once before request work."""
-        async with self._lifecycle_lock:
-            if self._shutdown_complete:
-                raise RuntimeError("Cannot start a shut down MCP server")
-            if self._startup_complete:
-                return
-            if self._startup_error is not None:
-                raise self._startup_error
-            try:
-                for resource in self._startup_resources:
-                    initialize = resource.initialize
-                    initialized = initialize()
-                    if inspect.isawaitable(initialized):
-                        await initialized
-            except Exception as exc:
-                self._startup_error = exc
-                raise
-            self._startup_complete = True
+        await self._resource_lifecycle.startup()
 
     @property
     def job_manager(self) -> JobManager | None:
@@ -1507,30 +1484,7 @@ class MCPServerAdapter:
 
     async def shutdown(self) -> None:
         """Shutdown the server gracefully, closing owned resources."""
-        async with self._lifecycle_lock:
-            if self._shutdown_complete:
-                return
-            log.info("mcp.server.shutdown", name=self._name)
-            for resource in self._owned_resources:
-                close_fn = getattr(resource, "close", None)
-                if callable(close_fn):
-                    try:
-                        await close_fn()
-                    except ControlBusDrainError:
-                        log.error(
-                            "mcp.server.control_bus_close_failed",
-                            resource=type(resource).__name__,
-                        )
-                        raise
-                    except Exception as exc:
-                        log.warning(
-                            "mcp.server.resource_close_failed",
-                            resource=type(resource).__name__,
-                            error=str(exc),
-                        )
-            self._owned_resources.clear()
-            self._startup_resources.clear()
-            self._shutdown_complete = True
+        await self._resource_lifecycle.shutdown()
 
 
 def create_ouroboros_server(
