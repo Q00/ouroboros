@@ -37,7 +37,7 @@ ouroboros-tui --help                    # show all options
 
 ## Keys
 
-`q` quit · `1-4` screens · `Ctrl+P` command palette · `l` open logs · `Esc` close the active palette, otherwise logs · `↑↓` navigate · `Enter` select · mouse click
+`q` quit · `1-4` screens · `Ctrl+P` command palette · `l` open logs · `Esc` close palette / return from Sessions / close Execution logs · `↑↓` navigate · `Enter` select · mouse click
 
 With the log filter focused, `l` enters filter text; global `q`, `1-4`, and `Ctrl+P` remain reserved.
 When the command palette is open, `Esc` closes only the palette and preserves the underlying log panel and filter.

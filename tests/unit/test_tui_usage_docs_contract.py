@@ -13,6 +13,7 @@ EN_GUIDE = REPO_ROOT / "docs/guides/tui-usage.md"
 KO_GUIDE = REPO_ROOT / "docs/guides/tui-usage.ko.md"
 GUIDES = (EN_GUIDE, KO_GUIDE)
 SLT_README = REPO_ROOT / "crates/ouroboros-tui/README.md"
+SLT_SESSION_SELECTOR = REPO_ROOT / "crates/ouroboros-tui/src/views/session_selector.rs"
 
 CONTRACT_MARKERS = (
     "<!-- tui-contract:textual-screens -->",
@@ -156,6 +157,16 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     assert "if event_count == 0" in source
     assert "Err(e) =>" in source
     assert "state.disable_lifecycle_controls();" in source
+    session_selector_source = _read(SLT_SESSION_SELECTOR)
+    assert re.search(
+        r"if ui\.key_code\(KeyCode::Esc\) \{\s*state\.tabs\.selected = 0;\s*\}",
+        session_selector_source,
+    )
+    assert re.search(
+        r"Screen::SessionSelector => \{.*?\(\"Esc\", \"Back\"\)",
+        source,
+        re.DOTALL,
+    )
 
     for guide in GUIDES:
         text = _read(guide)
@@ -186,15 +197,20 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     en_lifecycle = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
     ko_lifecycle = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
     assert (
-        "| `Esc` | Close the command palette when active; otherwise close the open "
-        "Execution log panel |"
+        "| `Esc` | Close the command palette when active; return from Sessions to "
+        "Dashboard; close the open log panel in Execution |"
     ) in en_lifecycle
     assert (
-        "| `Esc` | 명령 팔레트가 열려 있으면 팔레트만 닫고, 그 외에는 열린 실행 로그 패널 닫기 |"
-        in ko_lifecycle
+        "| `Esc` | 명령 팔레트가 열려 있으면 팔레트 닫기, 세션 화면에서는 대시보드로 "
+        "돌아가기, 실행 화면에서는 열린 로그 패널 닫기 |" in ko_lifecycle
     )
     assert "| `Esc` | Close the open Execution log panel |" not in _read(EN_GUIDE)
+    assert (
+        "Close the command palette when active; otherwise close the open Execution log panel"
+        not in _read(EN_GUIDE)
+    )
     assert "| `Esc` | 열린 실행 로그 패널 닫기 |" not in _read(KO_GUIDE)
+    assert "명령 팔레트가 열려 있으면 팔레트만 닫고, 그 외에는" not in _read(KO_GUIDE)
 
     assert "contains no events" in _read(EN_GUIDE)
     assert "cannot be opened" in _read(EN_GUIDE)
@@ -215,6 +231,7 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     assert "`Esc` closes only the palette and preserves the underlying log panel and filter" in (
         slt_readme
     )
+    assert "`Esc` close palette / return from Sessions / close Execution logs" in slt_readme
     assert "`1-5` screens" not in slt_readme
 
 
