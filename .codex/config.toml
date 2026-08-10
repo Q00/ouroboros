@@ -1,6 +1,7 @@
 [mcp_servers.ouroboros]
 command = "uvx"
 args = [
+    "--isolated",
     "--python",
     ">=3.12",
     "--from",

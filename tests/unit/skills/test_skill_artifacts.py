@@ -183,6 +183,7 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert codex_mcp["mcpServers"]["ouroboros"] == {
         "command": "uvx",
         "args": [
+            "--isolated",
             "--from",
             "ouroboros-ai[mcp]",
             "ouroboros",
