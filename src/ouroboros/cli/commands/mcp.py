@@ -1109,10 +1109,9 @@ async def _run_mcp_server(
             with contextlib.suppress(Exception):
                 await event_store.close()
         _cleanup_pid_file()
-        if lifecycle_recovery_required:
-            # The adapter shutdown above closes the bound listener before the
-            # predecessor task is allowed to bind the same port.
-            recover_managed_lifecycle(lifecycle_root, lifecycle_generation)
+        # A managed predecessor cannot recover here: this process remains alive
+        # until its finally block completes. Its immutable task's RestartOnFailure
+        # policy restarts it after the listener, stores, and lease are released.
         # Single error-propagation point: preserve a serve-loop failure (bind/
         # listen/runtime errors — asyncio.wait() leaves the exception parked on
         # the task) but raise it only after cleanup, from OUTSIDE this finally.
@@ -1132,6 +1131,10 @@ async def _run_mcp_server(
 
     if serve_exc is not None:
         raise serve_exc
+    if lifecycle_recovery_required:
+        raise OSError(
+            "Managed MCP successor ended before lifecycle commit; restarting predecessor task."
+        )
 
 
 def _resolve_network_security(

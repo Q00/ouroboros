@@ -1181,8 +1181,21 @@ def _restart_prior(schtasks: str, root: Path, identity: str) -> bool:
     return result.returncode == 0
 
 
+def _restore_committed_serve_predecessor(schtasks: str, root: Path, identity: str) -> bool:
+    """Restart and prove the current committed serve predecessor is listening."""
+    desired = _desired_generation(root)
+    if desired is None or not desired[2] or desired[1].get("mode") != "serve":
+        return False
+    token = desired[1].get("prepare_token")
+    if not isinstance(token, str) or not token:
+        return False
+    if not _restart_prior(schtasks, root, identity):
+        return False
+    return _wait_for_receipt(root, desired[0], "ready", token)
+
+
 def recover_managed_lifecycle(root_value: str, generation: str) -> bool:
-    """Restart the exact committed predecessor after a failed prepare expires."""
+    """Restore a failed prepare once its replacement no longer owns the listener."""
     schtasks = shutil.which("schtasks")
     identity = _current_windows_identity()
     if schtasks is None or identity is None:
@@ -1208,24 +1221,20 @@ def recover_managed_lifecycle(root_value: str, generation: str) -> bool:
         prior = _load_generation(root, prior_generation)
         if not _generation_is_committed(root, prior_generation) or prior.get("mode") != "serve":
             return False
-        command = prior.get("command")
-        arguments = prior.get("arguments")
-        token = prior.get("prepare_token")
-        if (
-            not isinstance(command, str)
-            or not isinstance(arguments, list)
-            or not all(isinstance(argument, str) for argument in arguments)
-            or not isinstance(token, str)
+        replacement_token = manifest.get("prepare_token")
+        if not isinstance(replacement_token, str) or not replacement_token:
+            return False
+        if not aborted:
+            _abort_generation(root, generation)
+        replacement_identity = _raw_standby_identity(root, generation, replacement_token)
+        if replacement_identity is None:
+            return False
+        replacement_pid, replacement_marker = replacement_identity
+        if _process_identity_alive(replacement_pid, replacement_marker) and tcp_listener_owned_by(
+            replacement_pid, 8765
         ):
             return False
-        name = _ensure_task(schtasks, identity, root, prior_generation, command, arguments, token)
-        result = subprocess.run(
-            [schtasks, "/Run", "/TN", name],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.returncode == 0
+        return _restore_committed_serve_predecessor(schtasks, root, identity)
     except OSError:
         return False
 
@@ -1283,6 +1292,10 @@ def _operate(
     root: Path | None = None
     setup_lease: object | None = None
     replacement_started = False
+    prior: tuple[str, dict[str, object], bool] | None = None
+    prior_identity: tuple[int, int | float] | None = None
+    token: str | None = None
+    has_committed_serve_predecessor = False
     try:
         with _windows_operation_lock():
             physical = _physical_config_dir(config_dir)
@@ -1298,6 +1311,9 @@ def _operate(
             _check_ancestors(root)
             _require_directory(root)
             prior = _desired_generation(root)
+            has_committed_serve_predecessor = (
+                prior is not None and prior[2] and prior[1].get("mode") == "serve"
+            )
             prior_identity = (
                 _latest_ready_identity(root, prior[0])
                 if prior is not None and prior[1].get("mode") == "serve"
@@ -1376,30 +1392,31 @@ def _operate(
         if generation is not None and root is not None:
             try:
                 _abort_generation(root, generation)
-                if replacement_started:
+                if mode == "serve" and has_committed_serve_predecessor and replacement_started:
                     standby_identity = _raw_standby_identity(root, generation, token or "")
                     if standby_identity is None:
                         recovery_error = (
                             "Replacement standby receipt is missing or invalid; "
                             "predecessor recovery was not started."
                         )
-                    else:
-                        replacement_alive = _process_identity_alive(*standby_identity)
-                        if replacement_alive and not _wait_for_identity_death(
-                            root, generation, standby_identity
-                        ):
-                            recovery_error = (
-                                "Replacement did not stop; predecessor recovery was not started."
-                            )
-                        if recovery_error is None:
-                            _restart_prior(schtasks, root, identity)
-                else:
-                    _restart_prior(schtasks, root, identity)
+                    elif _process_identity_alive(
+                        *standby_identity
+                    ) and not _wait_for_identity_death(root, generation, standby_identity):
+                        recovery_error = (
+                            "Replacement did not stop; predecessor recovery was not started."
+                        )
+                    if recovery_error is None and not _restore_committed_serve_predecessor(
+                        schtasks, root, identity
+                    ):
+                        recovery_error = "Could not restart committed predecessor or prove its token-bound readiness."
             except OSError:
-                recovery_error = "Could not complete predecessor recovery."
+                if mode == "serve" and has_committed_serve_predecessor:
+                    recovery_error = "Could not complete predecessor recovery."
         if setup_lease is not None:
             setup_lease.__exit__(None, None, None)
-        return recovery_error or str(exc)[:240]
+        if recovery_error is not None:
+            return f"{str(exc)[:240]} Predecessor recovery failed: {recovery_error}"
+        return str(exc)[:240]
     if setup_lease is not None:
         setup_lease.__exit__(None, None, None)
     return None

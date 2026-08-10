@@ -12,8 +12,10 @@ import asyncio
 import importlib
 from importlib import metadata as importlib_metadata
 import os
+from pathlib import Path
 import sys
-from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -262,6 +264,99 @@ def test_managed_serve_passes_complete_lifecycle_options(monkeypatch):
     assert mock_run_mcp_server.await_args.kwargs["lifecycle_generation"] == "gen-1"
     assert mock_run_mcp_server.await_args.kwargs["lifecycle_installation"] == "installation"
     assert mock_run_mcp_server.await_args.kwargs["lifecycle_token"] == "token"
+
+
+def test_managed_recovery_shutdown_exits_after_cleanup_without_self_recovery(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cleanup_order: list[str] = []
+
+    class Store:
+        async def initialize(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            cleanup_order.append("store-close")
+
+    class Repository:
+        def __init__(self, _event_store) -> None:
+            pass
+
+        async def cancel_orphaned_sessions(self) -> list[object]:
+            return []
+
+    class Server:
+        info = SimpleNamespace(tools=())
+
+        async def serve(self, **_kwargs) -> None:
+            await asyncio.Event().wait()
+
+        async def shutdown(self) -> None:
+            cleanup_order.append("server-shutdown")
+
+    lease = MagicMock()
+    lease.__enter__.return_value = lease
+    lease.__exit__.side_effect = lambda *_args: cleanup_order.append("lease-release")
+    server = Server()
+
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._require_mcp_dependency", Mock())
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", Mock())
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp._resolve_client_identity", Mock(return_value=None)
+    )
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._sweep_stale_instances", Mock(return_value=0))
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp._write_pid_file",
+        lambda: cleanup_order.append("pid-write"),
+    )
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp._cleanup_pid_file",
+        lambda: cleanup_order.append("pid-cleanup"),
+    )
+    monkeypatch.setattr("ouroboros.cli.commands.mcp.usage_telemetry.capture", Mock())
+
+    with (
+        patch(
+            "ouroboros.core.file_lock._windows_directory_lease",
+            return_value=lease,
+        ),
+        patch(
+            "ouroboros.config.models.resolve_event_store_path", return_value=tmp_path / "server.db"
+        ),
+        patch("ouroboros.persistence.event_store.EventStore", return_value=Store()),
+        patch("ouroboros.persistence.brownfield.BrownfieldStore", return_value=Store()),
+        patch("ouroboros.orchestrator.session.SessionRepository", Repository),
+        patch("ouroboros.mcp.bridge.create_bridge_from_env", return_value=None),
+        patch("ouroboros.mcp.server.adapter.create_ouroboros_server", return_value=server),
+        patch(
+            "ouroboros.cli.codex_http_mcp.validate_managed_lifecycle",
+            return_value=True,
+        ),
+        patch("ouroboros.cli.codex_http_mcp.publish_server_receipt", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp.wait_for_standby_handoff", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_http_readiness", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp.tcp_listener_owned_by", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp.lifecycle_should_stop", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp.managed_prepare_requires_recovery", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp.recover_managed_lifecycle") as recover,
+        patch("ouroboros.cli.commands.mcp._managed_process_identity", return_value=(42, 99)),
+    ):
+        with pytest.raises(OSError, match="successor ended before lifecycle commit"):
+            asyncio.run(
+                _run_mcp_server(
+                    "127.0.0.1",
+                    8765,
+                    "streamable-http",
+                    lifecycle_root=str(tmp_path),
+                    lifecycle_generation="prepared",
+                    lifecycle_installation="installation",
+                    lifecycle_token="token",
+                )
+            )
+
+    recover.assert_not_called()
+    assert cleanup_order.index("server-shutdown") < cleanup_order.index("pid-cleanup")
+    assert cleanup_order.index("pid-cleanup") < cleanup_order.index("lease-release")
 
 
 def test_public_claude_sdk_runtime_fails_before_process_state(monkeypatch):
