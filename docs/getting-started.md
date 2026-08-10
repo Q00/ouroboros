@@ -131,7 +131,7 @@ Auto mode is hang-resistant by design: interview and repair loops are bounded, s
 
 ### Option 1: Claude Code Plugin (Recommended)
 
-Requires `uvx` **and** a global `python3` on the host: the plugin's MCP manifest launches the server with `uvx` ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and the bundled skills shell out to `python3` directly (`skills/setup/SKILL.md:98`, `skills/welcome/SKILL.md:32`). `uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process only — it does not create a global `python3`. Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`. Tracked in #2001.
+Requires `uvx` **and** a global `python3` (3.12 recommended, **3.11 minimum**) on the host: the plugin's MCP manifest launches the server with `uvx` ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and the bundled skills shell out to `python3` directly (`skills/setup/SKILL.md:98`, `skills/welcome/SKILL.md:32`). `uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process only — it does not create a global `python3`. Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`. Tracked in #2001.
 
 ```bash
 # Terminal
@@ -145,7 +145,7 @@ ooo setup
 ooo help        # verify installation
 ```
 
-No pip install of Ouroboros and no API key configuration needed -- Claude Code handles the runtime. The host still needs `uvx` and `python3`, as above.
+No pip install of Ouroboros and no API key configuration needed -- Claude Code handles the runtime. The host still needs `uvx` and `python3` >= 3.11, as above — the shipped `.claude-plugin/skills/welcome/SKILL.md` imports `datetime.UTC`, which does not exist before 3.11.
 
 ### Option 2: pip Install
 
