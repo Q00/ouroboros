@@ -203,6 +203,23 @@ class TestParseTurn:
         assert turn.text == ""
         assert turn.error == "process failed"
 
+    def test_nonzero_exit_without_stderr_rejects_stale_success_diagnostic(self) -> None:
+        out = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "stale success",
+                "session_id": "stale-session",
+            }
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 7)
+
+        assert turn.is_error is True
+        assert turn.text == ""
+        assert turn.error == "claude exited with status 7"
+
 
 class TestPermissionArgs:
     def test_bypass_maps_to_skip_permissions(self) -> None:

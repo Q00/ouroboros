@@ -247,7 +247,17 @@ class ClaudeWorkerTransport:
         process_failed = returncode not in (0, None)
         is_error = payload.is_error or process_failed
         error: str | None = None
-        if is_error:
+        if process_failed:
+            # A success-looking envelope is not an error diagnostic when the
+            # outer process status says the invocation failed.  Use envelope
+            # detail only when the envelope itself also reports an error.
+            error = (
+                stderr
+                or (payload.result if payload.is_error else None)
+                or (payload.subtype if payload.is_error else None)
+                or f"claude exited with status {returncode}"
+            )
+        elif payload.is_error:
             error = (
                 stderr
                 or payload.result
