@@ -212,6 +212,23 @@ def test_ready_receipt_rejects_pid_reuse_or_non_owner(tmp_path: Path) -> None:
         assert not mcp._receipt_matches(root, generation, "ready", token)
 
 
+def test_ready_receipt_rejects_process_that_dies_during_listener_inspection(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    generation, token = _generation(root)
+    assert token is not None
+    assert mcp.publish_server_receipt(str(root), generation, "ready", 42, 99, token)
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._process_identity_alive",
+            side_effect=[True, False],
+        ),
+        patch("ouroboros.cli.codex_http_mcp.tcp_listener_owned_by", return_value=True),
+    ):
+        assert not mcp._receipt_matches(root, generation, "ready", token)
+
+
 def test_stopped_receipt_requires_the_exact_process_to_be_dead(tmp_path: Path) -> None:
     root = _root(tmp_path)
     generation, token = _generation(root)
@@ -266,6 +283,23 @@ def test_handoff_uses_the_exact_live_ready_identity(tmp_path: Path) -> None:
     ):
         assert mcp._latest_ready_identity(root, generation) == (42, 99)
     with patch("ouroboros.cli.codex_http_mcp._process_identity_alive", return_value=False):
+        assert mcp._latest_ready_identity(root, generation) is None
+
+
+def test_latest_ready_identity_rejects_process_that_dies_during_listener_inspection(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    generation, token = _generation(root)
+    assert token is not None
+    assert mcp.publish_server_receipt(str(root), generation, "ready", 42, 99, token)
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._process_identity_alive",
+            side_effect=[True, False],
+        ),
+        patch("ouroboros.cli.codex_http_mcp.tcp_listener_owned_by", return_value=True),
+    ):
         assert mcp._latest_ready_identity(root, generation) is None
 
 
@@ -325,6 +359,125 @@ def test_provision_waits_for_standby_before_prior_stop(tmp_path: Path) -> None:
         assert mcp.provision_windows_codex_mcp_http(tmp_path, LAUNCHER) is None
     assert order[0] == "standby"
     assert stopped.called
+
+
+@pytest.mark.parametrize(
+    ("death_proven", "restart", "ready", "expected"),
+    [
+        (False, True, True, "Compensation failed: prior HTTP service did not stop."),
+        (True, False, False, "Compensation failed: could not restart"),
+        (
+            True,
+            True,
+            False,
+            "Compensation failed: prior HTTP service did not become ready.",
+        ),
+        (True, True, True, "Prior HTTP service was restored."),
+    ],
+)
+def test_disable_compensation_requires_death_then_restarts_and_verifies_prior(
+    tmp_path: Path,
+    death_proven: bool,
+    restart: bool,
+    ready: bool,
+    expected: str,
+) -> None:
+    root = _root(tmp_path)
+    prior, prior_token = _generation(root)
+    assert prior_token is not None
+    mcp._commit_generation(root, prior)
+    disabled, _ = _generation(root, "disabled")
+    mcp._commit_generation(root, disabled)
+
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._process_identity_alive",
+            return_value=True,
+        ) as process_alive,
+        patch(
+            "ouroboros.cli.codex_http_mcp.tcp_listener_owned_by",
+            return_value=True,
+        ) as listener_owned,
+        patch(
+            "ouroboros.cli.codex_http_mcp._wait_for_identity_death",
+            return_value=death_proven,
+        ) as wait_for_death,
+        patch("ouroboros.cli.codex_http_mcp._restart_prior", return_value=restart) as restart_prior,
+        patch("ouroboros.cli.codex_http_mcp._wait_for_receipt", return_value=ready) as wait_ready,
+    ):
+        error = mcp._compensate_disabled_transition(
+            "schtasks.exe", IDENTITY, root, disabled, prior, (42, 99)
+        )
+
+    assert expected in error
+    assert (root / mcp._GENERATIONS_NAME / disabled / "abort.json").is_file()
+    assert mcp._desired_generation(root)[0] == prior
+    assert process_alive.call_count == 0
+    listener_owned.assert_not_called()
+    wait_for_death.assert_called_once_with(root, prior, (42, 99))
+    if not death_proven:
+        restart_prior.assert_not_called()
+        wait_ready.assert_not_called()
+    else:
+        restart_prior.assert_called_once_with("schtasks.exe", root, IDENTITY)
+        if restart:
+            wait_ready.assert_called_once_with(root, prior, "ready", prior_token)
+        else:
+            wait_ready.assert_not_called()
+
+
+def test_disable_does_not_succeed_when_prior_stop_is_unverified(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    prior, _ = _generation(root)
+    mcp._commit_generation(root, prior)
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=(42, 99)),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_stopped_identity", return_value=False),
+        patch(
+            "ouroboros.cli.codex_http_mcp._compensate_disabled_transition",
+            return_value="Existing MCP server did not stop. Prior HTTP service was restored.",
+        ) as compensate,
+    ):
+        error = mcp.remove_windows_codex_mcp_http(tmp_path)
+
+    assert error == "Existing MCP server did not stop. Prior HTTP service was restored."
+    disabled = max((root / mcp._GENERATIONS_NAME).iterdir(), key=lambda path: path.name)
+    compensate.assert_called_once_with(
+        "schtasks.exe", IDENTITY, root, disabled.name, prior, (42, 99)
+    )
+
+
+def test_disable_fails_closed_without_committing_when_prior_ready_identity_is_missing(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    prior, _ = _generation(root)
+    mcp._commit_generation(root, prior)
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=None),
+        patch(
+            "ouroboros.cli.codex_http_mcp._publish_generation",
+            wraps=mcp._publish_generation,
+        ) as publish,
+    ):
+        error = mcp.remove_windows_codex_mcp_http(tmp_path)
+
+    assert error == (
+        "Could not verify the existing MCP server identity; disabled transition was not started."
+    )
+    assert mcp._desired_generation(root)[0] == prior
+    publish.assert_not_called()
+    assert [path.name for path in (root / mcp._GENERATIONS_NAME).iterdir()] == [prior]
 
 
 def test_task_xml_rejects_unmodeled_root_and_exec_content(tmp_path: Path) -> None:

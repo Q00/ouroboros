@@ -38,7 +38,7 @@ def test_managed_process_identity_uses_integer_windows_creation_marker() -> None
 
 def test_managed_process_identity_fails_closed_when_windows_api_fails() -> None:
     with patch.object(mcp.sys, "platform", "win32"):
-        with patch("ctypes.WinDLL", side_effect=OSError):
+        with patch("ctypes.WinDLL", side_effect=OSError, create=True):
             pid, marker = mcp._managed_process_identity()
     assert pid == os.getpid()
     assert marker is None

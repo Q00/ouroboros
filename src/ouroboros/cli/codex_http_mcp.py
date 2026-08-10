@@ -966,7 +966,12 @@ def _receipt_matches(root: Path, generation: str, phase: str, token: str | None 
 
         pid = value["pid"]
         alive = _process_identity_alive(pid, start_marker)
-        if phase == "ready" and alive and tcp_listener_owned_by(pid, 8765):
+        if (
+            phase == "ready"
+            and alive
+            and tcp_listener_owned_by(pid, 8765)
+            and _process_identity_alive(pid, start_marker)
+        ):
             return True
         if phase == "standby" and alive:
             return True
@@ -1000,6 +1005,7 @@ def _latest_ready_identity(root: Path, generation: str) -> tuple[int, int | floa
             and not isinstance(marker, bool)
             and _process_identity_alive(pid, marker)
             and tcp_listener_owned_by(pid, 8765)
+            and _process_identity_alive(pid, marker)
         ):
             return pid, marker
     return None
@@ -1155,17 +1161,24 @@ def _wait_for_receipt(root: Path, generation: str, phase: str, token: str | None
     return False
 
 
-def _restart_prior(schtasks: str, root: Path, identity: str) -> None:
+def _restart_prior(schtasks: str, root: Path, identity: str) -> bool:
     desired = _desired_generation(root)
     if desired is None or desired[1].get("mode") != "serve" or (not desired[2]):
-        return
+        return False
     manifest = desired[1]
     command, arguments = (manifest.get("command"), manifest.get("arguments"))
-    if not isinstance(command, str) or not isinstance(arguments, list):
-        return
+    if (
+        not isinstance(command, str)
+        or not isinstance(arguments, list)
+        or not all(isinstance(argument, str) for argument in arguments)
+    ):
+        return False
     token = manifest.get("prepare_token") if isinstance(manifest.get("prepare_token"), str) else ""
     name = _ensure_task(schtasks, identity, root, desired[0], command, arguments, token)
-    subprocess.run([schtasks, "/Run", "/TN", name], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        [schtasks, "/Run", "/TN", name], capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0
 
 
 def recover_managed_lifecycle(root_value: str, generation: str) -> bool:
@@ -1217,6 +1230,33 @@ def recover_managed_lifecycle(root_value: str, generation: str) -> bool:
         return False
 
 
+def _compensate_disabled_transition(
+    schtasks: str,
+    identity: str,
+    root: Path,
+    disabled_generation: str,
+    prior_generation: str,
+    prior_identity: tuple[int, int | float],
+) -> str:
+    """Restore the prior HTTP service after its disabled transition cannot prove stop."""
+    shutdown_error = "Existing MCP server did not stop."
+    try:
+        _abort_generation(root, disabled_generation)
+        if not _wait_for_identity_death(root, prior_generation, prior_identity):
+            return f"{shutdown_error} Compensation failed: prior HTTP service did not stop."
+        if not _restart_prior(schtasks, root, identity):
+            return f"{shutdown_error} Compensation failed: could not restart prior HTTP service."
+        prior = _load_generation(root, prior_generation)
+        token = prior.get("prepare_token")
+        if not isinstance(token, str) or not _wait_for_receipt(
+            root, prior_generation, "ready", token
+        ):
+            return f"{shutdown_error} Compensation failed: prior HTTP service did not become ready."
+    except OSError as exc:
+        return f"{shutdown_error} Compensation failed: {exc}"
+    return f"{shutdown_error} Prior HTTP service was restored."
+
+
 def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str) -> str | None:
     schtasks, identity = (shutil.which("schtasks"), _current_windows_identity())
     if schtasks is None or identity is None:
@@ -1245,14 +1285,33 @@ def _operate(config_dir: Path, launcher: tuple[str, list[str]] | None, mode: str
                 if prior is not None and prior[1].get("mode") == "serve"
                 else None
             )
+            if (
+                mode == "disabled"
+                and prior is not None
+                and prior[1].get("mode") == "serve"
+                and prior_identity is None
+            ):
+                raise OSError(
+                    "Could not verify the existing MCP server identity; disabled transition was not started."
+                )
             generation, token = _publish_generation(root, mode, launcher)
             if mode == "disabled":
                 _commit_generation(root, generation)
+                stopped = True
                 if prior is not None and prior_identity is not None:
                     try:
-                        _wait_for_stopped_identity(root, prior[0], prior_identity)
+                        stopped = _wait_for_stopped_identity(root, prior[0], prior_identity)
                     except OSError:
-                        pass
+                        stopped = False
+                if not stopped:
+                    assert prior is not None and prior_identity is not None
+                    error = _compensate_disabled_transition(
+                        schtasks, identity, root, generation, prior[0], prior_identity
+                    )
+                    if setup_lease is not None:
+                        setup_lease.__exit__(None, None, None)
+                        setup_lease = None
+                    return error
                 if setup_lease is not None:
                     setup_lease.__exit__(None, None, None)
                     setup_lease = None

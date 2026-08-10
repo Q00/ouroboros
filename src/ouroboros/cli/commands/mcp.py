@@ -1427,6 +1427,22 @@ def serve(
 
     try:
         db_path = db if db else None
+        lifecycle_kwargs: dict[str, str | None] = {}
+        if any(
+            value is not None
+            for value in (
+                codex_lifecycle_root,
+                codex_lifecycle_generation,
+                codex_lifecycle_installation,
+                codex_lifecycle_token,
+            )
+        ):
+            lifecycle_kwargs = {
+                "lifecycle_root": codex_lifecycle_root,
+                "lifecycle_generation": codex_lifecycle_generation,
+                "lifecycle_installation": codex_lifecycle_installation,
+                "lifecycle_token": codex_lifecycle_token,
+            }
         asyncio.run(
             _run_mcp_server(
                 host,
@@ -1439,10 +1455,7 @@ def serve(
                 allowed_hosts=allowed_hosts,
                 allowed_origins=allowed_origins,
                 workspace_roots=workspace_roots,
-                lifecycle_root=codex_lifecycle_root,
-                lifecycle_generation=codex_lifecycle_generation,
-                lifecycle_installation=codex_lifecycle_installation,
-                lifecycle_token=codex_lifecycle_token,
+                **lifecycle_kwargs,
             )
         )
     except KeyboardInterrupt:

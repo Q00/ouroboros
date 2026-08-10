@@ -232,6 +232,38 @@ def test_public_codex_runtime_remains_executable(monkeypatch):
     )
 
 
+def test_managed_serve_passes_complete_lifecycle_options(monkeypatch):
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    mock_run_mcp_server = AsyncMock()
+
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=mock_run_mcp_server,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "--runtime",
+                "claude-cli",
+                "--codex-lifecycle-root",
+                "C:/lifecycle",
+                "--codex-lifecycle-generation",
+                "gen-1",
+                "--codex-lifecycle-installation",
+                "installation",
+                "--codex-lifecycle-token",
+                "token",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert mock_run_mcp_server.await_args.kwargs["lifecycle_root"] == "C:/lifecycle"
+    assert mock_run_mcp_server.await_args.kwargs["lifecycle_generation"] == "gen-1"
+    assert mock_run_mcp_server.await_args.kwargs["lifecycle_installation"] == "installation"
+    assert mock_run_mcp_server.await_args.kwargs["lifecycle_token"] == "token"
+
+
 def test_public_claude_sdk_runtime_fails_before_process_state(monkeypatch):
     """The MCP 2 server cannot select the in-process SDK runtime."""
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
