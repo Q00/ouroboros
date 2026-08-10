@@ -105,7 +105,20 @@ codex --version
 | macOS (ARM/Intel) | 지원 | 주 개발 플랫폼 |
 | Linux (x86_64/ARM64) | 지원 | Ubuntu 22.04+, Debian 12+, Fedora 38+ 에서 검증 |
 | Windows (WSL 2) | 지원 | Windows 사용자에게 권장하는 경로 |
-| Windows (네이티브) | 실험적 | WSL 2를 강력히 권장합니다. 네이티브 Windows에서는 경로 처리와 프로세스 관리에 문제가 있을 수 있습니다. **Codex CLI 자체가 네이티브 Windows를 지원하지 않습니다.** |
+| Windows (네이티브) | 실험적 | 로컬 HTTP 엔드포인트를 통한 Codex Desktop MCP를 실험적으로 지원합니다. 네이티브 Codex CLI 워커/런타임 실행은 지원하지 않으므로 전체 워크플로에는 WSL 2를 사용하세요. |
+### 네이티브 Windows Codex Desktop MCP (실험적)
+네이티브 Windows에서 `ouroboros setup --runtime codex`는 로그인할 때 HTTP MCP를 시작하는, setup이 관리하는 정확히 하나의 사용자별 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 시작 값을 씁니다. setup은 HTTP MCP를 즉시 시작하고 MCP `initialize` 프로브로 검증한 뒤에만 Codex Desktop에 `http://127.0.0.1:8765/mcp`를 등록합니다. setup이 성공하면 Codex Desktop이 이 엔드포인트를 사용하므로, 사용자는 세션마다 MCP 명령을 실행하지 않습니다.
+
+`--mcp-mode`는 MCP 등록만 제어합니다.
+
+- `auto`(기본값): 네이티브 Windows에서는 시작 값이 없거나 이미 setup 관리 값과 일치할 때만 관리형 HTTP 엔드포인트를 사용합니다. 그 밖의 플랫폼에서는 관리형 stdio를 사용하며, 사용자가 관리하는 항목은 보존합니다.
+- `http`: 관리형 HTTP 엔드포인트를 사용합니다.
+- `stdio`: 관리형 항목을 명령으로 실행하는 stdio 서버로 교체합니다.
+- `preserve`: 기존에 사용 가능한 명령 또는 URL 항목만 검증합니다.
+
+setup과 uninstall은 현재 Windows 로그인 세션 범위의 시간 제한 명명된 뮤텍스를 통해 협력하므로, 같은 로그인 세션에서 협력하는 Ouroboros setup 및 uninstall 작업이 직렬화되며, 시작 값의 정확한 형식과 값을 즉시 다시 확인합니다. 이 재확인에서 불일치가 관찰되면 setup은 그 값을 보존하고, 수정하거나 제거한 뒤 다시 실행하는 방법을 알리며, 그 전에는 HTTP 설정을 쓰지 않습니다. 같은 계정의 여러 Windows 세션에서 동시에 실행하는 lifecycle 명령은 이 실험적 setup 계약의 범위 밖이므로 실행하지 않아야 합니다. setup이 활성화된 동안 수동 또는 비-Ouroboros 레지스트리 편집은 동기화되지 않으므로 피해야 합니다. 이 실험적 경로는 로그인 시 MCP를 시작하지만, 충돌 후 재시작, 세대 관리, 자동 롤백, 무중단 업그레이드, 서비스 관리자 의미론을 제공하지 않습니다.
+
+> **Windows 사용자:** 네이티브 Codex CLI 워커/런타임 워크플로에는 WSL 2를 사용하세요. 위 네이티브 Windows setup은 실험적인 Codex Desktop MCP로만 한정됩니다.
 
 ## 설정
 
@@ -198,13 +211,13 @@ codex --version
 - 가능하면 `orchestrator.codex_cli_path`를 기록합니다
 - 관리되는 Ouroboros 규칙을 `~/.codex/rules/`에 설치합니다
 - 관리되는 Ouroboros 스킬을 `~/.codex/skills/`에 설치합니다
-- `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다
+- `~/.codex/config.toml`에 Ouroboros MCP/env 연결을 등록합니다. 네이티브 Windows의 `auto`는 조건이 맞을 때 고정 관리형 HTTP 엔드포인트를 사용하고, 그 밖의 플랫폼에서는 관리형 stdio를 사용하며 사용자가 관리하는 항목은 보존합니다
 - 손대지 않은 레거시 자동생성 `ouroboros-*.config.toml` 태스크 프로파일 앵커만 정리합니다. 사용자가 만든 Codex 프로파일은 보존됩니다
 - 관리되는 `ouroboros-worker.config.toml`을 등록해서, Agent OS 워커 서브프로세스가 MCP/env 연결을 잃지 않고도 대화형 Codex 기본값에서 빠질 수 있게 합니다
 
 `~/.codex/` 밖의 전역 산출물도 함께 생깁니다. `ensure_config_dir()`가 `~/.ouroboros/data/`와 `~/.ouroboros/logs/`를 만들고([`setup.py:2632`](../../src/ouroboros/cli/commands/setup.py)), 설정이 처음이면 `~/.ouroboros/credentials.yaml`을 `0600` 권한으로 새로 씁니다([`setup.py:2771`](../../src/ouroboros/cli/commands/setup.py)).
 
-`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요.
+`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로필을 유지하세요. `auto`는 사용자가 관리하는 MCP 명령과 URL 항목을 보존합니다. 관리형 등록을 의도적으로 고를 때만 `--mcp-mode stdio` 또는 `http`를 사용하세요.
 
 ### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
 

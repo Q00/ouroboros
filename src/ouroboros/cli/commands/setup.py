@@ -37,6 +37,20 @@ import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_http_mcp import (
+    HTTP_ENDPOINT,
+    WindowsHttpProvision,
+    commit_windows_codex_mcp_http_batch,
+    has_managed_codex_mcp_comment,
+    provision_windows_codex_mcp_http,
+    remove_windows_codex_mcp_startup,
+    render_windows_codex_http_mcp_section,
+    retain_windows_codex_mcp_http,
+    rollback_windows_codex_mcp_http_batch,
+)
+from ouroboros.cli.codex_http_mcp import (
+    MANAGED_CODEX_MCP_COMMENT_LINES as _CODEX_MCP_COMMENT_LINES,
+)
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
@@ -436,15 +450,8 @@ OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
 
-_CODEX_MCP_COMMENT_LINES = (
-    "# Ouroboros MCP hookup for Codex CLI.",
-    "# Keep Ouroboros runtime settings and per-role model overrides in",
-    "# ~/.ouroboros/config.yaml (for example: clarification.default_model,",
-    "# llm.qa_model, evaluation.semantic_model, consensus.*).",
-    "# This file is only for the Codex MCP/env registration block.",
-)
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "preserve", "stdio", "http"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
@@ -545,8 +552,8 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
     """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "preserve", "stdio", "http"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio, http.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -652,15 +659,8 @@ def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
     return None
 
 
-def _render_codex_mcp_section() -> str | None:
-    """Render the managed Codex MCP block for the current install source.
-
-    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
-    can bootstrap the MCP extra without reusing a conflicting installed tool.
-    Dev/git installs must instead point Codex at this
-    Python environment; otherwise setup silently downgrades the MCP server back
-    to the latest PyPI release and hides main-branch fixes under test.
-    """
+def _resolve_codex_mcp_launcher() -> tuple[str, list[str]] | None:
+    """Resolve the launcher shared by stdio config and Windows HTTP provisioning."""
     if _is_dev_ouroboros_build():
         if (
             not Path(sys.executable).is_file()
@@ -668,13 +668,17 @@ def _render_codex_mcp_section() -> str | None:
             or importlib_util.find_spec("mcp") is None
         ):
             return None
-        command = sys.executable
-        args = list(_CODEX_MODULE_MCP_ARGS)
-    else:
-        launcher = _codex_release_mcp_launcher()
-        if launcher is None:
-            return None
-        command, args = launcher
+        return sys.executable, list(_CODEX_MODULE_MCP_ARGS)
+    return _codex_release_mcp_launcher()
+
+
+def _render_codex_mcp_section(launcher: tuple[str, list[str]] | None = None) -> str | None:
+    """Render the managed Codex stdio MCP block for the resolved launcher."""
+    if launcher is None:
+        launcher = _resolve_codex_mcp_launcher()
+    if launcher is None:
+        return None
+    command, args = launcher
     command_lines = "\n".join(
         (
             f"command = {_toml_string(command)}",
@@ -684,42 +688,22 @@ def _render_codex_mcp_section() -> str | None:
     return _CODEX_MCP_SECTION_TEMPLATE.format(command_lines=command_lines)
 
 
-def _has_managed_codex_mcp_comment(raw: str) -> bool:
-    """Return whether the Ouroboros MCP table carries setup's managed comment."""
-    lines = raw.splitlines()
-    expected = list(_CODEX_MCP_COMMENT_LINES)
-    for index, line in enumerate(lines):
-        if not _toml_line_starts_structure(lines, index):
-            continue
-        if not _is_codex_ouroboros_table_header(line.strip()):
-            continue
-        comment_end = index
-        while comment_end > 0 and not lines[comment_end - 1].strip():
-            comment_end -= 1
-        comment_start = comment_end - len(expected)
-        if comment_start >= 0 and lines[comment_start:comment_end] == expected:
-            return True
-    return False
-
-
 def _is_setup_managed_codex_mcp_entry(
     entry: dict[str, object], *, has_managed_comment: bool = False
 ) -> bool:
     """Return whether setup may safely replace this Codex MCP entry."""
-    if "url" in entry:
-        return False
+    if entry.get("url") == HTTP_ENDPOINT:
+        return has_managed_comment and set(entry) == {"url"}
 
     command = entry.get("command")
     args = entry.get("args")
     if not isinstance(command, str) or not isinstance(args, list):
         return False
-
     env = entry.get("env")
     if env is not None and env != _CODEX_MANAGED_MCP_ENV:
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
-
     if Path(command).name == "uvx":
         return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
     if not has_managed_comment:
@@ -1180,6 +1164,7 @@ def _register_codex_mcp_server(
     *,
     mode: CodexMcpMode = "auto",
     expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+    http_provisions: list[WindowsHttpProvision] | None = None,
 ) -> bool:
     """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
     import tomllib
@@ -1204,18 +1189,10 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
-    if rendered_section is None:
-        print_error(
-            "Could not find a launchable Ouroboros MCP command. Install uv, or install "
-            "Ouroboros with the [mcp] extra, then rerun setup."
-        )
-        return False
-
     codex_config = resolve_codex_home() / "config.toml"
-    codex_config.parent.mkdir(parents=True, exist_ok=True)
-    codex_config_snapshot = _snapshot_path(codex_config)
-
+    raw = ""
+    entry: dict[str, object] | None = None
+    has_managed_comment = False
     if codex_config.exists():
         raw = codex_config.read_text(encoding="utf-8")
         try:
@@ -1223,61 +1200,103 @@ def _register_codex_mcp_server(
         except tomllib.TOMLDecodeError:
             print_error(f"Could not parse {codex_config} — Codex setup not saved.")
             return False
-
         entry = _codex_mcp_entry_from_toml(parsed)
-        has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
-            print_error(
-                "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
-            )
-            return False
-        if (
-            mode == "auto"
-            and entry is not None
-            and not _is_setup_managed_codex_mcp_entry(
-                entry, has_managed_comment=has_managed_comment
-            )
-        ):
-            print_info(
-                "Preserved existing user-managed Ouroboros MCP config in "
-                f"{codex_config}. Use --mcp-mode stdio to replace it."
-            )
-            return True
-
-        updated_raw, existed_before = _upsert_codex_mcp_section(raw, rendered_section)
-        if updated_raw == raw:
-            print_info("Codex MCP server already up to date.")
-            return True
-        try:
-            tomllib.loads(updated_raw)
-        except tomllib.TOMLDecodeError as exc:
-            print_error(
-                f"Could not update {codex_config} — MCP registration would create invalid TOML."
-            )
-            print_info(str(exc))
-            return False
-
-        written_snapshot = _atomic_write_text_if_current_matches(
-            codex_config,
-            updated_raw,
-            codex_config_snapshot,
+        has_managed_comment = has_managed_codex_mcp_comment(
+            raw, _toml_line_starts_structure, _is_codex_ouroboros_table_header
         )
-        if expected_snapshots is not None:
-            expected_snapshots[codex_config] = written_snapshot
-        if existed_before:
-            print_success(f"Updated Ouroboros MCP server in {codex_config}")
-        else:
-            print_success(f"Registered Ouroboros MCP server in {codex_config}")
+
+    managed_entry = entry is not None and _is_setup_managed_codex_mcp_entry(
+        entry, has_managed_comment=has_managed_comment
+    )
+    use_http = mode == "http" or (
+        mode == "auto" and sys.platform == "win32" and (entry is None or managed_entry)
+    )
+    if (
+        entry is not None
+        and not _codex_mcp_entry_has_endpoint(entry)
+        and mode not in {"stdio", "http"}
+    ):
+        print_error(
+            "Existing Codex Ouroboros MCP config has no usable command or URL; "
+            "Codex setup not saved. Use --mcp-mode stdio or http to replace it."
+        )
+        return False
+    if mode == "auto" and entry is not None and not managed_entry:
+        print_info(
+            "Preserved existing user-managed Ouroboros MCP config in "
+            f"{codex_config}. Use --mcp-mode stdio or http to replace it."
+        )
+        return True
+
+    launcher = _resolve_codex_mcp_launcher()
+    if launcher is None:
+        print_error(
+            "Could not find a launchable Ouroboros MCP command. Install uv, or install "
+            "Ouroboros with the [mcp] extra, then rerun setup."
+        )
+        return False
+
+    provision: WindowsHttpProvision | None = None
+    if use_http:
+        provision, provisioning_error = provision_windows_codex_mcp_http(launcher)
+        if provisioning_error is not None:
+            print_error(provisioning_error)
+            return False
+        if provision is None:
+            print_error("Codex HTTP MCP setup did not return an ownership record.")
+            return False
+        rendered_section = render_windows_codex_http_mcp_section()
     else:
-        written_snapshot = _atomic_write_text_if_current_matches(
-            codex_config,
-            rendered_section.lstrip("\n"),
-            codex_config_snapshot,
-        )
-        if expected_snapshots is not None:
-            expected_snapshots[codex_config] = written_snapshot
-        print_success(f"Registered Ouroboros MCP server in {codex_config}")
+        rendered_section = _render_codex_mcp_section(launcher)
+        if rendered_section is None:
+            return False
+    rollback_provisions = [] if provision is None else [provision]
+
+    try:
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        codex_config_snapshot = _snapshot_path(codex_config)
+        if codex_config.exists():
+            updated_raw, existed_before = _upsert_codex_mcp_section(raw, rendered_section)
+            if updated_raw == raw:
+                print_info("Codex MCP server already up to date.")
+            else:
+                try:
+                    tomllib.loads(updated_raw)
+                except tomllib.TOMLDecodeError as exc:
+                    for error in rollback_windows_codex_mcp_http_batch(rollback_provisions):
+                        print_error(error)
+                    print_error(
+                        f"Could not update {codex_config} — MCP registration would create invalid TOML."
+                    )
+                    print_info(str(exc))
+                    return False
+                written_snapshot = _atomic_write_text_if_current_matches(
+                    codex_config,
+                    updated_raw,
+                    codex_config_snapshot,
+                )
+                if expected_snapshots is not None:
+                    expected_snapshots[codex_config] = written_snapshot
+                if existed_before:
+                    print_success(f"Updated Ouroboros MCP server in {codex_config}")
+                else:
+                    print_success(f"Registered Ouroboros MCP server in {codex_config}")
+        else:
+            written_snapshot = _atomic_write_text_if_current_matches(
+                codex_config,
+                rendered_section.lstrip("\n"),
+                codex_config_snapshot,
+            )
+            if expected_snapshots is not None:
+                expected_snapshots[codex_config] = written_snapshot
+            print_success(f"Registered Ouroboros MCP server in {codex_config}")
+    except OSError:
+        for error in rollback_windows_codex_mcp_http_batch(rollback_provisions):
+            print_error(error)
+        raise
+
+    if provision is not None:
+        retain_windows_codex_mcp_http(provision, http_provisions)
     return True
 
 
@@ -2739,29 +2758,42 @@ def _setup_codex(
         print_info("Replace the symlink with a regular Codex config path, then rerun setup.")
         return False
     managed_codex_snapshot = _snapshot_managed_codex_setup_paths(codex_home)
+    http_provisions: list[WindowsHttpProvision] = []
     managed_codex_expected_snapshot: dict[Path, _PathSnapshot] | None = None
     config_expected_snapshot: _PathSnapshot | None = config_snapshot
     credentials_expected_snapshot: _PathSnapshot | None = credentials_snapshot
+
+    mcp_expected_snapshot: dict[Path, _PathSnapshot] = {}
     try:
-        mcp_expected_snapshot: dict[Path, _PathSnapshot] = {}
         mcp_registered = _register_codex_mcp_server(
             mode=mcp_mode,
             expected_snapshots=mcp_expected_snapshot,
+            http_provisions=http_provisions,
         )
     except OSError as exc:
+        if mcp_expected_snapshot:
+            managed_codex_expected_snapshot = dict(managed_codex_snapshot)
+            managed_codex_expected_snapshot.update(mcp_expected_snapshot)
         _restore_managed_codex_setup_paths(
             managed_codex_snapshot,
-            expected_current=managed_codex_snapshot,
+            expected_current=managed_codex_expected_snapshot or managed_codex_snapshot,
         )
+        for error in rollback_windows_codex_mcp_http_batch(http_provisions):
+            print_error(error)
         _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_error(f"Could not save Codex MCP config: {exc}")
         print_info("Restored unchanged Codex MCP config paths; setup incomplete.")
         return False
     if not mcp_registered:
+        if mcp_expected_snapshot:
+            managed_codex_expected_snapshot = dict(managed_codex_snapshot)
+            managed_codex_expected_snapshot.update(mcp_expected_snapshot)
         _restore_managed_codex_setup_paths(
             managed_codex_snapshot,
-            expected_current=managed_codex_snapshot,
+            expected_current=managed_codex_expected_snapshot or managed_codex_snapshot,
         )
+        for error in rollback_windows_codex_mcp_http_batch(http_provisions):
+            print_error(error)
         _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_info("Aborting Codex setup without rewriting config.yaml.")
         return False
@@ -2805,10 +2837,13 @@ def _setup_codex(
             credentials_snapshot,
             credentials_expected_snapshot,
         )
+        for error in rollback_windows_codex_mcp_http_batch(http_provisions):
+            print_error(error)
         _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_error(f"Could not save Codex runtime config: {exc}")
         print_info("Restored Codex MCP config; setup incomplete.")
         return False
+    removed_startup = False
 
     try:
         # Install Codex-native rules and skills into the active Codex home.
@@ -2831,6 +2866,13 @@ def _setup_codex(
             expected_snapshots=managed_codex_expected_snapshot,
         ):
             raise OSError("Codex worker profile registration failed")
+        if mcp_mode == "stdio" and sys.platform == "win32":
+            launcher = _resolve_codex_mcp_launcher()
+            if launcher is None:
+                raise OSError("Could not find a launchable Ouroboros MCP command")
+            removed_startup, cleanup_error = remove_windows_codex_mcp_startup(launcher)
+            if cleanup_error is not None:
+                raise OSError(cleanup_error)
     except (OSError, TypeError, ValueError) as exc:
         _restore_managed_codex_setup_paths(
             managed_codex_snapshot,
@@ -2846,10 +2888,15 @@ def _setup_codex(
             credentials_snapshot,
             credentials_expected_snapshot,
         )
+        for error in rollback_windows_codex_mcp_http_batch(http_provisions):
+            print_error(error)
         _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_error(f"Could not finish Codex setup: {exc}")
         print_info("Restored Codex and Ouroboros config; setup incomplete.")
         return False
+    commit_windows_codex_mcp_http_batch(http_provisions)
+    if removed_startup:
+        print_warning("Removed the managed Windows HTTP MCP startup entry.")
     print_success(f"Configured Codex runtime (CLI: {codex_path})")
     print_info(f"Config saved to: {config_path}")
     if added_profiles:
@@ -4658,7 +4705,12 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help=(
+                "Codex MCP config mode (auto | preserve | stdio | http): auto uses managed "
+                "HTTP on Windows when safe and otherwise preserves user-managed entries or "
+                "uses stdio; preserve skips MCP changes; stdio and http replace with the "
+                "selected managed entry."
+            ),
         ),
     ] = "auto",
     preserve_existing_llm: Annotated[

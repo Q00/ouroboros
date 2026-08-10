@@ -16,6 +16,7 @@ from ouroboros.cli.commands.uninstall import (
     _remove_codex_mcp,
     _remove_data_dir,
     _remove_opencode_bridge_plugin,
+    _remove_windows_codex_mcp_startup,
     app,
 )
 
@@ -542,6 +543,118 @@ class TestRemoveDataDir:
         assert data_dir.exists()
 
 
+# ── _remove_windows_codex_mcp_startup ────────────────────────────
+
+
+class TestRemoveWindowsCodexMcpStartup:
+    """Tests for removal of the managed Codex HTTP MCP Run value."""
+
+    _launcher = ("C:/Tools/uvx.exe", ["--from", "ouroboros-ai[mcp]", "ouroboros"])
+
+    def test_removes_exact_managed_startup_value(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=self._launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                return_value=(True, None),
+            ) as remove_startup,
+            patch("ouroboros.cli.commands.uninstall.print_success") as success,
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=False)
+
+        assert result is True
+        remove_startup.assert_called_once_with(self._launcher, dry_run=False)
+        assert "may remain until logoff" in success.call_args.args[0]
+
+    def test_preserves_mismatched_startup_value(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=self._launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                return_value=(False, None),
+            ) as remove_startup,
+            patch("ouroboros.cli.commands.uninstall.print_info") as info,
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=False)
+
+        assert result is False
+        remove_startup.assert_called_once_with(self._launcher, dry_run=False)
+        assert "No matching managed" in info.call_args.args[0]
+
+    def test_preserves_absent_startup_value(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=self._launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                return_value=(False, None),
+            ),
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=False)
+
+        assert result is False
+
+    def test_dry_run_reports_exact_startup_cleanup_without_mutation(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=self._launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                return_value=(True, None),
+            ) as remove_startup,
+            patch("ouroboros.cli.commands.uninstall.print_info") as info,
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=True)
+
+        assert result is True
+        remove_startup.assert_called_once_with(self._launcher, dry_run=True)
+        assert "[dry-run] Would remove" in info.call_args.args[0]
+
+    def test_reports_startup_cleanup_error_without_removing(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=self._launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                return_value=(False, "Could not read Windows startup entry."),
+            ),
+            patch("ouroboros.cli.commands.uninstall.print_warning") as warning,
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=False)
+
+        assert result is False
+        warning.assert_called_once_with("Could not read Windows startup entry.")
+
+    def test_does_not_resolve_or_remove_startup_value_off_windows(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=False),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup"
+            ) as remove_startup,
+        ):
+            result = _remove_windows_codex_mcp_startup(dry_run=False)
+
+        assert result is False
+        remove_startup.assert_not_called()
+
+
 # ── CLI integration ──────────────────────────────────────────────
 
 
@@ -556,6 +669,30 @@ class TestUninstallCLI:
             result = runner.invoke(app, [])
         assert result.exit_code == 0
         assert "Nothing to remove" in result.output
+
+    def test_removes_managed_windows_startup_entry(self, tmp_path: Path) -> None:
+        launcher = ("C:/Tools/uvx.exe", ["--from", "ouroboros-ai[mcp]", "ouroboros"])
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("ouroboros.cli.commands.uninstall._is_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._resolve_codex_mcp_launcher",
+                return_value=launcher,
+            ),
+            patch(
+                "ouroboros.cli.commands.uninstall.remove_windows_codex_mcp_startup",
+                side_effect=[(True, None), (True, None)],
+            ) as remove_startup,
+        ):
+            result = runner.invoke(app, ["-y"])
+
+        assert result.exit_code == 0
+        assert "Codex HTTP MCP Windows login startup entry" in result.output
+        assert remove_startup.call_args_list == [
+            ((launcher,), {"dry_run": True}),
+            ((launcher,), {"dry_run": False}),
+        ]
 
     def test_dry_run_no_changes(self, tmp_path: Path) -> None:
         # Create mcp.json with ouroboros

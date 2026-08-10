@@ -50,9 +50,22 @@ For alternative install methods and shell completions, see the [Codex CLI README
 | macOS (ARM/Intel) | Supported | Primary development platform |
 | Linux (x86_64/ARM64) | Supported | Tested on Ubuntu 22.04+, Debian 12+, Fedora 38+ |
 | Windows (WSL 2) | Supported | Recommended path for Windows users |
-| Windows (native) | Experimental | WSL 2 strongly recommended; native Windows may have path-handling and process-management issues. Codex CLI itself does not support native Windows. |
+| Windows (native) | Experimental | Codex Desktop MCP is supported experimentally through a local HTTP endpoint. Native Codex CLI worker/runtime execution is unsupported; use WSL 2 for full workflows. |
 
 > **Windows users:** Install and run both Codex CLI and Ouroboros inside a WSL 2 environment for full compatibility. See [Platform Support](../platform-support.md) for details.
+### Native Windows Codex Desktop MCP (experimental)
+On native Windows, `ouroboros setup --runtime codex` writes one exact setup-managed per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` startup value that launches the HTTP MCP at login. Setup launches the HTTP MCP immediately, verifies it with an MCP `initialize` probe, and only then registers `http://127.0.0.1:8765/mcp` with Codex Desktop. After successful setup, Codex Desktop uses that endpoint; users do not run an MCP command each session.
+
+`--mcp-mode` controls only the MCP registration:
+
+- `auto` (default): on native Windows, use the managed HTTP endpoint only when the startup value is absent or already matches the setup-managed value; elsewhere, use managed stdio. User-managed entries are preserved.
+- `http`: use the managed HTTP endpoint.
+- `stdio`: replace the managed entry with the command-spawned stdio server.
+- `preserve`: only validate an existing usable command or URL entry.
+
+Setup and uninstall cooperate through a bounded named mutex scoped to the current Windows login session, serializing cooperating Ouroboros setup and uninstall operations in that session, and immediately recheck the startup value's exact type and value. If that recheck observes a mismatch, setup preserves it, reports how to correct or remove it, and does not write the HTTP configuration first. Concurrent lifecycle commands from multiple Windows sessions for the same account are outside this experimental setup contract and should not be run. Manual or non-Ouroboros registry edits while setup is active are not synchronized and should be avoided. This experimental path starts the MCP at login, but has no crash restart, generation management, automatic rollback, zero-downtime upgrades, or service-manager semantics.
+
+> **Windows users:** Use WSL 2 for native Codex CLI worker/runtime workflows. The native Windows setup above is limited to experimental Codex Desktop MCP.
 
 ## Configuration
 
@@ -120,13 +133,13 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml`; native Windows `auto` uses the fixed managed HTTP endpoint when eligible, while non-Windows uses managed stdio and user-managed entries are preserved
 - Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
 Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
 
-`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. User-managed MCP command and URL entries are preserved by `auto`; use `--mcp-mode stdio` or `http` only when you intentionally select a managed registration.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 

@@ -23,6 +23,11 @@ from typing import Annotated
 
 import typer
 
+from ouroboros.cli.codex_http_mcp import (
+    _is_windows,
+    has_managed_codex_mcp_comment,
+    remove_windows_codex_mcp_startup,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
@@ -81,10 +86,11 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     from ouroboros.cli.commands.setup import (
         _atomic_write_text_if_current_matches,
         _codex_mcp_entry_from_toml,
-        _has_managed_codex_mcp_comment,
+        _is_codex_ouroboros_table_header,
         _is_setup_managed_codex_mcp_entry,
         _remove_codex_mcp_section,
         _snapshot_path,
+        _toml_line_starts_structure,
     )
 
     codex_config = resolve_codex_home() / "config.toml"
@@ -107,7 +113,11 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
         return False
     if not _is_setup_managed_codex_mcp_entry(
         entry,
-        has_managed_comment=_has_managed_codex_mcp_comment(raw),
+        has_managed_comment=has_managed_codex_mcp_comment(
+            raw,
+            _toml_line_starts_structure,
+            _is_codex_ouroboros_table_header,
+        ),
     ):
         print_info("Preserved user-managed Ouroboros MCP config in ~/.codex/config.toml")
         return False
@@ -135,6 +145,44 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
         print_warning("Could not write ~/.codex/config.toml — skipping.")
         return False
     print_success("Removed ouroboros from ~/.codex/config.toml")
+    return True
+
+
+def _remove_windows_codex_mcp_startup(dry_run: bool, *, report: bool = True) -> bool:
+    """Remove this installation's Windows login startup entry for Codex HTTP MCP."""
+    if not _is_windows():
+        return False
+
+    from ouroboros.cli.commands.setup import _resolve_codex_mcp_launcher
+
+    launcher = _resolve_codex_mcp_launcher()
+    if launcher is None:
+        print_warning(
+            "Could not resolve the Codex MCP launcher; preserving the Windows login startup entry."
+        )
+        return False
+
+    removed, error = remove_windows_codex_mcp_startup(launcher, dry_run=dry_run)
+    if error is not None:
+        print_warning(error)
+        return False
+    if not removed:
+        if report:
+            print_info("No matching managed Windows login startup entry was removed.")
+        return False
+
+    if dry_run:
+        if report:
+            print_info(
+                "[dry-run] Would remove the Ouroboros Codex HTTP MCP Windows login startup entry"
+            )
+        return True
+
+    print_success(
+        "Removed the Ouroboros Codex HTTP MCP Windows login startup entry. "
+        "Future logins will no longer launch it. An instance already running in this "
+        "login session may remain until logoff."
+    )
     return True
 
 
@@ -445,14 +493,19 @@ def uninstall(
             else:
                 from ouroboros.cli.commands.setup import (
                     _codex_mcp_entry_from_toml,
-                    _has_managed_codex_mcp_comment,
+                    _is_codex_ouroboros_table_header,
                     _is_setup_managed_codex_mcp_entry,
+                    _toml_line_starts_structure,
                 )
 
                 entry = _codex_mcp_entry_from_toml(parsed_codex_config)
                 if isinstance(entry, dict) and _is_setup_managed_codex_mcp_entry(
                     entry,
-                    has_managed_comment=_has_managed_codex_mcp_comment(raw_codex_config),
+                    has_managed_comment=has_managed_codex_mcp_comment(
+                        raw_codex_config,
+                        _toml_line_starts_structure,
+                        _is_codex_ouroboros_table_header,
+                    ),
                 ):
                     targets.append("Codex MCP config (~/.codex/config.toml)")
     except OSError:
@@ -509,6 +562,9 @@ def uninstall(
     data_dir = Path.home() / ".ouroboros"
     if not keep_data and data_dir.exists():
         targets.append("Data directory (~/.ouroboros/)")
+    startup_cleanup_planned = _remove_windows_codex_mcp_startup(dry_run=True, report=False)
+    if startup_cleanup_planned:
+        targets.append("Codex HTTP MCP Windows login startup entry")
 
     if not targets:
         console.print("[green]Nothing to remove — Ouroboros is not installed.[/green]\n")
@@ -528,6 +584,7 @@ def uninstall(
     console.print()
 
     if dry_run:
+        _remove_windows_codex_mcp_startup(dry_run=True)
         console.print("[yellow]Dry run — no changes made.[/yellow]\n")
         raise typer.Exit()
 
@@ -550,6 +607,9 @@ def uninstall(
     if not _remove_codex_mcp(dry_run=False):
         if any("codex/config.toml" in t for t in targets):
             failed.append("~/.codex/config.toml")
+    if not _remove_windows_codex_mcp_startup(dry_run=False):
+        if any("Windows login startup entry" in t for t in targets):
+            failed.append("Codex HTTP MCP Windows login startup entry")
 
     if not _remove_opencode_mcp(dry_run=False):
         if any("OpenCode MCP" in t for t in targets):
