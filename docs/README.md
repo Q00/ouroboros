@@ -22,6 +22,10 @@ replayable execution contract on your choice of runtime backend.
 - [Hermes](./runtime-guides/hermes.md) - Hermes Agent runtime setup and `ooo` dispatch
 - [Zcode](./runtime-guides/zcode.md) - Z.ai desktop-agent runtime and measured CLI contract
 - [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
+- [Claude Code (한국어)](./runtime-guides/claude-code.ko.md) - 같은 문서의 한국어판
+- [Codex CLI (한국어)](./runtime-guides/codex.ko.md) - 같은 문서의 한국어판
+- [GitHub Copilot CLI (한국어)](./runtime-guides/copilot.ko.md) - 같은 문서의 한국어판
+- [Kiro CLI (한국어)](./runtime-guides/kiro.ko.md) - 같은 문서의 한국어판
 
 ### Architecture
 
