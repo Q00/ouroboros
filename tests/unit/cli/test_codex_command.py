@@ -678,6 +678,7 @@ class TestCodexDoctor:
             ('environment_id = "remote"\n', "environment_id"),
             ("startup_timeout_sec = 0.25\n", "startup_timeout_sec"),
             ("startup_timeout_ms = 250\n", "startup_timeout_ms"),
+            ("tool_timeout_sec = 0.001\n", "tool_timeout_sec"),
         ],
         ids=[
             "working-directory",
@@ -685,6 +686,7 @@ class TestCodexDoctor:
             "execution-environment",
             "startup-timeout-seconds",
             "startup-timeout-milliseconds",
+            "tool-timeout-seconds",
         ],
     )
     def test_check_auto_dispatch_surface_rejects_unmodeled_execution_fields_before_probe(

@@ -354,6 +354,7 @@ def _check_mcp_execution_surface(
         "environment_id": "the Codex execution environment",
         "startup_timeout_sec": "the Codex MCP initialization deadline",
         "startup_timeout_ms": "the legacy Codex MCP initialization deadline",
+        "tool_timeout_sec": "the Codex MCP tool-call deadline",
     }
     for field, effect in unsupported_fields.items():
         if field in ouroboros_entry:

@@ -353,7 +353,8 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
 
 
 # Process-tree wrappers that sit between the real MCP client and this server.
-# The shipped install path (`uvx --from ouroboros-ai ... ouroboros mcp serve`)
+# The shipped install path
+# (`uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] ouroboros mcp serve`)
 # interposes a uv wrapper that blocks on waitpid() and survives the client's
 # death, so the *direct* parent is not the process whose lifetime matters.
 _WRAPPER_BASENAMES = frozenset(
