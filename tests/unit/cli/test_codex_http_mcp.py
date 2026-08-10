@@ -435,6 +435,7 @@ def test_disable_does_not_succeed_when_prior_stop_is_unverified(tmp_path: Path) 
         patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
         patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
         patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=(42, 99)),
         patch("ouroboros.cli.codex_http_mcp._wait_for_stopped_identity", return_value=False),
@@ -463,6 +464,7 @@ def test_disable_fails_closed_without_committing_when_prior_ready_identity_is_mi
         patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
         patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
         patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=None),
         patch(
