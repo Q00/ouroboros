@@ -221,7 +221,7 @@ After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is 
 | `ooo welcome` | Yes | *(MCP only)* |
 | `ooo update` | Yes | `pip install --upgrade ouroboros-ai` |
 | `ooo help` | Yes | `ouroboros --help` |
-| `ooo qa` | Yes | *(MCP only)* |
+| `ooo qa` | Yes | `ouroboros qa` |
 | `ooo setup` | Yes | `ouroboros setup --runtime opencode` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
