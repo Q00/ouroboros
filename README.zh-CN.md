@@ -6,7 +6,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -36,6 +36,14 @@
   <a href="#循环">运作原理</a> ·
   <a href="#命令">命令</a> ·
   <a href="#从-wonder-到本体论">理念</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问排序、崩溃后的持久性、v1 范围以及任务用什么来指认，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
+</p>
+
+<p align="center">
+  <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。上面的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
 </p>
 
 **把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、Zcode、Goose、GJC、Antigravity 和 Grok，变成一份经过验证、可运行的代码库。**
@@ -104,11 +112,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问排序、崩溃后的持久性、v1 范围以及任务用什么来指认，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
-</p>
-
-<p align="center">
-  <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。上面的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
+  <sub>本页顶部的录屏就是这条命令。放在最前面，是为了让你在安装之前先看到它。</sub>
 </p>
 
 <p align="center">
