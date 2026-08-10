@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -199,6 +200,7 @@ class TestParseTurn:
         turn = ClaudeWorkerTransport._parse_turn(out, "process failed", 7)
 
         assert turn.is_error is True
+        assert turn.text == ""
         assert turn.error == "process failed"
 
 
@@ -231,6 +233,32 @@ class TestRuntimeWiring:
     def test_persisted_runtime_declares_targeted_resume(self) -> None:
         rt = build_claude_worker_runtime(cwd="/tmp", persist_sessions=True)
         assert rt.capabilities.targeted_resume is True
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_stderr_is_public_provider_error_message(
+        self, tmp_path: Path
+    ) -> None:
+        runtime = build_claude_worker_runtime(cli_path="claude", cwd=tmp_path)
+        process = AsyncMock()
+        process.returncode = 7
+        process.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "stale success",
+                    "session_id": "stale-session",
+                }
+            ).encode(),
+            b"error: authentication required",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=process):
+            result = await runtime.execute_task_to_result("do the work")
+
+        assert result.is_err
+        assert result.error.message == "error: authentication required"
 
     def test_normalizes_path_cwd(self, tmp_path: Path) -> None:
         rt = build_claude_worker_runtime(cwd=tmp_path, persist_sessions=True)

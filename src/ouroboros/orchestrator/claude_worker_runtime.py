@@ -244,7 +244,8 @@ class ClaudeWorkerTransport:
                 ),
             )
 
-        is_error = payload.is_error or returncode not in (0, None)
+        process_failed = returncode not in (0, None)
+        is_error = payload.is_error or process_failed
         error: str | None = None
         if is_error:
             error = (
@@ -254,7 +255,10 @@ class ClaudeWorkerTransport:
                 or f"claude exited with status {returncode}"
             )
         return WorkerTurn(
-            text=payload.result,
+            # A nonzero process status is authoritative over a stale success
+            # envelope.  Do not let its ``result`` outrank the stderr diagnostic
+            # when LeaderDrivenWorkerRuntime collects this turn.
+            text="" if process_failed else payload.result,
             session_id=payload.session_id,
             is_error=is_error,
             error=error,
