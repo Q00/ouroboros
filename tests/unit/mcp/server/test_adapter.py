@@ -609,6 +609,398 @@ Parallel Execution Verification Report
         assert summary.run_verdict == "FAIL"
         assert "missing verifier report for AC 2" in (summary.failure_reason or "")
 
+    @pytest.mark.parametrize(
+        "ordered_outcomes",
+        [
+            (VerificationOutcome.DISCREPANCY, VerificationOutcome.VERIFIED),
+            (VerificationOutcome.VERIFIED, VerificationOutcome.DISCREPANCY),
+        ],
+    )
+    def test_duplicate_report_order_cannot_mint_formal_authority(
+        self,
+        ordered_outcomes: tuple[VerificationOutcome, VerificationOutcome],
+    ) -> None:
+        """The adapter revalidates duplicate identity even for compatibility objects."""
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        reports = tuple(
+            ACVerificationReport(
+                ac_index=0,
+                ac_text="Create config",
+                results=(SpecVerificationResult(assertion=assertion, outcome=outcome),),
+            )
+            for outcome in ordered_outcomes
+        )
+
+        summary = _evaluation_summary_from_spec_verification(
+            mechanical,
+            SimpleNamespace(reports=reports),
+            seed,
+        )
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert "duplicate report ac_index=0" in (summary.failure_reason or "")
+
+    @pytest.mark.parametrize("surface", ["report", "assertion"])
+    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    def test_adapter_rejects_non_strict_raw_indices_after_model_bypass(
+        self,
+        surface: str,
+        invalid_index: object,
+    ) -> None:
+        """Raw compatibility objects cannot exploit bool/int equality or coercion."""
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        raw_assertion = SimpleNamespace(
+            ac_index=invalid_index if surface == "assertion" else 0,
+            ac_text="Create config",
+        )
+        raw_report = SimpleNamespace(
+            ac_index=invalid_index if surface == "report" else 0,
+            ac_text="Create config",
+            results=(SimpleNamespace(assertion=raw_assertion),),
+        )
+
+        summary = _evaluation_summary_from_spec_verification(
+            mechanical,
+            SimpleNamespace(reports=(raw_report,)),
+            seed,
+        )
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert "invalid" in (summary.failure_reason or "")
+
+    @pytest.mark.parametrize(
+        ("assertion_index", "assertion_text", "reason"),
+        [
+            (7, "Create config", "assertion ac_index=7"),
+            (0, "Unrelated criterion", "assertion text"),
+        ],
+    )
+    def test_adapter_rejects_unvalidated_nested_report_identity(
+        self,
+        assertion_index: int,
+        assertion_text: str,
+        reason: str,
+    ) -> None:
+        """Model validation bypasses cannot introduce misbound evidence authority."""
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=assertion_index,
+            ac_text=assertion_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.VERIFIED,
+        )
+        unvalidated_report = ACVerificationReport.model_construct(
+            ac_index=0,
+            ac_text="Create config",
+            results=(result,),
+            agent_reported_pass=True,
+        )
+
+        summary = _evaluation_summary_from_spec_verification(
+            mechanical,
+            SimpleNamespace(reports=(unvalidated_report,)),
+            seed,
+        )
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert reason in (summary.failure_reason or "")
+
+    def test_serialized_out_of_range_report_is_rejected_against_seed(self) -> None:
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=1,
+            ac_text="Unexpected AC",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        verification = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 1,
+                        "ac_text": "Unexpected AC",
+                        "results": [
+                            {
+                                "assertion": assertion.model_dump(mode="json"),
+                                "outcome": "verified",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert "outside Seed AC coverage" in (summary.failure_reason or "")
+
+    def test_serialized_seed_text_mismatch_is_rejected(self) -> None:
+        seed = SimpleNamespace(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Create config",
+                    semantic_ac_key="ac_0123456789abcdef",
+                ),
+            )
+        )
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Unrelated criterion",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Unrelated criterion",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].semantic_ac_key == "ac_0123456789abcdef"
+        assert "does not match the authoritative Seed AC" in (summary.failure_reason or "")
+
+    def test_serialized_missing_report_remains_not_evaluated(self) -> None:
+        seed = SimpleNamespace(acceptance_criteria=("Create config", "Add docs"))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=tuple(
+                TaskResult(
+                    task_index=index,
+                    task_content=text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=index,
+                )
+                for index, text in enumerate(seed.acceptance_criteria)
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        verification = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [
+                            {
+                                "assertion": assertion.model_dump(mode="json"),
+                                "outcome": "verified",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert [result.rendered_verdict for result in summary.ac_results] == [
+            "PASS",
+            "NOT_EVALUATED",
+        ]
+        assert summary.final_approved is False
+
+    def test_identity_consistent_legacy_payload_can_still_approve(self) -> None:
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        verification = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [
+                            {
+                                "assertion": assertion.model_dump(mode="json"),
+                                "verified": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is True
+        assert summary.run_verdict == "PASS"
+
+    def test_serialized_mixed_outcomes_cannot_mint_formal_pass(self) -> None:
+        seed = SimpleNamespace(acceptance_criteria=("Create config",))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        )
+        serialized_assertion = assertion.model_dump(mode="json")
+        verification = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [
+                            {"assertion": serialized_assertion, "outcome": "verified"},
+                            {"assertion": serialized_assertion, "outcome": "discrepancy"},
+                        ],
+                    }
+                ],
+                "confirmed_discrepancy_count": 0,
+            }
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert verification.confirmed_discrepancy_count == 1
+        assert summary.final_approved is False
+        assert summary.ac_results[0].rendered_verdict == "FAIL"
+        assert summary.run_verdict == "FAIL"
+
     def test_unavailable_spec_verification_result_does_not_approve_run(self) -> None:
         """Unavailable verifier evidence is a failed formal AC, not approval."""
         mechanical = EvaluationSummary(

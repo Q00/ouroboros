@@ -2,7 +2,79 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeGuard
+
+
+def _valid_ac_index(value: Any) -> TypeGuard[int]:
+    """Whether an untrusted identity is a raw non-negative integer.
+
+    ``bool`` is an ``int`` subclass and equality-coincides with indices 0/1;
+    using exact type identity prevents model-construction bypasses from
+    laundering booleans or coercible strings/floats into AC authority.
+    """
+    return type(value) is int and value >= 0
+
+
+def _report_identity_error(
+    reports: tuple[Any, ...],
+    seed_criteria: tuple[Any, ...],
+) -> str | None:
+    """Return why verifier reports cannot carry Seed-bound authority.
+
+    Pydantic models validate ordinary construction and replay, but this adapter
+    is a public authority boundary and also receives compatibility objects in
+    tests and integrations. Revalidate identity here before any report is
+    indexed: a dictionary projection must never turn ordering into authority.
+    """
+    from ouroboros.core.seed import AcceptanceCriterionSpec
+
+    seen_indices: set[int] = set()
+    for position, report in enumerate(reports):
+        ac_index = getattr(report, "ac_index", None)
+        if not _valid_ac_index(ac_index):
+            return f"report {position + 1} has invalid ac_index={ac_index!r}"
+        if ac_index in seen_indices:
+            return f"duplicate report ac_index={ac_index}"
+        seen_indices.add(ac_index)
+
+        report_text = getattr(report, "ac_text", None)
+        if not isinstance(report_text, str):
+            return f"report AC {ac_index + 1} has invalid ac_text"
+        if seed_criteria:
+            if ac_index >= len(seed_criteria):
+                return f"report ac_index={ac_index} is outside Seed AC coverage"
+            criterion = seed_criteria[ac_index]
+            expected_text: str | None = None
+            if isinstance(criterion, str):
+                expected_text = criterion
+            elif isinstance(criterion, AcceptanceCriterionSpec):
+                expected_text = criterion.description
+            if expected_text is not None and report_text != expected_text:
+                return f"report AC {ac_index + 1} text does not match the authoritative Seed AC"
+
+        results = getattr(report, "results", ())
+        if not isinstance(results, tuple | list):
+            return f"report AC {ac_index + 1} has invalid results"
+        for result_position, result in enumerate(results):
+            assertion = getattr(result, "assertion", None)
+            assertion_index = getattr(assertion, "ac_index", None)
+            assertion_text = getattr(assertion, "ac_text", None)
+            if not _valid_ac_index(assertion_index):
+                return (
+                    f"report AC {ac_index + 1} result {result_position + 1} "
+                    f"has invalid assertion ac_index={assertion_index!r}"
+                )
+            if assertion_index != ac_index:
+                return (
+                    f"report AC {ac_index + 1} result {result_position + 1} "
+                    f"has assertion ac_index={assertion_index!r}"
+                )
+            if assertion_text != report_text:
+                return (
+                    f"report AC {ac_index + 1} result {result_position + 1} "
+                    "assertion text does not match its parent report"
+                )
+    return None
 
 
 def agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
@@ -36,6 +108,13 @@ def evaluation_summary_from_spec_verification(
     if not reports:
         return None
     seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+    identity_error = _report_identity_error(reports, seed_criteria)
+    if identity_error is not None:
+        return evaluation_summary_for_unavailable_spec_verification(
+            mechanical,
+            seed,
+            f"Spec verification report identity invalid: {identity_error}",
+        )
 
     def semantic_key(ac_index: int) -> str | None:
         if 0 <= ac_index < len(seed_criteria):

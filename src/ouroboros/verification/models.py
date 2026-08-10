@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
 
 
 class VerificationTier(StrEnum):
@@ -45,7 +45,7 @@ class SpecAssertion(BaseModel, frozen=True):
     that the verifier can check against actual source code.
     """
 
-    ac_index: int
+    ac_index: StrictInt = Field(ge=0)
     ac_text: str
     tier: VerificationTier
     pattern: str = ""
@@ -116,10 +116,22 @@ class ACVerificationReport(BaseModel, frozen=True):
     yields two T1 assertions). The AC passes only if ALL assertions pass.
     """
 
-    ac_index: int
+    ac_index: StrictInt = Field(ge=0)
     ac_text: str
     results: tuple[SpecVerificationResult, ...] = ()
     agent_reported_pass: bool = True
+
+    @model_validator(mode="after")
+    def _validate_assertion_identity(self) -> ACVerificationReport:
+        for position, result in enumerate(self.results):
+            assertion = result.assertion
+            if assertion.ac_index != self.ac_index:
+                raise ValueError(
+                    f"result {position + 1} assertion ac_index must match parent report"
+                )
+            if assertion.ac_text != self.ac_text:
+                raise ValueError(f"result {position + 1} assertion text must match parent report")
+        return self
 
     @property
     def verified_pass(self) -> bool:
@@ -173,6 +185,9 @@ class SpecVerificationSummary(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _canonicalize_derived_counts(self) -> SpecVerificationSummary:
         if self.reports:
+            report_indices = [report.ac_index for report in self.reports]
+            if len(report_indices) != len(set(report_indices)):
+                raise ValueError("duplicate report ac_index values are not authoritative")
             # Reports contain canonicalized result outcomes, including when
             # their source payload used only legacy booleans. Every persisted
             # count is derived compatibility data once reports exist, so never

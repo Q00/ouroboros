@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 from unittest.mock import AsyncMock
 
+from pydantic import ValidationError
 import pytest
 
 from ouroboros.core.types import Result
@@ -44,6 +45,58 @@ class TestVerificationModels:
         assert a.tier == VerificationTier.T1_CONSTANT
         with pytest.raises(Exception):
             a.ac_index = 1  # type: ignore[misc]
+
+    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    def test_spec_assertion_requires_raw_non_negative_integer_index(
+        self,
+        invalid_index: object,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            SpecAssertion.model_validate(
+                {
+                    "ac_index": invalid_index,
+                    "ac_text": "Create config",
+                    "tier": "t2_structural",
+                }
+            )
+
+    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    def test_ac_report_requires_raw_non_negative_integer_index(
+        self,
+        invalid_index: object,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            ACVerificationReport.model_validate(
+                {
+                    "ac_index": invalid_index,
+                    "ac_text": "Create config",
+                    "results": [],
+                }
+            )
+
+    def test_zero_index_remains_valid_for_assertion_and_report(self) -> None:
+        assertion = SpecAssertion.model_validate(
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "tier": "t2_structural",
+            }
+        )
+        report = ACVerificationReport.model_validate(
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "results": [
+                    {
+                        "assertion": assertion.model_dump(mode="json"),
+                        "outcome": "verified",
+                    }
+                ],
+            }
+        )
+
+        assert report.ac_index == 0
+        assert report.verified_pass is True
 
     def test_verification_result_discrepancy(self) -> None:
         assertion = SpecAssertion(
@@ -278,19 +331,32 @@ class TestVerificationModels:
         assert not report.has_discrepancy
 
     def test_summary_from_reports(self) -> None:
-        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
+        first_assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test1",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        second_assertion = SpecAssertion(
+            ac_index=1,
+            ac_text="test2",
+            tier=VerificationTier.T1_CONSTANT,
+        )
         reports = (
             ACVerificationReport(
                 ac_index=0,
                 ac_text="test1",
-                results=(SpecVerificationResult(assertion=assertion, verified=True),),
+                results=(SpecVerificationResult(assertion=first_assertion, verified=True),),
                 agent_reported_pass=True,
             ),
             ACVerificationReport(
                 ac_index=1,
                 ac_text="test2",
                 results=(
-                    SpecVerificationResult(assertion=assertion, verified=False, discrepancy=True),
+                    SpecVerificationResult(
+                        assertion=second_assertion,
+                        verified=False,
+                        discrepancy=True,
+                    ),
                 ),
                 agent_reported_pass=True,
             ),
@@ -309,6 +375,120 @@ class TestVerificationModels:
         assert summary.discrepancy_count == 1
         assert summary.has_discrepancies
         assert summary.override_approval is False
+
+    @pytest.mark.parametrize(
+        "ordered_outcomes",
+        [
+            ("discrepancy", "verified"),
+            ("verified", "discrepancy"),
+        ],
+    )
+    def test_serialized_duplicate_report_order_is_rejected(
+        self,
+        ordered_outcomes: tuple[str, str],
+    ) -> None:
+        """Replay ordering cannot select authority for a duplicate AC report."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        reports = [
+            {
+                "ac_index": 0,
+                "ac_text": "Create config",
+                "results": [{"assertion": assertion, "outcome": outcome}],
+            }
+            for outcome in ordered_outcomes
+        ]
+
+        with pytest.raises(ValidationError, match="duplicate report ac_index"):
+            SpecVerificationSummary.model_validate({"reports": reports})
+
+    @pytest.mark.parametrize(
+        ("assertion_index", "assertion_text", "error"),
+        [
+            (7, "Create config", "assertion ac_index"),
+            (0, "Unrelated criterion", "assertion text"),
+        ],
+    )
+    def test_serialized_report_rejects_mismatched_nested_identity(
+        self,
+        assertion_index: int,
+        assertion_text: str,
+        error: str,
+    ) -> None:
+        """Nested evidence must identify the same AC as its parent report."""
+        payload = {
+            "ac_index": 0,
+            "ac_text": "Create config",
+            "results": [
+                {
+                    "assertion": {
+                        "ac_index": assertion_index,
+                        "ac_text": assertion_text,
+                        "tier": "t2_structural",
+                    },
+                    "outcome": "verified",
+                }
+            ],
+        }
+
+        with pytest.raises(ValidationError, match=error):
+            ACVerificationReport.model_validate(payload)
+
+    def test_serialized_mixed_outcomes_retain_conservative_authority(self) -> None:
+        """A VERIFIED result cannot erase a sibling discrepancy on replay."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [
+                            {"assertion": assertion, "outcome": "verified"},
+                            {"assertion": assertion, "outcome": "discrepancy"},
+                        ],
+                    }
+                ],
+                "confirmed_discrepancy_count": 0,
+            }
+        )
+
+        assert summary.verified_count == 1
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.reports[0].verified_pass is False
+        assert summary.override_approval is False
+
+    def test_identity_consistent_legacy_report_payload_remains_readable(self) -> None:
+        """Legacy boolean results remain compatible when their identity is sound."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+        ).model_dump(mode="json")
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "Create config",
+                        "results": [{"assertion": assertion, "verified": True}],
+                    }
+                ],
+                "verified_count": 0,
+            }
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.VERIFIED
+        assert summary.verified_count == 1
+        assert SpecVerificationSummary.model_validate(summary.model_dump(mode="json")) == summary
 
     def test_summary_no_discrepancies(self) -> None:
         assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
