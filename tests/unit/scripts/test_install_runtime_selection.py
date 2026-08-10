@@ -632,6 +632,112 @@ def test_installer_real_process_env_wins_over_duplicated_user_env_file(
     assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
+def test_installer_fails_closed_on_escape_bearing_quoted_value(tmp_path: Path) -> None:
+    """`dotenv_values()` decodes backslash escapes inside a double-quoted
+    value (the two source characters `\\n` become an actual newline, then
+    the application's `.strip()` removes it, resolving to disabled); this
+    shell parser copies them literally (`0\\n`, matching no disabling
+    value). Rather than risk agreeing with neither interpretation, the
+    installer must refuse to trust this value and fail closed -- telemetry
+    off for the whole run, no notice, no events.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0\\n"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_single_quoted_key(tmp_path: Path) -> None:
+    """A key wrapped in one layer of matching quotes -- `'OUROBOROS_TELEMETRY'=0`
+    -- must parse identically to the bare form, matching python-dotenv.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("'OUROBOROS_TELEMETRY'=0\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_double_quoted_key(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('"DO_NOT_TRACK"=1\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_fails_closed_on_escape_bearing_value_even_when_it_looks_enabling(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed rule is deliberately asymmetric: an ambiguous value
+    that LOOKS like an enable (`"1\\n"`) must still disable the installer
+    run, not just an ambiguous-looking disable. This diverges from
+    whatever the application resolves only in the safe (under-collecting)
+    direction.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="1\\n"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_plain_quoted_value_without_backslash_still_enables(
+    tmp_path: Path,
+) -> None:
+    """Control for the previous two cases: a double-quoted value with NO
+    backslash anywhere in it is not ambiguous at all and must not trip the
+    fail-closed path -- only genuine escape-bearing values do.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="1"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
 def test_installer_do_not_track_precedes_explicit_enable(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,

@@ -139,6 +139,22 @@ _telemetry_load_user_env() {
     case "$line" in *=*) ;; *) continue ;; esac
     key="${line%%=*}"
     key="${key%"${key##*[![:space:]]}"}"
+    # python-dotenv also accepts a key wrapped in one layer of matching
+    # quotes (`'OUROBOROS_TELEMETRY'=0`, `"DO_NOT_TRACK"=1`) -- strip it
+    # before the allowlist check so those parse identically to the bare
+    # form. A key that only has ONE side quoted (no matching closing quote)
+    # falls through unchanged and correctly misses the allowlist below,
+    # same as today.
+    case "$key" in
+      \"*\")
+        key="${key#\"}"
+        key="${key%\"}"
+        ;;
+      \'*\')
+        key="${key#\'}"
+        key="${key%\'}"
+        ;;
+    esac
     case "$key" in
       DO_NOT_TRACK|OUROBOROS_TELEMETRY|OUROBOROS_POSTHOG_API_KEY|OUROBOROS_POSTHOG_HOST) ;;
       *) continue ;;
@@ -166,6 +182,21 @@ _telemetry_load_user_env() {
           *) continue ;;
         esac
         value="${rest%%\"*}"
+        # dotenv_values() decodes backslash escapes inside a double-quoted
+        # value (e.g. the two source characters `\n` become an actual
+        # newline); this shell parser copies them literally. A hand-rolled
+        # parser will never chase python-dotenv's full escape grammar
+        # (`\"` alone would need real state tracking), so rather than guess
+        # and risk agreeing with neither interpretation, refuse to trust
+        # THIS occurrence's value at all and force telemetry off for the
+        # whole run: under-collecting on an ambiguous value is always safe,
+        # over-collecting is the actual privacy violation. This is
+        # deliberately asymmetric -- an ambiguous value that LOOKS like an
+        # enable (e.g. `"1\n"`) also disables the installer run, diverging
+        # from the application only in the safe direction.
+        case "$value" in
+          *\\*) _TELEMETRY_USER_ENV_AMBIGUOUS=1; continue ;;
+        esac
         ;;
       \'*)
         rest="${value#\'}"
@@ -312,6 +343,11 @@ PY
 
 _telemetry_enabled() {
   [ -n "$PH_API_KEY" ] || return 1
+  # Set by _telemetry_load_user_env when a trusted-file value couldn't be
+  # parsed unambiguously (an escape-bearing double-quoted value) -- an
+  # opt-out this installer cannot resolve is treated as an opt-out, not
+  # ignored. Any one disabling control wins, matching every other flag here.
+  [ -z "${_TELEMETRY_USER_ENV_AMBIGUOUS:-}" ] || return 1
   local dnt oel
   # Lowercase and trim each flag before matching so `OFF`, `Yes`, `TRUE`,
   # or values with stray whitespace are recognized the same as their
