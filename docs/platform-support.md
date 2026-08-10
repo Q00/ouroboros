@@ -24,8 +24,9 @@ For installation instructions, see [Getting Started](getting-started.md).
 | Runtime Backend    | macOS | Linux | Windows (WSL 2) | Windows (native) |
 |--------------------|-------|-------|------------------|-------------------|
 | Claude Code        | Yes   | Yes   | Yes              | Experimental      |
-| Codex CLI          | Yes   | Yes   | Yes              | Not supported     |
+| Codex CLI runtime backend / worker subprocesses | Yes | Yes | Yes | Not supported |
 | *(custom adapter)* | Depends on adapter | Depends on adapter | Depends on adapter | Depends on adapter |
+| Codex Desktop MCP integration | Yes | Yes | Not applicable — WSL 2 does not provision or configure the Windows host bridge | Experimental — native Windows uses a local streamable-HTTP server |
 
 See the [runtime capability matrix](runtime-capability-matrix.md) for a feature comparison across backends.
 
@@ -37,7 +38,7 @@ See the [runtime capability matrix](runtime-capability-matrix.md) for a feature 
 
 ## Windows (WSL 2)
 
-For the best Windows experience, use [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) with a supported Linux distribution (Ubuntu recommended). All runtime backends and features are fully supported under WSL 2.
+For the best Windows experience, use [WSL 2](https://learn.microsoft.com/en-us/windows/wsl/install) with a supported Linux distribution (Ubuntu recommended). All runtime backends and Linux-hosted features are fully supported under WSL 2. Codex Desktop MCP is not applicable there because WSL 2 does not provision or configure the Windows host bridge.
 
 Windows 11 Home is a valid WSL 2 host when virtualization and the required Windows optional features are available. If WSL itself will not install, follow the [Windows WSL 2 troubleshooting guide](guides/windows-wsl-troubleshooting.md) before installing Ouroboros.
 
@@ -47,7 +48,8 @@ Native Windows support is **experimental**. Known limitations:
 
 - **File path handling**: Some workflow operations assume POSIX-style paths.
 - **Process management**: Subprocess spawning and signal handling differ on Windows.
-- **Codex CLI**: Not supported on native Windows. Use WSL 2 instead.
+- **Codex CLI runtime backend and worker subprocesses**: Not supported on native Windows. Use WSL 2 instead.
+- **Codex Desktop MCP integration**: Experimental support is available through a local streamable-HTTP Ouroboros MCP server. It does not make the Codex CLI runtime backend or worker subprocesses supported on native Windows.
 - **Terminal/TUI**: Requires a terminal with ANSI support (Windows Terminal recommended; `cmd.exe` is not supported).
 - **CI testing**: Native Windows is not part of the current CI matrix.
 

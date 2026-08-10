@@ -50,9 +50,9 @@ For alternative install methods and shell completions, see the [Codex CLI README
 | macOS (ARM/Intel) | Supported | Primary development platform |
 | Linux (x86_64/ARM64) | Supported | Tested on Ubuntu 22.04+, Debian 12+, Fedora 38+ |
 | Windows (WSL 2) | Supported | Recommended path for Windows users |
-| Windows (native) | Experimental | WSL 2 strongly recommended; native Windows may have path-handling and process-management issues. Codex CLI itself does not support native Windows. |
+| Windows (native) | Experimental | Only Codex Desktop-to-local-HTTP MCP is experimental. Native Codex CLI runtime and worker subprocesses remain unsupported; use WSL 2 for runtime/worker workflows. |
 
-> **Windows users:** Install and run both Codex CLI and Ouroboros inside a WSL 2 environment for full compatibility. See [Platform Support](../platform-support.md) for details.
+> **Windows users:** Use WSL 2 for Codex CLI runtime and worker workflows. Native Windows can experimentally connect Codex Desktop to Ouroboros through the managed local HTTP MCP endpoint; see [Platform Support](../platform-support.md) for its limitations.
 
 ## Configuration
 
@@ -110,7 +110,7 @@ When these keys are left at their shipped defaults, Codex setup adds provider-ne
 
 From the user's perspective, the Codex integration behaves like a **session-oriented Ouroboros runtime** — the same specification-first workflow harness that drives the Claude runtime.
 
-Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, but it preserves native session IDs and resume handles, and the Codex command dispatcher can route `ooo`-style skill commands through the in-process Ouroboros MCP server.
+Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, but it preserves native session IDs and resume handles, and the Codex command dispatcher can route `ooo`-style skill commands through the configured external Ouroboros MCP server over HTTP or stdio transport.
 
 `ouroboros setup --runtime codex` currently:
 
@@ -120,13 +120,18 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
-- Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml`. On native Windows, auto mode provisions a per-user scheduled task named `Ouroboros MCP HTTP`, starts a streamable-HTTP server on `127.0.0.1:8765`, and writes `url = "http://127.0.0.1:8765/mcp"` only when `[mcp_servers.ouroboros]` is absent or setup-managed. The task is hidden, least-privilege, battery-safe, unlimited-duration, and restarts on failure. In `auto` and `preserve` modes, user-managed entries are preserved. `--mcp-mode http` and `--mcp-mode stdio` each replace `[mcp_servers.ouroboros]`; HTTP forces this managed endpoint and stdio uses a command-spawned server.
+> **Windows HTTP with the plugin installed:** Setup refuses to add the global `[mcp_servers.ouroboros]` entry when `plugins."ouroboros@ouroboros"` and its plugin-scoped `mcp_servers.ouroboros` are active, because that would duplicate Ouroboros processes and tools. It does not rewrite plugin settings. Disable the plugin or its nested MCP; to keep the plugin installed, add this to `$CODEX_HOME/config.toml` and rerun Windows HTTP setup:
+>
+> ```toml
+> [plugins."ouroboros@ouroboros".mcp_servers.ouroboros]
+> enabled = false
+> ```
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
 Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
 
-`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. In `auto` and `preserve` modes, user-managed `[mcp_servers.ouroboros]` entries are preserved. On native Windows, auto mode provisions the managed local HTTP endpoint only when that entry is absent or setup-managed; `--mcp-mode http` and `--mcp-mode stdio` each replace it, respectively with the managed HTTP endpoint or a command-spawned server.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 

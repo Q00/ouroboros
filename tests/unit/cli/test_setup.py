@@ -143,6 +143,11 @@ def test_detect_runtimes_invalid_override_does_not_use_stale_path(
 class TestCodexSetup:
     """Tests for Codex-specific setup behavior."""
 
+    @pytest.fixture(autouse=True)
+    def _default_to_non_windows_platform(self, monkeypatch) -> None:
+        """Keep legacy Codex setup tests independent of the host platform."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "linux")
+
     def test_detect_runtimes_uses_bundled_codex_app_cli_when_path_is_missing(
         self, tmp_path: Path
     ) -> None:
@@ -337,6 +342,174 @@ class TestCodexSetup:
             'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
             '"ouroboros", "mcp", "serve"]' in contents
         )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("AUTO", "auto"), ("http", "http"), ("stdio", "stdio"), ("preserve", "preserve")],
+    )
+    def test_normalize_codex_mcp_mode_supports_http(self, value: str, expected: str) -> None:
+        assert setup_cmd._normalize_codex_mcp_mode(value) == expected
+
+    def test_register_codex_mcp_server_windows_auto_uses_http(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:8765/mcp"' in contents
+        assert "enabled = true" in contents
+        assert "command =" not in contents
+        assert "[mcp_servers.ouroboros.env]" not in contents
+
+    def test_register_codex_mcp_server_windows_stdio_retains_stdio(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = ["ouroboros"]\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="stdio")
+
+        assert 'command = "uvx"' in (tmp_path / ".codex" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+
+    @pytest.mark.parametrize("mode", ("http", "stdio"))
+    @pytest.mark.parametrize(
+        ("plugin_config", "expected"),
+        [
+            ("", True),
+            (
+                '[plugins."ouroboros@ouroboros"]\nenabled = true\n'
+                '[plugins."ouroboros@ouroboros".mcp_servers.ouroboros]\nenabled = true\n',
+                False,
+            ),
+            (
+                '[plugins."ouroboros@ouroboros"]\nenabled = false\n'
+                '[plugins."ouroboros@ouroboros".mcp_servers.ouroboros]\nenabled = true\n',
+                True,
+            ),
+            (
+                '[plugins."ouroboros@ouroboros"]\nenabled = true\n'
+                '[plugins."ouroboros@ouroboros".mcp_servers.ouroboros]\nenabled = false\n',
+                True,
+            ),
+        ],
+    )
+    def test_register_codex_mcp_server_avoids_active_plugin_registration(
+        self, tmp_path: Path, monkeypatch, plugin_config: str, expected: bool, mode: str
+    ) -> None:
+        """Global HTTP and stdio registration never duplicates an active plugin MCP."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(plugin_config, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = ["ouroboros"]\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode=mode) is expected
+
+        contents = config_path.read_text(encoding="utf-8")
+        assert ("[mcp_servers.ouroboros]" in contents) is expected
+        assert plugin_config in contents
+
+    def test_register_codex_mcp_server_non_windows_auto_retains_stdio(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "linux")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = ["ouroboros"]\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert 'command = "uvx"' in (tmp_path / ".codex" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_register_codex_mcp_server_rejects_non_windows_http(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "linux")
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert not setup_cmd._register_codex_mcp_server(mode="http")
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_windows_http_migration_removes_managed_stdio_env(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines='command = "uvx"\nargs = ["ouroboros", "mcp", "serve"]'
+            ),
+            encoding="utf-8",
+        )
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = config_path.read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:8765/mcp"' in contents
+        assert "command =" not in contents
+        assert "[mcp_servers.ouroboros.env]" not in contents
+
+    def test_windows_executable_stdio_entry_is_setup_managed(self, monkeypatch) -> None:
+        """Windows launcher suffixes and case do not prevent auto migration."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        assert setup_cmd._is_setup_managed_codex_mcp_entry(
+            {
+                "command": r"C:\Tools\UVX.EXE",
+                "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+                "env": setup_cmd._CODEX_MANAGED_MCP_ENV,
+            }
+        )
+
+    def test_forced_http_replaces_endpointless_entry(self, tmp_path: Path, monkeypatch) -> None:
+        """Forced HTTP repairs an endpointless Ouroboros table."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("[mcp_servers.ouroboros]\nenabled = true\n", encoding="utf-8")
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server(mode="http")
+
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config_path.read_text(encoding="utf-8")
+
+    def test_final_windows_stdio_entry_removes_http_task(self, tmp_path: Path, monkeypatch) -> None:
+        """Final managed stdio state cleans up the prior HTTP task."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines='command = "uvx"\nargs = ["ouroboros", "mcp", "serve"]'
+            ),
+            encoding="utf-8",
+        )
+        with patch(
+            "ouroboros.cli.codex_http_mcp.remove_windows_codex_mcp_http", return_value=None
+        ) as remove:
+            assert setup_cmd._finalize_windows_codex_mcp_service(tmp_path / ".ouroboros")
+
+        remove.assert_called_once_with(tmp_path / ".ouroboros")
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
