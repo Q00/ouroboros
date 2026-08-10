@@ -8,6 +8,7 @@ being embedded as XML in the user prompt.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2490,6 +2491,51 @@ class TestCLIFallbackWhenSDKAbsent:
         # the prompt, matching what the SDK path does with it.
         assert "--append-system-prompt" in argv
         assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
+
+    def test_cli_fallback_accepts_top_level_event_array(self) -> None:
+        """Newer/wrapped Claude CLIs may batch stream-json events as one array."""
+        adapter = self._adapter()
+        payload = json.dumps(
+            [
+                {"type": "system", "subtype": "init", "session_id": "array-session"},
+                {
+                    "type": "assistant",
+                    "session_id": "array-session",
+                    "message": {
+                        "content": [{"type": "text", "text": "draft"}],
+                        "usage": {"input_tokens": 2, "output_tokens": 1},
+                    },
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "array answer",
+                    "session_id": "array-session",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 13, "output_tokens": 5},
+                },
+            ]
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "array answer"
+        assert result.value.usage.total_tokens == 18
+        assert result.value.raw_response["type"] == "result"
+        assert result.value.raw_response["session_id"] == "array-session"
 
     def test_the_adapters_own_permission_vocabulary_is_not_forwarded_blindly(self) -> None:
         """`default` is a mode this adapter has and the CLI does not.

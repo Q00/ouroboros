@@ -70,6 +70,56 @@ class TestParseTurn:
         assert turn.text == "ok"
         assert turn.session_id == "z"
 
+    def test_parses_top_level_stream_event_array(self) -> None:
+        out = json.dumps(
+            [
+                {"type": "system", "subtype": "init", "session_id": "array-session"},
+                {
+                    "type": "assistant",
+                    "session_id": "array-session",
+                    "message": {"content": [{"type": "text", "text": "draft"}]},
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "final",
+                    "session_id": "array-session",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                },
+            ]
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 0)
+
+        assert turn == WorkerTurn(
+            text="final",
+            session_id="array-session",
+            usage={"input_tokens": 4, "output_tokens": 2},
+        )
+
+    def test_structured_error_uses_result_when_stderr_is_empty(self) -> None:
+        out = json.dumps(
+            {
+                "type": "result",
+                "is_error": True,
+                "result": "maximum turns reached",
+            }
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 0)
+
+        assert turn.is_error is True
+        assert turn.error == "maximum turns reached"
+
+    def test_nonzero_exit_cannot_be_overridden_by_success_payload(self) -> None:
+        out = json.dumps({"type": "result", "is_error": False, "result": "looks okay"})
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "process failed", 7)
+
+        assert turn.is_error is True
+        assert turn.error == "process failed"
+
 
 class TestPermissionArgs:
     def test_bypass_maps_to_skip_permissions(self) -> None:
