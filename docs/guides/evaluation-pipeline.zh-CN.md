@@ -138,7 +138,7 @@ timeout = 120
 |---|---|---|
 | **TOML 解析错误** | 所有 Stage 1 检查被跳过；不抛错 | `.ouroboros/mechanical.toml` 格式有误；检查 TOML 语法 |
 | **可执行文件被拦截** | 该项检查被静默跳过 | 可执行文件不在白名单；换成允许的工具，或直接在 `MechanicalConfig` 里设置命令 |
-| **没有 toml 文件** | 所有 Stage 1 检查被跳过 | 跑 `ouroboros detect`，或在 `MechanicalConfig` 里显式设置命令 |
+| **没有 toml 文件** | 所有 Stage 1 检查被跳过 | 常规 `run` 与 MCP 路径会**先自动尝试生成**它，所以在这些路径上出现空关卡意味着**自动检测失败了**——跑 `ouroboros detect` 看它报什么。只有绕过检测的底层调用方才会「单纯没有文件」，那种情况在 `MechanicalConfig` 里显式设置命令即可 |
 
 ### Stage 1 配置
 
@@ -288,7 +288,7 @@ trigger:
 
 ## Stage 3：多模型共识（Multi-Model Consensus）
 
-Stage 3 并发调用多个 Frontier 档位的模型。每个模型独立投票，需要 **2/3 多数**才算通过。
+Stage 3 并发发起多次 Frontier 档位的问询，需要 **2/3 多数**才算通过。**注意措辞**：这些是并发的「投票」，但并不意味着背后有多个独立模型——简单共识的每一票都通过交给 `ConsensusEvaluator` 的**同一个适配器**发出（`ConsensusEvaluator._llm`）。
 
 ### 简单共识（默认）
 
@@ -360,11 +360,13 @@ consensus:
   diversity_required: true     # 目前不生效 —— 见下方说明
 ```
 
-> **`diversity_required` 并未被强制执行。** 这个字段在 `ConsensusConfig` 和配置 schema 里都存在，但没有任何代码读它。厂商多样性来自默认模型名单本身，而不是这个开关。如果你把名单换成同一厂商的三个模型，`diversity_required: true` 不会提出任何异议。
+> **`diversity_required` 并未被强制执行。** 这个字段在 `ConsensusConfig` 和配置 schema 里都存在，但没有任何代码读它。如果你把名单换成同一厂商的三个模型，`diversity_required: true` 不会提出任何异议。
+>
+> **而且名单本身也不提供厂商多样性。** 所有票都经由同一个适配器发出，所以名单里的标签只是**请求标签**，不代表真的联系了那些厂商、模型或传输通道。
 
 **审议式共识（`DeliberativeConfig`）**
 
-配合 `DeliberativeConsensus` 使用（不是 `ConsensusEvaluator`）。每个角色用各自的模型：
+配合 `DeliberativeConsensus` 使用（不是 `ConsensusEvaluator`）。每个角色**配置各自的模型标签**——但与简单共识一样，**所有角色都通过传给 `DeliberativeConsensus` 的那一个适配器发出**，标签不代表独立的模型或厂商：
 
 ```python
 from ouroboros.evaluation.consensus import DeliberativeConfig, DeliberativeConsensus
@@ -415,10 +417,10 @@ evaluator = DeliberativeConsensus(llm_adapter, config)
 | 失败模式 | 现象 | 原因 / 处理 |
 |---|---|---|
 | **未设置 project_dir** | 评估只用到文字摘要 | 构建 `ArtifactBundle` 时没有文件内容；语义评估器退回到 agent 的文字输出。在执行上下文里设置 `project_dir`。 |
-| **没有抽取到文件路径** | 同上 | 执行输出里没有可识别的 `Write:` / `Edit:` / `file_path:` 模式。回退到文字摘要。 |
+| **没有抽取到文件路径** | **仍会收集文件** | 执行输出里没有可识别的 `Write:` / `Edit:` / `file_path:` 模式时，`collect()` 会转而调用 `_scan_directory(project_dir)`，遍历项目里符合条件的源文件（跳过二进制/生成物与依赖、缓存目录）。只有当扫描为空、不可访问或被完全排除时才没有文件可用。 |
 | **路径穿越被拦截** | 文件被静默跳过 | 文件路径解析后落在 `project_dir` 之外。这是安全边界，不是 bug。 |
 | **权限错误** | 文件被静默跳过 | 执行时用的是另一个用户身份。检查文件权限。 |
-| **大文件被跳过** | 评估缺少上下文 | 文件超过 100 KB。拆分大文件，或者接受评估器只能依据文字摘要工作。 |
+| **大文件被跳过** | 评估缺少**那一个**文件 | 文件超过 100 KB 会被整个跳过，但**其余已收集的文件照常参与评估**——跳过一个大文件并不会让评估退化成只看文字摘要。拆分大文件，或接受该文件缺席。 |
 
 ---
 
