@@ -239,6 +239,15 @@ class _AppendableEventStore(Protocol):
     def append(self, event: Any) -> Awaitable[None]:  # pragma: no cover — Protocol-style
         ...
 
+    def append_durable(
+        self,
+        event: Any,
+        *,
+        timeout: float,
+    ) -> Awaitable[None]:  # pragma: no cover — Protocol-style
+        """Append with a persistence-owned, cancellation-atomic deadline."""
+        ...
+
 
 class _ReplayableEventStore(Protocol):
     """Structural type for the replay-capable event store."""
@@ -277,6 +286,7 @@ class AgentProcessHandle:
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
     _failure: BaseException | None = None
+    _journal_failure: BaseException | None = None
     _complete_on_return_after_cancel: bool = False
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
     _journal_mode: AgentProcessJournalMode = AgentProcessJournalMode.BEST_EFFORT
@@ -345,34 +355,64 @@ class AgentProcessHandle:
         No-op when the process is not currently paused. Returns it to
         :attr:`AgentProcessStatus.RUNNING`.
 
-        Slice 2 (#518): overwrites the persisted pause checkpoint with a
-        ``running`` row so ``load_persisted_pause`` returns False after
-        resume. Persistence failures are raised before the loop is released
-        so durable state cannot remain paused while in-memory work resumes.
-        If *store* differs from the store captured by the acknowledged
-        pause, the captured store remains authoritative and *store* is
-        ignored.
+        In durable journal mode the committed ``CONTINUE`` row is the sole
+        resume authority.  The pause checkpoint is updated only after that
+        commit and is a restart cache/projection, never a competing release
+        boundary.  A failed append therefore leaves both the checkpoint and
+        work loop paused, and only a later explicit ``resume()`` call may
+        retry.  Direct ``AgentProcess`` users retain the legacy checkpoint-
+        first, best-effort journal behavior.
         """
-        if self._status in _TERMINAL_STATUSES or not self.should_pause():
-            return
+        del store  # the store captured by the acknowledged pause is authoritative
+        async with self._status_lock:
+            if self._status in _TERMINAL_STATUSES or not self.should_pause():
+                return
+            if self._status is not AgentProcessStatus.PAUSED:
+                return
 
-        # Overwrite any acknowledged paused checkpoint before releasing the
-        # work loop; otherwise a failed save could leave durable state paused
-        # while in-memory work has resumed.
-        self._save_lifecycle_checkpoint(
-            phase="agent_process_running",
-            status="running",
-            event_key="resumed_at",
-            log_key="resume",
-            store=self._pause_checkpoint_store,
-            strict=True,
-        )
-        self._pause_checkpoint_reason = None
-        self._pause_checkpoint_requested = False
+            if self._journal_mode is AgentProcessJournalMode.DURABLE:
+                # Commit replay authority before changing any checkpoint or
+                # releasing the waiter.  The waiter never retries this write.
+                await self._emit_lifecycle_transition(
+                    Directive.CONTINUE,
+                    "resume requested",
+                    AgentProcessStatus.RUNNING,
+                )
+                self._save_lifecycle_checkpoint(
+                    phase="agent_process_running",
+                    status="running",
+                    event_key="resumed_at",
+                    log_key="resume_projection",
+                    store=self._pause_checkpoint_store,
+                    strict=False,
+                )
+            else:
+                # Preserve the direct-AgentProcess compatibility contract:
+                # checkpoint persistence is strict while journal emission is
+                # observational and happens after the waiter is released.
+                self._save_lifecycle_checkpoint(
+                    phase="agent_process_running",
+                    status="running",
+                    event_key="resumed_at",
+                    log_key="resume",
+                    store=self._pause_checkpoint_store,
+                    strict=True,
+                )
+                self._status = AgentProcessStatus.RUNNING
+                self._pause_checkpoint_reason = None
+                self._pause_checkpoint_requested = False
+                self._paused_event.set()
+                await self._emit_lifecycle_transition(
+                    Directive.CONTINUE,
+                    "resume requested",
+                    AgentProcessStatus.RUNNING,
+                )
+                return
 
-        self._paused_event.set()
-        if self._status is AgentProcessStatus.PAUSED:
-            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+            self._status = AgentProcessStatus.RUNNING
+            self._pause_checkpoint_reason = None
+            self._pause_checkpoint_requested = False
+            self._paused_event.set()
 
     async def cancel(
         self,
@@ -466,12 +506,13 @@ class AgentProcessHandle:
         *,
         store: CheckpointStore | None = None,
     ) -> bool:
-        """Return True iff the latest persisted checkpoint marks this process as paused.
+        """Return whether a legacy checkpoint-authoritative process was paused.
 
-        This is the restart-recovery primitive for slice 2 (#518). A caller
-        restarting the process calls this to ask "was I paused before the
-        restart?" and, if True, calls :meth:`pause` again to restore the
-        in-memory flag.
+        This is the restart-recovery primitive for direct, best-effort
+        ``AgentProcess`` consumers.  Durable journal mode writes checkpoints
+        only as projections and must recover through :meth:`replay`; this
+        helper raises instead of letting a stale cache compete with committed
+        lifecycle history.
 
         Args:
             process_id: The process identifier to look up. UUID4 hex is
@@ -499,7 +540,14 @@ class AgentProcessHandle:
             )
             if result.is_err:
                 return False
+            if result.value.state.get("authority") == "journal":
+                raise RuntimeError(
+                    "Durable AgentProcess pause recovery requires lifecycle replay; "
+                    "the checkpoint is a non-authoritative journal projection."
+                )
             return result.value.phase == "agent_process_paused"
+        except RuntimeError:
+            raise
         except Exception:  # noqa: BLE001 — fault-tolerant; absence of checkpoint == not paused
             logger.warning(
                 "agent_process.load_persisted_pause_failed",
@@ -683,8 +731,9 @@ class AgentProcessHandle:
                     strict=True,
                 )
         await self._paused_event.wait()
-        if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
-            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+        # ``resume()`` owns the CONTINUE commit and status change.  A waiter
+        # must never turn a surfaced publication failure into an implicit
+        # retry and successful release.
 
     async def wait_until_complete(self, *, timeout: float | None = None) -> AgentProcessStatus:
         """Wait for a terminal status transition.
@@ -714,7 +763,13 @@ class AgentProcessHandle:
         try:
             async with self._emit_lock:
                 await self._emit_directive(directive, reason, status)
-        except Exception:
+        except Exception as exc:
+            if self._journal_mode is AgentProcessJournalMode.DURABLE:
+                self._journal_failure = exc
+                # Failed durable attempts are not replay facts and cannot be
+                # counted as committed history.  A later explicit retry earns
+                # its own expected count after it actually appends.
+                self._expected_directive_count -= 1
             logger.warning(
                 "agent_process.directive_emit_failed",
                 extra={
@@ -725,6 +780,8 @@ class AgentProcessHandle:
             )
             if self._journal_mode is AgentProcessJournalMode.DURABLE:
                 raise
+        else:
+            self._journal_failure = None
         finally:
             self._pending_emit_count -= 1
             self._pending_emit_statuses.discard(status)
@@ -795,6 +852,18 @@ class AgentProcessHandle:
         """Mark the underlying work task as exited without changing lifecycle status."""
         self._completed_event.set()
 
+    def _fail_closed_after_journal_failure(self, exc: BaseException) -> None:
+        """Stop locally after a required write fails, without another append.
+
+        A terminal compensation event would consume a second deadline and
+        could itself commit after the caller has already observed failure.
+        The original persistence error is therefore the only failure
+        authority for this live process.
+        """
+        self._failure = exc
+        self._status = AgentProcessStatus.FAILED
+        self._completed_event.set()
+
     async def _set_status(self, new_status: AgentProcessStatus, *, reason: str) -> None:
         async with self._status_lock:
             if new_status == self._status:
@@ -835,6 +904,11 @@ class AgentProcessHandle:
             state: dict[str, str | None] = {
                 "status": status,
                 event_key: datetime.now(UTC).isoformat(),
+                "authority": (
+                    "journal"
+                    if self._journal_mode is AgentProcessJournalMode.DURABLE
+                    else "checkpoint"
+                ),
             }
             if reason is not None:
                 state["reason"] = reason
@@ -975,13 +1049,16 @@ class AgentProcess:
                 try:
                     await handle._mark_cancelled()
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
-                    handle._failure = exc
-                    try:
-                        await handle._mark_failed(
-                            reason=f"cancel finalization failed {type(exc).__name__}: {exc!s}"
-                        )
-                    except BaseException:  # noqa: BLE001 — failure is stored on the handle
-                        pass
+                    if exc is handle._journal_failure:
+                        handle._fail_closed_after_journal_failure(exc)
+                    else:
+                        handle._failure = exc
+                        try:
+                            await handle._mark_failed(
+                                reason=f"cancel finalization failed {type(exc).__name__}: {exc!s}"
+                            )
+                        except BaseException:  # noqa: BLE001 — failure is stored on the handle
+                            pass
                     logger.exception(
                         "agent_process.cancel_finalization_failed",
                         extra={"process_id": pid},
@@ -989,17 +1066,20 @@ class AgentProcess:
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 handle._failure = exc
-                try:
-                    if handle.status() in _TERMINAL_STATUSES:
-                        await handle._mark_failed(
-                            reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
-                        )
-                    else:
-                        await handle._mark_failed(
-                            reason=f"work raised {type(exc).__name__}: {exc!s}"
-                        )
-                except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
-                    pass
+                if exc is handle._journal_failure:
+                    handle._fail_closed_after_journal_failure(exc)
+                else:
+                    try:
+                        if handle.status() in _TERMINAL_STATUSES:
+                            await handle._mark_failed(
+                                reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
+                            )
+                        else:
+                            await handle._mark_failed(
+                                reason=f"work raised {type(exc).__name__}: {exc!s}"
+                            )
+                    except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
+                        pass
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
@@ -1022,13 +1102,16 @@ class AgentProcess:
                     else:
                         await handle._mark_completed(reason="work returned")
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
-                    handle._failure = exc
-                    try:
-                        await handle._mark_failed(
-                            reason=f"terminal transition failed {type(exc).__name__}: {exc!s}"
-                        )
-                    except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
-                        pass
+                    if exc is handle._journal_failure:
+                        handle._fail_closed_after_journal_failure(exc)
+                    else:
+                        handle._failure = exc
+                        try:
+                            await handle._mark_failed(
+                                reason=f"terminal transition failed {type(exc).__name__}: {exc!s}"
+                            )
+                        except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
+                            pass
                     logger.exception(
                         "agent_process.terminal_transition_failed",
                         extra={"process_id": pid},
@@ -1050,24 +1133,32 @@ class AgentProcess:
         async def emit(
             directive: Directive, reason: str, lifecycle_status: AgentProcessStatus
         ) -> None:
-            async def append_event() -> None:
-                await _ensure_event_store_initialized(store)
-                event = create_control_directive_emitted_event(
-                    target_type=_TARGET_TYPE,
-                    target_id=process_id,
-                    emitted_by=_EMITTED_BY,
-                    directive=directive,
-                    reason=f"{intent}: {reason}" if reason else intent,
-                    extra={"intent": intent, "lifecycle_status": lifecycle_status.value},
-                )
-                await store.append(event)
+            event = create_control_directive_emitted_event(
+                target_type=_TARGET_TYPE,
+                target_id=process_id,
+                emitted_by=_EMITTED_BY,
+                directive=directive,
+                reason=f"{intent}: {reason}" if reason else intent,
+                extra={"intent": intent, "lifecycle_status": lifecycle_status.value},
+            )
 
             if self.journal_mode is AgentProcessJournalMode.DURABLE:
-                await asyncio.wait_for(
-                    append_event(),
+                append_durable = getattr(store, "append_durable", None)
+                if not callable(append_durable):
+                    raise TypeError(
+                        "Durable AgentProcess journaling requires event_store.append_durable() "
+                        "so the persistence layer, not caller cancellation, owns the deadline."
+                    )
+                await append_durable(
+                    event,
                     timeout=_DURABLE_DIRECTIVE_EMIT_TIMEOUT_SECONDS,
                 )
                 return
+
+            async def append_event() -> None:
+                await _ensure_event_store_initialized(store)
+                await store.append(event)
+
             try:
                 await asyncio.wait_for(append_event(), timeout=_DIRECTIVE_EMIT_TIMEOUT_SECONDS)
             except Exception:  # noqa: BLE001 — observational-first

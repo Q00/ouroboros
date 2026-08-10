@@ -15,6 +15,7 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
@@ -623,6 +624,7 @@ class EventStore:
         self._picker_projection_ready = False
         self._settling_writes = set()
         self._closing = False
+        self._initialized = False
         self._lifecycle_lock = asyncio.Lock()
         validate_standard_shared_memory_sqlite_url(database_url)
         validate_canonical_named_memdb_sqlite_url(database_url)
@@ -773,6 +775,7 @@ class EventStore:
                 self._initialize_locked(create_schema=create_schema),
                 operation="initialize",
             )
+            self._initialized = True
 
     async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:
@@ -881,6 +884,138 @@ class EventStore:
             )
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
         return None
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        """Append one ordinary event within a cancellation-atomic deadline.
+
+        Caller-side ``wait_for()`` cannot bound :func:`_run_to_settlement`:
+        cancellation intentionally waits for the transaction's final commit
+        or rollback.  This entry point moves the deadline into persistence.
+        SQLite receives both a deadline-sized ``busy_timeout`` and a progress
+        handler/interrupt, while a small part of the advertised budget is
+        reserved for rollback and connection cleanup.  ``TimeoutError`` is
+        raised only after that settlement, so returning never leaves an
+        ambiguous transaction running in the background.
+
+        Agent-process lifecycle events are ordinary append-only events.  The
+        guarded session/workflow event families keep their specialized APIs
+        and are deliberately rejected here rather than silently weakening
+        their conditional transition contracts.
+        """
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError("append_durable timeout must be a positive number")
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(event, operation="append_durable")
+        if (
+            _is_session_start_event(event)
+            or _is_session_terminal_event(event)
+            or _is_ac_acceptance_finalized_type(event)
+            or event.aggregate_type == "workflow_ir"
+        ):
+            raise PersistenceError(
+                "append_durable only accepts ordinary append-only events.",
+                operation="append_durable",
+                details={"event_type": event.type, "aggregate_type": event.aggregate_type},
+            )
+
+        loop = asyncio.get_running_loop()
+        overall_deadline = loop.time() + float(timeout)
+
+        # Schema initialization has its own cancellation-atomic settlement
+        # contract and cannot honestly be folded into a hard append deadline.
+        # Production EventStores initialize during service startup; refusing
+        # lazy initialization here is the bounded, ambiguity-free contract.
+        if not self._initialized or self._engine is None:
+            raise PersistenceError(
+                "Durable append requires an initialized EventStore; initialize it "
+                "during startup before beginning the bounded lifecycle write.",
+                operation="append_durable",
+            )
+
+        await _run_to_settlement(
+            self._append_durable_registered(event, overall_deadline=overall_deadline),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_durable",
+        )
+
+    async def _append_durable_registered(
+        self,
+        event: BaseEvent,
+        *,
+        overall_deadline: float,
+    ) -> None:
+        """Run one deadline-aware SQLite transaction to final settlement."""
+        engine = self._engine
+        if engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_durable",
+            )
+
+        loop = asyncio.get_running_loop()
+        remaining = overall_deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("durable append deadline expired before transaction admission")
+
+        # Reserve up to 250ms (half of very small test budgets) for rollback,
+        # handler removal, and pool return.  The SQL interrupt fires at the
+        # earlier operation deadline; the public deadline includes cleanup.
+        settlement_reserve = min(0.25, remaining / 2)
+        operation_deadline = time.monotonic() + (remaining - settlement_reserve)
+        deadline_reached = False
+
+        def _interrupt_long_sql() -> int:
+            nonlocal deadline_reached
+            if time.monotonic() < operation_deadline:
+                return 0
+            deadline_reached = True
+            return 1
+
+        try:
+            async with asyncio.timeout_at(overall_deadline):
+                async with engine.connect() as conn:
+                    raw = await conn.get_raw_connection()
+                    driver = raw.driver_connection
+                    await driver.set_progress_handler(_interrupt_long_sql, 1_000)
+                    busy_ms = max(1, int((operation_deadline - time.monotonic()) * 1_000))
+                    busy_cursor = await driver.execute(f"PRAGMA busy_timeout={busy_ms}")
+                    await busy_cursor.close()
+
+                    interrupt_handle = loop.call_later(
+                        max(0.0, operation_deadline - time.monotonic()),
+                        lambda: asyncio.create_task(driver.interrupt()),
+                    )
+                    try:
+                        async with conn.begin():
+                            await _insert_event(conn, event, self._picker_projection_ready)
+                    finally:
+                        interrupt_handle.cancel()
+                        await driver.set_progress_handler(None, 0)
+                        restore_cursor = await driver.execute("PRAGMA busy_timeout=30000")
+                        await restore_cursor.close()
+        except TimeoutError:
+            raise
+        except OperationalError as exc:
+            if deadline_reached or loop.time() >= overall_deadline - settlement_reserve:
+                raise TimeoutError("durable append exceeded its persistence deadline") from exc
+            raise PersistenceError(
+                f"Failed to append event: {exc}",
+                operation="append_durable",
+                table="events",
+                details={"event_id": event.id, "event_type": event.type},
+            ) from exc
+        except Exception as exc:
+            if deadline_reached:
+                raise TimeoutError("durable append exceeded its persistence deadline") from exc
+            if isinstance(exc, PersistenceError):
+                raise
+            raise PersistenceError(
+                f"Failed to append event: {exc}",
+                operation="append_durable",
+                table="events",
+                details={"event_id": event.id, "event_type": event.type},
+            ) from exc
 
     async def append_session_start_if_absent(self, event: BaseEvent) -> None:
         """Fenced wrapper: admission + settlement for the CAS below.
@@ -3066,6 +3201,7 @@ class EventStore:
                     await self.checkpoint_wal()
                     await self._engine.dispose()
                     self._engine = None
+                    self._initialized = False
                 if self._memory_keepalive is not None:
                     # Release the shared in-memory database anchor last so
                     # pooled connections never observe the database

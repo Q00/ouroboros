@@ -39,6 +39,10 @@ class _EventStore:
     async def append(self, event: BaseEvent) -> None:
         self.appended.append(event)
 
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        async with asyncio.timeout(timeout):
+            await self.append(event)
+
     async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
         return [
             event
@@ -815,6 +819,7 @@ async def test_cancel_requested_by_child_prevents_completed_publication(tmp_path
 @pytest.mark.asyncio
 async def test_bounded_reference_round_trips_through_real_event_store(tmp_path: Path) -> None:
     event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
     service = DisposableMemory(
         artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
         event_store=event_store,

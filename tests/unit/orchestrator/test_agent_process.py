@@ -29,7 +29,18 @@ from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
 
-class _FakeEventStore:
+class _DurableAppendTestStore:
+    """Test-double implementation of the persistence-owned deadline API."""
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        async with asyncio.timeout(timeout):
+            initialize = getattr(self, "initialize", None)
+            if callable(initialize):
+                await initialize()
+            await self.append(event)  # type: ignore[attr-defined]
+
+
+class _FakeEventStore(_DurableAppendTestStore):
     def __init__(self) -> None:
         self.appended: list[BaseEvent] = []
 
@@ -40,7 +51,7 @@ class _FakeEventStore:
         return list(self.appended)
 
 
-class _FailingAppendReplayStore:
+class _FailingAppendReplayStore(_DurableAppendTestStore):
     async def append(self, event: BaseEvent) -> None:  # noqa: ARG002
         raise RuntimeError("simulated append failure")
 
@@ -48,7 +59,7 @@ class _FailingAppendReplayStore:
         return []
 
 
-class _DropAfterFirstAppendReplayStore:
+class _DropAfterFirstAppendReplayStore(_DurableAppendTestStore):
     def __init__(self) -> None:
         self.appended: list[BaseEvent] = []
 
@@ -61,7 +72,7 @@ class _DropAfterFirstAppendReplayStore:
         return list(self.appended)
 
 
-class _BlockingSecondAppendStore:
+class _BlockingSecondAppendStore(_DurableAppendTestStore):
     def __init__(self) -> None:
         self.appended: list[BaseEvent] = []
         self.second_append_started = asyncio.Event()
@@ -77,7 +88,7 @@ class _BlockingSecondAppendStore:
         return list(self.appended)
 
 
-class _DropSecondAppendReplayStore:
+class _DropSecondAppendReplayStore(_DurableAppendTestStore):
     def __init__(self) -> None:
         self.appended: list[BaseEvent] = []
         self.append_attempts = 0
@@ -118,6 +129,55 @@ class _BlockingInitializeReplayStore(_FakeEventStore):
     async def initialize(self) -> None:
         self.initialize_started.set()
         await self.release_initialize.wait()
+
+
+class _FailOnceAttemptReplayStore(_FakeEventStore):
+    """Store that fails one selected durable lifecycle append exactly once."""
+
+    def __init__(self, fail_attempt: int) -> None:
+        super().__init__()
+        self.fail_attempt = fail_attempt
+        self.append_attempts = 0
+
+    async def append(self, event: BaseEvent) -> None:
+        self.append_attempts += 1
+        if self.append_attempts == self.fail_attempt:
+            raise RuntimeError(f"transient append failure at attempt {self.fail_attempt}")
+        await super().append(event)
+
+
+class _CancellationResistantDeadlineStore(_FakeEventStore):
+    """Model a persistence operation that settles only after interruption."""
+
+    def __init__(self, fail_attempt: int) -> None:
+        super().__init__()
+        self.fail_attempt = fail_attempt
+        self.append_attempts = 0
+        self.cancellation_seen = asyncio.Event()
+        self.transaction_settled = asyncio.Event()
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        self.append_attempts += 1
+        if self.append_attempts != self.fail_attempt:
+            self.appended.append(event)
+            return
+
+        interrupt = asyncio.Event()
+
+        async def cancellation_atomic_transaction() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancellation_seen.set()
+                await interrupt.wait()
+                self.transaction_settled.set()
+
+        transaction = asyncio.create_task(cancellation_atomic_transaction())
+        await asyncio.sleep(0)
+        transaction.cancel()
+        asyncio.get_running_loop().call_later(timeout / 2, interrupt.set)
+        await transaction
+        raise TimeoutError("persistence deadline interrupted and rolled back transaction")
 
 
 def _types(events: list[BaseEvent]) -> list[str]:
@@ -2267,6 +2327,173 @@ async def test_run_with_agent_process_surfaces_terminal_journal_failure() -> Non
         )
 
     assert _directives(store.appended) == ["continue"]
+
+
+@pytest.mark.asyncio
+async def test_durable_transient_resume_failure_stays_paused_until_explicit_retry(
+    tmp_path: Path,
+) -> None:
+    """A surfaced resume error cannot release work or be retried by its waiter."""
+    store = _FailOnceAttemptReplayStore(fail_attempt=3)
+    checkpoint_store = CheckpointStore(tmp_path / "checkpoints")
+    checkpoint_store.initialize()
+    process_id = "durable-transient-resume"
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+    resumed_work = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause(reason="operator pause", store=checkpoint_store)
+        reached_pause.set()
+        await handle.wait_unpaused()
+        resumed_work.set()
+        return "done"
+
+    task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+            process_id=process_id,
+            checkpoint_store=checkpoint_store,
+        )
+    )
+    await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+    handle = handle_box[0]
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    with pytest.raises(RuntimeError, match="transient append failure"):
+        await handle.resume()
+
+    await asyncio.sleep(0.05)
+    assert task.done() is False
+    assert resumed_work.is_set() is False
+    assert handle.status() is AgentProcessStatus.PAUSED
+    assert store.append_attempts == 3
+    assert _directives(store.appended) == ["continue", "wait"]
+    assert (await handle.replay()).status is AgentProcessStatus.PAUSED
+    checkpoint_key = f"agent_process_{hashlib.sha256(process_id.encode()).hexdigest()}"
+    failed_resume_checkpoint = checkpoint_store.load(checkpoint_key)
+    assert failed_resume_checkpoint.is_ok
+    assert failed_resume_checkpoint.value.phase == "agent_process_paused"
+    assert failed_resume_checkpoint.value.state["authority"] == "journal"
+
+    # Recovery is an explicit operator decision; exactly one new CONTINUE is
+    # committed before the checkpoint projection and work-loop release.
+    await handle.resume()
+    assert await asyncio.wait_for(task, timeout=1.0) == "done"
+    assert resumed_work.is_set()
+    assert _directives(store.appended) == ["continue", "wait", "continue", "converge"]
+    committed_resume_checkpoint = checkpoint_store.load(checkpoint_key)
+    assert committed_resume_checkpoint.is_ok
+    assert committed_resume_checkpoint.value.phase == "agent_process_running"
+    with pytest.raises(RuntimeError, match="requires lifecycle replay"):
+        AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store)
+
+
+@pytest.mark.asyncio
+async def test_durable_pause_journal_failure_fails_without_compensating_append() -> None:
+    """A failed WAIT is surfaced once and cannot consume another deadline."""
+    store = _FailOnceAttemptReplayStore(fail_attempt=2)
+    handle_box: list[AgentProcessHandle] = []
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        await handle.wait_unpaused()
+        return "unreachable"
+
+    with pytest.raises(RuntimeError, match="transient append failure"):
+        await run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+
+    assert handle_box[0].status() is AgentProcessStatus.FAILED
+    assert store.append_attempts == 2
+    assert _directives(store.appended) == ["continue"]
+
+
+@pytest.mark.asyncio
+async def test_durable_concurrent_resume_commits_one_release_transition() -> None:
+    """Two overlapping resume calls serialize around one journal commit."""
+
+    class _BlockingResumeStore(_FakeEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_attempts = 0
+            self.resume_append_started = asyncio.Event()
+            self.release_resume_append = asyncio.Event()
+
+        async def append(self, event: BaseEvent) -> None:
+            self.append_attempts += 1
+            if self.append_attempts == 3:
+                self.resume_append_started.set()
+                await self.release_resume_append.wait()
+            await super().append(event)
+
+    store = _BlockingResumeStore()
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        reached_pause.set()
+        await handle.wait_unpaused()
+        return "done"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+    )
+    await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+    handle = handle_box[0]
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    first = asyncio.create_task(handle.resume())
+    await asyncio.wait_for(store.resume_append_started.wait(), timeout=1.0)
+    second = asyncio.create_task(handle.resume())
+    await asyncio.sleep(0)
+    assert first.done() is False
+    assert second.done() is False
+
+    store.release_resume_append.set()
+    await asyncio.gather(first, second)
+    assert await asyncio.wait_for(run_task, timeout=1.0) == "done"
+    assert _directives(store.appended) == ["continue", "wait", "continue", "converge"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail_attempt", "work_must_start", "expected_attempts"),
+    [(1, False, 1), (2, True, 2)],
+)
+async def test_durable_initial_and_later_append_deadlines_settle_once(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_attempt: int,
+    work_must_start: bool,
+    expected_attempts: int,
+) -> None:
+    """Persistence interruption bounds cancellation-resistant settlement."""
+    from ouroboros.orchestrator import agent_process as agent_process_module
+
+    monkeypatch.setattr(agent_process_module, "_DURABLE_DIRECTIVE_EMIT_TIMEOUT_SECONDS", 0.04)
+    store = _CancellationResistantDeadlineStore(fail_attempt)
+    work_started = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:  # noqa: ARG001
+        work_started.set()
+        return "done"
+
+    started_at = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError, match="interrupted and rolled back"):
+        await run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed < 0.1
+    assert store.cancellation_seen.is_set()
+    assert store.transaction_settled.is_set()
+    assert store.append_attempts == expected_attempts
+    assert work_started.is_set() is work_must_start
+    assert len(store.appended) == (1 if work_must_start else 0)
 
 
 @pytest.mark.asyncio

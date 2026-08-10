@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 from pathlib import Path
 import shutil
+import sqlite3
 
 import pytest
 
@@ -84,6 +85,42 @@ class TestEventStoreInitialization:
         await store.initialize()
         await store.initialize()  # Should not raise
         await store.close()
+
+    async def test_durable_append_interrupts_lock_and_returns_after_rollback(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+    ) -> None:
+        """The real SQLite path owns its deadline and cannot commit afterward."""
+        db_path = tmp_path / "durable-deadline.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        blocker = sqlite3.connect(db_path, isolation_level=None)
+        blocker.execute("BEGIN IMMEDIATE")
+        started_at = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(TimeoutError):
+                await store.append_durable(sample_event, timeout=0.08)
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
+
+        assert asyncio.get_running_loop().time() - started_at < 0.2
+        await asyncio.sleep(0.05)
+        assert await store.replay(sample_event.aggregate_type, sample_event.aggregate_id) == []
+        await store.close()
+
+    async def test_durable_append_refuses_unbounded_lazy_initialization(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+    ) -> None:
+        """The hard append deadline never wraps cancellation-atomic schema setup."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'not-initialized.db'}")
+        started_at = asyncio.get_running_loop().time()
+        with pytest.raises(PersistenceError, match="requires an initialized EventStore"):
+            await store.append_durable(sample_event, timeout=0.01)
+        assert asyncio.get_running_loop().time() - started_at < 0.05
 
     async def test_repeated_initialize_settles_schema_transaction_before_cancellation(
         self,
