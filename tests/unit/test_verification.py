@@ -2296,36 +2296,43 @@ class TestAssertionExtractor:
         assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_an_array_only_partly_rejected_is_remembered_as_what_survived(self) -> None:
-        """One good entry among bad ones is still an extraction that was read.
-
-        The rule is about a reply in which *nothing* arrived, not about every
-        entry being perfect. If one assertion survives, the model answered in
-        this schema and the seed should not pay for a second extraction.
-        """
+    async def test_same_ac_mixed_valid_and_invalid_assertions_are_retried_atomically(
+        self,
+    ) -> None:
+        """A rejected assertion cannot disappear behind a valid sibling in one AC."""
         extractor = self._make_extractor_sequence(
             json.dumps(
                 [
-                    {"ac_index": 0},
                     {
                         "ac_index": 0,
                         "tier": "t2_structural",
-                        "pattern": "class Foo",
-                        "expected_value": "",
-                        "file_hint": "*.py",
+                        "pattern": "marker",
+                        "expected_value": "marker.txt",
+                        "file_hint": "marker.txt",
                         "description": "",
                     },
-                    {"ac_index": 99, "tier": "t2_structural", "pattern": "class Bar"},
+                    {
+                        "ac_index": 0,
+                        "tier": "t2_structural",
+                        "pattern": "(",
+                        "expected_value": "docs.md",
+                        "file_hint": "docs.md",
+                        "description": "",
+                    },
                 ]
-            )
+            ),
+            _GOOD_EXTRACTION,
+            _GOOD_EXTRACTION,
         )
 
-        first = await extractor.extract("seed_partly_rejected", ("Has class Foo",))
-        second = await extractor.extract("seed_partly_rejected", ("Has class Foo",))
+        first = await extractor.extract("seed_partly_rejected", ("Create marker.txt and docs.md",))
+        second = await extractor.extract("seed_partly_rejected", ("Create marker.txt and docs.md",))
+        third = await extractor.extract("seed_partly_rejected", ("Create marker.txt and docs.md",))
 
-        assert first.is_ok and len(first.value) == 1
-        assert second.value is first.value
-        extractor.llm_adapter.complete.assert_called_once()
+        assert first.is_err
+        assert second.is_ok and len(second.value) == 1
+        assert third.value is second.value
+        assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_a_readable_empty_extraction_is_still_remembered(self) -> None:

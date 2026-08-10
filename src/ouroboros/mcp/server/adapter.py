@@ -567,17 +567,36 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
     from ouroboros.core.lineage import EvaluationSummary, TaskResult
 
     task_line_matches = re.findall(
-        r"### (?:Task|AC) (\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
+        r"### (?:Task|AC) (-?\d+): \[(COMPLETED|FAILED|PASS|FAIL)\]\s*(.*)", artifact
     )
     if not task_line_matches:
         return None
 
     seed_acs = getattr(seed, "acceptance_criteria", None) or ()
     feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
+    task_numbers = [int(task_number) for task_number, _, _ in task_line_matches]
+    invalid_task_numbers = sorted({number for number in task_numbers if number < 1})
+    if invalid_task_numbers:
+        rendered_numbers = ", ".join(str(number) for number in invalid_task_numbers)
+        return EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            score=0.0,
+            drift_score=None,
+            failure_reason=(
+                f"invalid one-based task number(s): {rendered_numbers}; "
+                "formal AC evaluation not run"
+            ),
+            ac_results=(),
+            task_results=(),
+            feedback_metadata=feedback_metadata,
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
 
     task_results: list[TaskResult] = []
-    for ac_num_str, status, description in task_line_matches:
-        task_idx = int(ac_num_str) - 1
+    for task_number, (_, status, description) in zip(task_numbers, task_line_matches, strict=True):
+        task_idx = task_number - 1
         task_content = (
             ac_text(seed_acs[task_idx]) if task_idx < len(seed_acs) else description.strip()
         )

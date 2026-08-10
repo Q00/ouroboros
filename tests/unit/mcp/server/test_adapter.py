@@ -311,6 +311,74 @@ Parallel Execution Verification Report
         assert summary.run_verdict == "FAIL"
         assert "duplicate task indices" in (summary.failure_reason or "")
 
+    def test_task_zero_is_rejected_before_formal_spec_projection(self) -> None:
+        """A zero task number cannot become a negative Seed or AC identity."""
+        seed = SimpleNamespace(acceptance_criteria=("Create marker.txt",))
+        mechanical = _parse_legacy_execution_task_summary(
+            "### Task 0: [COMPLETED] bogus",
+            seed,
+        )
+        assert mechanical is not None
+        assert mechanical.task_results == ()
+        assert mechanical.execution_completion_status == "failed"
+        assert "invalid one-based task number(s): 0" in (mechanical.failure_reason or "")
+
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create marker.txt",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="marker",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create marker.txt",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found marker.txt",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.execution_completion_status == "failed"
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "artifact, invalid_number",
+        [
+            ("### AC 0: [PASS] bogus", "0"),
+            ("### Task -1: [COMPLETED] bogus", "-1"),
+        ],
+    )
+    def test_all_non_positive_legacy_task_numbers_are_rejected(
+        self,
+        artifact: str,
+        invalid_number: str,
+    ) -> None:
+        """Both legacy syntaxes enforce a positive one-based identity."""
+        summary = _parse_legacy_execution_task_summary(
+            artifact,
+            SimpleNamespace(acceptance_criteria=("Create marker.txt",)),
+        )
+
+        assert summary is not None
+        assert summary.task_results == ()
+        assert summary.execution_completion_status == "failed"
+        assert f"invalid one-based task number(s): {invalid_number}" in (
+            summary.failure_reason or ""
+        )
+
     def test_agent_results_preserve_failed_legacy_task_for_spec_verification(self) -> None:
         """Legacy task failures must remain visible to the verifier input map."""
         mechanical = EvaluationSummary(
