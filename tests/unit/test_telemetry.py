@@ -931,6 +931,21 @@ def _no_ambient_frontdoor_or_ci(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def test_genuine_process_ci_still_stamps_ci_true(
+    monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+) -> None:
+    """Denying CI/GITHUB_ACTIONS from the untrusted project .env (see
+    tests/unit/config/test_loader_env.py) must not affect genuine CI
+    detection: a real CI runner sets these in the actual process
+    environment, which the loader never touches regardless of the
+    denylist, so `ci=true` must still be stamped from there."""
+    monkeypatch.setenv("CI", "true")
+    telemetry.capture_cli_command("run")
+    telemetry.flush(timeout=2.0)
+    assert len(sent) == 1
+    assert sent[0]["properties"]["ci"] is True
+
+
 class TestExactPropertySets:
     """Regression: the declared TELEMETRY.md table and the executable
     per-variant allowlist must match key-for-key, not just "subset of a

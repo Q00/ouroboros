@@ -62,8 +62,11 @@ Deleting `~/.ouroboros/telemetry.json` resets your anonymous ID.
 
 Telemetry controls and destination overrides are operator-owned. The real
 process environment and `~/.ouroboros/.env` are trusted; a project-directory
-`.env` cannot set `DO_NOT_TRACK`, `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_HOST`, or
-`OUROBOROS_POSTHOG_API_KEY`. Invalid or unreadable user configuration disables
+`.env` cannot set `DO_NOT_TRACK`, `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_HOST`,
+`OUROBOROS_POSTHOG_API_KEY`, `CI`, or `GITHUB_ACTIONS` — the last two feed the
+`ci!=true` exclusion in the counting rule above, so a cloned repository's
+`.env` cannot forge CI classification to deregister genuine local users from
+the published metric. Invalid or unreadable user configuration disables
 collection rather than silently restoring the default. An explicit
 `OUROBOROS_TELEMETRY=1` is never an override: any disabling control above —
 including a persisted `enabled: false` or malformed configuration — still

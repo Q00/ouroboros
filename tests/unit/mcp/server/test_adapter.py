@@ -132,6 +132,74 @@ class HostileNameError(Exception, metaclass=_RaisingNameMeta):
     """An error class that raises when its own __name__ is read."""
 
 
+class _RaisingNameMetaKeyboardInterrupt(type):
+    """Metaclass whose __name__ property raises KeyboardInterrupt.
+
+    A hostile object choosing this exception class over a plain RuntimeError
+    is not an actual user interrupt -- it is an extension-controlled dunder
+    read designed to slip past a narrower ``except Exception`` in whatever
+    code reads it. _safe_error_type must swallow it all the same.
+    """
+
+    @property
+    def __name__(cls) -> str:  # type: ignore[override]
+        raise KeyboardInterrupt("hostile __name__ access (not a real interrupt)")
+
+
+class HostileKeyboardInterruptNameError(Exception, metaclass=_RaisingNameMetaKeyboardInterrupt):
+    """An error class whose __name__ read raises KeyboardInterrupt."""
+
+
+class HostileRaisedKeyboardInterrupt(
+    KeyboardInterrupt, metaclass=_RaisingNameMetaKeyboardInterrupt
+):
+    """Directly subclasses KeyboardInterrupt (not Exception) so a handler
+    that *raises* this bypasses MCPServerAdapter._call_tool_impl's
+    ``except Exception`` entirely -- KeyboardInterrupt/SystemExit are direct
+    BaseException subclasses, siblings of Exception, not descendants of it.
+    It reaches observe_adapter_tool_call's own ``except BaseException``
+    clause with this exact object still intact, letting _safe_error_type's
+    isolation be proven through the real adapter path (unlike the
+    Result.err(HostileNameError(...)) shape, which is intercepted by
+    _call_tool_impl's own pre-existing, unrelated logging call before ever
+    reaching this boundary -- see the round-14 report).
+    """
+
+
+class _RaisingNameMetaSystemExit(type):
+    """Metaclass whose __name__ property raises SystemExit, not a real exit."""
+
+    @property
+    def __name__(cls) -> str:  # type: ignore[override]
+        raise SystemExit("hostile __name__ access (not a real exit)")
+
+
+class HostileSystemExitNameError(Exception, metaclass=_RaisingNameMetaSystemExit):
+    """An error class whose __name__ read raises SystemExit."""
+
+
+class _HostileIsErrorRaisesSystemExit:
+    """Stand-in for a handler's MCPToolResult-shaped return value whose
+    ``is_error`` property raises SystemExit rather than returning a bool.
+
+    Used inside Result.ok(...) -- the success path, where
+    _is_logical_error() reads .is_error to decide whether a completed
+    request was actually a logical failure.
+    """
+
+    @property
+    def is_error(self) -> bool:
+        raise SystemExit("hostile is_error access (not a real exit)")
+
+
+class _HostileIsErrorRaisesKeyboardInterrupt:
+    """SystemExit's sibling case for _is_logical_error, for symmetry."""
+
+    @property
+    def is_error(self) -> bool:
+        raise KeyboardInterrupt("hostile is_error access (not a real interrupt)")
+
+
 class MockToolHandler:
     """Mock tool handler for testing."""
 
@@ -1801,6 +1869,72 @@ class TestMCPServerAdapterTools:
         assert "MalformedModuleMetadata" not in full_event
         assert "acme" not in full_event.lower()
 
+    async def test_call_tool_hostile_is_error_systemexit_never_crashes_the_real_result(
+        self,
+    ) -> None:
+        """Round-16: a hostile is_error property raising SystemExit must not
+        replace a genuinely successful handler result.
+
+        Unlike the hostile-__name__/Result.err shape, this one is provably
+        clean through the REAL adapter path: MCPServerAdapter._call_tool_impl's
+        own logging only ever reads ``result.is_ok``/``type(result.error).__name__``,
+        never ``result.value.is_error`` -- so this scenario never touches
+        that unrelated pre-existing code and genuinely exercises
+        observe_adapter_tool_call's own _is_logical_error call.
+        """
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_hostile_is_error_probe")
+        original_value = _HostileIsErrorRaisesSystemExit()
+        handler.handle_mock.return_value = Result.ok(original_value)
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_hostile_is_error_probe", {"input": "safe"})
+
+        # The call completes normally and the real handler value survives
+        # untouched -- no SystemExit escaped, no substitute result.
+        assert result.is_ok
+        assert result.value is original_value
+        capture.assert_called_once()
+        # _is_logical_error's total-isolation fallback is False (not a
+        # logical error), so the outer Result.is_ok alone decides -- ok stays
+        # True, matching this round's spec ("logical-error False").
+        assert capture.call_args.kwargs["ok"] is True
+
+    async def test_call_tool_raised_hostile_keyboardinterrupt_error_type_folds(self) -> None:
+        """Round-16: a raised (not returned) BaseException-not-Exception
+        subclass with a hostile __name__ reaches observe_adapter_tool_call's
+        own except BaseException clause with the original object intact --
+        _call_tool_impl's ``except Exception`` never matches a
+        KeyboardInterrupt subclass, so its own logging never runs and this
+        genuinely exercises _safe_error_type() through the real adapter path
+        (the Result.err(...) shape used for the analogous err-variant test
+        is intercepted by that unrelated pre-existing logging first; see
+        TestSafeErrorTypeDirect's docstring and the round-14 report).
+
+        The exception legitimately propagating to the caller is expected,
+        unchanged behavior -- Result reserves raised exceptions for
+        programming errors, not Result.err's expected-failure channel. What
+        must not happen is a SECOND, different crash while telemetry
+        computes error_type for it.
+        """
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_hostile_raised_probe")
+        handler.handle_mock.side_effect = HostileRaisedKeyboardInterrupt(
+            "acme private project failed"
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            with pytest.raises(HostileRaisedKeyboardInterrupt):
+                await adapter.call_tool("ouroboros_hostile_raised_probe", {"input": "safe"})
+
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "ExtensionError"
+        full_event = repr(capture.call_args.args) + repr(capture.call_args.kwargs)
+        assert "acme" not in full_event.lower()
+
     async def test_call_tool_builtin_error_class_stays_verbatim(self) -> None:
         """No-regression companion: our own/builtin error classes are unaffected."""
         adapter = MCPServerAdapter()
@@ -1926,6 +2060,68 @@ class TestSafeErrorTypeDirect:
         from ouroboros.mcp.telemetry_boundary import _safe_error_type
 
         assert _safe_error_type(ValidationError("boom")) == "ExtensionError"
+
+    def test_hostile_name_metaclass_raising_keyboardinterrupt_never_escapes(self) -> None:
+        """Round-16: except Exception alone would let this KeyboardInterrupt
+        through -- it must be caught and folded like any other hostile name.
+        """
+        from ouroboros.mcp.telemetry_boundary import _safe_error_type
+
+        assert (
+            _safe_error_type(HostileKeyboardInterruptNameError("acme private project failed"))
+            == "ExtensionError"
+        )
+
+    def test_hostile_name_metaclass_raising_systemexit_never_escapes(self) -> None:
+        from ouroboros.mcp.telemetry_boundary import _safe_error_type
+
+        assert (
+            _safe_error_type(HostileSystemExitNameError("acme private project failed"))
+            == "ExtensionError"
+        )
+
+
+class TestIsLogicalErrorDirect:
+    """Direct unit coverage of _is_logical_error()'s total isolation.
+
+    Same rationale as TestSafeErrorTypeDirect for testing directly rather
+    than only through the adapter: it lets every hostile shape be proven
+    independent of whether some other, unrelated code on the adapter path
+    happens to touch the same attribute first.
+    """
+
+    def test_hostile_is_error_raising_systemexit_never_escapes(self) -> None:
+        """Round-16: except Exception alone would let this SystemExit
+        through -- it must be caught and folded to False (not a logical
+        error), letting the outer Result.is_ok decide instead.
+        """
+        from ouroboros.mcp.telemetry_boundary import _is_logical_error
+
+        assert _is_logical_error(_HostileIsErrorRaisesSystemExit()) is False
+
+    def test_hostile_is_error_raising_keyboardinterrupt_never_escapes(self) -> None:
+        from ouroboros.mcp.telemetry_boundary import _is_logical_error
+
+        assert _is_logical_error(_HostileIsErrorRaisesKeyboardInterrupt()) is False
+
+    def test_normal_is_error_true_still_detected(self) -> None:
+        """No-regression companion: a well-behaved is_error=True still counts."""
+        from ouroboros.mcp.telemetry_boundary import _is_logical_error
+
+        assert _is_logical_error(MCPToolResult(is_error=True)) is True
+
+    def test_normal_is_error_false_still_detected(self) -> None:
+        from ouroboros.mcp.telemetry_boundary import _is_logical_error
+
+        assert _is_logical_error(MCPToolResult(is_error=False)) is False
+
+    def test_missing_attribute_falls_back_false(self) -> None:
+        """A value with no is_error attribute at all (not hostile, just a
+        different shape) falls back to False via getattr's own default.
+        """
+        from ouroboros.mcp.telemetry_boundary import _is_logical_error
+
+        assert _is_logical_error(object()) is False
 
 
 class TestMCPServerAdapterResources:

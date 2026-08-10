@@ -98,12 +98,22 @@ def _safe_error_type(error: object) -> str:
     is wrapped and any exception folds to the same safe literal a
     non-audited name would. The boundary's never-raises contract must hold
     even when the error value it is describing is itself adversarial.
+
+    Catches ``BaseException``, not just ``Exception``: a hostile metaclass
+    property can raise ``KeyboardInterrupt``/``SystemExit`` just as easily
+    as ``RuntimeError`` -- that is not a real user interrupt or process
+    exit, it is an extension-controlled property choosing an exception
+    class designed to slip past a narrower ``except Exception`` and corrupt
+    the caller's real result. Swallowing it here is correct: this function
+    is sanitization-only, never re-raises, and a genuine Ctrl-C from the
+    actual OS signal handler is delivered on the main thread independently
+    of this call, not manufactured by reading an object's dunder.
     """
     try:
         name = type(error).__name__
         if isinstance(name, str) and name in _SAFE_ERROR_TYPE_NAMES:
             return name
-    except Exception:
+    except BaseException:  # noqa: BLE001 -- sanitization-only, see docstring
         pass
     return _EXTENSION_ERROR_TYPE
 
@@ -120,10 +130,15 @@ def _is_logical_error(value: object) -> bool:
     corrupting the real handler result the caller is waiting on. Falls back
     to ``False`` (not a logical error, so the outer ``Result.is_ok`` alone
     decides) rather than guessing either way.
+
+    Catches ``BaseException`` for the same reason as :func:`_safe_error_type`:
+    a hostile ``is_error`` property raising ``SystemExit``/``KeyboardInterrupt``
+    is an extension-controlled dunder read, not a real interrupt or exit
+    request, and this helper never re-raises regardless of what it catches.
     """
     try:
         return bool(getattr(value, "is_error", False))
-    except Exception:
+    except BaseException:  # noqa: BLE001 -- sanitization-only, see docstring
         return False
 
 
