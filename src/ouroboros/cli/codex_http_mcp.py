@@ -1246,24 +1246,27 @@ def _compensate_disabled_transition(
     disabled_generation: str,
     prior_generation: str,
     prior_identity: tuple[int, int | float],
+    *,
+    failure: str = "Existing MCP server did not stop.",
+    already_aborted: bool = False,
 ) -> str:
-    """Restore the prior HTTP service after its disabled transition cannot prove stop."""
-    shutdown_error = "Existing MCP server did not stop."
+    """Restore the prior HTTP service after a disabled transition must be rolled back."""
     try:
-        _abort_generation(root, disabled_generation)
+        if not already_aborted:
+            _abort_generation(root, disabled_generation)
         if not _wait_for_identity_death(root, prior_generation, prior_identity):
-            return f"{shutdown_error} Compensation failed: prior HTTP service did not stop."
+            return f"{failure} Compensation failed: prior HTTP service did not stop."
         if not _restart_prior(schtasks, root, identity):
-            return f"{shutdown_error} Compensation failed: could not restart prior HTTP service."
+            return f"{failure} Compensation failed: could not restart prior HTTP service."
         prior = _load_generation(root, prior_generation)
         token = prior.get("prepare_token")
         if not isinstance(token, str) or not _wait_for_receipt(
             root, prior_generation, "ready", token
         ):
-            return f"{shutdown_error} Compensation failed: prior HTTP service did not become ready."
+            return f"{failure} Compensation failed: prior HTTP service did not become ready."
     except OSError as exc:
-        return f"{shutdown_error} Compensation failed: {exc}"
-    return f"{shutdown_error} Prior HTTP service was restored."
+        return f"{failure} Compensation failed: {exc}"
+    return f"{failure} Prior HTTP service was restored."
 
 
 def _require_commit_authorization(commit_authorized: Callable[[], bool] | None) -> None:
@@ -1296,6 +1299,8 @@ def _operate(
     prior_identity: tuple[int, int | float] | None = None
     token: str | None = None
     has_committed_serve_predecessor = False
+    generation_committed = False
+    abort_published = False
     try:
         with _windows_operation_lock():
             physical = _physical_config_dir(config_dir)
@@ -1332,6 +1337,8 @@ def _operate(
             if mode == "disabled":
                 _require_commit_authorization(commit_authorized)
                 _commit_generation(root, generation)
+                generation_committed = True
+                _require_commit_authorization(commit_authorized)
                 stopped = True
                 if prior is not None and prior_identity is not None:
                     try:
@@ -1343,6 +1350,7 @@ def _operate(
                     error = _compensate_disabled_transition(
                         schtasks, identity, root, generation, prior[0], prior_identity
                     )
+                    abort_published = True
                     if setup_lease is not None:
                         setup_lease.__exit__(None, None, None)
                         setup_lease = None
@@ -1387,36 +1395,66 @@ def _operate(
                 raise OSError("MCP generation did not become ready.")
             _require_commit_authorization(commit_authorized)
             _commit_generation(root, generation)
+            generation_committed = True
+            _require_commit_authorization(commit_authorized)
     except OSError as exc:
         recovery_error: str | None = None
+        disabled_recovery: str | None = None
+        error = str(exc)[:240]
         if generation is not None and root is not None:
             try:
-                _abort_generation(root, generation)
-                if mode == "serve" and has_committed_serve_predecessor and replacement_started:
-                    standby_identity = _raw_standby_identity(root, generation, token or "")
-                    if standby_identity is None:
-                        recovery_error = (
-                            "Replacement standby receipt is missing or invalid; "
-                            "predecessor recovery was not started."
-                        )
-                    elif _process_identity_alive(
-                        *standby_identity
-                    ) and not _wait_for_identity_death(root, generation, standby_identity):
-                        recovery_error = (
-                            "Replacement did not stop; predecessor recovery was not started."
-                        )
-                    if recovery_error is None and not _restore_committed_serve_predecessor(
-                        schtasks, root, identity
-                    ):
-                        recovery_error = "Could not restart committed predecessor or prove its token-bound readiness."
+                if mode == "disabled" and generation_committed and has_committed_serve_predecessor:
+                    assert prior is not None and prior_identity is not None
+                    _abort_generation(root, generation)
+                    abort_published = True
+                    disabled_recovery = _compensate_disabled_transition(
+                        schtasks,
+                        identity,
+                        root,
+                        generation,
+                        prior[0],
+                        prior_identity,
+                        failure=error,
+                        already_aborted=True,
+                    )
+                else:
+                    if not abort_published:
+                        _abort_generation(root, generation)
+                        abort_published = True
+                    if mode == "serve" and replacement_started:
+                        standby_identity = _raw_standby_identity(root, generation, token or "")
+                        if standby_identity is None:
+                            recovery_error = (
+                                "Replacement standby receipt is missing or invalid; "
+                                "predecessor recovery was not started."
+                            )
+                        elif not _wait_for_identity_death(root, generation, standby_identity):
+                            recovery_error = (
+                                "Replacement did not stop; predecessor recovery was not started."
+                            )
+                        if (
+                            recovery_error is None
+                            and has_committed_serve_predecessor
+                            and not _restore_committed_serve_predecessor(schtasks, root, identity)
+                        ):
+                            recovery_error = (
+                                "Could not restart committed predecessor or prove its "
+                                "token-bound readiness."
+                            )
             except OSError:
                 if mode == "serve" and has_committed_serve_predecessor:
                     recovery_error = "Could not complete predecessor recovery."
+                elif mode == "disabled" and generation_committed:
+                    disabled_recovery = (
+                        f"{error} Compensation failed: could not abort disabled generation."
+                    )
         if setup_lease is not None:
             setup_lease.__exit__(None, None, None)
+        if disabled_recovery is not None:
+            return disabled_recovery
         if recovery_error is not None:
-            return f"{str(exc)[:240]} Predecessor recovery failed: {recovery_error}"
-        return str(exc)[:240]
+            return f"{error} Predecessor recovery failed: {recovery_error}"
+        return error
     if setup_lease is not None:
         setup_lease.__exit__(None, None, None)
     return None
