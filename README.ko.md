@@ -6,7 +6,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -35,6 +35,14 @@
   <a href="#순환-구조">원리</a> ·
   <a href="#명령어">명령어</a> ·
   <a href="#아홉-개의-사고">에이전트</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 순서, 크래시 내구성, v1 범위, 작업을 무엇으로 지목할지를 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
+</p>
+
+<p align="center">
+  <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 위의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
 </p>
 
 > *AI는 무엇이든 만들 수 있다. 어려운 건 무엇을 만들어야 하는지 아는 것이다.*
@@ -140,11 +148,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 순서, 크래시 내구성, v1 범위, 작업을 무엇으로 지목할지를 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
-</p>
-
-<p align="center">
-  <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 위의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
+  <sub>이 페이지 맨 위의 녹화가 바로 이 명령입니다. 설치 전에 먼저 보시라고 위에 뒀습니다.</sub>
 </p>
 
 <p align="center">
