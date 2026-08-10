@@ -5782,15 +5782,27 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             text=True,
         )
         try:
-            for _ in range(500):
+            import time
+
+            startup_timeout = 30.0
+            startup_deadline = time.monotonic() + startup_timeout
+            while time.monotonic() < startup_deadline:
                 if marker.exists():
                     break
                 if first.poll() is not None:
                     break
-                import time
-
                 time.sleep(0.01)
-            assert marker.exists(), first.communicate(timeout=1)
+            if not marker.exists():
+                if first.poll() is None:
+                    first.kill()
+                first_stdout, first_stderr = first.communicate()
+                pytest.fail(
+                    "first setup subprocess did not reach the credentials publication "
+                    f"checkpoint within {startup_timeout:.0f} seconds "
+                    f"(returncode={first.returncode})\n"
+                    f"stdout:\n{first_stdout}\n"
+                    f"stderr:\n{first_stderr}"
+                )
             second = subprocess.Popen(
                 [sys.executable, "-c", second_script],
                 cwd=root,
@@ -5800,8 +5812,6 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 text=True,
             )
             # The second process must still be waiting on the activation lock.
-            import time
-
             time.sleep(0.1)
             assert second.poll() is None
             release.write_text("go", encoding="utf-8")

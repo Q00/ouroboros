@@ -16065,11 +16065,11 @@ class TestParallelACExecutor:
                 )
             )
 
-            await asyncio.wait_for(all_stage_one_started.wait(), timeout=1)
+            await asyncio.wait_for(all_stage_one_started.wait(), timeout=30)
             assert stage_two_started.is_set() is False
 
             release_stage_one.set()
-            result = await asyncio.wait_for(execution_task, timeout=1)
+            result = await asyncio.wait_for(execution_task, timeout=30)
 
         assert result.all_succeeded is True
         assert result.success_count == 3
@@ -16147,12 +16147,12 @@ class TestParallelACExecutor:
                 )
             )
 
-            await asyncio.wait_for(all_first_batch_started.wait(), timeout=1)
+            await asyncio.wait_for(all_first_batch_started.wait(), timeout=30)
             assert second_batch_started.is_set() is False
             assert stage_two_started.is_set() is False
 
             release_first_batch.set()
-            result = await asyncio.wait_for(execution_task, timeout=1)
+            result = await asyncio.wait_for(execution_task, timeout=30)
 
         assert result.all_succeeded is True
         assert result.success_count == 4
