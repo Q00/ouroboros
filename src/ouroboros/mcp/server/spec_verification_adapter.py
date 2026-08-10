@@ -196,3 +196,58 @@ def evaluation_summary_from_spec_verification(
         execution_completion_status=mechanical.execution_completion_status,
         approval_status="approved" if approved else "rejected",
     )
+
+
+def evaluation_summary_for_unavailable_spec_verification(
+    mechanical: Any,
+    seed: Any,
+    reason: str,
+) -> Any:
+    """Reject a mechanically completed run when formal evidence is unavailable."""
+    from ouroboros.core.lineage import ACResult, EvaluationSummary
+    from ouroboros.core.seed import ac_texts
+
+    seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+    seed_texts = ac_texts(seed_criteria)
+    expected_content = dict(enumerate(seed_texts))
+    for ac in mechanical.ac_results:
+        expected_content.setdefault(ac.ac_index, ac.ac_content)
+    for task in mechanical.task_results:
+        source_ac_index = task.source_ac_index
+        if source_ac_index is None:
+            source_ac_index = task.task_index
+        expected_content.setdefault(source_ac_index, task.task_content)
+
+    def semantic_key(ac_index: int) -> str | None:
+        if 0 <= ac_index < len(seed_criteria):
+            return getattr(seed_criteria[ac_index], "semantic_ac_key", None)
+        return None
+
+    ac_results = tuple(
+        ACResult(
+            ac_index=ac_index,
+            ac_content=ac_content,
+            semantic_ac_key=semantic_key(ac_index),
+            passed=False,
+            score=0.0,
+            evidence=reason,
+            verification_method="spec_verifier",
+            ac_verdict_state="not_evaluated",
+            final_verdict="fail",
+            rendered_verdict="NOT_EVALUATED",
+        )
+        for ac_index, ac_content in sorted(expected_content.items())
+    )
+
+    return EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=2 if mechanical.execution_completion_status == "completed" else 1,
+        score=0.0,
+        drift_score=None,
+        failure_reason=reason,
+        ac_results=ac_results,
+        task_results=mechanical.task_results,
+        feedback_metadata=mechanical.feedback_metadata,
+        execution_completion_status=mechanical.execution_completion_status,
+        approval_status="rejected",
+    )

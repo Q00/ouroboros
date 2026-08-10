@@ -48,6 +48,9 @@ from ouroboros.mcp.server.spec_verification_adapter import (
     agent_results_from_execution_summary as _agent_results_from_execution_summary,
 )
 from ouroboros.mcp.server.spec_verification_adapter import (
+    evaluation_summary_for_unavailable_spec_verification as _evaluation_summary_for_unavailable_spec_verification,
+)
+from ouroboros.mcp.server.spec_verification_adapter import (
     evaluation_summary_from_spec_verification as _evaluation_summary_from_spec_verification,
 )
 from ouroboros.mcp.types import (
@@ -1849,12 +1852,18 @@ def create_ouroboros_server(
     ) -> EvaluationSummary | None:
         """Run spec verification and override mechanical results if discrepancies found.
 
-        Returns a corrected EvaluationSummary if discrepancies are detected,
-        or None if no override is needed (verification passed or unavailable).
+        Returns a formal EvaluationSummary whenever Seed AC verification can
+        be evaluated. Missing project context, extraction failure, and empty
+        extraction are explicit rejected summaries rather than mechanical-pass
+        fallbacks.
         """
         project_dir = _extract_project_dir(artifact, seed=seed)
         if not project_dir:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: project directory could not be resolved.",
+            )
 
         seed_acs = getattr(seed, "acceptance_criteria", None) or ()
         if not seed_acs:
@@ -1862,16 +1871,28 @@ def create_ouroboros_server(
 
         seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
         if not seed_id:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec verification unavailable: Seed identifier is missing.",
+            )
 
         extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                f"Spec assertion extraction failed: {extract_result.error}",
+            )
 
         assertions = extract_result.value
         if not assertions:
-            return None
+            return _evaluation_summary_for_unavailable_spec_verification(
+                mechanical,
+                seed,
+                "Spec assertion extraction produced no independently usable assertions.",
+            )
 
         agent_results = _agent_results_from_execution_summary(mechanical)
 

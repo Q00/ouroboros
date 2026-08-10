@@ -12,7 +12,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from ouroboros import __version__
-from ouroboros.core.lineage import EvaluationSummary, TaskResult
+from ouroboros.core.lineage import ACResult, EvaluationSummary, TaskResult
+from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
@@ -24,6 +25,7 @@ from ouroboros.mcp.server.adapter import (
     _agent_results_from_execution_summary,
     _build_prompt_signature_with_aliases,
     _build_tool_signature_with_aliases,
+    _evaluation_summary_for_unavailable_spec_verification,
     _evaluation_summary_from_spec_verification,
     _extract_feedback_metadata_from_artifact,
     _parse_legacy_execution_task_summary,
@@ -310,6 +312,55 @@ Parallel Execution Verification Report
         )
 
         assert _agent_results_from_execution_summary(mechanical) == {0: False}
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "Spec assertion extraction failed: unreadable response",
+            "Spec assertion extraction produced no independently usable assertions.",
+        ],
+    )
+    def test_unavailable_assertion_extraction_cannot_fall_back_to_mechanical_pass(
+        self,
+        reason: str,
+    ) -> None:
+        """Unreadable, rejected, and empty extraction all fail the formal gate."""
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Set MAX_RETRIES to 5",
+                    passed=True,
+                    score=1.0,
+                    evidence="Agent reported PASS",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+        seed = SimpleNamespace(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Set MAX_RETRIES to 5",
+                    semantic_ac_key="ac_0123456789abcdef",
+                ),
+            )
+        )
+
+        summary = _evaluation_summary_for_unavailable_spec_verification(
+            mechanical,
+            seed,
+            reason,
+        )
+
+        assert summary.final_approved is False
+        assert summary.approval_status == "rejected"
+        assert summary.run_verdict == "FAIL"
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert summary.ac_results[0].semantic_ac_key == "ac_0123456789abcdef"
+        assert summary.failure_reason == reason
 
     def test_unverifiable_report_preserves_legacy_task_failure_as_ac_failure(self) -> None:
         """Skipped verifier assertions must not upgrade a failed task to approval."""

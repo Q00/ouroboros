@@ -1874,15 +1874,7 @@ class TestAssertionExtractor:
             ]
         )
         result = await extractor.extract("seed_empty_expected", ("WARMUP_FRAMES should be 10",))
-        assert result.is_ok
-        assert result.value == ()
-
-        project = TestSpecVerifier()._create_project({"config.py": "WARMUP_FRAMES = 999\n"})
-        summary = SpecVerifier(project_dir=project).verify_all(
-            result.value, agent_results={0: True}
-        )
-        assert summary.total_assertions == 0
-        assert summary.verified_count == 0
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
@@ -1903,8 +1895,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("seed_invalid_regex", ("MAX_RETRIES should be 5",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_overflowing_regex_assertion_rejected_before_verifier(self) -> None:
@@ -1925,8 +1916,7 @@ class TestAssertionExtractor:
 
         result = await extractor.extract("seed_overflow_regex", ("constant is five",))
 
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     def test_overflowing_regex_fails_closed_in_verifier(self) -> None:
         """Direct verifier callers cannot crash it with a regex overflow."""
@@ -2029,8 +2019,7 @@ class TestAssertionExtractor:
         extractor = self._make_extractor_sequence(unreadable, _GOOD_EXTRACTION, _GOOD_EXTRACTION)
 
         first = await extractor.extract("seed_unreadable", ("Has class Foo",))
-        assert first.is_ok
-        assert first.value == ()
+        assert first.is_err
 
         second = await extractor.extract("seed_unreadable", ("Has class Foo",))
         assert second.is_ok
@@ -2072,8 +2061,7 @@ class TestAssertionExtractor:
         extractor = self._make_extractor_sequence(wrong_schema, _GOOD_EXTRACTION, _GOOD_EXTRACTION)
 
         first = await extractor.extract("seed_wrong_schema", ("Has class Foo",))
-        assert first.is_ok
-        assert first.value == ()
+        assert first.is_err
 
         second = await extractor.extract("seed_wrong_schema", ("Has class Foo",))
         assert second.is_ok
@@ -2151,8 +2139,8 @@ class TestAssertionExtractor:
         assert result.value == ()
 
     @pytest.mark.asyncio
-    async def test_invalid_json_returns_empty(self) -> None:
-        """Malformed LLM response → empty assertions, no crash."""
+    async def test_invalid_json_returns_error(self) -> None:
+        """Malformed LLM response remains retryable and cannot bypass the gate."""
         mock_adapter = AsyncMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
@@ -2165,8 +2153,7 @@ class TestAssertionExtractor:
         )
         extractor = AssertionExtractor(llm_adapter=mock_adapter)
         result = await extractor.extract("seed_bad", ("test",))
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err
 
     @pytest.mark.asyncio
     async def test_invalid_tier_is_rejected(self) -> None:
@@ -2184,5 +2171,4 @@ class TestAssertionExtractor:
             ]
         )
         result = await extractor.extract("seed_tier", ("test",))
-        assert result.is_ok
-        assert result.value == ()
+        assert result.is_err

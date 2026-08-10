@@ -145,7 +145,7 @@ class AssertionExtractor:
             # of the seed. The transport-failure path above already retries;
             # this one now does too.
             logger.warning("AssertionExtractor response unreadable, not caching: %s", seed_id)
-            return Result.ok(())
+            return Result.err("Extraction response was unreadable or all assertions were rejected")
 
         self._cache[seed_id] = assertions
         # LRU eviction: remove oldest entry if cache exceeds max size
