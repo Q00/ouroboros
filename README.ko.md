@@ -269,8 +269,8 @@ ooo evaluate   →  3단계 검증: Mechanical → Semantic → Consensus
 
 
 <p align="center">
-  <sub>인터뷰가 물었는데 답 못 한 질문이 있었다면, 그게 남한테 말할 만한 부분입니다.<br/>
-  <a href="https://github.com/Q00/ouroboros"><strong>저장소에 star</strong></a>를 눌러두면, 자기가 시키지도 않은 코드를 리뷰하느라 지친 다음 사람에게 닿습니다.</sub>
+  <sub>대개는 리뷰 세 번째 파일쯤에서 자기가 명확하지 않았다는 걸 알게 됩니다.<br/>
+  익숙한 기분이라면, 이 페이지 위쪽의 <strong>Star</strong> 버튼이 같은 일을 겪을 다음 사람에게 이걸 보내줍니다.</sub>
 </p>
 
 ---

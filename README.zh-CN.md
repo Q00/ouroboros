@@ -217,8 +217,8 @@ ouroboros uninstall
 
 
 <p align="center">
-  <sub>如果访谈问到了你答不上来的地方，那一条才是值得说给别人听的。<br/>
-  给仓库<a href="https://github.com/Q00/ouroboros"><strong>点个 star</strong></a>，它就能找到下一个正在审自己没要过的代码的人。</sub>
+  <sub>大多数人是在审到第三个文件的时候，才发现自己当初没说清楚。<br/>
+  如果这感觉很熟，页面顶部那个 <strong>Star</strong> 按钮，能把它送到下一个会栽在同一处的人面前。</sub>
 </p>
 
 ---
