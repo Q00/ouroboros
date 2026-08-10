@@ -113,4 +113,4 @@ def test_web_app_class_is_product_complete() -> None:
     assert profile.name == "web_app"
     assert profile.default_completion_mode is CompletionMode.PRODUCT_COMPLETE
     assert profile.default_ac_template
-    assert profile.runtime_probe_kinds
+    assert profile.runtime_probe_kinds == ("headless_run", "browser_smoke")

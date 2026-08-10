@@ -60,6 +60,7 @@ from ouroboros.auto.web_ownership import (
     _WEB_APP_GOAL_SIGNAL_RE,
     _WEB_SIMILARITY_MODIFIER_RE,
     _goal_first_np_has_ui_shape,
+    _goal_first_np_head,
     _goal_first_np_is_ui_headed,
 )
 
@@ -735,6 +736,14 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     visible = _game_visible_text(ledger)
+    # An explicitly produced game owns the game class without requiring
+    # rendering vocabulary in the outputs (#1813 R119). Browser-hosted games
+    # commonly describe ordinary gameplay (controls, score, levels) while the
+    # goal itself supplies the decisive artifact identity. Requiring the first
+    # NP to be headed by ``game`` keeps subject compounds such as "game
+    # leaderboard" and "game analytics dashboard" outside this fast path.
+    if _goal_first_np_head(goal) in {"game", "games"} and _GAME_DOMAIN_RE.search(visible):
+        return True
     # Token-bounded (#1813 R13): substring matching made "iframe" satisfy
     # "frame" and would accept similar embeddings for the other terms.
     if _GAME_CORE_RE.search(visible):
