@@ -243,8 +243,15 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
     """Host guides must match setup's fail-closed uvx/pipx contract."""
     root = Path(__file__).parent.parent.parent
     guides = {
-        runtime: (root / "docs" / "runtime-guides" / f"{runtime}.md").read_text(encoding="utf-8")
-        for runtime in ("kiro", "copilot", "hermes")
+        "kiro": tuple(
+            (root / "docs" / "runtime-guides" / filename).read_text(encoding="utf-8")
+            for filename in ("kiro.md", "kiro.ko.md")
+        ),
+        "copilot": tuple(
+            (root / "docs" / "runtime-guides" / filename).read_text(encoding="utf-8")
+            for filename in ("copilot.md", "copilot.ko.md")
+        ),
+        "hermes": ((root / "docs" / "runtime-guides" / "hermes.md").read_text(encoding="utf-8"),),
     }
 
     exact_launcher_contracts = {
@@ -280,19 +287,20 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
         "command: python3",
     )
 
-    for runtime, content in guides.items():
-        assert "pipx install 'ouroboros-ai[mcp]'" in content
-        assert "uv tool install 'ouroboros-ai[mcp]'" in content
-        for snippet in exact_launcher_contracts[runtime]:
-            assert snippet in content
-        for forbidden in forbidden_host_commands:
-            assert forbidden not in content
+    for runtime, translations in guides.items():
+        for content in translations:
+            assert "pipx install 'ouroboros-ai[mcp]'" in content
+            assert "uv tool install 'ouroboros-ai[mcp]'" in content
+            for snippet in exact_launcher_contracts[runtime]:
+                assert snippet in content
+            for forbidden in forbidden_host_commands:
+                assert forbidden not in content
 
-    assert "from the venv that owns" not in guides["kiro"]
-    assert "`uv tool install` / `pip install`" not in guides["copilot"]
-    assert "plain `pip install`" in guides["copilot"]
-    assert "setup fails closed" in guides["copilot"]
-    assert "never falls back to a direct `ouroboros` binary" in guides["hermes"]
+    assert "from the venv that owns" not in guides["kiro"][0]
+    assert "`uv tool install` / `pip install`" not in guides["copilot"][0]
+    assert "plain `pip install`" in guides["copilot"][0]
+    assert "setup fails closed" in guides["copilot"][0]
+    assert "never falls back to a direct `ouroboros` binary" in guides["hermes"][0]
 
 
 @pytest.mark.parametrize(

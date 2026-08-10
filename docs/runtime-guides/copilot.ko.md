@@ -139,7 +139,7 @@ copilot --no-color --log-level none \
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
       "env": {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
         "OUROBOROS_LLM_BACKEND": "copilot"

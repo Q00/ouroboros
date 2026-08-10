@@ -669,6 +669,56 @@ class TestCodexDoctor:
         assert any(expected_failure in failure for failure in failures)
         live_probe.assert_not_awaited()
 
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("execution_config", "field"),
+        [
+            ('cwd = "."\n', "cwd"),
+            ('env_vars = ["PATH"]\n', "env_vars"),
+            ('environment_id = "remote"\n', "environment_id"),
+            ("startup_timeout_sec = 0.25\n", "startup_timeout_sec"),
+            ("startup_timeout_ms = 250\n", "startup_timeout_ms"),
+        ],
+        ids=[
+            "working-directory",
+            "ambient-environment",
+            "execution-environment",
+            "startup-timeout-seconds",
+            "startup-timeout-milliseconds",
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_unmodeled_execution_fields_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        execution_config: str,
+        field: str,
+    ) -> None:
+        """Doctor cannot approve a launcher after dropping Codex execution controls."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            + execution_config
+            + 'command = "uvx"\n'
+            + 'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any(
+            f"[mcp_servers.ouroboros].{field} is unsupported by doctor" in failure
+            for failure in failures
+        )
+        live_probe.assert_not_awaited()
+
     def test_check_auto_dispatch_surface_rejects_custom_command_mcp_entry(
         self,
         tmp_path: Path,

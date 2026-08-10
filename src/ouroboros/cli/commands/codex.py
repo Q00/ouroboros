@@ -206,6 +206,7 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         return failures
 
     _check_mcp_activation_surface(ouroboros_entry, failures)
+    _check_mcp_execution_surface(ouroboros_entry, failures)
 
     url = ouroboros_entry.get("url")
     if isinstance(url, str) and url.strip():
@@ -334,6 +335,31 @@ def _check_mcp_activation_surface(
             failures.append(
                 "[mcp_servers.ouroboros].disabled_tools blocks required auto tools: "
                 + ", ".join(blocked_tools)
+            )
+
+
+def _check_mcp_execution_surface(
+    ouroboros_entry: Mapping[str, object], failures: list[str]
+) -> None:
+    """Reject Codex execution controls that the doctor probe cannot reproduce.
+
+    The live probe deliberately supports only the launcher, argv, and explicit
+    environment table represented by :class:`_CodexMCPCommandEntry`.  Silently
+    ignoring any additional process or initialization controls would verify a
+    different execution contract from the one Codex actually uses.
+    """
+    unsupported_fields = {
+        "cwd": "the stdio process working directory",
+        "env_vars": "which ambient environment variables Codex forwards",
+        "environment_id": "the Codex execution environment",
+        "startup_timeout_sec": "the Codex MCP initialization deadline",
+        "startup_timeout_ms": "the legacy Codex MCP initialization deadline",
+    }
+    for field, effect in unsupported_fields.items():
+        if field in ouroboros_entry:
+            failures.append(
+                f"[mcp_servers.ouroboros].{field} is unsupported by doctor because "
+                f"it changes {effect}; remove it before verifying this MCP contract"
             )
 
 

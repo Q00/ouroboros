@@ -44,7 +44,7 @@ setup이 하는 일:
      "mcpServers": {
        "ouroboros": {
          "command": "uvx",
-         "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+         "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
          "disabled": false,
          "env": {
            "OUROBOROS_RUNTIME": "kiro",
