@@ -920,7 +920,21 @@ class AgentProcessHandle:
                 )
             directive = _TRANSITION_DIRECTIVE.get(new_status)
             if directive is not None and self._journal_mode is AgentProcessJournalMode.DURABLE:
-                await self._emit_lifecycle_transition(directive, reason, new_status)
+
+                async def commit_and_apply_live_status() -> None:
+                    await self._emit_lifecycle_transition(directive, reason, new_status)
+                    self._status = new_status
+                    if new_status in _TERMINAL_STATUSES:
+                        self._completed_event.set()
+
+                # Every durable transition has one indivisible journal/live
+                # handoff. EventStore may finish a commit before surfacing
+                # caller cancellation; keep the corresponding live status
+                # (and terminal completion signal) in the same shielded task
+                # so replay can never advance past the live state. The helper
+                # re-raises cancellation only after both halves have settled.
+                await _run_cancellation_atomic_handoff(commit_and_apply_live_status())
+                return
             self._status = new_status
             if new_status in _TERMINAL_STATUSES:
                 self._completed_event.set()
@@ -1107,6 +1121,14 @@ class AgentProcess:
                 try:
                     await handle._mark_cancelled()
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
+                    if (
+                        isinstance(exc, asyncio.CancelledError)
+                        and handle.status() is AgentProcessStatus.CANCELLED
+                    ):
+                        # The durable terminal handoff committed and applied
+                        # its live state before preserving task cancellation.
+                        # It is authoritative, not a new terminal failure.
+                        raise
                     if exc is handle._journal_failure:
                         handle._fail_closed_after_journal_failure(exc)
                     else:
@@ -1160,6 +1182,14 @@ class AgentProcess:
                     else:
                         await handle._mark_completed(reason="work returned")
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
+                    if isinstance(exc, asyncio.CancelledError) and handle.status() in {
+                        AgentProcessStatus.CANCELLED,
+                        AgentProcessStatus.COMPLETED,
+                    }:
+                        # Cancellation after a terminal commit remains caller
+                        # cancellation; the committed terminal state must not
+                        # be reclassified through a synthetic FAILED append.
+                        raise
                     if exc is handle._journal_failure:
                         handle._fail_closed_after_journal_failure(exc)
                     else:
@@ -1245,13 +1275,16 @@ def _new_process_id() -> str:
 async def _wait_for_lifecycle_emit_drain(
     handle: AgentProcessHandle, *, timeout: float = 1.0
 ) -> None:
-    """Best-effort wait for AgentProcess lifecycle journal writes to drain."""
-    if handle._pending_emit_count <= 0:
+    """Best-effort wait for terminal publication and owned runner cleanup."""
+    work_task = handle._work_task
+    if handle._pending_emit_count <= 0 and (work_task is None or work_task.done()):
         return
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while handle._pending_emit_count > 0 and loop.time() < deadline:
+    while (
+        handle._pending_emit_count > 0 or (work_task is not None and not work_task.done())
+    ) and loop.time() < deadline:
         await asyncio.sleep(0.01)
 
 
