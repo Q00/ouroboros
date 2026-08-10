@@ -543,6 +543,22 @@ class AgentPool:
         if self._running_tasks.get(task_id) is task:
             self._running_tasks.pop(task_id, None)
 
+    def _settle_dispatch_failure(self, task: TaskRequest, error: BaseException) -> None:
+        """Publish a terminal result for an acquired task dispatch failure."""
+        if isinstance(error, asyncio.CancelledError):
+            error_message = "Task cancelled"
+        else:
+            detail = str(error) or type(error).__name__
+            error_message = f"Task dispatch failed: {detail}"
+
+        self._publish_task_result(
+            TaskResult(
+                task_id=task.id,
+                success=False,
+                error_message=error_message,
+            )
+        )
+
     async def _spawn_agent(self, agent_id: str) -> AgentInstance:
         """Spawn a new agent instance.
 
@@ -637,17 +653,20 @@ class AgentPool:
         log.info("agents.pool.dispatcher_started")
 
         while not self._shutdown:
-            queue_item_acquired = False
-            queue_item_transferred = False
-            task: TaskRequest | None = None
+            # This timeout belongs only to polling an empty queue. Once get()
+            # returns, every exception is a dispatch failure for an accepted
+            # task and must pass through the ownership settlement below.
             try:
-                # Get next task with timeout
                 priority, task = await asyncio.wait_for(
                     self._task_queue.get(),
                     timeout=1.0,
                 )
-                queue_item_acquired = True
+            except TimeoutError:
+                continue
 
+            queue_item_transferred = False
+            agent: AgentInstance | None = None
+            try:
                 # Wait for available agent
                 agent = await self._wait_for_agent(task.agent_type)
                 if not agent:
@@ -672,28 +691,28 @@ class AgentPool:
                 self._track_running_task(task.id, asyncio.create_task(task_coro))
                 queue_item_transferred = True
 
-            except TimeoutError:
-                continue
-            except Exception as e:
+            except BaseException as error:
                 # Once acquired, the dispatcher owns settlement until it
                 # explicitly transfers the item back to the queue or to an
-                # execution task. Never acknowledge an accepted task while
-                # leaving it pending.
-                if queue_item_acquired and not queue_item_transferred and task is not None:
-                    self._publish_task_result(
-                        TaskResult(
-                            task_id=task.id,
-                            success=False,
-                            error_message=f"Task dispatch failed: {e}",
-                        )
-                    )
+                # execution task. Cancellation terminalizes the acquired item
+                # before propagating; process-control exceptions do likewise
+                # and retain their original propagation semantics.
+                if not queue_item_transferred:
+                    self._settle_dispatch_failure(task, error)
+                    if agent is not None and agent.current_task == task.id:
+                        agent.state = AgentState.IDLE
+                        agent.current_task = None
+                        agent.last_activity = time.time()
+
+                if isinstance(error, asyncio.CancelledError) or not isinstance(error, Exception):
+                    raise
+
                 log.exception(
                     "agents.pool.dispatcher_error",
-                    error=str(e),
+                    error=str(error),
                 )
             finally:
-                if queue_item_acquired:
-                    self._task_queue.task_done()
+                self._task_queue.task_done()
 
     async def _wait_for_agent(
         self,

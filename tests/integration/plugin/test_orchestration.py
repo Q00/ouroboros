@@ -308,6 +308,68 @@ class TestAgentPoolIntegration:
         await pool.stop()
 
     @pytest.mark.asyncio
+    async def test_agent_pool_dispatcher_timeout_settles_acquired_task(self) -> None:
+        """A timeout after queue acquisition is a terminal dispatch failure."""
+        pool = AgentPool(
+            adapter=MagicMock(),
+            config=AgentPoolConfig(
+                min_instances=0,
+                max_instances=0,
+                enable_auto_scaling=False,
+            ),
+        )
+
+        with patch.object(
+            pool,
+            "_wait_for_agent",
+            side_effect=TimeoutError("agent lookup timed out"),
+        ):
+            await pool.start()
+            task_id = await pool.submit_task(agent_type="executor", prompt="settle timeout")
+            result = await pool.get_task_result(task_id, timeout=0.5)
+
+        assert result.success is False
+        assert result.error_message == "Task dispatch failed: agent lookup timed out"
+        assert task_id not in pool._pending_task_ids
+        await asyncio.wait_for(pool._task_queue.join(), timeout=0.1)
+        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
+            pool._task_queue.task_done()
+        await pool.stop()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_queue_poll_timeout_does_not_fabricate_task(self) -> None:
+        """An empty-queue poll timeout simply starts the next poll."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        first_poll_timed_out = asyncio.Event()
+        second_poll_started = asyncio.Event()
+        never_returns = asyncio.Event()
+        poll_count = 0
+
+        async def poll_queue() -> tuple[int, TaskRequest]:
+            nonlocal poll_count
+            poll_count += 1
+            if poll_count == 1:
+                first_poll_timed_out.set()
+                raise TimeoutError
+            second_poll_started.set()
+            await never_returns.wait()
+            raise AssertionError("unreachable")
+
+        with patch.object(pool._task_queue, "get", side_effect=poll_queue):
+            await pool.start()
+            await asyncio.wait_for(first_poll_timed_out.wait(), timeout=0.5)
+            await asyncio.wait_for(second_poll_started.wait(), timeout=0.5)
+
+            assert pool._dispatcher_task is not None
+            assert not pool._dispatcher_task.done()
+            assert pool._pending_task_ids == set()
+            assert pool._task_results == {}
+
+            await pool.stop()
+
+        assert poll_count == 2
+
+    @pytest.mark.asyncio
     async def test_agent_pool_stop_acknowledges_dispatcher_owned_queue_item(self) -> None:
         """Cancelling a dispatcher-held item settles its queue ownership exactly once."""
         dispatcher_owned = asyncio.Event()
