@@ -50,6 +50,7 @@ from ouroboros.providers.profiles import (
 @dataclass
 class _Adapter:
     tokens: int | None
+    unallocated_tokens: int = 0
     response_model: str = "test-model"
     llm_backend: str | None = None
     api_base: str = "https://provider.example/v1"
@@ -115,6 +116,7 @@ class _Adapter:
                     prompt_tokens=self.tokens,
                     completion_tokens=0,
                     total_tokens=self.tokens,
+                    unallocated_tokens=self.unallocated_tokens,
                 ),
             )
         )
@@ -257,6 +259,58 @@ async def test_generation_provider_usage_sums_every_tracked_call() -> None:
     assert summary.configuration_fingerprint is not None
     assert summary.configuration_assignments
     assert summary.issues == ()
+
+
+@pytest.mark.parametrize(
+    ("allocated_tokens", "unallocated_tokens"),
+    [
+        pytest.param(0, 132, id="total-only"),
+        pytest.param(120, 12, id="cache-inclusive"),
+    ],
+)
+async def test_generation_provider_usage_accounts_explicit_unallocated_authority(
+    allocated_tokens: int,
+    unallocated_tokens: int,
+) -> None:
+    config = CompletionConfig(model="test-model", role="reflect")
+    with capture_generation_provider_usage() as capture:
+        await tracked_complete(
+            _Adapter(allocated_tokens, unallocated_tokens=unallocated_tokens),
+            [],
+            config,
+        )
+
+    summary = capture.summary(instrumentation_complete=True)
+
+    assert summary.complete is True
+    assert summary.token_spend == 132
+    assert summary.issues == ()
+
+
+@pytest.mark.parametrize(
+    "unallocated_tokens",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(-1, id="negative"),
+        pytest.param(10**400, id="overflow"),
+    ],
+)
+async def test_generation_provider_usage_rejects_invalid_unallocated_authority(
+    unallocated_tokens: int,
+) -> None:
+    config = CompletionConfig(model="test-model", role="reflect")
+    with capture_generation_provider_usage() as capture:
+        await tracked_complete(
+            _Adapter(0, unallocated_tokens=unallocated_tokens),
+            [],
+            config,
+        )
+
+    summary = capture.summary(instrumentation_complete=True)
+
+    assert summary.complete is False
+    assert summary.token_spend is None
+    assert "missing or invalid" in "; ".join(summary.issues)
 
 
 async def test_generation_provider_usage_rejects_any_missing_runtime_usage() -> None:

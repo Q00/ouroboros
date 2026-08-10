@@ -367,6 +367,8 @@ class ClaudeCodeAdapter:
 
         error_type = str(error.details.get("error_type", ""))
         stderr = str(error.details.get("stderr", "") or "").strip()
+        if stderr and self._is_retryable_error(stderr):
+            return True
         if stderr:
             return False
 
@@ -792,7 +794,32 @@ class ClaudeCodeAdapter:
             )
 
         payload = normalized.raw_payload
-        if normalized.is_error or proc.returncode != 0:
+        process_failed = proc.returncode not in (0, None)
+        if process_failed:
+            # The process status is the outer authority.  A stale success
+            # envelope can remain on stdout after the CLI/service fails; using
+            # its result text would hide overload/rate-limit diagnostics and
+            # suppress the shared transient retry loop.
+            process_diagnostic = stderr_text or (normalized.result if normalized.is_error else "")
+            return Result.err(
+                ProviderError(
+                    message=(
+                        process_diagnostic
+                        or f"claude CLI command failed with exit code {proc.returncode}"
+                    ),
+                    details={
+                        "error_type": "ProcessError",
+                        "subtype": normalized.subtype,
+                        "returncode": proc.returncode,
+                        "session_id": normalized.session_id,
+                        "usage": normalized.usage,
+                        "stop_reason": normalized.stop_reason,
+                        "stderr": stderr_text[:2000],
+                        "envelope_is_error": normalized.is_error,
+                    },
+                )
+            )
+        if normalized.is_error:
             return Result.err(
                 ProviderError(
                     message=normalized.result or "claude CLI reported an error",
@@ -816,6 +843,10 @@ class ClaudeCodeAdapter:
             return Result.err(empty)
 
         usage = normalized.usage or {}
+        prompt_tokens = int(usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        allocated_tokens = prompt_tokens + completion_tokens
+        authoritative_tokens = int(usage.get("total_tokens") or 0)
         log.info(
             "claude_code_adapter.cli_request_completed",
             content_length=len(content),
@@ -827,13 +858,14 @@ class ClaudeCodeAdapter:
                 content=content,
                 model=config.model,
                 usage=UsageInfo(
-                    # The normalizer is the single accounting authority.  A
-                    # total-only provider payload cannot be split truthfully;
-                    # UsageInfo's legacy integer component fields stay zero
-                    # while raw_response["usage"] retains their absence.
-                    prompt_tokens=int(usage.get("input_tokens") or 0),
-                    completion_tokens=int(usage.get("output_tokens") or 0),
-                    total_tokens=int(usage.get("total_tokens") or 0),
+                    # Preserve UsageInfo's additive invariant.  The normalizer
+                    # guarantees that the authoritative total is at least the
+                    # known prompt/completion sum; cache or total-only spend is
+                    # explicit rather than silently split between components.
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=allocated_tokens,
+                    unallocated_tokens=authoritative_tokens - allocated_tokens,
                 ),
                 finish_reason=normalized.stop_reason or "stop",
                 raw_response=payload,
