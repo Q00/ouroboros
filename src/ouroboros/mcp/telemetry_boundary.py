@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import sys
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,38 @@ _TERMINAL_JOB_EVENTS = frozenset(
 # command="unknown_tool", is_funnel=False).
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
+# error_type is a plain exception-class name, so it is just as capable of
+# smuggling a caller-controlled/extension-defined identifier as `tool` was
+# (e.g. a registered extension raising AcmePrivateProjectError). Only class
+# names we can vouch for -- stdlib, builtins, or our own `ouroboros`
+# package -- are ever queued verbatim; every third-party/extension class
+# folds to this fixed literal instead. Kept distinct from _UNKNOWN_TOOL_NAME
+# (a different axis: that one is about an unresolved tool name, this one is
+# about an error class we don't recognize).
+_EXTENSION_ERROR_TYPE = "ExtensionError"
+
+
+def _safe_error_type(error: object) -> str:
+    """Fold a non-audited exception/error class name to a fixed literal.
+
+    Verbatim only for: builtins (``ValueError``, ``RuntimeError``, ...),
+    the standard library (top-level package in ``sys.stdlib_module_names``),
+    or our own code (``__module__`` starting with ``"ouroboros"`` -- covers
+    ``MCPToolError``/``MCPServerError`` and every internal exception).
+    Everything else -- a third-party dependency's exception, or a class an
+    extension/registered tool defines itself -- is a class name we cannot
+    vouch for as non-identifying, so it folds to ``_EXTENSION_ERROR_TYPE``.
+    """
+    module = type(error).__module__
+    top_level = module.partition(".")[0]
+    if (
+        module == "builtins"
+        or top_level in sys.stdlib_module_names
+        or module.startswith("ouroboros")
+    ):
+        return type(error).__name__
+    return _EXTENSION_ERROR_TYPE
+
 
 def _duration_ms(started_at: float) -> float:
     return (time.monotonic() - started_at) * 1000
@@ -49,6 +82,15 @@ async def observe_adapter_tool_call[T, E](
     the caller must assert whether it resolved to a registered tool via
     ``registered``. Only a registered name is ever queued verbatim; otherwise
     the fixed ``_UNKNOWN_TOOL_NAME`` literal stands in.
+
+    ``ok`` reflects both layers of the Result-wrapping-MCPToolResult shape:
+    the outer ``Result.is_ok`` (did the call raise or return an error
+    object) AND the inner ``MCPToolResult.is_error`` (did the handler
+    itself report a logical failure while still returning ``Result.ok``,
+    e.g. a validation/input-required response). A logical error has no
+    exception to name, so it carries ``error_type=None`` -- the request
+    completed, the outcome was a logical error, and there is no dishonest
+    "unknown"/"none of the above" value to invent in its place.
     """
     safe_name = name if registered else _UNKNOWN_TOOL_NAME
     started_at = time.monotonic()
@@ -60,15 +102,19 @@ async def observe_adapter_tool_call[T, E](
                 safe_name,
                 ok=False,
                 duration_ms=_duration_ms(started_at),
-                error_type=type(exc).__name__,
+                error_type=_safe_error_type(exc),
             )
         raise
     if enabled:
+        # getattr, not a direct attribute access: this function is generic
+        # over T, and a telemetry-shape assumption must never be able to
+        # crash the real call it is only supposed to be observing.
+        logical_error = result.is_ok and bool(getattr(result.value, "is_error", False))
         usage_telemetry.capture_tool_call(
             safe_name,
-            ok=result.is_ok,
+            ok=result.is_ok and not logical_error,
             duration_ms=_duration_ms(started_at),
-            error_type=type(result.error).__name__ if result.is_err else None,
+            error_type=_safe_error_type(result.error) if result.is_err else None,
         )
     return result
 
@@ -78,7 +124,16 @@ async def call_sdk_tool(
     name: str,
     arguments: dict[str, Any],
 ) -> Any:
-    """Own SDK validation plus the one complete request-outcome event."""
+    """Own SDK validation plus the one complete request-outcome event.
+
+    ``ok`` reflects both the outer ``Result.is_ok`` and, once a definition
+    is resolved and the call actually runs, the inner
+    ``MCPToolResult.is_error`` -- a logical-error response (e.g. a
+    validation/input-required payload returned as ``Result.ok``) counts as
+    ``ok=False`` here too, matching :func:`observe_adapter_tool_call`. Its
+    ``error_type`` stays ``None``: there is no exception to name, only a
+    completed request whose outcome was a logical error.
+    """
     from jsonschema import Draft202012Validator
 
     from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
@@ -104,7 +159,7 @@ async def call_sdk_tool(
         Draft202012Validator(definition.to_input_schema()).validate(arguments)
         result = await adapter.call_tool(name, arguments, _capture_telemetry=False)
         if result.is_err:
-            error_type = type(result.error).__name__
+            error_type = _safe_error_type(result.error)
             raise RuntimeError(str(result.error))
         value = result.value
         if definition.output_schema is not None:
@@ -115,10 +170,16 @@ async def call_sdk_tool(
             safe_name,
             ok=False,
             duration_ms=_duration_ms(started_at),
-            error_type=error_type or type(exc).__name__,
+            error_type=error_type or _safe_error_type(exc),
         )
         raise
-    usage_telemetry.capture_tool_call(safe_name, ok=True, duration_ms=_duration_ms(started_at))
+    # getattr, not a direct attribute access: value is always MCPToolResult
+    # at the sole current call site, but this must never crash a genuinely
+    # successful call over a telemetry-shape assumption.
+    logical_error = bool(getattr(value, "is_error", False))
+    usage_telemetry.capture_tool_call(
+        safe_name, ok=not logical_error, duration_ms=_duration_ms(started_at)
+    )
     return response
 
 

@@ -16,7 +16,7 @@ from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
-from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
+from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
@@ -63,6 +63,16 @@ from ouroboros.verification.verifier import SpecVerifier
 class _FakeEventStore:
     async def append(self, event: object) -> None:
         pass
+
+
+class AcmePrivateProjectError(Exception):
+    """Stand-in for a registered extension's own error class.
+
+    Its __module__ under pytest is this test file's dotted module path
+    (e.g. "tests.unit.mcp.server.test_adapter"), whose top-level package is
+    "tests" -- not builtins, not in sys.stdlib_module_names, and not
+    "ouroboros"-prefixed -- so _safe_error_type() must fold it.
+    """
 
 
 class MockToolHandler:
@@ -1587,6 +1597,86 @@ class TestMCPServerAdapterTools:
             assert "acme" not in str(value)
             assert "private_project" not in str(value)
 
+    async def test_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
+        """A built-in handler returning Result.ok(MCPToolResult(is_error=True))
+        (e.g. ouroboros_ralph without lineage_id, status=input_required) is a
+        logical failure, not a success -- outer Result.is_ok alone is not
+        enough to call it ok=True.
+        """
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_logical_error_probe")
+        handler.handle_mock.return_value = Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
+                is_error=True,
+                meta={"status": "input_required"},
+            )
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_logical_error_probe", {"input": "safe"})
+
+        assert result.is_ok
+        assert result.value.is_error is True
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        # No exception exists for a logical error -- absence is honest here,
+        # not an invented "unknown" value.
+        assert capture.call_args.kwargs["error_type"] is None
+
+    async def test_call_tool_normal_success_still_counts_as_ok(self) -> None:
+        """No-regression companion to the logical-error test above."""
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_success_probe"))
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_success_probe", {"input": "safe"})
+
+        assert result.is_ok
+        assert result.value.is_error is False
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is True
+        assert capture.call_args.kwargs["error_type"] is None
+
+    async def test_call_tool_extension_error_class_is_folded_in_error_type(self) -> None:
+        """A registered extension's handler returning Result.err(AcmePrivateProjectError(...))
+        directly (not via raise -- _call_tool_impl only wraps raised exceptions,
+        an err Result the handler builds itself flows through unwrapped) must
+        never expose that class name through error_type.
+        """
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_extension_error_probe")
+        handler.handle_mock.return_value = Result.err(
+            AcmePrivateProjectError("acme private project failed")
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_extension_error_probe", {"input": "safe"})
+
+        assert result.is_err
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "ExtensionError"
+        full_event = repr(capture.call_args.args) + repr(capture.call_args.kwargs)
+        assert "AcmePrivateProject" not in full_event
+        assert "acme" not in full_event.lower()
+
+    async def test_call_tool_builtin_error_class_stays_verbatim(self) -> None:
+        """No-regression companion: our own/builtin error classes are unaffected."""
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_builtin_error_probe")
+        handler.handle_mock.return_value = Result.err(MCPToolError("boom", tool_name="probe"))
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_builtin_error_probe", {"input": "safe"})
+
+        assert result.is_err
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["error_type"] == "MCPToolError"
+
     async def test_call_tool_security_denial_is_captured_once(self) -> None:
         """A pre-handler security return is a visible failed invocation."""
         adapter = MCPServerAdapter()
@@ -2177,7 +2267,11 @@ class TestServeTransport:
                 await call_sdk_tool(adapter, "ouroboros_sdk_boundary", {"input": "safe"})
             capture.assert_called_once()
             assert capture.call_args.kwargs["ok"] is False
-            assert capture.call_args.kwargs["error_type"] == "ValidationError"
+            # jsonschema.ValidationError is third-party (module "jsonschema.*",
+            # not builtins/stdlib/ouroboros), so the audited error_type taxonomy
+            # folds it to the fixed extension literal rather than exposing the
+            # dependency's class name verbatim.
+            assert capture.call_args.kwargs["error_type"] == "ExtensionError"
 
             capture.reset_mock()
             handler.handle_mock.return_value = Result.ok(success)
@@ -2238,6 +2332,86 @@ class TestServeTransport:
         for value in props.values():
             assert "acme" not in str(value)
             assert "private_project" not in str(value)
+
+    async def test_sdk_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
+        """SDK-path companion to the typed-adapter logical-error test."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_sdk_logical_error_probe")
+        handler.handle_mock.return_value = Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
+                is_error=True,
+                meta={"status": "input_required"},
+            )
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            await call_sdk_tool(adapter, "ouroboros_sdk_logical_error_probe", {"input": "safe"})
+
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        # The SDK-path success-side capture call never included error_type at
+        # all (unlike the typed path, which always passes it explicitly) --
+        # its absence here is the pre-existing convention, not a regression.
+        assert capture.call_args.kwargs.get("error_type") is None
+
+    async def test_sdk_call_tool_normal_success_still_counts_as_ok(self) -> None:
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_sdk_success_probe"))
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            await call_sdk_tool(adapter, "ouroboros_sdk_success_probe", {"input": "safe"})
+
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is True
+
+    async def test_sdk_call_tool_extension_error_class_is_folded_in_error_type(self) -> None:
+        """SDK-path companion to the typed-adapter extension-error test."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_sdk_extension_error_probe")
+        handler.handle_mock.return_value = Result.err(
+            AcmePrivateProjectError("acme private project failed")
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            with pytest.raises(RuntimeError, match="acme private project failed"):
+                await call_sdk_tool(
+                    adapter, "ouroboros_sdk_extension_error_probe", {"input": "safe"}
+                )
+
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "ExtensionError"
+        full_event = repr(capture.call_args.args) + repr(capture.call_args.kwargs)
+        assert "AcmePrivateProject" not in full_event
+        assert "acme" not in full_event.lower()
+
+    async def test_sdk_call_tool_builtin_error_class_stays_verbatim(self) -> None:
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_sdk_builtin_error_probe")
+        handler.handle_mock.return_value = Result.err(MCPToolError("boom", tool_name="probe"))
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            with pytest.raises(RuntimeError):
+                await call_sdk_tool(adapter, "ouroboros_sdk_builtin_error_probe", {"input": "safe"})
+
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["error_type"] == "MCPToolError"
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

@@ -111,6 +111,11 @@ Notes:
   lookup appears as `ouroboros_unknown_tool`, and a registered third-party
   or custom tool (extensions can register arbitrary names) appears as
   `ouroboros_extension_tool` — the identifying name itself is never sent.
+  `command` on a job-derived `workflow_outcome` is the same contract for
+  background-job types: only the five funnel stages and Ouroboros' own
+  internal diagnostic job types are ever forwarded; anything else (a
+  third-party job type registered against the same job manager) appears as
+  the fixed `extension_job` value.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
 - Start-tool `command_run` events are submission receipts. They intentionally

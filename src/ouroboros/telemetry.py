@@ -207,6 +207,32 @@ _JOB_FUNNEL: dict[str, str] = {
     "ralph": "ralph",
 }
 
+# Internal shipped job types that reach JobTelemetryBoundary.observe (and
+# therefore capture_job_outcome) but aren't part of the interview -> seed ->
+# run -> evolve -> auto -> evaluate funnel: detached_worker.py's
+# process-lifetime probes (_run_probe / _run_nested_probe -- exercised by
+# the detached-job integration suite and any process verifying a detached
+# worker survives its parent exiting). Shipped and non-identifying, so
+# folding them to _EXTENSION_JOB_COMMAND would mislabel a first-party
+# diagnostic job as a foreign/registered-by-an-extension one. Investigated
+# by grepping every `job_type=` call site under src/: execute_seed,
+# evolve_step, auto, evaluate, and ralph (the _JOB_FUNNEL keys above) plus
+# exactly these two are the only literals JobManager.start_job() is ever
+# called with from shipped code.
+_INTERNAL_SHIPPED_JOB_TYPES = frozenset({"detached_probe", "detached_nested_probe"})
+
+# The audited privacy contract for workflow_outcome's `command`, mirroring
+# _CANONICAL_TOOL_NAMES' rationale: JobManager.start_job() accepts an
+# arbitrary job_type string from whatever code calls it -- a third-party
+# extension using the same job manager included -- and
+# JobTelemetryBoundary.observe fires for every terminal job regardless of
+# who started it. A job_type outside this static set is registered but not
+# ours, symmetric with an unrecognized MCP tool name (see
+# _EXTENSION_TOOL_NAME), so it folds to a fixed literal command rather than
+# being forwarded verbatim.
+_CANONICAL_JOB_TYPES = frozenset(_JOB_FUNNEL) | _INTERNAL_SHIPPED_JOB_TYPES
+_EXTENSION_JOB_COMMAND = "extension_job"
+
 # Executable form of the TELEMETRY.md event table. Auditing call sites for
 # compliance is not the same as enforcing it: capture() and set_context()
 # below drop anything outside these sets before it reaches the queue, so a
@@ -971,18 +997,33 @@ def capture_job_outcome(
     success: only an explicit ``final_approved is True`` earns ``verified``.
     The PostHog insert id is a one-way digest, so retries can be de-duplicated
     without disclosing the internal job identifier.
+
+    ``job_type`` is caller-controlled the same way an MCP tool name is:
+    ``JobManager.start_job()`` accepts an arbitrary string, so ``command``
+    below is only ever an audited value (a real _JOB_FUNNEL stage, an
+    internal shipped probe type, or the fixed ``extension_job`` literal) --
+    see ``_CANONICAL_JOB_TYPES``.
     """
     try:
         normalized_status = terminal_status.strip().lower()
         meta = result_meta if isinstance(result_meta, dict) else {}
         final_approved = meta.get("final_approved")
+        # Compares the RAW job_type, never the folded/audited `command`
+        # below: an extension job must not earn verified=true just because
+        # its job_type happens not to be "evaluate" either way. Folding
+        # only ever affects the `command` property, never this check.
         verified = (
             normalized_status == "completed" and job_type == "evaluate" and final_approved is True
+        )
+        command = (
+            _JOB_FUNNEL.get(job_type, job_type)
+            if job_type in _CANONICAL_JOB_TYPES
+            else _EXTENSION_JOB_COMMAND
         )
         capture(
             "workflow_outcome",
             {
-                "command": _JOB_FUNNEL.get(job_type, job_type),
+                "command": command,
                 "phase": "terminal",
                 "terminal_status": normalized_status,
                 "ok": normalized_status == "completed",

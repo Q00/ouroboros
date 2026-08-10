@@ -772,6 +772,72 @@ class TestCapture:
         assert event["properties"].get("final_approved") is reported_approval
         assert "job_private_id" not in json.dumps(event)
 
+    def test_extension_job_type_is_replaced_not_forwarded(self, sent: list[dict[str, Any]]) -> None:
+        """job_type is caller-controlled the same way an MCP tool name is:
+        JobManager.start_job() accepts an arbitrary string, so an unaudited
+        job type must never carry an identifying name through `command`."""
+        hostile = "acme_private_project"
+        telemetry.capture_job_outcome(
+            "job-1", hostile, terminal_status="completed", result_meta={"final_approved": True}
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["properties"]["command"] == "extension_job"
+        assert hostile not in repr(event)
+
+    def test_extension_job_type_never_earns_verified(self, sent: list[dict[str, Any]]) -> None:
+        """An extension job must not earn verified=true just because it
+        isn't literally "evaluate" -- `verified` compares the RAW job_type,
+        never the folded `command`, and folding must not change that."""
+        telemetry.capture_job_outcome(
+            "job-1",
+            "acme_private_project",
+            terminal_status="completed",
+            result_meta={"final_approved": True},
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert sent[0]["properties"]["verified"] is False
+        assert sent[0]["properties"]["command"] == "extension_job"
+
+    @pytest.mark.parametrize(
+        ("job_type", "expected_command"),
+        (
+            ("execute_seed", "run"),
+            ("evolve_step", "evolve"),
+            ("auto", "auto"),
+            ("evaluate", "evaluate"),
+            ("ralph", "ralph"),
+        ),
+    )
+    def test_shipped_job_types_keep_their_funnel_commands(
+        self,
+        sent: list[dict[str, Any]],
+        job_type: str,
+        expected_command: str,
+    ) -> None:
+        telemetry.capture_job_outcome("job-1", job_type, terminal_status="completed")
+        telemetry.flush(timeout=2.0)
+        assert sent[0]["properties"]["command"] == expected_command
+
+    @pytest.mark.parametrize("job_type", ("detached_probe", "detached_nested_probe"))
+    def test_internal_shipped_job_types_pass_through_unfolded(
+        self,
+        sent: list[dict[str, Any]],
+        job_type: str,
+    ) -> None:
+        """detached_worker.py's process-lifetime probes are shipped and
+        non-identifying -- audited into the canonical set so they aren't
+        mislabeled as a foreign extension_job."""
+        telemetry.capture_job_outcome("job-1", job_type, terminal_status="completed")
+        telemetry.flush(timeout=2.0)
+        assert sent[0]["properties"]["command"] == job_type
+
+    def test_job_funnel_keys_are_subset_of_canonical_job_types(self) -> None:
+        assert set(telemetry._JOB_FUNNEL) <= telemetry._CANONICAL_JOB_TYPES
+
     def test_funnel_mapping_covers_all_stages(self) -> None:
         commands = set(telemetry._TOOL_FUNNEL.values())
         assert {"interview", "seed", "run", "evolve", "auto", "evaluate", "qa"} <= commands
