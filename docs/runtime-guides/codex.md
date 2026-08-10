@@ -5,6 +5,8 @@ doc_metadata:
 
 # Running Ouroboros with Codex CLI
 
+> 한국어: [codex.ko.md](./codex.ko.md)
+
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
 Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local execution surface that the adapter talks to; on macOS, setup also detects the executable bundled with the ChatGPT app when it is not on your `PATH`. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable. By default, Ouroboros uses the model currently selected by Codex and supplies only the role's reasoning effort.
@@ -15,9 +17,10 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 ## Prerequisites
 
-- **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
+- **Codex CLI** installed and on your `PATH`. The marketplace-plugin path runs `codex plugin ...` from a shell, so `PATH` registration is required there. If you only have the bundled executable from the macOS ChatGPT app, put it on `PATH` (see [install steps](#installing-codex-cli) below) or use the standalone path — Ouroboros setup can discover a bundled executable, but your shell cannot resolve `codex plugin`
 - A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
-- **Python >= 3.12**
+- **An isolated MCP launcher** — required on **both** paths, not only the plugin. The plugin's MCP descriptor launches the server with `uvx` ([`.mcp.codex.json`](../../.mcp.codex.json)). Standalone setup resolves one of three, in this order (`_codex_release_mcp_launcher()`): `uvx`; an `ouroboros` install whose `mcp serve --help` succeeds, which means the `[mcp]` extra; or a Python environment containing `mcp`. With none of them, `_register_codex_mcp_server()` aborts with `Could not find a launchable Ouroboros MCP command. Install uv, or install Ouroboros with the [mcp] extra, then rerun setup.` — note that Rich consumes `[mcp]` as markup, so the terminal shows `with the extra` Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`
+- **Python >= 3.12** for the standalone installation. On the plugin path `uvx` provisions an interpreter from the package's `requires-python = ">=3.12"`
 
 ## Installing Codex CLI
 
@@ -38,7 +41,7 @@ For alternative install methods and shell completions, see the [Codex CLI README
 ## Installing Ouroboros
 
 > For all installation options (pip, one-liner, from source) and first-run onboarding, see **[Getting Started](../getting-started.md)**.
-> The base `ouroboros-ai` package includes the Codex CLI runtime adapter — no extras are required.
+> The base `ouroboros-ai` package includes the Codex CLI **runtime adapter** — no extras are required *for the adapter*. MCP registration is separate: standalone setup still needs `uvx`, the `[mcp]` extra, or an environment containing `mcp`, as listed under [Prerequisites](#prerequisites).
 
 ## Platform Notes
 
@@ -121,6 +124,8 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
+Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
+
 `~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
@@ -153,7 +158,7 @@ When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exac
 
 ### `ooo` Skill Availability on Codex
 
-After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
+After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. `resolve_packaged_codex_assets()` currently resolves and installs 22 `skills/*/SKILL.md` bundles. The table below is a **subset** — the ones most often driven from a terminal — with their CLI equivalents. See the Korean guide for the complete 22-row table.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|
@@ -170,7 +175,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo welcome` | Yes | *(MCP only)* |
 | `ooo update` | Yes | `ouroboros update` |
 | `ooo help` | Yes | `ouroboros --help` |
-| `ooo qa` | Yes | *(MCP only)* |
+| `ooo qa` | Yes | `ouroboros qa` |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
@@ -193,9 +198,23 @@ message assembly, and MCP invocation local. See
 ### Verify Installation
 
 ```bash
-codex --version
 ouroboros --help
+codex --version
 ```
+
+> `codex --version` reporting `command not found` is **not** a failure on the
+> standalone path. That path supports users whose only Codex executable is the
+> macOS ChatGPT app bundle and is not on `PATH`; setup discovers the bundle. In
+> that case check what setup actually resolved:
+>
+> ```bash
+> ouroboros config show
+> ```
+>
+> The **`CLI path:`** line in that output is the resolved executable
+> (`cli/commands/config.py:696-701`). The string `codex_cli_path` does not appear
+> in the output, so do not grep for it. On the plugin path, and for anyone who
+> put `codex` on `PATH`, `codex --version` is the right check.
 
 ## How It Works
 
@@ -265,12 +284,12 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 | Aspect | Codex CLI | Claude Code |
 |--------|-----------|-------------|
 | What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
-| Authentication | OpenAI API key | Max Plan subscription |
+| Authentication | Codex account sign-in or OpenAI API key | Max Plan subscription |
 | Model | Codex's current default model (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
 | Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
-| Cost model | OpenAI API usage charges | Included in Max Plan subscription |
+| Cost model | Follows whatever your Codex CLI is configured for — Codex OAuth or OpenAI API key | Included in Max Plan subscription |
 | Windows (native) | Not supported | Experimental |
 
 > **Note:** The Ouroboros workflow model (Seed files, acceptance criteria, evaluation principles) is identical across runtimes. However, because Codex CLI and Claude Code have different underlying agent capabilities, tool access, and sandboxing, they may produce different execution paths and results for the same Seed file.
@@ -298,14 +317,40 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `goal` | Yes | Primary objective |
-| `task_type` | No | Execution strategy: `code` (default), `research`, or `analysis` |
+| `goal` | Yes | Primary objective. Cannot be empty |
+| `task_type` | No | Execution strategy: `code` (default), `research`, `analysis`, `artifact`, `document`, `documentation`, or `presentation` |
+| `brownfield_context` | No | Existing-codebase context. Empty means greenfield |
 | `constraints` | No | Hard constraints to satisfy |
 | `acceptance_criteria` | No | Specific success criteria |
 | `ontology_schema` | Yes | Output structure definition |
 | `evaluation_principles` | No | Principles for evaluation |
 | `exit_conditions` | No | Termination conditions |
-| `metadata.ambiguity_score` | Yes | Must be <= 0.2 |
+| `metadata` | Yes | Generation metadata |
+| `metadata.ambiguity_score` | No | Ambiguity at generation time. Defaults to `0.15`, accepts `0.0`-`1.0` |
+
+> **Where the 0.2 threshold actually applies.** The field itself accepts `0.0`-`1.0`
+> ([`core/seed.py:409`](../../src/ouroboros/core/seed.py)). The 0.2 gate is enforced at **seed
+> generation**: if the interview cannot get below it, no seed is produced. That gate has an explicit
+> opt-out — the CLI's "Generate Seed anyway" and the MCP `force` parameter. Bypassing it still records
+> the real score in seed metadata and emits the bypass to the audit log.
+>
+> `ouroboros auto` re-checks readiness during a run, but **conditionally**, and the
+> two suppression cases have opposite consequences
+> ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
+>
+> - **Ledger closure** (`closure_mode` of `ledger_only` or `safe_default`, not
+>   degraded): the ledger's structural completeness is the acceptance signal and
+>   the LLM-derived score is stale by design, so a Seed scoring well above 0.2 can
+>   grade A and **run**. Other grading axes still apply.
+> - **Degraded Seed**: the blocker is suppressed only so the run can emit a typed
+>   partial product. A blocker-free degraded Seed goes straight to the
+>   partial-product terminal as `AutoPhase.COMPLETE` **regardless of grade or
+>   `may_run`** ([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)).
+>   It never reaches RUN. Remaining blockers are hard safety blockers and still
+>   terminate.
+>
+> In practice: a hand-written seed carrying a high `ambiguity_score` is not blocked by
+> `ouroboros run workflow`. The field is provenance, not an enforcement gate.
 
 ## Troubleshooting
 
@@ -370,6 +415,21 @@ Codex CLI is a proven Synapse `inform` and `after_turn` backend: Ouroboros
 resumes the same persisted Codex thread after the current turn, and only reports
 `applied` after the resumed provider turn emits an acknowledgement. It does not
 advertise live checkpoint `redirect` or hard `replace`.
+
+Concretely, the Codex runtime declares three of the six session-signal capabilities (`orchestrator/codex_cli_runtime.py:453`):
+
+| Capability | Codex | Meaning |
+|---|:---:|---|
+| `inform_delivery` | yes | information can be delivered to a running session |
+| `background_reply` | yes | a reply can arrive in the background |
+| `after_turn_delivery` | yes | **delivered after the current turn completes** |
+| `checkpoint_redirect` | no | cannot steer mid-turn |
+| `owned_turn_abort` | no | cannot abort a turn in flight |
+| `replacement_resume` | no | cannot resume via a replacement session |
+
+The practical consequence: **to change direction during a long turn, you wait for that turn to finish.**
+
+> **Subagent fan-out.** Codex can self-parallelize inside a session, but `codex mcp-server` exposes only `codex` and `codex-reply`, so Codex's native multi-agent team tools are unreachable by an external driver. Ouroboros can reuse and continue a Codex thread but cannot orchestrate Codex children; fan-out stays in-process (`subagent_orchestration=INTERNAL`, `orchestrator/codex_cli_runtime.py:448`).
 
 This becomes publicly callable only in the complete MCP host layer, which
 registers the discovery/delivery tools and shares one Synapse hub with run and

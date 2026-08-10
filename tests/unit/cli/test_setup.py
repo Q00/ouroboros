@@ -9973,9 +9973,7 @@ class TestCopilotSetup:
         assert config_path.read_text(encoding="utf-8") == original
         mock_register.assert_not_called()
 
-    def test_setup_copilot_warns_when_discovery_used_fallback(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_setup_copilot_warns_when_discovery_used_fallback(self, tmp_path: Path) -> None:
         """Setup must visibly warn when it could not reach the live API."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -9995,11 +9993,14 @@ class TestCopilotSetup:
                 return_value=True,
             ),
             patch("ouroboros.cli.commands.setup._register_copilot_mcp_server"),
+            patch("ouroboros.cli.commands.setup.print_warning") as mock_warning,
         ):
             setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
 
-        out = capsys.readouterr().out
-        assert "fallback" in out.lower() or "gh auth" in out.lower()
+        mock_warning.assert_called_once_with(
+            "Could not reach the GitHub Copilot models API — using a bundled "
+            "fallback list. Run `gh auth login` and re-run setup to refresh."
+        )
 
     def test_setup_copilot_aborts_when_no_models_discovered(self, tmp_path: Path) -> None:
         """If discovery returns an empty list, setup must abort cleanly

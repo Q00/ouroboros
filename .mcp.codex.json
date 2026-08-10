@@ -3,6 +3,7 @@
     "ouroboros": {
       "command": "uvx",
       "args": [
+        "--isolated",
         "--from",
         "ouroboros-ai[mcp]",
         "ouroboros",

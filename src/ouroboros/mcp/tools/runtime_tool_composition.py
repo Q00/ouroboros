@@ -137,7 +137,6 @@ def configured_runtime_tools(
         project_dir = runtime_adapter.working_directory
 
     from ouroboros.mcp.server.adapter import create_ouroboros_server
-    from ouroboros.mcp.tools.evaluation_handlers import ChecklistVerifyHandler
 
     compose_token = _COMPOSING_RUNTIME_TOOLS.set(True)
     try:
@@ -163,10 +162,6 @@ def configured_runtime_tools(
         _COMPOSING_RUNTIME_TOOLS.reset(compose_token)
 
     configured = dict(server._tool_handlers)  # noqa: SLF001 - composition reuse
-    configured["ouroboros_checklist_verify"] = ChecklistVerifyHandler(
-        evaluate_handler=configured["ouroboros_evaluate"],
-        llm_backend=llm_backend,
-    )
     ordered_names = (
         "ouroboros_execute_seed",
         "ouroboros_start_execute_seed",

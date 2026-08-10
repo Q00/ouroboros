@@ -11,7 +11,20 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. Run the install commands in your terminal, then run setup and auto inside Claude Code to go from idea to execution:
+You do not install Ouroboros with pip on this path, but the host needs two
+things: **`uvx`**, because the plugin's MCP server is launched with it
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and **`python3` (3.12 recommended, 3.11 minimum)**, because the plugin's skills
+shell out to it directly (`.claude-plugin/skills/setup/SKILL.md:98`) and import
+`datetime.UTC` (`.claude-plugin/skills/welcome/SKILL.md:168`), which does not
+exist before Python 3.11. Install uv with `pipx install uv`, `pip install --user uv`,
+or `brew install uv`.
+
+`uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process; it
+does not create a global `python3`, so a host with uv but no system Python fails
+during the first setup/welcome flow. Tracked in #2001.
+
+Then run the install commands in your terminal, and run setup and auto inside
+Claude Code to go from idea to execution:
 
 **1. Install the plugin** (in your terminal):
 ```bash
@@ -61,7 +74,11 @@ ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 
 ### Codex first use
 
-For the Codex plugin, add the marketplace and install Ouroboros:
+For the Codex plugin, add the marketplace and install Ouroboros. This needs
+`codex` on your `PATH` and `uvx` on the host — the plugin's MCP descriptor
+launches the server with it ([`.mcp.codex.json`](../.mcp.codex.json)). Install uv
+with `pipx install uv`, `pip install --user uv`, or `brew install uv`; you do not
+need to install Python yourself.
 
 ```bash
 codex plugin marketplace add Q00/ouroboros
@@ -118,6 +135,8 @@ Auto mode is hang-resistant by design: interview and repair loops are bounded, s
 
 ### Option 1: Claude Code Plugin (Recommended)
 
+Requires `uvx` **and** a global `python3` (3.12 recommended, **3.11 minimum**) on the host: the plugin's MCP manifest launches the server with `uvx` ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and the bundled skills shell out to `python3` directly (`skills/setup/SKILL.md:98`, `skills/welcome/SKILL.md:32`). `uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process only — it does not create a global `python3`. Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`. Tracked in #2001.
+
 ```bash
 # Terminal
 claude plugin marketplace add Q00/ouroboros
@@ -130,7 +149,7 @@ ooo setup
 ooo help        # verify installation
 ```
 
-No Python, pip, or API key configuration needed -- Claude Code handles the runtime.
+No pip install of Ouroboros and no API key configuration needed -- Claude Code handles the runtime. The host still needs `uvx` and `python3` >= 3.11, as above — the shipped `.claude-plugin/skills/welcome/SKILL.md` imports `datetime.UTC`, which does not exist before 3.11.
 
 ### Option 2: pip Install
 

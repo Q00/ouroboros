@@ -1,5 +1,7 @@
 # Ouroboros Runtime Guide: Kiro CLI
 
+> 한국어: [kiro.ko.md](./kiro.ko.md)
+
 This guide covers how to use Ouroboros with the [Kiro CLI](https://kiro.dev/docs/cli/)
 as an execution runtime. Kiro is run in its **headless mode**
 (`kiro-cli chat --no-interactive`, documented at

@@ -123,6 +123,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex 插件快速开始</strong></summary>
 
+需要 `codex` 在 `PATH` 中，并且主机上有 `uvx`（插件的 MCP 描述符用它启动
+server）。可用 `pipx install uv`、`pip install --user uv` 或 `brew install uv`
+安装。
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -158,7 +162,7 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
                                              # 在 ~/.copilot/mcp-config.json 中注册 MCP server
 ```
 
-重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。配置中其他地方使用的连字符格式 Anthropic 模型 ID（如 `claude-opus-4-6`）会在运行时自动映射为 Copilot 的点号格式（`claude-opus-4.6`），因此切换后端时现有配置仍然可用。
+重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。**模型 ID 映射的覆盖范围比看上去要窄**：静态映射表只覆盖 `claude-opus-4-6` 和 `claude-sonnet-4-5`；已经包含 `.` 的 ID 会原样通过；连字符转点号的兜底逻辑会替换**每一个**连字符，因此当前默认值 `claude-opus-4-8` 会变成 `claude.opus.4.8` 而匹配失败。请让各角色模型保持未设置，由 setup 写入发现到的 ID；或显式设置一个 Copilot 可用的点号格式 ID。参见 [#1995](https://github.com/Q00/ouroboros/issues/1995) 与 [Copilot 运行时指南](./docs/runtime-guides/copilot.md)。
 
 完整说明见 [GitHub Copilot CLI 运行时指南](./docs/runtime-guides/copilot.md)。
 
@@ -167,7 +171,7 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
 <details>
 <summary><strong>其他安装方式</strong></summary>
 
-**仅安装 Claude Code 插件**（不装系统包）：
+**仅安装 Claude Code 插件**（无需安装 Python 包；但主机上需要有 `uvx` 和 `python3`（建议 3.12，最低 3.11）—— 见 #2001）：
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
@@ -380,7 +384,10 @@ src/ouroboros/
 - **Agent OS runtime** —— 跨能力发现、策略、指令、事件日志、agent 进程的可重放执行契约
 - **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes；同一份工作流规约，跑在不同执行引擎上
 
-完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文设计说明：[隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 无条件隐藏。
+完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文文档：
+
+- [评估流水线指南（Evaluation Pipeline）](./docs/guides/evaluation-pipeline.zh-CN.md) —— 三阶段关卡的完整参考：每个阶段验什么、阈值和配置项、失败模式与排查、以及事件审计轨迹
+- [隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 无条件隐藏
 
 </details>
 
@@ -521,14 +528,16 @@ Ouroboros 采用 MIT 许可证，完全开源开发。如果它为你减少了�
 
 ---
 
-## Star 历史
+## 活跃度
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+这里的数字基于 GitHub 数据生成并自动更新；缓存可能会导致更新延迟。
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 

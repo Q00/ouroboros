@@ -131,7 +131,11 @@ ouroboros_lateral_think persona="all"
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `OUROBOROS_CHILD_TIMEOUT_MS` | `1200000` (20 min) | Per-child wall clock |
-| `OUROBOROS_SUB_RETRIES` | `2` | Retry count on spawn failure |
+
+> `OUROBOROS_CHILD_TIMEOUT_MS` is the only environment knob the bridge reads
+> (`opencode/plugin/ouroboros-bridge.ts:38`). Retry counts are compile-time
+> constants there — `PATCH_RETRIES = 3` and `RESOLVE_RETRIES = 5` (`:40-41`) —
+> and neither is overridable.
 
 See the full plugin guide: **[OpenCode Subagent Bridge](../guides/opencode-subagent-bridge.md)**.
 

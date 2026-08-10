@@ -47,6 +47,7 @@ replayable execution contract on your choice of runtime backend.
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
 - [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
+- [Evaluation Pipeline Guide (简体中文)](./guides/evaluation-pipeline.zh-CN.md) - 同一份指南的中文版
 - [Execution vs. Evaluation Contract](./guides/execution-vs-evaluation.md) - Task completion, AC verdict, and drift terminology boundaries
 - [Hidden-Checklist Convergence](./hidden-checklist-convergence/architecture.md) - Run → evaluation → bounded Ralph chaining with hidden harness grading inputs
 - [Hidden-Checklist Convergence (简体中文)](./hidden-checklist-convergence/README.zh-CN.md) - 同一设计的中文说明
@@ -54,6 +55,7 @@ replayable execution contract on your choice of runtime backend.
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
+- [TUI Usage Guide (한국어)](./guides/tui-usage.ko.md) - 같은 문서의 한국어판
 
 ### Contributing
 

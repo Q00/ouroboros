@@ -145,7 +145,9 @@ class AssertionExtractor:
             # of the seed. The transport-failure path above already retries;
             # this one now does too.
             logger.warning("AssertionExtractor response unreadable, not caching: %s", seed_id)
-            return Result.ok(())
+            return Result.err(
+                "Extraction response was unreadable or contained a rejected assertion"
+            )
 
         self._cache[seed_id] = assertions
         # LRU eviction: remove oldest entry if cache exceeds max size
@@ -162,9 +164,9 @@ class AssertionExtractor:
 
         Returns ``None`` when the response could not be read as an extraction:
         no JSON payload, malformed JSON, a payload that is not the expected
-        array, or an array that offered assertions and had every one of them
-        rejected. In none of those cases did the model answer in the schema
-        this asks for.
+        array, or an array containing any rejected assertion. Extraction is
+        atomic: accepting only the valid subset would erase offered evidence
+        and could let the surviving subset manufacture a formal PASS.
 
         An empty tuple means the opposite — the array was read and was empty,
         the model saying there is nothing here to verify. That is an answer,
@@ -182,12 +184,15 @@ class AssertionExtractor:
                 return None
 
             assertions: list[SpecAssertion] = []
+            response_rejected = False
             for item in data:
                 if not isinstance(item, dict):
                     logger.warning("Expected assertion object, got: %s", type(item))
+                    response_rejected = True
                     continue
                 if "ac_index" not in item:
                     logger.warning("Ignoring assertion without explicit ac_index: %r", item)
+                    response_rejected = True
                     continue
                 ac_idx = item["ac_index"]
                 if (
@@ -197,16 +202,19 @@ class AssertionExtractor:
                     or ac_idx >= len(acceptance_criteria)
                 ):
                     logger.warning("Ignoring assertion with invalid ac_index: %r", ac_idx)
+                    response_rejected = True
                     continue
                 ac_text = acceptance_criteria[ac_idx]
                 if "tier" not in item:
                     logger.warning("Ignoring assertion without explicit tier: %r", item)
+                    response_rejected = True
                     continue
                 raw_tier = item["tier"]
                 try:
                     tier = VerificationTier(raw_tier)
                 except (TypeError, ValueError):
                     logger.warning("Ignoring assertion with invalid tier: %r", raw_tier)
+                    response_rejected = True
                     continue
                 text_fields = {
                     name: item.get(name, "")
@@ -214,6 +222,7 @@ class AssertionExtractor:
                 }
                 if not all(isinstance(value, str) for value in text_fields.values()):
                     logger.warning("Ignoring assertion with invalid text fields: %r", item)
+                    response_rejected = True
                     continue
                 if (
                     tier
@@ -228,6 +237,7 @@ class AssertionExtractor:
                         tier.value,
                         item,
                     )
+                    response_rejected = True
                     continue
                 if tier in (
                     VerificationTier.T1_CONSTANT,
@@ -238,6 +248,7 @@ class AssertionExtractor:
                         tier.value,
                         item,
                     )
+                    response_rejected = True
                     continue
                 if (
                     tier is VerificationTier.T1_CONSTANT
@@ -247,6 +258,7 @@ class AssertionExtractor:
                         "Ignoring t1_constant assertion without expected_value: %r",
                         item,
                     )
+                    response_rejected = True
                     continue
 
                 try:
@@ -263,14 +275,15 @@ class AssertionExtractor:
                     )
                 except ValidationError as e:
                     logger.warning("Ignoring invalid assertion object: %s", e)
+                    response_rejected = True
                     continue
 
-            if data and not assertions:
-                # The model offered assertions and every one was thrown out, so
-                # nothing it said arrived in the schema this asks for. Read as
-                # "nothing to verify" that would be indistinguishable from a
-                # criterion set with nothing mechanical in it.
-                logger.warning("Every assertion in the extraction response was rejected")
+            if response_rejected:
+                # The model offered evidence that did not survive validation.
+                # Returning the surviving subset would make that loss invisible
+                # to coverage checks, especially when both entries belong to
+                # the same AC. Keep the whole response retryable instead.
+                logger.warning("Extraction response contained a rejected assertion")
                 return None
 
             return tuple(assertions)

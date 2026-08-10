@@ -156,6 +156,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
 
+Needs `codex` on your `PATH` and `uvx` on the host (the plugin's MCP descriptor
+launches the server with it). Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -194,7 +198,7 @@ ouroboros setup --runtime copilot            # discovers models live, picks a de
                                              # registers MCP server in ~/.copilot/mcp-config.json
 ```
 
-Restart your Copilot CLI session, then use `ooo` commands inside it. Hyphenated Anthropic model IDs (`claude-opus-4-6`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing configs keep working when you switch backends.
+Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is narrower than it looks: the static map covers `claude-opus-4-6` and `claude-sonnet-4-5`, any ID already containing a `.` passes through unchanged, and the hyphen-to-dot fallback rewrites *every* hyphen, so the current default `claude-opus-4-8` becomes `claude.opus.4.8` and misses. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid dotted ID explicitly. See [#1995](https://github.com/Q00/ouroboros/issues/1995) and the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
 
 See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 
@@ -203,7 +207,7 @@ See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for
 <details>
 <summary><strong>Other install methods</strong></summary>
 
-**Claude Code plugin only** (no system package):
+**Claude Code plugin only** (no Python package to install; the host needs `uvx` and `python3` >= 3.11, 3.12 recommended — see #2001):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
@@ -564,14 +568,16 @@ Every sponsor keeps the serpent evolving. Thank you.
 
 ---
 
-## Star History
+## Activity
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+These numbers are generated from GitHub data and refreshed automatically; caching may delay updates.
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 

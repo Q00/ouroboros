@@ -81,13 +81,13 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       gemini:
         model: gemini-2.5-pro
       opencode:
         model: openai/gpt-5.4
       litellm:
-        model: openrouter/anthropic/claude-opus-4-6
+        model: openrouter/anthropic/claude-opus-4.8
 
   frontier:
     max_turns: 8
@@ -266,11 +266,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -280,7 +280,7 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -294,9 +294,9 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
-          model: claude-opus-4-6
+          model: claude-opus-4-8
       use_cases:
         - consensus
         - lateral_thinking
@@ -324,7 +324,7 @@ economics:
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier (e.g., `gpt-4o-mini`, `claude-opus-4-6`). |
+| `model` | `string` | Model identifier. Provider formats differ: Anthropic uses `claude-opus-4-8`, while OpenRouter uses `openrouter/anthropic/claude-opus-4.8`. |
 
 ---
 
@@ -337,7 +337,7 @@ clarification:
   ambiguity_threshold: 0.2    # Interview completes when ambiguity score <= this value
   max_interview_rounds: 10    # Hard ceiling on clarification rounds
   model_tier: standard        # "frugal" | "standard" | "frontier"
-  default_model: claude-opus-4-6
+  default_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -345,7 +345,7 @@ clarification:
 | `ambiguity_threshold` | `float [0.0, 1.0]` | `0.2` | Maximum ambiguity score to allow seed generation to proceed. Interview loops until the score falls at or below this value. |
 | `max_interview_rounds` | `int >= 1` | `10` | Maximum number of question-answer rounds regardless of ambiguity score. |
 | `model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"standard"` | PAL tier used for the clarification phase. |
-| `default_model` | `string` | `"claude-opus-4-6"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
+| `default_model` | `string` | `"claude-opus-4-8"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
 
 ---
 
@@ -409,8 +409,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier   # "frugal" | "standard" | "frontier"
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4-6
-  reflect_model: claude-opus-4-6
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -419,8 +419,8 @@ resilience:
 | `lateral_thinking_enabled` | `bool` | `true` | Whether lateral thinking persona rotation is active when stagnation is detected. |
 | `lateral_model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frontier"` | PAL tier used for lateral thinking calls. Frontier is the default because creative re-framing requires high model capability. |
 | `lateral_temperature` | `float [0.0, 2.0]` | `0.8` | LLM sampling temperature for lateral thinking prompts. Higher values produce more divergent outputs. |
-| `wonder_model` | `string` | `"claude-opus-4-6"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
-| `reflect_model` | `string` | `"claude-opus-4-6"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
+| `wonder_model` | `string` | `"claude-opus-4-8"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
+| `reflect_model` | `string` | `"claude-opus-4-8"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
 
 ---
 
@@ -430,24 +430,26 @@ Controls Phase 4 — the 3-stage evaluation pipeline.
 
 ```yaml
 evaluation:
-  stage1_enabled: true         # Mechanical checks (lint, build, tests)
-  stage2_enabled: true         # Semantic evaluation (AC compliance, drift)
-  stage3_enabled: true         # Multi-model consensus (when triggered)
-  satisfaction_threshold: 0.8  # Minimum semantic satisfaction score to pass
-  uncertainty_threshold: 0.3   # Uncertainty score above which consensus is triggered
-  semantic_model: claude-opus-4-6
+  stage1_enabled: true         # Currently inert in config.yaml; see below
+  stage2_enabled: true         # Currently inert in config.yaml; see below
+  stage3_enabled: true         # Currently inert in config.yaml; see below
+  satisfaction_threshold: 0.8  # Currently inert; the pipeline gate is hardcoded to 0.8
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml; see below
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `stage1_enabled` | `bool` | `true` | Enable mechanical checks (lint, build, test, static analysis). When `false`, skipped entirely — use only for debugging. |
-| `stage2_enabled` | `bool` | `true` | Enable semantic evaluation (AC compliance, goal alignment, drift scoring). |
-| `stage3_enabled` | `bool` | `true` | Enable multi-model consensus evaluation (triggered by the consensus trigger matrix). |
-| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | Minimum semantic satisfaction score required to pass Stage 2 without triggering Stage 3. |
-| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | Semantic uncertainty score above which Stage 3 consensus is triggered even if `satisfaction_threshold` is met. |
-| `semantic_model` | `string` | `"claude-opus-4-6"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
+| `stage1_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage2_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage3_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** The field is validated but the pipeline compares Stage 2 scores against a hardcoded `0.8`; changing this value does not change the gate. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
+| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert in `config.yaml`.** Runtime builders do not copy it into `TriggerConfig`. |
+| `semantic_model` | `string` | `"claude-opus-4-8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
 | `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
+
+> **Configuration boundary:** the top-level `evaluation.stage1_enabled`, `stage2_enabled`, `stage3_enabled`, and `uncertainty_threshold` keys are schema-validated placeholders, not runtime controls. The similarly named direct-Python `PipelineConfig.stage*_enabled` fields and `TriggerConfig.uncertainty_threshold` are separate and active when explicitly supplied to `EvaluationPipeline`; see [Disabling Stages](./guides/evaluation-pipeline.md#disabling-stages) and [Trigger Configuration](./guides/evaluation-pipeline.md#trigger-configuration).
 
 ---
 
@@ -455,30 +457,40 @@ evaluation:
 
 Controls Phase 5 — multi-model consensus voting and deliberation.
 
+> **Inert fields in `evaluation` and `consensus`.** Eight fields in these two
+> sections are schema-only: they validate, persist, and appear in `ouroboros config
+> show`, but no production code reads them. In `evaluation`: `stage1_enabled`,
+> `stage2_enabled`, `stage3_enabled`, `satisfaction_threshold`, and
+> `uncertainty_threshold`. In `consensus`: `min_models`, `threshold`, and
+> `diversity_required`. Each is marked in its field table below with what actually
+> controls the behaviour instead. The model fields in both sections **are** wired.
+
 ```yaml
 consensus:
-  min_models: 3
-  threshold: 0.67           # Fraction of models that must agree (2/3 majority)
-  diversity_required: true  # Require models from different providers
+  min_models: 3             # Inert — runtime requires 2 successful post-filter votes
+  threshold: 0.67           # Inert — runtime ratio threshold defaults to 0.66
+  diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-4-6
+    - openrouter/anthropic/claude-opus-4.8
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-4-6
+  advocate_model: openrouter/anthropic/claude-opus-4.8
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `min_models` | `int >= 2` | `3` | Minimum number of models required for a consensus vote. |
-| `threshold` | `float [0.0, 1.0]` | `0.67` | Fraction of models that must agree for consensus to pass (e.g., `0.67` = 2/3 majority). |
-| `diversity_required` | `bool` | `true` | When `true`, consensus requires models from at least two different providers. |
+| `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
+| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
+| `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4-6"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4.8"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
+> **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two successful post-filter votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
+>
 > **Backend note:** With `llm.backend: litellm`, consensus models typically go through OpenRouter/LiteLLM and require the corresponding provider credentials (commonly `OPENROUTER_API_KEY`). With `llm.backend: codex`, the configured model strings are sent through Codex CLI instead.
 
 ---
@@ -832,13 +844,19 @@ orchestrator:
 
 llm:
   backend: copilot
-  default_model: claude-opus-4.6           # written by `ouroboros setup --runtime copilot`
 
 clarification:
-  default_model: claude-opus-4.6           # same value written by setup
+  default_model: claude-opus-4.6           # example live-discovered Copilot ID
 ```
 
-The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time and writes the chosen default into the config above. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required. Hyphenated Anthropic IDs (for example `claude-opus-4-6`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing per-role overrides keep working when you switch backends. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
+The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time. There is no `llm.default_model` contract: setup removes that key and writes the selected dotted Copilot ID into supported per-role fields that are absent or still carry shipped defaults, while preserving explicit user overrides. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required.
+
+Model-ID normalization is narrower than it looks, so check your explicit overrides before switching backends. `map_to_copilot_model()` (`copilot/model_discovery.py:247`) resolves in this order: a verbatim match against the discovered model list; a static name map that currently covers `claude-opus-4-6` and `openrouter/anthropic/claude-opus-4-6` (both to `claude-opus-4.6`); then a hyphen-to-dot fallback. Two consequences:
+
+- Any ID already containing a `.` short-circuits at the top and is passed through unchanged (`:276`).
+- The hyphen-to-dot fallback calls `replace("-", ".")`, which rewrites *every* hyphen. `claude-opus-4-8` becomes `claude.opus.4.8`, which is not a Copilot ID, so it also passes through unchanged.
+
+The current direct-provider default `claude-opus-4-8` therefore has no Copilot mapping, unlike the previous default `claude-opus-4-6`. Leave role models unset to use the value setup discovered and wrote, or set a Copilot-valid ID explicitly. Mapping never changes the model generation. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
 ### Pi CLI Runtime
 
@@ -888,18 +906,18 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -910,16 +928,16 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
-          model: claude-opus-4-6
+          model: claude-opus-4-8
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-4-6
+  default_model: claude-opus-4-8
 
 execution:
   max_iterations_per_ac: 10
@@ -930,27 +948,27 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4-6
-  reflect_model: claude-opus-4-6
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 
 evaluation:
-  stage1_enabled: true
-  stage2_enabled: true
-  stage3_enabled: true
-  satisfaction_threshold: 0.8
-  uncertainty_threshold: 0.3
-  semantic_model: claude-opus-4-6
+  stage1_enabled: true         # Currently inert in config.yaml
+  stage2_enabled: true         # Currently inert in config.yaml
+  stage3_enabled: true         # Currently inert in config.yaml
+  satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 
 consensus:
-  min_models: 3
-  threshold: 0.67
-  diversity_required: true
+  min_models: 3               # Inert; runtime needs 2 successful post-filter votes
+  threshold: 0.67             # Inert; runtime ratio threshold defaults to 0.66
+  diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-4-6
+    - openrouter/anthropic/claude-opus-4.8
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-4-6
+  advocate_model: openrouter/anthropic/claude-opus-4.8
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 

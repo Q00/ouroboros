@@ -159,6 +159,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
 
+`codex`가 `PATH`에 있어야 하고, 호스트에 `uvx`가 필요합니다(플러그인의 MCP
+서술자가 `uvx`로 서버를 띄웁니다). `pipx install uv`, `pip install --user uv`,
+`brew install uv` 중 하나로 설치하세요.
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -197,16 +201,16 @@ ouroboros setup --runtime copilot            # 모델 실시간 검색 및 기�
                                              # ~/.copilot/mcp-config.json에 MCP 서버 등록
 ```
 
-Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. 다른 설정에서 사용하는 하이픈 형식의 Anthropic 모델 ID(`claude-opus-4-6`)는 런타임에서 Copilot의 점 표기 형식(`claude-opus-4.6`)으로 자동 변환되므로, 백엔드를 전환해도 기존 설정을 그대로 사용할 수 있습니다.
+Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. **모델 ID 변환 범위는 생각보다 좁습니다.** 정적 맵은 `claude-opus-4-6`과 `claude-sonnet-4-5`까지 커버하고, `.`이 이미 들어간 ID는 그대로 통과하며, 하이픈-점 폴백은 **하이픈을 전부** 바꾸기 때문에 현재 기본값 `claude-opus-4-8`은 `claude.opus.4.8`이 되어 매칭에 실패합니다. 역할별 모델을 비워 두어 setup이 발견한 ID를 쓰게 하거나, 점 표기 Copilot ID를 명시하세요. [#1995](https://github.com/Q00/ouroboros/issues/1995)와 [Copilot 런타임 가이드](./docs/runtime-guides/copilot.ko.md) 참고.
 
-자세한 내용은 [GitHub Copilot CLI 런타임 가이드](./docs/runtime-guides/copilot.md)를 참고하세요.
+자세한 내용은 [GitHub Copilot CLI 런타임 가이드](./docs/runtime-guides/copilot.ko.md)를 참고하세요.
 
 </details>
 
 <details>
 <summary><strong>다른 설치 방법</strong></summary>
 
-**Claude Code 플러그인만** (시스템 패키지 없이):
+**Claude Code 플러그인만** (Python 패키지 설치는 없지만, 호스트에 `uvx`와 `python3`(3.12 권장, 최소 3.11)이 있어야 합니다 — [#2001](https://github.com/Q00/ouroboros/issues/2001)):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
@@ -231,7 +235,7 @@ ouroboros setup                         # 런타임 설정
 
 호환성 참고: extras 전환 기간 동안 `ouroboros-ai[dashboard]`도 no-op alias로 계속 허용됩니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -476,7 +480,7 @@ uv run ouroboros tui monitor
 | `3` | **Logs** | 레벨별 색상 구분, 필터링 가능한 로그 뷰어 |
 | `4` | **Debug** | 상태 인스펙터, 원시 이벤트, 설정 |
 
-> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.md)를 참고하세요.
+> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.ko.md)를 참고하세요.
 
 ---
 
@@ -505,14 +509,16 @@ Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 
 
 ---
 
-## Star 히스토리
+## 활동
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+여기 있는 숫자는 GitHub 데이터를 바탕으로 생성되어 자동으로 갱신되며, 캐시로 인해 업데이트가 지연될 수 있습니다.
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 

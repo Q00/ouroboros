@@ -14,9 +14,10 @@ result-envelope surface (L1-e).
 
 Design constraints honored:
 
-- **Plain strings, no LLM, no eval set.** The 7-class enum is frozen at
-  this PR; growth happens via PR-per-class (~10 LoC + a unit test),
-  not via re-curating a training corpus.
+- **Plain strings, no LLM, no eval set.** The original 7-class enum was
+  frozen at L1-a; growth happens via PR-per-class (~10 LoC + a unit
+  test), not via re-curating a training corpus. ``web_app`` (#1813) is
+  the first class added through that path, bringing the catalog to 8.
 - **Decoupled from `domain_profile.DomainProfile`.** The existing
   `DomainProfile` is a *meta-domain* concept (coding / research /
   design) and carries cross-domain machinery (`repo_context_extractor`,
@@ -76,17 +77,20 @@ class CompletionMode(StrEnum):
 
 
 class TaskClass(StrEnum):
-    """Canonical task classes for L1-a.
+    """Canonical task classes.
 
-    Frozen at this PR. Additional classes (``game_3d``, ``desktop_app``,
-    ``notebook_analysis``, ...) land as their own follow-up PRs of
-    ~10 LoC plus a unit test once a canonical scenario demonstrates
-    real need.
+    The original seven were frozen at L1-a; ``web_app`` (#1813) is the
+    first class added through the PR-per-class growth path. Additional
+    classes (``game_3d``, ``desktop_app``, ``notebook_analysis``, ...)
+    land as their own follow-up PRs once a canonical scenario
+    demonstrates real need — see the domain_inference module docstring
+    for the full extension obligations.
     """
 
     LIBRARY = "library"
     CLI = "cli"
     WEB_SERVICE = "web_service"
+    WEB_APP = "web_app"
     WEBHOOK = "webhook"
     DATA_PIPELINE = "data_pipeline"
     GAME_2D = "game_2d"
@@ -170,6 +174,16 @@ _CATALOG: dict[TaskClass, TaskClassProfile] = {
         ),
         probes=("headless_run", "api_smoke"),
     ),
+    TaskClass.WEB_APP: _profile(
+        name=TaskClass.WEB_APP,
+        completion=CompletionMode.PRODUCT_COMPLETE,
+        ac_template=(
+            "The app builds and loads in a browser (or headless browser) without console errors.",
+            "Each documented user flow (form submit, panel interaction) completes against a running instance.",
+            "Client-side validation rejects the documented invalid inputs without crashing the page.",
+        ),
+        probes=("headless_run", "browser_smoke"),
+    ),
     TaskClass.WEBHOOK: _profile(
         name=TaskClass.WEBHOOK,
         completion=CompletionMode.PRODUCT_COMPLETE,
@@ -214,7 +228,8 @@ _CATALOG: dict[TaskClass, TaskClassProfile] = {
 
 
 TASK_CLASS_CATALOG: Mapping[TaskClass, TaskClassProfile] = MappingProxyType(_CATALOG)
-"""Immutable view of the frozen 7-class catalog.
+"""Immutable view of the 8-class catalog (7 frozen at L1-a plus ``web_app``,
+added per the PR-per-class growth path in #1813).
 
 Callers should treat this as the authoritative source of per-class
 defaults. Adding a class = adding an entry here + a unit test. Modifying
