@@ -1,7 +1,7 @@
 {
   "name": "ouroboros",
   "version": "0.51.1",
-  "description": "Sits in front of Codex CLI and fixes the brief before the code. An interview scores how vague your request is and refuses to generate a spec until it clears the bar, though you can force past it. Each acceptance criterion then carries a verify command and an expected output that are omitted from the worker's contract block, with no flag to put them back, so the worker is asked for the outcome rather than handed the assertion. Redaction of those values elsewhere is literal over five encodings, so a reshaped copy can still get through; that gap is tracked in a public issue.",
+  "description": "Sits in front of Codex CLI and fixes the brief before the code. An interview scores how vague your request is and refuses to generate a spec until it clears the bar, though you can force past it. When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back, so the worker is asked for the outcome rather than handed the assertion. Redaction of those values elsewhere is literal over five encodings, so a reshaped copy can still get through; that gap is tracked in a public issue.",
   "author": {
     "name": "Q00",
     "email": "jqyu.lee@gmail.com",
