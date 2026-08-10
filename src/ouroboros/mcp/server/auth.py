@@ -307,8 +307,9 @@ def build_transport_security(
         host: The bind address.
         port: The bind port.
         allowed_hosts: Operator-supplied ``Host`` header allowlist. When empty,
-            the bind address itself is allowed on any port -- which only means
-            anything for a concrete address, hence the wildcard guard below.
+            the bind address itself is allowed only on the configured port.
+            The SDK's three interchangeable loopback defaults retain their
+            documented wildcard-port behaviour.
         allowed_origins: Operator-supplied ``Origin`` header allowlist. Left
             empty by default so that browser-originated requests -- the only
             ones that carry ``Origin`` -- are rejected outright.
@@ -317,9 +318,9 @@ def build_transport_security(
         An SDK ``TransportSecuritySettings`` instance.
 
     Raises:
-        ValueError: If a wildcard bind is passed with no explicit allowlist.
-            Clients reach a ``0.0.0.0`` bind under some other name, so there is
-            no ``Host`` value to infer; the caller must collect one first.
+        ValueError: If a wildcard bind has no explicit allowlist, or if a
+            non-default concrete spelling uses an ephemeral port without one.
+            In either case the Host value clients will send cannot be inferred.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -335,17 +336,28 @@ def build_transport_security(
         input_ipv6_authority = _input_ipv6_authority(host)
         wire_identity = authority.strip("[]")
         canonical_identity = _canonical_host_identity(host)
-        if (
+        uses_sdk_loopback_defaults = (
             canonical_identity in _SDK_LOOPBACK_DEFAULT_IDENTITIES
             and wire_identity == canonical_identity
-        ):
+        )
+        has_distinct_ipv6_spelling = (
+            input_ipv6_authority is not None and input_ipv6_authority != authority
+        )
+        if port == 0 and (not uses_sdk_loopback_defaults or has_distinct_ipv6_spelling):
+            msg = (
+                f"Cannot infer an exact Host allowlist for ephemeral port on {host!r}. "
+                "Use a fixed port or pass --allowed-host explicitly."
+            )
+            raise ValueError(msg)
+        if uses_sdk_loopback_defaults:
             # Preserve the SDK's three interchangeable loopback Host spellings
             # while making the Origin policy explicit and fail-closed.
             hosts = list(_SDK_LOOPBACK_ALLOWED_HOSTS)
         else:
-            hosts = [f"{authority}:{port}", f"{authority}:*"]
-        if input_ipv6_authority is not None and input_ipv6_authority != authority:
-            hosts.extend([f"{input_ipv6_authority}:{port}", f"{input_ipv6_authority}:*"])
+            hosts = [f"{authority}:{port}"]
+        if has_distinct_ipv6_spelling:
+            assert input_ipv6_authority is not None
+            hosts.append(f"{input_ipv6_authority}:{port}")
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

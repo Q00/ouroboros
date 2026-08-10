@@ -183,7 +183,7 @@ class TestServeRefusesUnauthenticatedExposure:
         settings = instance.run_sse_async.await_args.kwargs["transport_security"]
         assert settings is not None
         assert settings.enable_dns_rebinding_protection is True
-        assert settings.allowed_hosts == ["127.0.0.2:9000", "127.0.0.2:*"]
+        assert settings.allowed_hosts == ["127.0.0.2:9000"]
 
     @pytest.mark.asyncio
     async def test_stdio_ignores_network_hardening(self) -> None:
@@ -302,7 +302,7 @@ class TestResolveNetworkSecurity:
         ("host", "expected"),
         [
             ("LOCALHOST", ["127.0.0.1:*", "localhost:*", "[::1]:*"]),
-            ("LOCALHOST.", ["localhost.:8080", "localhost.:*"]),
+            ("LOCALHOST.", ["localhost.:8080"]),
         ],
     )
     def test_nonliteral_loopback_spelling_uses_normalized_explicit_settings(
@@ -376,7 +376,7 @@ class TestIPv6Binds:
             allowed_origins=(),
         )
 
-        assert settings.allowed_hosts == ["[2001:db8::1]:8080", "[2001:db8::1]:*"]
+        assert settings.allowed_hosts == ["[2001:db8::1]:8080"]
 
     def test_authenticated_ipv6_loopback_bind_resolves(self) -> None:
         """An inherited token on a valid `--host ::1` must not break startup."""
@@ -404,10 +404,7 @@ class TestIPv6Binds:
         )
 
         assert isinstance(wiring.token_verifier, OuroborosTokenVerifier)
-        assert wiring.transport_security.allowed_hosts == [
-            "[2001:db8::1]:8080",
-            "[2001:db8::1]:*",
-        ]
+        assert wiring.transport_security.allowed_hosts == ["[2001:db8::1]:8080"]
 
     def test_ipv6_loopback_without_auth_is_still_credential_free(self) -> None:
         wiring = resolve_network_security(
@@ -451,6 +448,28 @@ class TestTransportSecurityBuilder:
 
         assert settings.allowed_hosts == ["a.example:8080", "b.example:*"]
         assert settings.allowed_origins == ["https://a.example"]
+
+    @pytest.mark.parametrize("host", ["127.0.0.2", "LOCALHOST.", "0:0:0:0:0:0:0:1"])
+    def test_nondefault_ephemeral_port_requires_an_explicit_allowlist(self, host: str) -> None:
+        """A concrete inferred policy cannot know port zero's eventual wire value."""
+        with pytest.raises(ValueError, match="exact Host allowlist for ephemeral port"):
+            build_transport_security(
+                host=host,
+                port=0,
+                allowed_hosts=(),
+                allowed_origins=(),
+            )
+
+    def test_explicit_allowlist_preserves_operator_ephemeral_port_policy(self) -> None:
+        """Operators may still opt into the SDK wildcard for an ephemeral bind."""
+        settings = build_transport_security(
+            host="127.0.0.2",
+            port=0,
+            allowed_hosts=("127.0.0.2:*",),
+            allowed_origins=(),
+        )
+
+        assert settings.allowed_hosts == ["127.0.0.2:*"]
 
     @pytest.mark.parametrize(
         ("host", "url"),
@@ -500,10 +519,54 @@ class TestTransportSecurityBuilder:
         assert middleware._validate_host(wire_request.headers["host"]) is True
         assert await middleware.validate_request(request) is None
 
-    def test_inferred_ipv6_allowlist_accepts_only_canonical_and_input_spellings(
+    @pytest.mark.parametrize(
+        "authority",
+        ["[2001:db8::1]", "[2001:0DB8:0:0:0:0:0:1]"],
+    )
+    @pytest.mark.parametrize(
+        ("port_suffix", "expected_status"),
+        [
+            (":8080", 204),
+            (":8081", 421),
+            (":", 421),
+            (":evil", 421),
+            (":8080.evil", 421),
+            (":8080:evil", 421),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_inferred_ipv6_allowlist_enforces_exact_well_formed_port(
         self,
+        authority: str,
+        port_suffix: str,
+        expected_status: int,
     ) -> None:
-        """Equivalent operator spelling is narrow, not a wildcard IPv6 bypass."""
+        """Canonical and input spellings admit only the configured wire authority."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
+
+        settings = build_transport_security(
+            host="2001:0DB8:0:0:0:0:0:1",
+            port=8080,
+            allowed_hosts=(),
+            allowed_origins=(),
+        )
+        middleware = TransportSecurityMiddleware(settings)
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [(b"host", f"{authority}{port_suffix}".encode())],
+            }
+        )
+
+        response = await middleware.validate_request(request)
+        status = 204 if response is None else response.status_code
+        assert status == expected_status
+
+    def test_inferred_ipv6_allowlist_rejects_textual_lookalikes(self) -> None:
+        """Adding an operator spelling must not turn it into a prefix allowlist."""
         from mcp.server.transport_security import TransportSecurityMiddleware
 
         settings = build_transport_security(
@@ -514,8 +577,10 @@ class TestTransportSecurityBuilder:
         )
         middleware = TransportSecurityMiddleware(settings)
 
-        assert middleware._validate_host("[2001:0DB8:0:0:0:0:0:1]:8080") is True
-        assert middleware._validate_host("[2001:db8::1]:8080") is True
+        assert settings.allowed_hosts == [
+            "[2001:db8::1]:8080",
+            "[2001:0DB8:0:0:0:0:0:1]:8080",
+        ]
         assert middleware._validate_host("[2001:db8::2]:8080") is False
         assert middleware._validate_host("[2001:0DB8:0:0:0:0:0:1].evil:8080") is False
 
