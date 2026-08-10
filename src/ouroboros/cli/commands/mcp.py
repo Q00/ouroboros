@@ -33,6 +33,7 @@ from ouroboros.orchestrator.heartbeat import (
     process_start_time,
 )
 from ouroboros.package_profiles import (
+    SDK_RUNTIME_IN_MCP_SERVER_MESSAGE,
     UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
     has_unsupported_claude_sdk_mcp_mix,
     public_runtime_backend,
@@ -1203,8 +1204,16 @@ def serve(
     # missing option inherits config and ultimately defaults to the SDK-backed
     # ``claude`` runtime, which is not executable inside this MCP 2 process.
     selected_runtime = _effective_mcp_server_runtime(runtime)
-    if has_unsupported_claude_sdk_mcp_mix() or selected_runtime == "claude":
+    # Two different failures used to share one string. An environment that mixes
+    # MCP 2 with the Claude SDK really is a package-profile problem and the user
+    # must reinstall. Inheriting the ``claude`` default is a runtime-selection
+    # failure, and the fix is ``--runtime``. Telling that user to reinstall sent
+    # them to change extras that were never relevant to the selected backend.
+    if has_unsupported_claude_sdk_mcp_mix():
         _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
+        raise typer.Exit(1)
+    if selected_runtime == "claude":
+        _stderr_console.print(Text(SDK_RUNTIME_IN_MCP_SERVER_MESSAGE, style="red"))
         raise typer.Exit(1)
 
     # Guard: prevent recursive MCP server spawning.

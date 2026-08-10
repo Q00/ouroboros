@@ -54,3 +54,22 @@ def test_platform_matrix_uses_canonical_unsupported_message() -> None:
     content = (root / "docs" / "platform-support.md").read_text(encoding="utf-8")
 
     assert UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE in content
+
+
+def test_sdk_runtime_message_names_the_fix_not_a_reinstall() -> None:
+    """The default-runtime failure must not read as a packaging problem.
+
+    Regression for the report in #2038: `ouroboros mcp serve` with no
+    `--runtime` inherits the `claude` default and printed the package-profile
+    message, so a user with a perfectly good install was told to change extras.
+    """
+    from ouroboros.package_profiles import SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
+
+    assert "--runtime" in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
+    assert "claude-cli" in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
+    # It must not send the reader back to the package extras.
+    assert "[mcp]" not in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
+    # Dependency validation happens later, so this early runtime diagnostic
+    # must not make an unconditional claim about installation health.
+    assert "install" not in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE.lower()
+    assert SDK_RUNTIME_IN_MCP_SERVER_MESSAGE != UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
