@@ -29,6 +29,7 @@ def evaluation_summary_from_spec_verification(
 ) -> Any | None:
     """Promote complete verifier coverage into Seed-bound formal AC verdicts."""
     from ouroboros.core.lineage import ACResult, EvaluationSummary
+    from ouroboros.core.seed import ac_texts
     from ouroboros.verification.models import VerificationOutcome
 
     reports = tuple(getattr(verification_summary, "reports", ()) or ())
@@ -41,9 +42,12 @@ def evaluation_summary_from_spec_verification(
             return getattr(seed_criteria[ac_index], "semantic_ac_key", None)
         return None
 
-    expected_ac_content: dict[int, str] = {
-        ac.ac_index: ac.ac_content for ac in mechanical.ac_results
-    }
+    # Seed criteria are the authority boundary. Mechanical execution records
+    # and verifier reports may add diagnostic indices, but they cannot narrow
+    # the set of ACs that must be independently verified before PASS.
+    expected_ac_content: dict[int, str] = dict(enumerate(ac_texts(seed_criteria)))
+    for ac in mechanical.ac_results:
+        expected_ac_content.setdefault(ac.ac_index, ac.ac_content)
     expected_agent_results = agent_results_from_execution_summary(mechanical)
     for task in mechanical.task_results:
         source_ac_index = task.source_ac_index

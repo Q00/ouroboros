@@ -595,12 +595,31 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
         )
 
     total = len(task_results)
-    completed_count = sum(1 for result in task_results if result.completed)
-    score = completed_count / total if total > 0 else 0.0
+    reported_indices = [result.task_index for result in task_results]
+    reported_index_set = set(reported_indices)
+    if seed_acs:
+        expected_indices = set(range(len(seed_acs)))
+    else:
+        # Without a Seed, the report's highest one-based task number is the
+        # only available coverage boundary. Requiring the complete contiguous
+        # range keeps ``Task 2`` alone from masquerading as a complete run.
+        expected_indices = set(range(max(reported_indices, default=-1) + 1))
 
-    total_expected_tasks = len(seed_acs) if seed_acs else total
-    all_expected_tasks_reported = total >= total_expected_tasks
-    all_tasks_completed = completed_count == total and all_expected_tasks_reported
+    indices_are_unique = len(reported_indices) == len(reported_index_set)
+    exact_expected_coverage = reported_index_set == expected_indices
+    completed_expected_indices = {
+        result.task_index
+        for result in task_results
+        if result.completed and result.task_index in expected_indices
+    }
+    total_expected_tasks = len(expected_indices)
+    completed_count = len(completed_expected_indices)
+    score = completed_count / total_expected_tasks if total_expected_tasks > 0 else 0.0
+    all_tasks_completed = (
+        indices_are_unique
+        and exact_expected_coverage
+        and all(result.completed for result in task_results)
+    )
 
     failed_indices = [result.task_index + 1 for result in task_results if not result.completed]
     failure_reason = None
@@ -609,6 +628,26 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
             failure_reason = (
                 f"{len(failed_indices)}/{total} tasks failed "
                 f"(Task {', '.join(str(i) for i in failed_indices)})"
+            )
+        elif not indices_are_unique:
+            failure_reason = (
+                "duplicate task indices in execution report; formal AC evaluation not run"
+            )
+        elif not exact_expected_coverage:
+            missing_indices = sorted(expected_indices - reported_index_set)
+            unexpected_indices = sorted(reported_index_set - expected_indices)
+            coverage_parts = []
+            if missing_indices:
+                coverage_parts.append(
+                    "missing Task " + ", ".join(str(index + 1) for index in missing_indices)
+                )
+            if unexpected_indices:
+                coverage_parts.append(
+                    "unexpected Task " + ", ".join(str(index + 1) for index in unexpected_indices)
+                )
+            failure_reason = (
+                "incomplete task coverage (" + "; ".join(coverage_parts) + "); "
+                "formal AC evaluation not run"
             )
         else:
             failure_reason = (

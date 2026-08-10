@@ -171,33 +171,59 @@ class SpecVerificationSummary(BaseModel, frozen=True):
     strict: bool = True
 
     @model_validator(mode="after")
-    def _preserve_legacy_discrepancy_override(self) -> SpecVerificationSummary:
-        if "confirmed_discrepancy_count" not in self.model_fields_set and self.discrepancy_count:
-            has_outcome_aware_result = any(
-                "outcome" in result.model_fields_set
-                for report in self.reports
-                for result in report.results
-            )
-            # Old serialized summaries could not distinguish a confirmed
-            # mismatch from unavailable evidence. Preserve their fail-closed
-            # override, but do not reinterpret a compact outcome-aware payload
-            # whose explicit UNVERIFIABLE/SKIPPED result proves the zero was
-            # omitted only because it equals the Pydantic default.
+    def _canonicalize_derived_counts(self) -> SpecVerificationSummary:
+        if self.reports:
+            # Reports contain canonicalized result outcomes, including when
+            # their source payload used only legacy booleans. Every persisted
+            # count is derived compatibility data once reports exist, so never
+            # let contradictory counters suppress or manufacture authority.
+            counts = self._counts_from_reports(self.reports)
+            for field_name, value in counts.items():
+                object.__setattr__(self, field_name, value)
+        elif "confirmed_discrepancy_count" not in self.model_fields_set and self.discrepancy_count:
+            # Report-less legacy summaries have no stronger evidence surface.
+            # Preserve their historical fail-closed discrepancy override.
             object.__setattr__(
                 self,
                 "confirmed_discrepancy_count",
-                (
-                    sum(
-                        1
-                        for report in self.reports
-                        for result in report.results
-                        if result.outcome is VerificationOutcome.DISCREPANCY
-                    )
-                    if has_outcome_aware_result
-                    else self.discrepancy_count
-                ),
+                self.discrepancy_count,
             )
         return self
+
+    @staticmethod
+    def _counts_from_reports(
+        reports: tuple[ACVerificationReport, ...],
+    ) -> dict[str, int]:
+        total = sum(len(report.results) for report in reports)
+        verified = sum(
+            sum(1 for result in report.results if result.outcome is VerificationOutcome.VERIFIED)
+            for report in reports
+        )
+        confirmed_discrepancies = sum(
+            sum(1 for result in report.results if result.outcome is VerificationOutcome.DISCREPANCY)
+            for report in reports
+        )
+        unverifiable = sum(
+            sum(
+                1 for result in report.results if result.outcome is VerificationOutcome.UNVERIFIABLE
+            )
+            for report in reports
+        )
+        failed = confirmed_discrepancies + unverifiable
+        skipped = sum(1 for report in reports if not report.results) + sum(
+            sum(1 for result in report.results if result.outcome is VerificationOutcome.SKIPPED)
+            for report in reports
+        )
+        discrepancies = sum(1 for report in reports if report.has_discrepancy)
+        return {
+            "total_assertions": total,
+            "verified_count": verified,
+            "failed_count": failed,
+            "unverifiable_count": unverifiable,
+            "skipped_count": skipped,
+            "discrepancy_count": discrepancies,
+            "confirmed_discrepancy_count": confirmed_discrepancies,
+        }
 
     @property
     def has_discrepancies(self) -> bool:
@@ -242,41 +268,10 @@ class SpecVerificationSummary(BaseModel, frozen=True):
         strict: bool = True,
     ) -> SpecVerificationSummary:
         """Build summary from individual AC reports."""
-        total = sum(len(r.results) for r in reports)
-        verified = sum(
-            sum(1 for result in report.results if result.outcome is VerificationOutcome.VERIFIED)
-            for report in reports
-        )
-        confirmed_discrepancies = sum(
-            sum(1 for result in report.results if result.outcome is VerificationOutcome.DISCREPANCY)
-            for report in reports
-        )
-        unverifiable = sum(
-            sum(
-                1 for result in report.results if result.outcome is VerificationOutcome.UNVERIFIABLE
-            )
-            for report in reports
-        )
-        # ``failed_count`` historically counted every explicit non-pass. Keep
-        # that contract for readers of persisted summaries while the outcome
-        # counters above expose why verification did not pass.
-        failed = confirmed_discrepancies + unverifiable
-        # Preserve the legacy meaning for manually built empty reports while
-        # also counting the now-visible T3/T4 assertion results.
-        skipped = sum(1 for report in reports if not report.results) + sum(
-            sum(1 for result in report.results if result.outcome is VerificationOutcome.SKIPPED)
-            for report in reports
-        )
-        discrepancies = sum(1 for r in reports if r.has_discrepancy)
+        counts = SpecVerificationSummary._counts_from_reports(reports)
         return SpecVerificationSummary(
             reports=reports,
             project_dir=project_dir,
-            total_assertions=total,
-            verified_count=verified,
-            failed_count=failed,
-            unverifiable_count=unverifiable,
-            skipped_count=skipped,
-            discrepancy_count=discrepancies,
-            confirmed_discrepancy_count=confirmed_discrepancies,
             strict=strict,
+            **counts,
         )

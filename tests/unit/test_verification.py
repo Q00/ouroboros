@@ -158,6 +158,50 @@ class TestVerificationModels:
         assert replayed.confirmed_discrepancy_count == 0
         assert replayed.override_approval is None
 
+    def test_outcome_reports_canonicalize_contradictory_persisted_counts(self) -> None:
+        """Public summary authority is derived from reports, never stale counters."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "reports": [
+                    {
+                        "ac_index": 0,
+                        "ac_text": "test",
+                        "agent_reported_pass": True,
+                        "results": [
+                            {
+                                "assertion": assertion.model_dump(mode="json"),
+                                "outcome": "discrepancy",
+                            }
+                        ],
+                    }
+                ],
+                "total_assertions": 0,
+                "verified_count": 99,
+                "failed_count": 0,
+                "unverifiable_count": 99,
+                "skipped_count": 99,
+                "discrepancy_count": 0,
+                "confirmed_discrepancy_count": 0,
+                "strict": False,
+            }
+        )
+
+        assert summary.total_assertions == 1
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.unverifiable_count == 0
+        assert summary.skipped_count == 0
+        assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.has_confirmed_discrepancies is True
+        assert summary.override_approval is False
+        assert summary.model_dump(mode="json")["confirmed_discrepancy_count"] == 1
+
     @pytest.mark.parametrize(
         ("outcome", "flags"),
         [

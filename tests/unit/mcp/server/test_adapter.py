@@ -52,6 +52,7 @@ from ouroboros.mcp.types import (
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import (
     ACVerificationReport,
     SpecAssertion,
@@ -292,6 +293,24 @@ Parallel Execution Verification Report
         assert summary.drift_score is None
         assert summary.run_verdict == "FAIL"
 
+    def test_duplicate_task_indices_do_not_satisfy_seed_coverage(self) -> None:
+        """Repeated Task 1 records cannot stand in for a missing Seed AC."""
+        seed = SimpleNamespace(acceptance_criteria=("Create config", "Add docs"))
+        artifact = """
+### Task 1: [COMPLETED] Create config
+### Task 1: [COMPLETED] Duplicate worker record
+""".strip()
+
+        summary = _parse_legacy_execution_task_summary(artifact, seed)
+
+        assert summary is not None
+        assert [task.source_ac_index for task in summary.task_results] == [0, 0]
+        assert summary.score == 0.5
+        assert summary.execution_completion_status == "failed"
+        assert summary.approval_status == "not_evaluated"
+        assert summary.run_verdict == "FAIL"
+        assert "duplicate task indices" in (summary.failure_reason or "")
+
     def test_agent_results_preserve_failed_legacy_task_for_spec_verification(self) -> None:
         """Legacy task failures must remain visible to the verifier input map."""
         mechanical = EvaluationSummary(
@@ -494,6 +513,101 @@ Parallel Execution Verification Report
         assert "No spec verification report" in summary.ac_results[1].evidence
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
+
+    def test_seed_coverage_survives_partial_production_extraction(self, tmp_path: Any) -> None:
+        """Parser, extractor, verifier, and formal adapter fail closed together."""
+        seed = SimpleNamespace(
+            seed_id="seed-partial-coverage",
+            acceptance_criteria=("Create marker.txt", "Add docs.md"),
+        )
+        mechanical = _parse_legacy_execution_task_summary(
+            "### Task 1: [COMPLETED] first\n### Task 1: [COMPLETED] duplicate",
+            seed,
+        )
+        assert mechanical is not None
+
+        extractor = AssertionExtractor(llm_adapter=AsyncMock(), model="test-model")
+        assertions = extractor._parse_response(
+            json.dumps(
+                [
+                    {
+                        "ac_index": 0,
+                        "tier": "t2_structural",
+                        "pattern": "marker",
+                        "expected_value": "marker.txt",
+                        "file_hint": "marker.txt",
+                    }
+                ]
+            ),
+            seed.acceptance_criteria,
+        )
+        assert assertions is not None
+        (tmp_path / "marker.txt").write_text("marker\n")
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            assertions,
+            agent_results=_agent_results_from_execution_summary(mechanical),
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert [result.ac_index for result in summary.ac_results] == [0, 1]
+        assert summary.ac_results[0].rendered_verdict == "PASS"
+        assert summary.ac_results[1].rendered_verdict == "NOT_EVALUATED"
+        assert summary.execution_completion_status == "failed"
+        assert summary.final_approved is False
+        assert summary.run_verdict == "FAIL"
+        assert "missing verifier report for AC 2" in (summary.failure_reason or "")
+
+    def test_seed_indices_are_required_even_when_mechanical_records_omit_them(self) -> None:
+        """A mechanically reported subset cannot narrow formal Seed authority."""
+        seed = SimpleNamespace(acceptance_criteria=("Create config", "Add docs"))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Create config",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Create config",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="config",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Create config",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert [result.rendered_verdict for result in summary.ac_results] == [
+            "PASS",
+            "NOT_EVALUATED",
+        ]
+        assert summary.final_approved is False
+        assert summary.run_verdict == "FAIL"
+        assert "missing verifier report for AC 2" in (summary.failure_reason or "")
 
     def test_unavailable_spec_verification_result_does_not_approve_run(self) -> None:
         """Unavailable verifier evidence is a failed formal AC, not approval."""
