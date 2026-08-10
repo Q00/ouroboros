@@ -122,6 +122,21 @@ _ASYNC_SUBMISSION_TOOLS = frozenset(
     }
 )
 
+# Backstop for capture_tool_call: every registered MCP tool name is
+# lowercase snake-case after the "ouroboros_" prefix (verified against
+# _TOOL_FUNNEL/_POLLING_TOOLS/_ASYNC_SUBMISSION_TOOLS above), so a `name`
+# that fails this fullmatch cannot be a real tool -- it's caller-controlled
+# input (the "ouroboros_" startswith gate alone lets anything after that
+# prefix through unchanged). The property allowlist constrains which keys
+# reach a batch, not the string semantics of a value that IS an allowed key
+# (`tool`/`command` are plain caller strings), so this is the backstop that
+# constrains the one caller-controlled value that becomes a property --
+# a path, an identifier, or anything else must never ride through `tool`
+# or `command`, even if the real boundary (the MCP tool registry lookup)
+# has a bug.
+_TOOL_NAME_PATTERN = re.compile(r"^ouroboros_[a-z0-9_]{1,64}$")
+_UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
+
 _JOB_FUNNEL: dict[str, str] = {
     "execute_seed": "run",
     "evolve_step": "evolve",
@@ -827,10 +842,26 @@ def capture_tool_call(
     duration_ms: float | None = None,
     error_type: str | None = None,
 ) -> None:
-    """Capture one MCP tool invocation (the single funnel chokepoint)."""
+    """Capture one MCP tool invocation (the single funnel chokepoint).
+
+    `name` is caller-controlled and only loosely gated by the
+    "ouroboros_" prefix check below -- see _TOOL_NAME_PATTERN for the
+    strict charset backstop that follows: a name that doesn't look like a
+    real registered tool is replaced with a fixed literal before it can
+    become the `tool`/`command` property values, rather than dropped or
+    forwarded verbatim.
+    """
     try:
         if not name.startswith("ouroboros_"):
             return
+        if not _TOOL_NAME_PATTERN.fullmatch(name):
+            # Defense in depth: the real boundary (an MCP tool registry
+            # lookup) belongs upstream of this function and should already
+            # normalize unknown names, but this call site must not depend
+            # on that holding forever. Replace, don't drop -- unknown-tool
+            # failures are deliberately counted, just never under a caller
+            # string that could be a path, an identifier, or anything else.
+            name = _UNKNOWN_TOOL_NAME
         sample_rate = 1
         if name in _POLLING_TOOLS:
             if _poll_rng.random() >= 1.0 / _POLL_SAMPLE_RATE:

@@ -1521,6 +1521,37 @@ class TestMCPServerAdapterTools:
         assert capture.call_args.kwargs["ok"] is False
         assert capture.call_args.kwargs["error_type"] == "MCPResourceNotFoundError"
 
+    async def test_call_tool_hostile_unregistered_name_is_sanitized(self) -> None:
+        """A caller-controlled unregistered name never reaches telemetry verbatim."""
+        adapter = MCPServerAdapter()
+        hostile_name = "ouroboros_/home/alice/private-project"
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool(hostile_name, {})
+
+        assert result.is_err
+        assert isinstance(result.error, MCPResourceNotFoundError)
+        capture.assert_called_once()
+        assert capture.call_args.args[0] == "ouroboros_unknown_tool"
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "MCPResourceNotFoundError"
+        for value in (*capture.call_args.args, *capture.call_args.kwargs.values()):
+            assert "/home/alice" not in str(value)
+            assert "private-project" not in str(value)
+
+    async def test_call_tool_registered_name_still_captured_verbatim(self) -> None:
+        """The sanitization gate does not clip a genuinely registered tool's name."""
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_registered_probe"))
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_registered_probe", {"input": "safe"})
+
+        assert result.is_ok
+        capture.assert_called_once()
+        assert capture.call_args.args[0] == "ouroboros_registered_probe"
+        assert capture.call_args.kwargs["ok"] is True
+
     async def test_call_tool_security_denial_is_captured_once(self) -> None:
         """A pre-handler security return is a visible failed invocation."""
         adapter = MCPServerAdapter()
@@ -2101,6 +2132,25 @@ class TestServeTransport:
             capture.assert_called_once()
             assert capture.call_args.kwargs["ok"] is False
             assert capture.call_args.kwargs["error_type"] == "ValueError"
+
+    async def test_sdk_call_tool_hostile_unregistered_name_is_sanitized(self) -> None:
+        """The SDK entry path never queues a caller-controlled unregistered name."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        hostile_name = "ouroboros_/home/alice/private-project"
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            with pytest.raises(RuntimeError, match="Tool not found"):
+                await call_sdk_tool(adapter, hostile_name, {})
+
+        capture.assert_called_once()
+        assert capture.call_args.args[0] == "ouroboros_unknown_tool"
+        assert capture.call_args.kwargs["ok"] is False
+        for value in (*capture.call_args.args, *capture.call_args.kwargs.values()):
+            assert "/home/alice" not in str(value)
+            assert "private-project" not in str(value)
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

@@ -609,6 +609,63 @@ class TestCapture:
         telemetry.flush(timeout=2.0)
         assert sent == []
 
+    def test_hostile_tool_name_is_replaced_not_forwarded(self, sent: list[dict[str, Any]]) -> None:
+        """A caller-controlled name that merely starts with "ouroboros_" is
+        not automatically a real registered tool -- e.g. a path smuggled
+        past a boundary bug upstream. capture_tool_call must never let it
+        become the `tool`/`command` property value."""
+        hostile = "ouroboros_/home/alice/private-project"
+        telemetry.capture_tool_call(hostile, ok=False, error_type="KeyError")
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["properties"]["tool"] == "ouroboros_unknown_tool"
+        assert event["properties"]["command"] == "unknown_tool"
+        # Assert on the full serialized event, not just the two fields
+        # above -- proves the hostile string can't leak through any other
+        # property (e.g. error_type) either.
+        assert "alice" not in repr(event)
+        assert "private-project" not in repr(event)
+        assert hostile not in repr(event)
+
+    def test_hostile_tool_name_variants_are_all_replaced(self, sent: list[dict[str, Any]]) -> None:
+        """Uppercase, dots, and other non-snake-case punctuation are just as
+        invalid as a path -- the charset gate is exact, not a blocklist of
+        specific dangerous characters."""
+        for hostile in ("ouroboros_Evil.Tool", "ouroboros_evil tool", "ouroboros_EVIL_TOOL!"):
+            telemetry.capture_tool_call(hostile, ok=True)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 3
+        for event in sent:
+            assert event["properties"]["tool"] == "ouroboros_unknown_tool"
+            assert event["properties"]["command"] == "unknown_tool"
+
+    def test_canonical_tool_name_passes_through_unchanged(self, sent: list[dict[str, Any]]) -> None:
+        """The backstop must not false-positive on real tool names -- a
+        canonical, registered name still gets its funnel mapping."""
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["properties"]["tool"] == "ouroboros_interview"
+        assert sent[0]["properties"]["command"] == "interview"
+        assert sent[0]["properties"]["is_funnel"] is True
+
+    def test_overlong_tool_name_is_replaced(self, sent: list[dict[str, Any]]) -> None:
+        """A name that is otherwise charset-valid but exceeds the length
+        bound (no real tool name is anywhere close to 64 chars) is still
+        not a real tool -- must not pass through as free text."""
+        overlong = "ouroboros_" + ("a" * 65)
+        telemetry.capture_tool_call(overlong, ok=True)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["properties"]["tool"] == "ouroboros_unknown_tool"
+        assert sent[0]["properties"]["command"] == "unknown_tool"
+        assert overlong not in repr(sent[0])
+
     def test_polling_tools_sampled(self, sent: list[dict[str, Any]]) -> None:
         # Sampling is a per-call random draw (see telemetry._poll_rng), not a
         # deterministic 1-in-50 counter, so the batch needs a seed that is

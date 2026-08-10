@@ -931,7 +931,12 @@ class MCPServerAdapter:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool through the complete request observer."""
         operation = lambda: self._call_tool_impl(name, arguments, credentials)  # noqa: E731
-        return await observe_adapter_tool_call(name, operation, enabled=_capture_telemetry)
+        return await observe_adapter_tool_call(
+            name,
+            operation,
+            enabled=_capture_telemetry,
+            registered=name in self._tool_handlers,
+        )
 
     async def _call_tool_impl(
         self,

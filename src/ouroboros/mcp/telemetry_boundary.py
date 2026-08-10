@@ -21,6 +21,16 @@ _TERMINAL_JOB_EVENTS = frozenset(
     }
 )
 
+# capture_tool_call() derives both "tool" and "command" from whatever name
+# reaches it, so a caller-controlled unregistered name (e.g. a filesystem
+# path smuggled in as a tool call) must never be queued verbatim -- that
+# would leak arbitrary caller-controlled strings into telemetry despite
+# TELEMETRY.md promising file paths are never collected. Every unregistered
+# lookup is folded to this fixed literal instead. It keeps the "ouroboros_"
+# prefix so capture_tool_call's existing funnel gate still records it (as
+# command="unknown_tool", is_funnel=False).
+_UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
+
 
 def _duration_ms(started_at: float) -> float:
     return (time.monotonic() - started_at) * 1000
@@ -31,15 +41,23 @@ async def observe_adapter_tool_call[T, E](
     operation: Callable[[], Awaitable[Result[T, E]]],
     *,
     enabled: bool,
+    registered: bool,
 ) -> Result[T, E]:
-    """Run one typed adapter call and emit exactly one sanitized outcome."""
+    """Run one typed adapter call and emit exactly one sanitized outcome.
+
+    ``name`` is caller-controlled and never trusted for telemetry on its own:
+    the caller must assert whether it resolved to a registered tool via
+    ``registered``. Only a registered name is ever queued verbatim; otherwise
+    the fixed ``_UNKNOWN_TOOL_NAME`` literal stands in.
+    """
+    safe_name = name if registered else _UNKNOWN_TOOL_NAME
     started_at = time.monotonic()
     try:
         result = await operation()
     except BaseException as exc:
         if enabled:
             usage_telemetry.capture_tool_call(
-                name,
+                safe_name,
                 ok=False,
                 duration_ms=_duration_ms(started_at),
                 error_type=type(exc).__name__,
@@ -47,7 +65,7 @@ async def observe_adapter_tool_call[T, E](
         raise
     if enabled:
         usage_telemetry.capture_tool_call(
-            name,
+            safe_name,
             ok=result.is_ok,
             duration_ms=_duration_ms(started_at),
             error_type=type(result.error).__name__ if result.is_err else None,
@@ -68,6 +86,10 @@ async def call_sdk_tool(
 
     started_at = time.monotonic()
     error_type: str | None = None
+    # Unregistered until a matching definition is found below; never
+    # overwritten with the caller-controlled ``name`` before that (see
+    # _UNKNOWN_TOOL_NAME).
+    safe_name = _UNKNOWN_TOOL_NAME
     try:
         definition = next(
             (item for item in await adapter.list_tools() if item.name == name),
@@ -75,6 +97,7 @@ async def call_sdk_tool(
         )
         if definition is None:
             raise RuntimeError(f"Tool not found: {name}")
+        safe_name = name
         if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
             arguments = arguments["kwargs"]
         _validate_parameter_constraints(definition.parameters, arguments)
@@ -89,13 +112,13 @@ async def call_sdk_tool(
         response = tool_result_to_sdk(value)
     except BaseException as exc:
         usage_telemetry.capture_tool_call(
-            name,
+            safe_name,
             ok=False,
             duration_ms=_duration_ms(started_at),
             error_type=error_type or type(exc).__name__,
         )
         raise
-    usage_telemetry.capture_tool_call(name, ok=True, duration_ms=_duration_ms(started_at))
+    usage_telemetry.capture_tool_call(safe_name, ok=True, duration_ms=_duration_ms(started_at))
     return response
 
 
