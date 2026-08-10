@@ -26,6 +26,17 @@ from ouroboros.plugin.manifest import SUPPORTED_SCHEMA_VERSIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BUILTIN_GLOSSARY_PACKS = ("ui_ux_basics.yaml",)
+PYTHON_RESOLVER_START = "<!-- ouroboros-python-resolver:start -->"
+PYTHON_RESOLVER_END = "<!-- ouroboros-python-resolver:end -->"
+
+
+def _extract_python_resolver(contents: str) -> str:
+    """Extract the executable resolver contract from one skill artifact."""
+    start = contents.index(PYTHON_RESOLVER_START) + len(PYTHON_RESOLVER_START)
+    end = contents.index(PYTHON_RESOLVER_END, start)
+    fenced = contents[start:end].strip()
+    assert fenced.startswith("```bash\n") and fenced.endswith("\n```")
+    return fenced.removeprefix("```bash\n").removesuffix("\n```")
 
 
 @pytest.mark.skipif(
@@ -89,6 +100,21 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         metadata = Parser().parsestr(archive.read(metadata_paths[0]).decode("utf-8"))
         requires_dist = metadata.get_all("Requires-Dist") or []
         provided_extras = set(metadata.get_all("Provides-Extra") or [])
+
+        wheel_skill_paths = {
+            skill: f"ouroboros/skills/{skill}/SKILL.md" for skill in ("welcome", "setup", "seed")
+        }
+        wheel_resolvers: dict[str, str] = {}
+        for skill, path in wheel_skill_paths.items():
+            assert names.count(path) == 1, (
+                f"built wheel must ship {path} exactly once; found {names.count(path)} entries"
+            )
+            wheel_resolvers[skill] = _extract_python_resolver(archive.read(path).decode("utf-8"))
+
+        source_resolver = _extract_python_resolver(
+            (PROJECT_ROOT / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+        )
+        assert set(wheel_resolvers.values()) == {source_resolver}, wheel_resolvers
 
     assert {"claude", "claude-cli", "claude-sdk", "mcp", "all"} <= provided_extras
     sdk_requirements = [

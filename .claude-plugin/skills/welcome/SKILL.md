@@ -30,19 +30,19 @@ argument passed to it; the function preserves arguments and heredoc/stdin input.
 ```bash
 ouroboros_python() {
   if command -v python3 >/dev/null 2>&1 &&
-    command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+    (unset PYTHONHOME; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
   then
-    command python3 "$@"
+    (unset PYTHONHOME; command python3 "$@")
     return
   fi
   if command -v python >/dev/null 2>&1 &&
-    command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+    (unset PYTHONHOME; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
   then
-    command python "$@"
+    (unset PYTHONHOME; command python "$@")
     return
   fi
   if command -v uv >/dev/null 2>&1; then
-    command uv run --no-project --quiet --python '>=3.12' python "$@"
+    (unset PYTHONHOME; command uv run --no-project --quiet --python '>=3.12' python "$@")
     return
   fi
   printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2

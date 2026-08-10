@@ -714,6 +714,12 @@ def test_python_resolver_contract_is_identical_in_all_six_packaged_skill_sources
     assert 'command python3 "$@"' in contract
     assert 'command python "$@"' in contract
     assert "uv run --no-project --quiet --python '>=3.12' python \"$@\"" in contract
+    assert contract.count("unset PYTHONHOME") == 5
+    assert "(unset PYTHONHOME; command python3 -c" in contract
+    assert '(unset PYTHONHOME; command python3 "$@")' in contract
+    assert "(unset PYTHONHOME; command python -c" in contract
+    assert '(unset PYTHONHOME; command python "$@")' in contract
+    assert "(unset PYTHONHOME; command uv run" in contract
 
     for relative_path in _PYTHON_SKILL_PATHS:
         contents = (repo_root / relative_path).read_text(encoding="utf-8")
@@ -757,6 +763,29 @@ DATA
     assert not (tmp_path / "uv-calls.log").exists()
 
 
+def test_python_resolver_sanitizes_pythonhome_for_compatible_global_python(
+    tmp_path: Path,
+) -> None:
+    """A stale inherited Python home cannot poison probes or the selected child."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_direct_python(bin_dir / "python3", "python3")
+    poisoned_pythonhome = str(tmp_path / "missing-python-home")
+
+    result = _run_resolver(
+        """ouroboros_python -c 'import json, os; print(json.dumps({"pythonhome": os.environ.get("PYTHONHOME")}))'
+printf 'caller-pythonhome=%s\n' "$PYTHONHOME"
+""",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": poisoned_pythonhome},
+    )
+
+    output_lines = result.stdout.splitlines()
+    assert json.loads(output_lines[0]) == {"pythonhome": None}
+    assert output_lines[1] == f"caller-pythonhome={poisoned_pythonhome}"
+    assert (tmp_path / "python-calls.log").read_text().splitlines() == ["python3", "python3"]
+
+
 def test_python_resolver_uses_compatible_python_when_python3_is_old(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -767,6 +796,7 @@ def test_python_resolver_uses_compatible_python_when_python3_is_old(tmp_path: Pa
     result = _run_resolver(
         "ouroboros_python -c 'import sys; print(sys.version_info[:2])'",
         path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
     )
 
     assert result.stdout.strip().startswith("(3, ")
@@ -785,14 +815,19 @@ def test_python_resolver_uses_uv_on_a_host_without_global_python(tmp_path: Path)
 
     result = _run_resolver(
         """ouroboros_python - 'space value' <<'PY'
-import json, sys
-print(json.dumps({"argv": sys.argv[1:], "value": "from-heredoc"}))
+import json, os, sys
+print(json.dumps({"argv": sys.argv[1:], "pythonhome": os.environ.get("PYTHONHOME"), "value": "from-heredoc"}))
 PY
 """,
         path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
     )
 
-    assert json.loads(result.stdout) == {"argv": ["space value"], "value": "from-heredoc"}
+    assert json.loads(result.stdout) == {
+        "argv": ["space value"],
+        "pythonhome": None,
+        "value": "from-heredoc",
+    }
     assert (tmp_path / "uv-calls.log").read_text().splitlines() == [
         "run",
         "--no-project",
@@ -814,9 +849,13 @@ def test_python_resolver_rejects_old_global_interpreters_before_uv_fallback(
     _install_old_python(bin_dir / "python", "old-python")
     _install_uv_fallback(bin_dir / "uv")
 
-    result = _run_resolver("ouroboros_python -c 'print(\"uv-selected\")'", path=bin_dir)
+    result = _run_resolver(
+        "ouroboros_python -c 'import os; print(os.environ.get(\"PYTHONHOME\") is None)'",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+    )
 
-    assert result.stdout.strip() == "uv-selected"
+    assert result.stdout.strip() == "True"
     assert (tmp_path / "python-calls.log").read_text().splitlines() == [
         "old-python3",
         "old-python",
@@ -828,11 +867,17 @@ def test_python_resolver_fails_cleanly_without_python_or_uv(tmp_path: Path) -> N
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
 
-    result = _run_resolver("ouroboros_python -c 'print(1)'", path=bin_dir, check=False)
+    result = _run_resolver(
+        "ouroboros_python -c 'print(1)'",
+        path=bin_dir,
+        extra_env={"PYTHONHOME": str(tmp_path / "missing-python-home")},
+        check=False,
+    )
 
     assert result.returncode == 127
     assert result.stdout == ""
     assert "require Python >= 3.12 or uv on PATH" in result.stderr
+    assert "Fatal Python error" not in result.stderr
 
 
 @pytest.mark.parametrize("relative_path", _PYTHON_SKILL_PATHS)
@@ -851,7 +896,14 @@ def test_first_run_preference_write_works_through_uv_only_path(
     bin_dir.mkdir()
     _install_uv_fallback(bin_dir / "uv")
 
-    _run_resolver(snippet, path=bin_dir, extra_env={"HOME": str(tmp_path)})
+    _run_resolver(
+        snippet,
+        path=bin_dir,
+        extra_env={
+            "HOME": str(tmp_path),
+            "PYTHONHOME": str(tmp_path / "missing-python-home"),
+        },
+    )
 
     prefs = json.loads((tmp_path / ".ouroboros" / "prefs.json").read_text(encoding="utf-8"))
     if relative_path.parts[-2] == "welcome":
