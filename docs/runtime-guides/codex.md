@@ -198,9 +198,23 @@ message assembly, and MCP invocation local. See
 ### Verify Installation
 
 ```bash
-codex --version
 ouroboros --help
+codex --version
 ```
+
+> `codex --version` reporting `command not found` is **not** a failure on the
+> standalone path. That path supports users whose only Codex executable is the
+> macOS ChatGPT app bundle and is not on `PATH`; setup discovers the bundle. In
+> that case check what setup actually resolved:
+>
+> ```bash
+> ouroboros config show
+> ```
+>
+> The **`CLI path:`** line in that output is the resolved executable
+> (`cli/commands/config.py:696-701`). The string `codex_cli_path` does not appear
+> in the output, so do not grep for it. On the plugin path, and for anyone who
+> put `codex` on `PATH`, `codex --version` is the right check.
 
 ## How It Works
 
