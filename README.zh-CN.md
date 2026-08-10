@@ -390,7 +390,7 @@ src/ouroboros/
 完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文文档：
 
 - [评估流水线指南（Evaluation Pipeline）](./docs/guides/evaluation-pipeline.zh-CN.md) —— 三阶段关卡的完整参考：每个阶段验什么、阈值和配置项、失败模式与排查、以及事件审计轨迹
-- [隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 无条件隐藏
+- [隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 隐藏、且没有配置项能把它打开
 
 </details>
 
