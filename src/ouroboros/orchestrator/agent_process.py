@@ -73,14 +73,13 @@ _CANCELLED_WORK_DRAIN_GRACE_SECONDS: Final[float] = 10.0
 async def _run_cancellation_atomic_handoff[T](awaitable: Awaitable[T]) -> T:
     """Settle one bounded lifecycle handoff before surfacing cancellation.
 
-    A durable resume has two inseparable halves: commit ``CONTINUE`` and
-    release the live waiter.  EventStore already settles the SQLite half
-    before re-raising caller cancellation, but that re-raise used to strand
-    the live handle in ``PAUSED`` after the journal had committed ``RUNNING``.
-    Shield the complete handoff and, if its caller is cancelled, wait until
-    it either fails before commit or finishes the post-commit release.  The
-    original cancellation is then re-raised so cancellation semantics are
-    preserved without allowing a persisted/live split.
+    Durable lifecycle transitions can have an inseparable live half after
+    their journal write: resume releases a waiter, while cancelled startup
+    terminalizes a possibly committed initial RUNNING row.  EventStore settles
+    the SQLite half before re-raising caller cancellation. Shield the complete
+    handoff and wait until it either fails before commit or finishes its live
+    release/reconciliation. The original cancellation is then re-raised, so
+    cancellation semantics survive without allowing a persisted/live split.
 
     The durable append keeps its persistence-owned timeout, so a wedged write
     still rolls back and settles within that deadline rather than making this
@@ -1080,7 +1079,24 @@ class AgentProcess:
         # cooperative checkpoint.
         if emit is not None:
             handle._expected_directive_count += 1
-            await emit(Directive.CONTINUE, "spawned", AgentProcessStatus.RUNNING)
+            try:
+                await emit(Directive.CONTINUE, "spawned", AgentProcessStatus.RUNNING)
+            except asyncio.CancelledError as caller_cancellation:
+                if self.journal_mode is AgentProcessJournalMode.DURABLE:
+                    # EventStore settles a transaction before it re-raises
+                    # cancellation, so the initial RUNNING row may already be
+                    # committed even though no runner exists yet.  Reconcile
+                    # that possible row to one durable terminal state before
+                    # cancellation escapes.  Work is never created or started.
+                    handle._request_cancel("cancelled during initial durable handoff")
+                    try:
+                        await _run_cancellation_atomic_handoff(handle._mark_cancelled())
+                    except asyncio.CancelledError as settlement_cancellation:
+                        if settlement_cancellation.__cause__ is not None:
+                            raise caller_cancellation from settlement_cancellation.__cause__
+                    except BaseException as exc:
+                        raise caller_cancellation from exc
+                raise caller_cancellation
 
         async def _runner() -> None:
             try:

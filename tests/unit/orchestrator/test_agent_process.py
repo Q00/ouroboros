@@ -2349,6 +2349,92 @@ async def test_run_with_agent_process_surfaces_initial_journal_failure_before_wo
 
 
 @pytest.mark.asyncio
+async def test_real_event_store_cancel_after_initial_commit_terminalizes_without_starting_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed RUNNING row is terminalized before caller cancellation escapes."""
+    from ouroboros.persistence import event_store as event_store_module
+
+    process_id = "durable-real-store-cancelled-initial-handoff"
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+    original_append = event_store_module.append_with_sqlite_deadline
+    initial_committed = asyncio.Event()
+    release_initial_append = asyncio.Event()
+    work_started = asyncio.Event()
+
+    async def append_then_hold_after_initial_commit(
+        engine: Any,
+        event: BaseEvent,
+        *,
+        overall_deadline: float,
+        picker_projection_ready: bool,
+        insert_event: Any,
+    ) -> None:
+        await original_append(
+            engine,
+            event,
+            overall_deadline=overall_deadline,
+            picker_projection_ready=picker_projection_ready,
+            insert_event=insert_event,
+        )
+        if event.data.get("directive") == "continue" and "spawned" in str(event.data.get("reason")):
+            initial_committed.set()
+            await release_initial_append.wait()
+
+    monkeypatch.setattr(
+        event_store_module,
+        "append_with_sqlite_deadline",
+        append_then_hold_after_initial_commit,
+    )
+
+    async def work(_handle: AgentProcessHandle) -> str:
+        work_started.set()
+        return "must not run"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+            process_id=process_id,
+        )
+    )
+    try:
+        await asyncio.wait_for(initial_committed.wait(), timeout=1.0)
+        run_task.cancel()
+        await asyncio.sleep(0)
+        run_task.cancel()
+
+        assert run_task.done() is False
+        assert work_started.is_set() is False
+
+        release_initial_append.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+        events = await store.replay("agent_process", process_id)
+        assert _directives(events) == ["continue", "cancel"]
+        snapshot = project_agent_process_snapshot(events, process_id=process_id)
+        assert snapshot is not None
+        assert snapshot.status is AgentProcessStatus.CANCELLED
+        assert snapshot.directive_count == 2
+        assert work_started.is_set() is False
+        assert not any(
+            task.get_name() == f"agent_process:{process_id}" and not task.done()
+            for task in asyncio.all_tasks()
+        )
+    finally:
+        release_initial_append.set()
+        if not run_task.done():
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_run_with_agent_process_surfaces_terminal_journal_failure() -> None:
     """Durable mode cannot return success with a missing terminal row."""
     store = _DropAfterFirstAppendReplayStore()
