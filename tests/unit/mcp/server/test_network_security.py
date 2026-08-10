@@ -461,7 +461,14 @@ class TestTransportSecurityBuilder:
             ("BÜCHER.Example.", "http://BÜCHER.Example.:8080/mcp"),
             ("faß.de", "http://faß.de:8080/mcp"),
             ("127.0.0.1", "http://127.0.0.1:8080/mcp"),
-            ("2001:0DB8:0:0:0:0:0:1", "http://[2001:db8::1]:8080/mcp"),
+            (
+                "2001:0DB8:0:0:0:0:0:1",
+                "http://[2001:0DB8:0:0:0:0:0:1]:8080/mcp",
+            ),
+            (
+                "0:0:0:0:0:0:0:1",
+                "http://[0:0:0:0:0:0:0:1]:8080/mcp",
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -492,6 +499,25 @@ class TestTransportSecurityBuilder:
 
         assert middleware._validate_host(wire_request.headers["host"]) is True
         assert await middleware.validate_request(request) is None
+
+    def test_inferred_ipv6_allowlist_accepts_only_canonical_and_input_spellings(
+        self,
+    ) -> None:
+        """Equivalent operator spelling is narrow, not a wildcard IPv6 bypass."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        settings = build_transport_security(
+            host="2001:0DB8:0:0:0:0:0:1",
+            port=8080,
+            allowed_hosts=(),
+            allowed_origins=(),
+        )
+        middleware = TransportSecurityMiddleware(settings)
+
+        assert middleware._validate_host("[2001:0DB8:0:0:0:0:0:1]:8080") is True
+        assert middleware._validate_host("[2001:db8::1]:8080") is True
+        assert middleware._validate_host("[2001:db8::2]:8080") is False
+        assert middleware._validate_host("[2001:0DB8:0:0:0:0:0:1].evil:8080") is False
 
     @pytest.mark.asyncio
     async def test_explicit_loopback_origin_is_honored_at_wire_boundary(self) -> None:

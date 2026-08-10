@@ -97,16 +97,16 @@ def is_wildcard_host(host: str) -> bool:
 
 
 def as_url_authority(host: str) -> str:
-    """Return ``host`` in the canonical spelling used on the HTTP wire.
+    """Return ``host`` as a canonical URL authority.
 
     A bind address and its URL spelling differ for IPv6: the socket layer takes
     the bare literal (``::1``) and rejects the bracketed form, while a URL or
     ``Host`` value needs brackets or the trailing ``:port`` cannot be told apart
     from another hextet. DNS names have a similar bind-to-wire boundary: HTTP
     clients normally lowercase them and encode Unicode labels using modern IDNA.
-    An absolute DNS name keeps its trailing root dot on the HTTP wire. The SDK
-    compares Host allowlists case-sensitively, so inferred values must use that
-    wire spelling rather than a separately canonicalized DNS identity.
+    An absolute DNS name keeps its trailing root dot on the HTTP wire. HTTPX 2
+    preserves an IPv6 literal's input spelling instead, so Host policy also
+    retains that spelling separately when it differs from this canonical form.
 
     Callers keep the original value for socket binding and pass it through here
     only for URL- and Host-shaped values.
@@ -129,6 +129,25 @@ def as_url_authority(host: str) -> str:
     if address.version == 6:
         return f"[{address.compressed}]"
     return address.compressed
+
+
+def _input_ipv6_authority(host: str) -> str | None:
+    """Return the operator-provided IPv6 spelling in bracketed wire form.
+
+    HTTPX 2 preserves the textual IPv6 literal from its URL in the ``Host``
+    header. The SDK compares that header textually, so a canonical authority
+    alone cannot admit a client using the same expanded bind spelling.
+    """
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    if address.version != 6:
+        return None
+    return f"[{candidate}]"
 
 
 def _canonical_host_identity(host: str) -> str:
@@ -313,6 +332,7 @@ def build_transport_security(
             )
             raise ValueError(msg)
         authority = as_url_authority(host)
+        input_ipv6_authority = _input_ipv6_authority(host)
         wire_identity = authority.strip("[]")
         canonical_identity = _canonical_host_identity(host)
         if (
@@ -324,6 +344,8 @@ def build_transport_security(
             hosts = list(_SDK_LOOPBACK_ALLOWED_HOSTS)
         else:
             hosts = [f"{authority}:{port}", f"{authority}:*"]
+        if input_ipv6_authority is not None and input_ipv6_authority != authority:
+            hosts.extend([f"{input_ipv6_authority}:{port}", f"{input_ipv6_authority}:*"])
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
