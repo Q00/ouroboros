@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field
 import structlog
 
-from ouroboros import telemetry as usage_telemetry
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import get_execution_model
 from ouroboros.core.seed import ac_text, ac_texts
@@ -43,7 +42,7 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
-from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call
+from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call, stamp_backend_context
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -926,15 +925,11 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
-        *,
-        _capture_telemetry: bool = True,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool through the complete request observer."""
-        operation = lambda: self._call_tool_impl(name, arguments, credentials)  # noqa: E731
         return await observe_adapter_tool_call(
             name,
-            operation,
-            enabled=_capture_telemetry,
+            lambda: self._call_tool_impl(name, arguments, credentials),
             registered=name in self._tool_handlers,
         )
 
@@ -1736,13 +1731,12 @@ def create_ouroboros_server(
     evaluate_llm_backend = role_llm_backend("semantic_evaluation")
     reflect_llm_backend = role_llm_backend("reflect")
 
-    # Stamp resolved backends onto anonymous usage telemetry so every
-    # command_run event carries provider context (see TELEMETRY.md).
-    usage_telemetry.set_context(
-        runtime_backend=resolved_runtime_backend,
-        execute_runtime_backend=execute_runtime_backend,
-        interview_llm_backend=interview_llm_backend,
-        evaluate_llm_backend=evaluate_llm_backend,
+    # Provider context for every subsequent telemetry event (TELEMETRY.md).
+    stamp_backend_context(
+        resolved_runtime_backend,
+        execute_runtime_backend,
+        interview_llm_backend,
+        evaluate_llm_backend,
     )
 
     # Resolve opencode_mode from config file if caller did not pass one.

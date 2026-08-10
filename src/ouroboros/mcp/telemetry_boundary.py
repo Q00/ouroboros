@@ -150,7 +150,6 @@ async def observe_adapter_tool_call[T, E](
     name: str,
     operation: Callable[[], Awaitable[Result[T, E]]],
     *,
-    enabled: bool,
     registered: bool,
 ) -> Result[T, E]:
     """Run one typed adapter call and emit exactly one sanitized outcome.
@@ -174,22 +173,20 @@ async def observe_adapter_tool_call[T, E](
     try:
         result = await operation()
     except BaseException as exc:
-        if enabled:
-            usage_telemetry.capture_tool_call(
-                safe_name,
-                ok=False,
-                duration_ms=_duration_ms(started_at),
-                error_type=_safe_error_type(exc),
-            )
-        raise
-    if enabled:
-        logical_error = result.is_ok and _is_logical_error(result.value)
         usage_telemetry.capture_tool_call(
             safe_name,
-            ok=result.is_ok and not logical_error,
+            ok=False,
             duration_ms=_duration_ms(started_at),
-            error_type=_safe_error_type(result.error) if result.is_err else None,
+            error_type=_safe_error_type(exc),
         )
+        raise
+    logical_error = result.is_ok and _is_logical_error(result.value)
+    usage_telemetry.capture_tool_call(
+        safe_name,
+        ok=result.is_ok and not logical_error,
+        duration_ms=_duration_ms(started_at),
+        error_type=_safe_error_type(result.error) if result.is_err else None,
+    )
     return result
 
 
@@ -231,7 +228,9 @@ async def call_sdk_tool(
             arguments = arguments["kwargs"]
         _validate_parameter_constraints(definition.parameters, arguments)
         Draft202012Validator(definition.to_input_schema()).validate(arguments)
-        result = await adapter.call_tool(name, arguments, _capture_telemetry=False)
+        # The private impl skips call_tool's observer wrapper: this SDK path
+        # owns the one request-outcome event itself (no double counting).
+        result = await adapter._call_tool_impl(name, arguments)
         if result.is_err:
             error_type = _safe_error_type(result.error)
             raise RuntimeError(str(result.error))
@@ -282,6 +281,26 @@ def record_direct_evaluation_outcome(*, final_approved: bool | None, failed: boo
         pass
 
 
+def stamp_backend_context(
+    runtime_backend: str | None,
+    execute_runtime_backend: str | None,
+    interview_llm_backend: str | None,
+    evaluate_llm_backend: str | None,
+) -> None:
+    """Stamp resolved provider backends onto every subsequent telemetry event.
+
+    Lives here rather than in the (grandfathered, size-capped) adapter module:
+    the adapter's composition root only supplies the resolved values, and the
+    context keys stay next to the other telemetry-boundary vocabulary.
+    """
+    usage_telemetry.set_context(
+        runtime_backend=runtime_backend,
+        execute_runtime_backend=execute_runtime_backend,
+        interview_llm_backend=interview_llm_backend,
+        evaluate_llm_backend=evaluate_llm_backend,
+    )
+
+
 class JobTelemetryBoundary:
     """Remember privacy-safe job classes and observe durable terminal appends."""
 
@@ -317,4 +336,5 @@ __all__ = [
     "call_sdk_tool",
     "observe_adapter_tool_call",
     "record_direct_evaluation_outcome",
+    "stamp_backend_context",
 ]
