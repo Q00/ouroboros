@@ -242,20 +242,28 @@ This dual representation is a transitional surface, not a second contract:
   disabled, and a sink that cannot be created is skipped — so absence from
   available logs can never prove inactivity and carries no removal
   authority.
-- **Removal criterion.** Delete `legacy_identity.py` and the runner's legacy
-  branch only after a fail-closed pre-anchor inventory preflight over the
-  durable EventStore — the same store resume itself reads — finds no
-  remaining pre-anchor session. The preflight enumerates every persisted
-  session with `EventStore.get_all_sessions()`, reads each session's
-  immutable start-identity snapshot (the `_session_start_identity` value
-  persisted at session start), and applies the runner's own
-  `_project_start_identity` predicate: any snapshot without the complete
-  anchor is pre-anchor. A session that cannot be enumerated or whose
-  snapshot cannot be read also counts as pre-anchor, so missing or
-  unreadable evidence blocks removal instead of authorizing it. An empty
-  inventory is a structural guarantee — every session the store could still
-  be asked to resume carries the anchor — not an inference from log
-  absence.
+- **Removal criterion.** The seam is a package-wide compatibility
+  contract. EventStores are local and independently configured per
+  installation, so no store inspection — maintainer-side or otherwise —
+  can establish that other installations hold no resumable pre-anchor
+  sessions, and no such inspection authorizes removal. Removal is instead
+  governed by a finite support window this RFC declares: sessions started
+  before the anchor (2026-07-29) remain resumable in every release
+  published before 2027-07-29, and the seam must be retained through that
+  entire window. After the window ends, a release may delete
+  `legacy_identity.py` and the runner's legacy branch only as a documented
+  breaking change that simultaneously replaces the branch with a
+  fail-closed rejection: when `_project_start_identity` finds a persisted
+  start-identity snapshot without the complete anchor, resume must raise a
+  typed error naming the last compatible release — never silently rewrite
+  the session under the current resolver, and never strand it without
+  explanation. Operators who want to know whether the cutover affects
+  their installation can run a per-installation inventory preflight before
+  upgrading — enumerate sessions with `EventStore.get_all_sessions()`,
+  read each persisted `_session_start_identity` snapshot, and treat any
+  session that cannot be enumerated or read as pre-anchor — but this
+  preflight is a verification tool for that one store only; it grants no
+  package-wide removal authority.
 
 ## Authority boundary
 
