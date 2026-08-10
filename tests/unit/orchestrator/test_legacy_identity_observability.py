@@ -190,3 +190,18 @@ class TestActivationEvents:
 
         assert changed is False
         assert _activations(logs) == []
+
+    def test_identity_window_does_not_bypass_execution_contract_gate(self, tmp_path: Path) -> None:
+        """The support window preserves identity only, not every resume contract."""
+        persisted, resumed = _contract_and_resumed_runner(tmp_path)
+        persisted["version"] = 8
+        progress = {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {"seed_id": "seed-legacy"},
+        }
+
+        with capture_logs() as logs, pytest.raises(OrchestratorError) as exc_info:
+            resumed._restore_execution_contract(progress)
+
+        assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
+        assert _activations(logs) == []

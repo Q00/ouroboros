@@ -18,14 +18,15 @@ This surface is transitional, not permanent:
   log sink retains seven days and may be absent — so log absence carries no
   removal authority.
 - **Removal criterion** (mirrored in ``docs/rfc/project-map-v1.md``):
-  the seam is a package-wide support contract — pre-anchor sessions stay
-  resumable in every release published before 2027-07-29, and no single
-  EventStore inspection can authorize removal because stores are local
-  and per-installation. After the window ends, a release may delete this
-  module only as a documented breaking change that replaces the
-  ``has_project_anchor`` branch with a typed fail-closed rejection
-  naming the last compatible release, never a silent rewrite of resume
-  identity.
+  the seam is a package-wide project-identity support contract — every
+  release published before 2027-07-29 retains this representation, and no
+  single EventStore inspection can authorize removal because stores are
+  local and per-installation. The window does not bypass independent
+  execution-contract, provider, permission, or workspace compatibility
+  gates. After it ends, a release may delete this module only as a
+  documented breaking change that replaces the ``has_project_anchor``
+  branch with a typed fail-closed rejection naming the last
+  identity-compatible release, never a silent rewrite of resume identity.
 """
 
 from __future__ import annotations

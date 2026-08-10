@@ -6353,12 +6353,12 @@ class OrchestratorRunner:
             # Historical v9 session starts predate the additive project anchor.
             # Preserve their exact direct-cwd representation rather than
             # rewriting durable resume authority under the new resolver.
-            # Transitional (#1799): this branch is a package-wide support
-            # contract — see the removal criterion in
+            # Transitional (#1799): this branch is a package-wide
+            # project-identity support contract — see the removal criterion in
             # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md.
-            # Removal is allowed only after the documented compatibility
-            # window ends and must replace this path with a typed
-            # fail-closed rejection.
+            # It does not bypass other resume gates. Removal is allowed only
+            # after the documented identity-compatibility window ends and must
+            # replace this path with a typed fail-closed rejection.
             #
             # Current prepared executions intentionally restore an anchorless
             # contract-only mapping; only a durable historical start snapshot
