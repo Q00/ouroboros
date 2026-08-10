@@ -1118,6 +1118,36 @@ class TestCliCapture:
         telemetry.flush(timeout=2.0)
         assert sent == []
 
+    def test_dynamic_plugin_command_is_replaced_not_forwarded(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        """subcommand is caller-controlled the same way an MCP tool name or
+        a job_type is: _PluginAwareGroup resolves any name not in the
+        static command table as a dynamically-installed plugin command, so
+        an unaudited value must never carry an identifying name through
+        `command`."""
+        hostile = "acme-private-project"
+        telemetry.capture_cli_command(hostile)
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["properties"]["command"] == "extension_command"
+        assert event["properties"]["is_funnel"] is False
+        assert hostile not in repr(event)
+
+    def test_canonical_cli_command_passes_through_unchanged(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_cli_command("run")
+        telemetry.flush(timeout=2.0)
+        assert sent[0]["properties"]["command"] == "run"
+
+    def test_cli_funnel_and_is_funnel_tuple_are_subsets_of_canonical_set(self) -> None:
+        assert set(telemetry._CLI_FUNNEL) <= telemetry._CANONICAL_CLI_COMMANDS
+        is_funnel_names = {"auto", "init", "interview", "seed", "run", "qa", "pm"}
+        assert is_funnel_names <= telemetry._CANONICAL_CLI_COMMANDS
+
 
 class TestFrontdoor:
     def test_claude_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:

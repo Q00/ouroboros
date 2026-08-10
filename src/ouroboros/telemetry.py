@@ -108,6 +108,56 @@ _TOOL_FUNNEL: dict[str, str] = {
 _CLI_SKIP = frozenset({"dispatch", "job", "mcp"})
 _CLI_FUNNEL = {"init": "interview"}
 
+# The audited privacy contract for a direct CLI command_run's `command`,
+# mirroring _CANONICAL_TOOL_NAMES'/_CANONICAL_JOB_TYPES' rationale:
+# `_PluginAwareGroup.get_command()` (src/ouroboros/cli/main.py) resolves any
+# name NOT in this static table as a dynamically-installed plugin command
+# via build_plugin_dispatch_command, so `ctx.invoked_subcommand` is exactly
+# as caller-controlled as an MCP tool name or a job_type -- a plugin can be
+# named anything. `_CLI_SKIP` above is a separate, earlier gate (product
+# reasons, not privacy) and does not affect which names are audited here.
+#
+# Derived programmatically, not guessed: `typer.main.get_command(app)`
+# converts the real Typer app into its underlying click Group exactly the
+# way the actual `ooo` entrypoint does, and `.commands.keys()` is the
+# statically-registered set -- `_PluginAwareGroup`'s dynamic fallback only
+# triggers for names NOT in that dict, so this enumeration inherently
+# excludes plugin dispatch. 27 names: every `app.command(name=...)` /
+# `app.add_typer(..., name=...)` registration plus two hidden top-level
+# aliases (`monitor`, `dispatch`).
+_CANONICAL_CLI_COMMANDS = frozenset(
+    {
+        "artifacts",
+        "auto",
+        "cancel",
+        "cleanup",
+        "codex",
+        "config",
+        "detect",
+        "dispatch",
+        "harness",
+        "init",
+        "interview",
+        "job",
+        "mcp",
+        "monitor",
+        "plugin",
+        "pm",
+        "qa",
+        "resume",
+        "run",
+        "seed",
+        "setup",
+        "status",
+        "tui",
+        "uninstall",
+        "update",
+        "workflow-ir",
+        "zcode",
+    }
+)
+_EXTENSION_CLI_COMMAND = "extension_command"
+
 # These handlers acknowledge durable background-job submission. Their return
 # value says only whether work was accepted, never whether the workflow later
 # completed or passed verification. Keeping them structurally separate avoids
@@ -1039,14 +1089,26 @@ def capture_job_outcome(
 
 
 def capture_cli_command(subcommand: str | None) -> None:
-    """Capture a direct ``ooo <subcommand>`` invocation."""
+    """Capture a direct ``ooo <subcommand>`` invocation.
+
+    ``subcommand`` is caller-controlled the same way an MCP tool name or a
+    job_type is: ``_PluginAwareGroup`` resolves any name not in the static
+    command table as a dynamically-installed plugin command, so an
+    unaudited value must never carry an identifying name through
+    ``command`` -- see ``_CANONICAL_CLI_COMMANDS``.
+    """
     try:
         if not subcommand or subcommand in _CLI_SKIP:
             return
+        command = (
+            _CLI_FUNNEL.get(subcommand, subcommand)
+            if subcommand in _CANONICAL_CLI_COMMANDS
+            else _EXTENSION_CLI_COMMAND
+        )
         capture(
             "command_run",
             {
-                "command": _CLI_FUNNEL.get(subcommand, subcommand),
+                "command": command,
                 "source": "cli",
                 "is_funnel": subcommand in ("auto", "init", "interview", "seed", "run", "qa", "pm"),
             },

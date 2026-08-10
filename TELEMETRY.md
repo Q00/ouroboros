@@ -115,7 +115,11 @@ Notes:
   background-job types: only the five funnel stages and Ouroboros' own
   internal diagnostic job types are ever forwarded; anything else (a
   third-party job type registered against the same job manager) appears as
-  the fixed `extension_job` value.
+  the fixed `extension_job` value. `command` on a `command_run` (source=cli)
+  event is the same contract again for direct `ooo <subcommand>` runs:
+  built-in subcommands are forwarded verbatim, and a dynamically installed
+  plugin command (`ooo <plugin-name> ...`) appears as the fixed
+  `extension_command` value.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
 - Start-tool `command_run` events are submission receipts. They intentionally
