@@ -83,12 +83,17 @@ class SpecVerificationResult(BaseModel, frozen=True):
             # ``discrepancy`` bit was omitted or contradictory. The two newer
             # flags let transitional callers construct the richer outcomes
             # without supplying the enum yet.
-            if self.verified:
-                inferred = VerificationOutcome.VERIFIED
-            elif self.skipped:
-                inferred = VerificationOutcome.SKIPPED
+            # Contradictory legacy flags are untrusted persisted input. Prefer
+            # the strongest non-success evidence instead of allowing a stale
+            # ``verified=True`` bit to launder it into a PASS.
+            if self.discrepancy:
+                inferred = VerificationOutcome.DISCREPANCY
             elif self.unverifiable:
                 inferred = VerificationOutcome.UNVERIFIABLE
+            elif self.skipped:
+                inferred = VerificationOutcome.SKIPPED
+            elif self.verified:
+                inferred = VerificationOutcome.VERIFIED
             else:
                 inferred = VerificationOutcome.DISCREPANCY
             object.__setattr__(self, "outcome", inferred)
@@ -168,13 +173,29 @@ class SpecVerificationSummary(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _preserve_legacy_discrepancy_override(self) -> SpecVerificationSummary:
         if "confirmed_discrepancy_count" not in self.model_fields_set and self.discrepancy_count:
+            has_outcome_aware_result = any(
+                "outcome" in result.model_fields_set
+                for report in self.reports
+                for result in report.results
+            )
             # Old serialized summaries could not distinguish a confirmed
             # mismatch from unavailable evidence. Preserve their fail-closed
-            # override rather than silently weakening a replayed gate.
+            # override, but do not reinterpret a compact outcome-aware payload
+            # whose explicit UNVERIFIABLE/SKIPPED result proves the zero was
+            # omitted only because it equals the Pydantic default.
             object.__setattr__(
                 self,
                 "confirmed_discrepancy_count",
-                self.discrepancy_count,
+                (
+                    sum(
+                        1
+                        for report in self.reports
+                        for result in report.results
+                        if result.outcome is VerificationOutcome.DISCREPANCY
+                    )
+                    if has_outcome_aware_result
+                    else self.discrepancy_count
+                ),
             )
         return self
 

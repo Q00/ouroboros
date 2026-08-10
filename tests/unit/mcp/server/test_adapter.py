@@ -499,6 +499,56 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    def test_contradictory_legacy_verification_flags_cannot_mint_formal_pass(self) -> None:
+        """A stale legacy PASS bit cannot override an explicit discrepancy bit."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Set MAX_RETRIES to 5",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Set MAX_RETRIES to 5",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        contradictory = SpecVerificationResult.model_validate(
+            {
+                "assertion": assertion.model_dump(mode="json"),
+                "verified": True,
+                "discrepancy": True,
+                "detail": "Observed MAX_RETRIES=3",
+            }
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Set MAX_RETRIES to 5",
+                    results=(contradictory,),
+                    agent_reported_pass=True,
+                ),
+            )
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert contradictory.outcome is VerificationOutcome.DISCREPANCY
+        assert summary.ac_results[0].rendered_verdict == "FAIL"
+        assert summary.final_approved is False
+        assert summary.run_verdict == "FAIL"
+
     def test_skipped_spec_verification_result_does_not_approve_run(self) -> None:
         """A visible T3/T4 skip remains NOT_EVALUATED at the formal gate."""
         mechanical = EvaluationSummary(

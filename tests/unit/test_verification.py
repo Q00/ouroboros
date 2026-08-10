@@ -102,13 +102,13 @@ class TestVerificationModels:
                 "skipped": True,
             }
         )
-        assert contradictory.outcome is VerificationOutcome.VERIFIED
+        assert contradictory.outcome is VerificationOutcome.DISCREPANCY
         assert (
             contradictory.verified,
             contradictory.discrepancy,
             contradictory.unverifiable,
             contradictory.skipped,
-        ) == (True, False, False, False)
+        ) == (False, True, False, False)
 
         result = SpecVerificationResult(
             assertion=assertion,
@@ -122,6 +122,41 @@ class TestVerificationModels:
         assert payload["unverifiable"] is True
         assert payload["skipped"] is False
         assert SpecVerificationResult.model_validate(payload) == result
+
+    def test_compact_outcome_summary_replay_preserves_zero_confirmed_discrepancies(
+        self,
+    ) -> None:
+        """Outcome-aware compact JSON cannot revive a legacy discrepancy override."""
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+        )
+        summary = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="test",
+                    results=(result,),
+                    agent_reported_pass=True,
+                ),
+            ),
+            strict=False,
+        )
+
+        assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is None
+        payload = summary.model_dump(mode="json", exclude_defaults=True)
+        assert "confirmed_discrepancy_count" not in payload
+
+        replayed = SpecVerificationSummary.model_validate(payload)
+        assert replayed.confirmed_discrepancy_count == 0
+        assert replayed.override_approval is None
 
     @pytest.mark.parametrize(
         ("outcome", "flags"),
