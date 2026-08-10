@@ -546,6 +546,92 @@ def test_installer_process_env_wins_over_user_env_file(tmp_path: Path) -> None:
     assert "telemetry-envfile.invalid" not in captures
 
 
+def test_installer_user_env_duplicate_telemetry_key_resolves_last_wins(tmp_path: Path) -> None:
+    """A key repeated in the trusted .env must resolve to its LAST valid
+    occurrence -- matching python-dotenv's dotenv_values(), which the
+    application loader delegates to. An installer that instead kept the
+    FIRST occurrence (a plain per-line "export once, then skip" bug) would
+    disagree with the application about whether telemetry is enabled, from
+    the exact same file.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("OUROBOROS_TELEMETRY=1\nOUROBOROS_TELEMETRY=0\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_user_env_duplicate_do_not_track_resolves_last_wins(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("DO_NOT_TRACK=0\nDO_NOT_TRACK=1\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_user_env_duplicate_telemetry_key_reverse_order_enables(
+    tmp_path: Path,
+) -> None:
+    """Reverse order of the previous case (disable, then enable): last-wins
+    means the file's own final value is `1`, and there's no OTHER disabling
+    control in play here, so telemetry ends up enabled -- proving the fix
+    didn't accidentally make a duplicated key sticky-disabled regardless of
+    the order its occurrences appear in.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("OUROBOROS_TELEMETRY=0\nOUROBOROS_TELEMETRY=1\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
+def test_installer_real_process_env_wins_over_duplicated_user_env_file(
+    tmp_path: Path,
+) -> None:
+    """Real process-env precedence must survive the last-wins rework: a
+    process-set `OUROBOROS_TELEMETRY=0` still wins even when the file
+    contains a duplicated, enabling `OUROBOROS_TELEMETRY=1`.
+    """
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("OUROBOROS_TELEMETRY=1\nOUROBOROS_TELEMETRY=1\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "0"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
 def test_installer_do_not_track_precedes_explicit_enable(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,

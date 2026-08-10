@@ -97,14 +97,36 @@ _prompt() {
 # The API key is a public write-only PostHog project key.
 
 # TELEMETRY.md declares ~/.ouroboros/.env a trusted persistent control
-# source; the application loader applies it at import. This standalone
-# installer must honor the same telemetry keys before any notice or capture,
-# so a persisted opt-out or destination override there holds during install.
-# Only the four allowlisted telemetry keys are read, and an already-set real
-# process environment value is never overridden (mirrors config/loader.py).
+# source; the application loader applies it at import via python-dotenv's
+# dotenv_values(), which resolves a key repeated in the file to its LAST
+# occurrence. This standalone installer must honor the same telemetry keys
+# before any notice or capture, so a persisted opt-out or destination
+# override there holds during install -- including matching that same
+# last-wins resolution for an internally-duplicated key, so the two loaders
+# never disagree about a single file's meaning. Only the four allowlisted
+# telemetry keys are read, and an already-set real process environment
+# value always wins over the file, no matter how many times a key repeats
+# in it (mirrors config/loader.py).
 _telemetry_load_user_env() {
   local f="$HOME/.ouroboros/.env" line key value rest after trailing
+  local preset_var parsed_var
+  local preset_DO_NOT_TRACK preset_OUROBOROS_TELEMETRY
+  local preset_OUROBOROS_POSTHOG_API_KEY preset_OUROBOROS_POSTHOG_HOST
+  local parsed_DO_NOT_TRACK="" parsed_OUROBOROS_TELEMETRY=""
+  local parsed_OUROBOROS_POSTHOG_API_KEY="" parsed_OUROBOROS_POSTHOG_HOST=""
   { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+
+  # Phase 1: snapshot which of the four allowlisted keys are already set in
+  # the REAL process environment, before the trusted file is consulted at
+  # all -- this is the one precedence check that must survive unchanged.
+  for key in DO_NOT_TRACK OUROBOROS_TELEMETRY OUROBOROS_POSTHOG_API_KEY OUROBOROS_POSTHOG_HOST; do
+    if eval "[ -n \"\${$key+x}\" ]"; then
+      printf -v "preset_$key" '%s' true
+    else
+      printf -v "preset_$key" '%s' false
+    fi
+  done
+
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
@@ -169,9 +191,31 @@ _telemetry_load_user_env() {
         ;;
     esac
     [ -n "$value" ] || continue
-    eval "[ -z \"\${$key+x}\" ]" || continue
-    export "$key=$value"
+    # Phase 2: accumulate into a per-key holding variable rather than
+    # exporting immediately -- overwriting on every valid occurrence gives
+    # LAST-wins semantics for a key duplicated WITHIN the trusted file,
+    # matching dotenv_values(). The old per-line "export, then skip if
+    # already set" approach silently flipped this to first-wins: once the
+    # first occurrence exported the variable, the same `${key+x}` guard
+    # would already be true for every later occurrence in THIS SAME file
+    # too, blocking them even though none of them are the real process env
+    # this guard exists to protect.
+    printf -v "parsed_$key" '%s' "$value"
   done < "$f"
+
+  # Phase 3: export each key's last-parsed-from-file value, but ONLY if it
+  # was not already present in the real process environment (phase 1) --
+  # preserving real process-env precedence while now resolving duplicates
+  # inside the file itself with last-wins instead of first-wins. An empty
+  # `parsed_*` here means no occurrence in the file ever produced a value
+  # worth keeping (every occurrence, if any, failed to parse or was empty).
+  for key in DO_NOT_TRACK OUROBOROS_TELEMETRY OUROBOROS_POSTHOG_API_KEY OUROBOROS_POSTHOG_HOST; do
+    preset_var="preset_$key"
+    parsed_var="parsed_$key"
+    if [ "${!preset_var}" = false ] && [ -n "${!parsed_var}" ]; then
+      export "$key=${!parsed_var}"
+    fi
+  done
 }
 _telemetry_load_user_env
 
