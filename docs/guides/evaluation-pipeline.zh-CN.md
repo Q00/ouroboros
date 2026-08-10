@@ -155,7 +155,7 @@ mechanical:
   coverage_command: ["pytest", "--cov=src", "--cov-report=term-missing", "tests/"]
 ```
 
-> **重要：** 这些字段是编程侧的逃生舱。在正常的 `ouroboros run` 路径上，命令来自 `.ouroboros/mechanical.toml`；当该文件不存在**且**没有显式配置命令时，Stage 1 会静默跳过每一项检查（并视为通过）。
+> **重要：** 这些字段是编程侧的逃生舱。在正常的 `ouroboros run` 路径上，命令来自 `.ouroboros/mechanical.toml`。**但这条路径会先自动尝试生成该文件**，所以要让 Stage 1 在这里静默跳过每一项检查（并视为通过），需要同时满足：**自动检测失败了**（返回 `False` 或抛异常）、文件不存在、且没有显式配置命令。单纯「文件不在」并不足以解释——那种情况只出现在绕过检测的底层调用方身上。参见上面的失败模式表。
 
 ### 诊断 Stage 1 失败
 
@@ -247,7 +247,9 @@ semantic:
 
 ## 共识触发矩阵（Stage 2 → Stage 3 关卡）
 
-Stage 2 通过之后（`ac_compliance=True`、`score >= 0.8`），触发条件会**按优先级顺序**逐个评估。第一个命中的条件触发 Stage 3。一个都没命中，产物立即通过。
+触发条件会**按优先级顺序**逐个评估，第一个命中的触发 Stage 3。
+
+**注意这里的门槛不是分数。** `EvaluationPipeline.evaluate()` 只在 `ac_compliance=False` **且没有手动共识请求**时提前返回。也就是说，一个 AC 合规但只拿到 `0.7` 的结果**仍会走到触发评估**；若有条件命中，它会进入 Stage 3，并可能最终被批准。分数关卡（`0.8`）是**更后面**的一道判定，不是进入触发矩阵的前提。
 
 | 优先级 | 触发器 | 条件 |
 |----------|---------|-----------|
@@ -416,7 +418,7 @@ evaluator = DeliberativeConsensus(llm_adapter, config)
 
 | 失败模式 | 现象 | 原因 / 处理 |
 |---|---|---|
-| **未设置 project_dir** | 评估只用到文字摘要 | 构建 `ArtifactBundle` 时没有文件内容；语义评估器退回到 agent 的文字输出。在执行上下文里设置 `project_dir`。 |
+| **未传入 project_dir** | 评估只用到文字摘要 | `EvaluationContext` **没有 `project_dir` 字段**。目录要作为参数传给 `ArtifactCollector.collect(execution_output, project_dir)`，再把返回的 bundle 作为 `artifact_bundle` 挂到 `EvaluationContext` 上。只在「执行上下文里设置 `project_dir`」是做不到的——那样什么文件都不会被收集，语义评估只看 `EvaluationContext.artifact`。 |
 | **没有抽取到文件路径** | **仍会收集文件** | 执行输出里没有可识别的 `Write:` / `Edit:` / `file_path:` 模式时，`collect()` 会转而调用 `_scan_directory(project_dir)`，遍历项目里符合条件的源文件（跳过二进制/生成物与依赖、缓存目录）。只有当扫描为空、不可访问或被完全排除时才没有文件可用。 |
 | **路径穿越被拦截** | 文件被静默跳过 | 文件路径解析后落在 `project_dir` 之外。这是安全边界，不是 bug。 |
 | **权限错误** | 文件被静默跳过 | 执行时用的是另一个用户身份。检查文件权限。 |
@@ -544,12 +546,20 @@ config = PipelineConfig(
     ),
 
     # Stage 3：简单共识评估
+    #
+    # models=None 保留后端感知的默认解析：sentinel 后端得到 ("default",) * 3，
+    # 非 sentinel 后端保留出厂的 OpenRouter 名单。**非 sentinel 不等于会走
+    # OpenRouter** —— 所有投票仍旧使用之后交给 ConsensusEvaluator 的那一个适配器。
+    # 显式写死一个 tuple 会设置 models_are_explicit 并跳过上述归一化，因此下面
+    # 这组 id 只在「当前适配器确实能路由它们」时才正确；在本地或 sentinel 后端上
+    # 反而可能退回同会话模型，或送出该后端不支持的模型标签。
     consensus=ConsensusConfig(
-        models=(
-            "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-opus-4.8",
-            "openrouter/google/gemini-2.5-pro",
-        ),
+        models=None,  # 或者，仅当活动适配器能路由这些 id 时：
+        # models=(
+        #     "openrouter/openai/gpt-4o",
+        #     "openrouter/anthropic/claude-opus-4.8",
+        #     "openrouter/google/gemini-2.5-pro",
+        # ),
         temperature=0.3,
         max_tokens=1024,
         majority_threshold=0.66,     # 需要 2/3 多数
