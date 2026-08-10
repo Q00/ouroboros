@@ -161,6 +161,60 @@ class TestEventStoreInitialization:
         assert "event_store.append.post_commit_cleanup_failed" in caplog.text
         await store.close()
 
+    async def test_durable_append_invalidates_connection_when_cleanup_is_cancelled(
+        self,
+        tmp_path: Path,
+        sample_event: BaseEvent,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cleanup deadline after commit cannot return a poisoned driver to the pool."""
+        from aiosqlite import Connection
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'cleanup-timeout.db'}")
+        await store.initialize()
+        original_set_progress_handler = Connection.set_progress_handler
+        configured_drivers: list[Connection] = []
+        cleanup_started = asyncio.Event()
+
+        async def delay_progress_handler_removal(
+            connection: Connection,
+            handler,
+            steps: int,
+        ) -> None:
+            if handler is None:
+                cleanup_started.set()
+                await asyncio.sleep(1.0)
+            else:
+                configured_drivers.append(connection)
+            await original_set_progress_handler(connection, handler, steps)
+
+        monkeypatch.setattr(
+            Connection,
+            "set_progress_handler",
+            delay_progress_handler_removal,
+        )
+
+        await store.append_durable(sample_event, timeout=0.2)
+        assert cleanup_started.is_set()
+        assert len(configured_drivers) == 1
+
+        monkeypatch.setattr(Connection, "set_progress_handler", original_set_progress_handler)
+        events = await store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
+        assert [event.id for event in events] == [sample_event.id]
+
+        engine = store._engine
+        assert engine is not None
+        async with engine.connect() as conn:
+            raw = await conn.get_raw_connection()
+            assert raw.driver_connection is not configured_drivers[0]
+            result = await conn.exec_driver_sql(
+                "WITH RECURSIVE count(x) AS ("
+                "SELECT 1 UNION ALL SELECT x + 1 FROM count WHERE x < 2000"
+                ") SELECT sum(x) FROM count"
+            )
+            assert result.scalar_one() == 2_001_000
+        await store.close()
+
     async def test_repeated_initialize_settles_schema_transaction_before_cancellation(
         self,
         monkeypatch,

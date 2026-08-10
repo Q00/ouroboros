@@ -905,6 +905,18 @@ class AgentProcessHandle:
         self._status = AgentProcessStatus.FAILED
         self._completed_event.set()
 
+    def _is_or_caused_by_journal_failure(self, exc: BaseException) -> bool:
+        """Return whether *exc* preserves the current journal failure as its cause."""
+        journal_failure = self._journal_failure
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while journal_failure is not None and current is not None and id(current) not in seen:
+            if current is journal_failure:
+                return True
+            seen.add(id(current))
+            current = current.__cause__
+        return False
+
     async def _set_status(self, new_status: AgentProcessStatus, *, reason: str) -> None:
         async with self._status_lock:
             if new_status == self._status:
@@ -1129,8 +1141,8 @@ class AgentProcess:
                         # its live state before preserving task cancellation.
                         # It is authoritative, not a new terminal failure.
                         raise
-                    if exc is handle._journal_failure:
-                        handle._fail_closed_after_journal_failure(exc)
+                    if handle._is_or_caused_by_journal_failure(exc):
+                        handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
                     else:
                         handle._failure = exc
                         try:
@@ -1146,8 +1158,8 @@ class AgentProcess:
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 handle._failure = exc
-                if exc is handle._journal_failure:
-                    handle._fail_closed_after_journal_failure(exc)
+                if handle._is_or_caused_by_journal_failure(exc):
+                    handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
                 else:
                     try:
                         if handle.status() in _TERMINAL_STATUSES:
@@ -1190,8 +1202,8 @@ class AgentProcess:
                         # cancellation; the committed terminal state must not
                         # be reclassified through a synthetic FAILED append.
                         raise
-                    if exc is handle._journal_failure:
-                        handle._fail_closed_after_journal_failure(exc)
+                    if handle._is_or_caused_by_journal_failure(exc):
+                        handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
                     else:
                         handle._failure = exc
                         try:

@@ -183,6 +183,25 @@ class _PreCommitResumeFailureStore(_FakeEventStore):
         await self.append(event)
 
 
+class _PreCommitTerminalFailureStore(_FakeEventStore):
+    """Hold then fail the terminal append before it reaches durable history."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_attempts = 0
+        self.terminal_append_started = asyncio.Event()
+        self.release_failure = asyncio.Event()
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        self.append_attempts += 1
+        if self.append_attempts == 2:
+            self.terminal_append_started.set()
+            async with asyncio.timeout(timeout):
+                await self.release_failure.wait()
+            raise RuntimeError("terminal failed before commit")
+        await self.append(event)
+
+
 class _CancellationResistantDeadlineStore(_FakeEventStore):
     """Model a persistence operation that settles only after interruption."""
 
@@ -2649,6 +2668,45 @@ async def test_run_with_agent_process_surfaces_terminal_journal_failure() -> Non
         )
 
     assert _directives(store.appended) == ["continue"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_terminal_journal_failure_does_not_append_compensation() -> None:
+    """A journal failure wrapped by caller cancellation remains fail-closed."""
+    store = _PreCommitTerminalFailureStore()
+    handle_box: list[AgentProcessHandle] = []
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        return "result"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+        )
+    )
+    try:
+        await asyncio.wait_for(store.terminal_append_started.wait(), timeout=1.0)
+        handle = handle_box[0]
+        runner_task = handle._work_task
+        assert runner_task is not None
+        runner_task.cancel()
+        store.release_failure.set()
+
+        with pytest.raises(RuntimeError, match="terminal failed before commit"):
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+        assert store.append_attempts == 2
+        assert _directives(store.appended) == ["continue"]
+        assert handle.status() is AgentProcessStatus.FAILED
+        assert isinstance(handle.failure(), RuntimeError)
+    finally:
+        store.release_failure.set()
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

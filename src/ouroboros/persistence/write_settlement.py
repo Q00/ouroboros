@@ -156,11 +156,25 @@ async def append_with_sqlite_deadline(
                     cleanup_error: BaseException | None = None
                     try:
                         await driver.set_progress_handler(None, 0)
+                    except asyncio.CancelledError as exc:
+                        # The overall deadline can expire after COMMIT while
+                        # driver cleanup is in flight.  Keep that cancellation
+                        # as a cleanup failure so the still-configured progress
+                        # handler can never return to the pool.
+                        cleanup_error = exc
                     except Exception as exc:
                         cleanup_error = exc
                     try:
                         restore_cursor = await driver.execute("PRAGMA busy_timeout=30000")
                         await restore_cursor.close()
+                    except asyncio.CancelledError as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                        else:
+                            logger.warning(
+                                "event_store.append.secondary_cleanup_cancelled",
+                                exc_info=exc,
+                            )
                     except Exception as exc:
                         if cleanup_error is None:
                             cleanup_error = exc
@@ -172,6 +186,11 @@ async def append_with_sqlite_deadline(
                     if cleanup_error is not None:
                         try:
                             await conn.invalidate(cleanup_error)
+                        except asyncio.CancelledError as exc:
+                            logger.warning(
+                                "event_store.append.connection_invalidation_cancelled",
+                                exc_info=exc,
+                            )
                         except Exception as exc:
                             logger.warning(
                                 "event_store.append.connection_invalidation_failed",
