@@ -15,8 +15,10 @@ from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_s
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import (
     EventStore,
-    _await_sqlite_write_atomically,
     acceptance_generation_id_for_session,
+)
+from ouroboros.persistence.write_settlement import (
+    await_sqlite_write_atomically as _await_sqlite_write_atomically,
 )
 
 

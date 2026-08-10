@@ -2538,26 +2538,41 @@ async def test_real_event_store_cancel_after_resume_commit_releases_live_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real SQLite commit and live release settle before cancellation surfaces."""
+    from ouroboros.persistence import event_store as event_store_module
+
     process_id = "durable-real-store-cancelled-resume"
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
     await store.initialize()
-    original_append = store._append_durable_registered
+    original_append = event_store_module.append_with_sqlite_deadline
     resume_committed = asyncio.Event()
     release_append = asyncio.Event()
 
     async def append_then_hold_after_resume_commit(
+        engine: Any,
         event: BaseEvent,
         *,
         overall_deadline: float,
+        picker_projection_ready: bool,
+        insert_event: Any,
     ) -> None:
-        await original_append(event, overall_deadline=overall_deadline)
+        await original_append(
+            engine,
+            event,
+            overall_deadline=overall_deadline,
+            picker_projection_ready=picker_projection_ready,
+            insert_event=insert_event,
+        )
         if event.data.get("directive") == "continue" and "resume requested" in str(
             event.data.get("reason")
         ):
             resume_committed.set()
             await release_append.wait()
 
-    monkeypatch.setattr(store, "_append_durable_registered", append_then_hold_after_resume_commit)
+    monkeypatch.setattr(
+        event_store_module,
+        "append_with_sqlite_deadline",
+        append_then_hold_after_resume_commit,
+    )
     handle_box: list[AgentProcessHandle] = []
     reached_pause = asyncio.Event()
     work_released = asyncio.Event()
