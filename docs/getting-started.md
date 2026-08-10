@@ -11,17 +11,16 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-You do not install Ouroboros with pip on this path, but the host needs two
-things: **`uvx`**, because the plugin's MCP server is launched with it
-([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and **`python3` (3.12 recommended, 3.11 minimum)**, because the plugin's skills
-shell out to it directly (`.claude-plugin/skills/setup/SKILL.md:98`) and import
-`datetime.UTC` (`.claude-plugin/skills/welcome/SKILL.md:168`), which does not
-exist before Python 3.11. Install uv with `pipx install uv`, `pip install --user uv`,
-or `brew install uv`.
+You do not install Ouroboros with pip or install a global Python on this path.
+The host needs **uv**: its `uvx` command launches the plugin's MCP server
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and its `uv` command
+is the skills' final Python >= 3.12 fallback. Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
 
-`uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process; it
-does not create a global `python3`, so a host with uv but no system Python fails
-during the first setup/welcome flow. Tracked in #2001.
+The welcome, setup, and seed skills prefer a compatible `python3`, then a
+compatible `python`, and otherwise run with
+`uv run --no-project --quiet --python '>=3.12' python`. Older global
+interpreters are rejected instead of entering the first-run flow.
 
 Then run the install commands in your terminal, and run setup and auto inside
 Claude Code to go from idea to execution:
@@ -135,7 +134,11 @@ Auto mode is hang-resistant by design: interview and repair loops are bounded, s
 
 ### Option 1: Claude Code Plugin (Recommended)
 
-Requires `uvx` **and** a global `python3` (3.12 recommended, **3.11 minimum**) on the host: the plugin's MCP manifest launches the server with `uvx` ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and the bundled skills shell out to `python3` directly (`skills/setup/SKILL.md:98`, `skills/welcome/SKILL.md:32`). `uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process only — it does not create a global `python3`. Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`. Tracked in #2001.
+Requires uv on the host. Its `uvx` command launches the plugin's MCP server
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and its `uv`
+command provides Python >= 3.12 to bundled skills when no compatible global
+interpreter is available. Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
 
 ```bash
 # Terminal

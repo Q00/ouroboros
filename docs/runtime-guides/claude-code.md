@@ -20,20 +20,16 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 ## Prerequisites
 
 - Claude Code CLI installed and authenticated (Pro or Max Plan)
-- **`uvx`** (ships with uv) if you use the marketplace plugin. The plugin's MCP
-  manifest launches the server with `uvx`
+- **uv** if you use the marketplace plugin. The plugin's MCP manifest launches
+  the server with the bundled `uvx` command
   ([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)), so a host with
   only Claude Code cannot start it. Install uv with `pipx install uv`,
   `pip install --user uv`, or `brew install uv`.
-- **`python3` on `PATH`, 3.12 recommended and 3.11 minimum**, for the marketplace
-  plugin as well. `.claude-plugin/plugin.json` selects `.claude-plugin/skills/`,
-  whose snippets shell out to `python3` directly
-  (`.claude-plugin/skills/setup/SKILL.md:98`) and import `datetime.UTC`
-  (`.claude-plugin/skills/welcome/SKILL.md:168`, `:468`, `:495`), which does not
-  exist before 3.11. `uvx --python '>=3.12'` supplies an interpreter to the
-  isolated MCP process only; it does not create a global `python3`. A host with
-  uv but no system Python, or with Python 3.10, satisfies neither. Tracked in
-  #2001.
+- No global Python is required for the marketplace plugin. Its shipped skills
+  resolve Python >= 3.12 in this order: compatible `python3`, compatible
+  `python`, then `uv run --no-project --quiet --python '>=3.12' python`. This
+  rejects older host interpreters and lets the same uv prerequisite cover the
+  first-run welcome, setup, and seed snippets.
 - Python >= 3.12 specifically, **for the standalone CLI**.
 - Ouroboros installed, for the standalone CLI (see [Getting Started](../getting-started.md) for install options)
 

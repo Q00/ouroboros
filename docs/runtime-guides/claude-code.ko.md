@@ -22,10 +22,9 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 
 대부분의 사람은 이 길로 오면 됩니다. **Ouroboros를 pip로 설치할 필요도, API 키를 설정할 필요도 없습니다** — 런타임은 Claude Code가 맡습니다.
 
-시작하기 전에 호스트에 두 가지가 있어야 합니다:
-
-- **`uvx`** — 플러그인의 MCP 매니페스트가 이걸로 서버를 띄웁니다([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)).
-- **`python3` (3.12 이상 권장, 최소 3.11)** — 마켓플레이스 플러그인이 싣는 스킬들이 셸에서 직접 호출합니다([`.claude-plugin/skills/setup/SKILL.md:98`](../../.claude-plugin/skills/setup/SKILL.md), [`.claude-plugin/skills/welcome/SKILL.md`](../../.claude-plugin/skills/welcome/SKILL.md)). 이 welcome 스킬은 `from datetime import UTC`를 쓰는데(`:168`, `:468`, `:495`), **`datetime.UTC`는 Python 3.11부터 존재합니다.** 3.10 호스트는 사전 조건을 만족한 채로 MCP 프로세스는 뜨지만 `ooo` welcome 흐름에서 `ImportError`로 실패합니다.
+시작하기 전에 호스트에는 **uv**만 있으면 됩니다. uv가 함께 제공하는
+`uvx`로 플러그인 MCP 서버를 띄우고([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)),
+`uv`는 스킬의 Python >= 3.12 폴백으로 쓰입니다. 전역 Python은 필요하지 않습니다.
 
 ```bash
 pipx install uv
@@ -33,7 +32,9 @@ pip install --user uv
 brew install uv          # macOS / Linuxbrew
 ```
 
-> **`uvx`가 Python 요구를 대신하지 않습니다.** `uvx --python '>=3.12'`는 **격리된 MCP 프로세스에** 인터프리터를 붙여 줄 뿐, 전역 `python3` 명령을 만들어 주지 않습니다. 위 스킬 스니펫들은 셸에서 `python3`을 직접 찾으므로, `uvx`만 있고 시스템 Python이 없는 호스트는 **첫 setup/welcome 흐름에서 실패합니다.** 스킬 쪽 인터프리터 탐색을 고치는 건 [#2001](https://github.com/Q00/ouroboros/issues/2001)에서 추적합니다.
+> welcome, setup, seed 스킬은 호환되는 `python3`, 호환되는 `python`,
+> `uv run --no-project --quiet --python '>=3.12' python` 순서로 실행기를
+> 고릅니다. 3.12 미만 전역 인터프리터는 거부하고 uv 폴백을 사용합니다.
 
 **터미널:**
 
@@ -60,8 +61,8 @@ ooo
 ### 사전 조건 (권장 경로)
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
-- **`uvx`** (uv에 포함) — 위에서 설명한 대로 플러그인 MCP 매니페스트가 이걸로 서버를 띄웁니다
-- **`python3` (3.12 이상 권장, 최소 3.11)** — 플러그인이 싣는 스킬이 셸에서 직접 호출하고, `datetime.UTC` 때문에 3.11 미만은 실패합니다. `uvx`가 이걸 대신하지 않습니다 ([#2001](https://github.com/Q00/ouroboros/issues/2001))
+- **uv** — 함께 설치되는 `uvx`는 플러그인 MCP 서버를 띄우고, `uv`는
+  전역 Python이 없거나 3.12 미만일 때 스킬 실행기를 제공합니다
 
 아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 

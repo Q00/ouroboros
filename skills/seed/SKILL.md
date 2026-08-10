@@ -33,6 +33,38 @@ ooo seed [session_id]
 
 When the user invokes this skill:
 
+### Python Runtime (Required)
+
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+
+<!-- ouroboros-python-resolver:start -->
+```bash
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python3 "$@"
+    return
+  fi
+  if command -v python >/dev/null 2>&1 &&
+    command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python "$@"
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    command uv run --no-project --quiet --python '>=3.12' python "$@"
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
+```
+<!-- ouroboros-python-resolver:end -->
+
 ### Load MCP Tools (Required before Path A/B decision)
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
@@ -422,7 +454,7 @@ Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not se
 Create `~/.ouroboros/` directory if it doesn't exist. Preserve existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
 
 ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 os.makedirs(os.path.dirname(path), exist_ok=True)

@@ -42,6 +42,38 @@ ooo setup
 
 When the user invokes this skill, guide them through an enhanced 6-step wizard with progressive disclosure and celebration checkpoints.
 
+### Python Runtime (Required)
+
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+
+<!-- ouroboros-python-resolver:start -->
+```bash
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python3 "$@"
+    return
+  fi
+  if command -v python >/dev/null 2>&1 &&
+    command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python "$@"
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    command uv run --no-project --quiet --python '>=3.12' python "$@"
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
+```
+<!-- ouroboros-python-resolver:end -->
+
 ---
 
 ### Step 0: Welcome & Motivation (The Hook)
@@ -95,7 +127,7 @@ Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`
 Create `~/.ouroboros/` directory if it doesn't exist. Preserve any existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
 
 ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -122,20 +154,20 @@ If `star_asked` is already `true`, skip this step silently.
 Check the user's environment with clear feedback:
 
 ```bash
-python3 --version
+ouroboros_python --version
 which uvx 2>/dev/null && uvx --version 2>/dev/null
 which claude 2>/dev/null
 ```
 
-**IMPORTANT: If system Python is < 3.12 but uvx is available, also check uv-managed Python:**
+For diagnostics, list uv-managed Python installations when uv is available:
 
 ```bash
 uv python list 2>/dev/null | grep "cpython-3.1[2-9]"
 ```
 
-If `uv python list` shows Python >= 3.12 available, CLI workflows are available
-through uv-managed Python even when system Python is older. This does not make
-the isolated `[claude-sdk]` and MCP 2 profiles import-compatible.
+The resolver already rejects system Python below 3.12 and provisions a
+compatible uv-managed Python when needed. This does not make the isolated
+`[claude-sdk]` and MCP 2 profiles import-compatible.
 
 **Report results with personality:**
 
@@ -143,8 +175,8 @@ the isolated `[claude-sdk]` and MCP 2 profiles import-compatible.
 Environment Detected:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-System Python 3.11         [!] Below 3.12
-uv Python 3.12+            [✓] Available (uvx will use this)
+Skill Python 3.12+         [✓] Resolver-selected
+uv Python 3.12+            [✓] Available
 uvx package runner         [✓] Available
 Runtime backend            [✓] Detected
 
@@ -615,14 +647,12 @@ If Yes:
 
 ## Setup Troubleshooting
 
-### "python3: command not found"
+### "No compatible Python found"
 ```
-Plugin mode still works! You can use:
-- ooo interview
-- ooo seed
-- ooo unstuck
+Plugin mode works without a global Python when uv is on PATH. The skill
+resolver uses a compatible python3, then python, then uv-managed Python >= 3.12.
 
-For Full Mode, install Python >= 3.12:
+If neither a compatible interpreter nor uv is available, install one:
   macOS: brew install python@3.12
   Ubuntu: sudo apt install python3.12
   Windows: python.org/downloads

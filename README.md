@@ -207,7 +207,9 @@ See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for
 <details>
 <summary><strong>Other install methods</strong></summary>
 
-**Claude Code plugin only** (no Python package to install; the host needs `uvx` and `python3` >= 3.11, 3.12 recommended — see #2001):
+**Claude Code plugin only** (no Python package or global Python to install; the
+host needs uv, which provides both `uvx` for the MCP server and the skills'
+Python >= 3.12 fallback):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

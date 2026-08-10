@@ -19,6 +19,38 @@ Interactive onboarding for new Ouroboros users.
 
 When this skill is invoked, follow this flow:
 
+### Python Runtime (Required)
+
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+
+<!-- ouroboros-python-resolver:start -->
+```bash
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python3 "$@"
+    return
+  fi
+  if command -v python >/dev/null 2>&1 &&
+    command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1
+  then
+    command python "$@"
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    command uv run --no-project --quiet --python '>=3.12' python "$@"
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
+```
+<!-- ouroboros-python-resolver:end -->
+
 ---
 
 ### Pre-Check: Already Completed?
@@ -29,7 +61,7 @@ First, check `~/.ouroboros/prefs.json` for `welcomeCompleted`. For upgrades from
 PREFFILE="$HOME/.ouroboros/prefs.json"
 
 if [ -f "$PREFFILE" ]; then
-  WELCOME_COMPLETED=$(python3 - <<'PY'
+  WELCOME_COMPLETED=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -41,7 +73,7 @@ if not isinstance(prefs, dict):
 print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
 PY
 )
-  WELCOME_VERSION=$(python3 - <<'PY'
+  WELCOME_VERSION=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -65,7 +97,7 @@ previously completed welcome must never hide the setup gate from a user who
 chose **나중에** or whose setup was later removed:
 
 ```bash
-if python3 - "$HOME/.ouroboros/config.yaml" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -163,7 +195,7 @@ completion prompt and continue to the Setup Gate below.
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -200,7 +232,7 @@ Before showing the welcome banner, check whether Ouroboros has been prepared
 on this machine:
 
 ```bash
-if python3 - "$HOME/.ouroboros/config.yaml" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -463,7 +495,7 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
 - Both choices: merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys. Set `star_asked: true` after either star prompt choice so the star prompt is not repeated:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -490,7 +522,7 @@ PY
 **If `GH_MISSING` or `star_asked` is true:**
 Merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')

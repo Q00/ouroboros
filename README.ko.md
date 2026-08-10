@@ -210,7 +210,9 @@ Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 �
 <details>
 <summary><strong>다른 설치 방법</strong></summary>
 
-**Claude Code 플러그인만** (Python 패키지 설치는 없지만, 호스트에 `uvx`와 `python3`(3.12 권장, 최소 3.11)이 있어야 합니다 — [#2001](https://github.com/Q00/ouroboros/issues/2001)):
+**Claude Code 플러그인만** (Python 패키지나 전역 Python 설치는 필요 없습니다.
+호스트에는 uv만 있으면 됩니다. uv가 제공하는 `uvx`는 MCP 서버를 띄우고,
+스킬은 uv를 Python >= 3.12 폴백으로 사용합니다):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
