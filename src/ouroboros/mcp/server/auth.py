@@ -90,6 +90,26 @@ def is_wildcard_host(host: str) -> bool:
     return host.strip().strip("[]") in ("", "0.0.0.0", "::")
 
 
+def as_url_authority(host: str) -> str:
+    """Return ``host`` spelled the way a URL or ``Host`` header needs it.
+
+    A bind address and its URL spelling differ for IPv6: the socket layer takes
+    the bare literal (``::1``) and rejects the bracketed form, while a URL or
+    ``Host`` value needs brackets or the trailing ``:port`` cannot be told apart
+    from another hextet. Callers keep the bare value for binding and pass it
+    through here for anything address-shaped that carries a port.
+    """
+    candidate = host.strip()
+    if candidate.startswith("["):
+        return candidate
+    try:
+        if ipaddress.ip_address(candidate).version == 6:
+            return f"[{candidate}]"
+    except ValueError:
+        pass
+    return candidate
+
+
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
     """Map a bearer token onto the credential dict its auth method expects."""
     if method == AuthMethod.API_KEY:
@@ -213,7 +233,7 @@ def build_auth_settings(*, host: str, port: int) -> Any:
     """
     from mcp.server.auth.settings import AuthSettings
 
-    advertised_host = "127.0.0.1" if is_wildcard_host(host) else host
+    advertised_host = "127.0.0.1" if is_wildcard_host(host) else as_url_authority(host)
     base_url = f"http://{advertised_host}:{port}"
     return AuthSettings(issuer_url=base_url, resource_server_url=base_url)
 
@@ -259,7 +279,8 @@ def build_transport_security(
                 "Pass --allowed-host with the hostname clients will connect to."
             )
             raise ValueError(msg)
-        hosts = [f"{host}:{port}", f"{host}:*"]
+        authority = as_url_authority(host)
+        hosts = [f"{authority}:{port}", f"{authority}:*"]
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

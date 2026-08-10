@@ -15,7 +15,9 @@ import pytest
 from ouroboros.mcp.server.adapter import MCPServerAdapter
 from ouroboros.mcp.server.auth import (
     OuroborosTokenVerifier,
+    as_url_authority,
     auth_context_from_access_token,
+    build_auth_settings,
     build_transport_security,
     is_loopback_host,
     is_wildcard_host,
@@ -252,6 +254,91 @@ class TestResolveNetworkSecurity:
         assert wiring.token_verifier is None
         # The SDK builds its own settings for this spelling.
         assert wiring.transport_security is None
+
+
+class TestIPv6Binds:
+    """A bind address and its URL spelling differ for IPv6.
+
+    Sockets take the bare literal and reject brackets; URLs and ``Host`` values
+    require brackets or the trailing ``:port`` merges into the address. Getting
+    this backwards made authenticated IPv6 serving impossible to start.
+    """
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("::1", "[::1]"),
+            ("2001:db8::1", "[2001:db8::1]"),
+            ("[::1]", "[::1]"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("example.com", "example.com"),
+        ],
+    )
+    def test_url_authority_brackets_only_ipv6(self, host: str, expected: str) -> None:
+        assert as_url_authority(host) == expected
+
+    @pytest.mark.parametrize("host", ["::1", "2001:db8::1"])
+    def test_auth_settings_build_for_ipv6(self, host: str) -> None:
+        """Building these raised a Pydantic ValidationError before bracketing."""
+        settings = build_auth_settings(host=host, port=8080)
+
+        assert str(settings.issuer_url).startswith(f"http://[{host.strip('[]')}]:8080")
+
+    def test_inferred_host_allowlist_is_unambiguous_for_ipv6(self) -> None:
+        settings = build_transport_security(
+            host="2001:db8::1",
+            port=8080,
+            allowed_hosts=(),
+            allowed_origins=(),
+        )
+
+        assert settings.allowed_hosts == ["[2001:db8::1]:8080", "[2001:db8::1]:*"]
+
+    def test_authenticated_ipv6_loopback_bind_resolves(self) -> None:
+        """An inherited token on a valid `--host ::1` must not break startup."""
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="::1",
+            port=8080,
+            security=SecurityLayer(auth_config=_auth_config()),
+        )
+
+        assert isinstance(wiring.token_verifier, OuroborosTokenVerifier)
+        # The SDK auto-protects this spelling, so we add nothing of our own.
+        assert wiring.transport_security is None
+
+    def test_authenticated_ipv6_routable_bind_resolves(self) -> None:
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="2001:db8::1",
+            port=8080,
+            security=SecurityLayer(auth_config=_auth_config()),
+        )
+
+        assert isinstance(wiring.token_verifier, OuroborosTokenVerifier)
+        assert wiring.transport_security.allowed_hosts == [
+            "[2001:db8::1]:8080",
+            "[2001:db8::1]:*",
+        ]
+
+    def test_ipv6_loopback_without_auth_is_still_credential_free(self) -> None:
+        wiring = resolve_network_security(
+            transport="sse",
+            host="::1",
+            port=8080,
+            security=SecurityLayer(),
+        )
+
+        assert wiring.token_verifier is None
+
+    def test_routable_ipv6_without_auth_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="Refusing to serve"):
+            resolve_network_security(
+                transport="sse",
+                host="2001:db8::1",
+                port=8080,
+                security=SecurityLayer(),
+            )
 
 
 class TestTransportSecurityBuilder:
