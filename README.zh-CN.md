@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Q00/ouroboros/stargazers"><img src="https://img.shields.io/github/stars/Q00/ouroboros?color=yellow&logo=github&label=stars" alt="GitHub stars"></a>
+  <a href="https://github.com/Q00/ouroboros"><img src="https://img.shields.io/github/stars/Q00/ouroboros?color=yellow&logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
   <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
@@ -218,7 +218,7 @@ ouroboros uninstall
 
 <p align="center">
   <sub>大多数人是在审到第三个文件的时候，才发现自己当初没说清楚。<br/>
-  如果这感觉很熟，页面顶部那个 <strong>Star</strong> 按钮，能把它送到下一个会栽在同一处的人面前。</sub>
+  如果这种感觉很熟悉，请给 <a href="https://github.com/Q00/ouroboros"><strong>GitHub 上的 Q00/ouroboros</strong></a> 点个 Star，让下一个遇到同样问题的人更容易找到它。</sub>
 </p>
 
 ---
