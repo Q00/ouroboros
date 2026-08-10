@@ -81,6 +81,28 @@ def test_windows_process_liveness_handles_open_process_failures(
     kernel32.CloseHandle.assert_not_called()
 
 
+def test_windows_process_liveness_preserves_lease_when_open_process_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32 = _install_windows_api(monkeypatch, handle=0, last_error=0)
+    kernel32.OpenProcess.side_effect = OSError("Win32 boundary unavailable")
+
+    assert heartbeat._is_windows_process_alive(42) is True
+    kernel32.WaitForSingleObject.assert_not_called()
+    kernel32.CloseHandle.assert_not_called()
+
+
+def test_windows_process_liveness_closes_handle_when_wait_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32 = _install_windows_api(monkeypatch, handle=1234, last_error=0)
+    kernel32.WaitForSingleObject.side_effect = OSError("wait failed")
+
+    assert heartbeat._is_windows_process_alive(42) is True
+
+    kernel32.CloseHandle.assert_called_once_with(1234)
+
+
 def test_process_identity_alive_uses_windows_api_instead_of_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,4 +135,18 @@ def test_process_identity_alive_preserves_posix_kill_behavior(
     monkeypatch.setattr(heartbeat.os, "kill", kill)
 
     assert heartbeat.is_process_identity_alive(42) is expected
+    kill.assert_called_once_with(42, 0)
+
+
+def test_process_identity_alive_preserves_unexpected_posix_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(heartbeat.os, "name", "posix")
+    error = OSError("unexpected signal-zero failure")
+    kill = Mock(side_effect=error)
+    monkeypatch.setattr(heartbeat.os, "kill", kill)
+
+    with pytest.raises(OSError, match="unexpected signal-zero failure"):
+        heartbeat.is_process_identity_alive(42)
+
     kill.assert_called_once_with(42, 0)

@@ -406,25 +406,35 @@ def process_start_time(pid: int) -> float | None:
 
 
 def _is_windows_process_alive(pid: int) -> bool:
-    """Return whether Windows can confirm that ``pid`` is running."""
+    """Return whether Windows can confirm that ``pid`` is running.
+
+    This observer is deliberately fail-closed for cleanup: only an invalid PID
+    or a signaled process handle proves that an owner is dead. Win32 boundary
+    failures preserve the lease instead of letting cleanup race a live owner.
+    """
     process_query_limited_information = 0x1000
     synchronize = 0x00100000
     error_access_denied = 5
     error_invalid_parameter = 87
     wait_object_0 = 0
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    open_process.restype = wintypes.HANDLE
-    wait_for_single_object = kernel32.WaitForSingleObject
-    wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    wait_for_single_object.restype = wintypes.DWORD
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
 
-    handle = open_process(process_query_limited_information | synchronize, False, pid)
+        handle = open_process(process_query_limited_information | synchronize, False, pid)
+    except OSError:
+        # A broken or unavailable Win32 boundary is not proof that the process
+        # is gone. Preserve its authority until a later probe can decide.
+        return True
     if not handle:
         error = ctypes.get_last_error()
         if error == error_invalid_parameter:
@@ -434,7 +444,10 @@ def _is_windows_process_alive(pid: int) -> bool:
         return True
 
     try:
-        wait_result = wait_for_single_object(handle, 0)
+        try:
+            wait_result = wait_for_single_object(handle, 0)
+        except OSError:
+            return True
         # Only a signaled process handle proves termination. Timeouts and
         # unknown/failed wait results preserve the live lease conservatively.
         return wait_result != wait_object_0

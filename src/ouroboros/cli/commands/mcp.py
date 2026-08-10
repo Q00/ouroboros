@@ -148,9 +148,9 @@ def _parse_pid_record(text: str) -> tuple[int, float | None] | None:
 def _record_is_stale(pid: int, start_time: float | None) -> bool:
     """True when a record's process identity is provably not running.
 
-    Windows cannot probe liveness via signal 0 (``os.kill(pid, 0)`` raises
-    ``OSError`` WinError 87) — treat as stale, preserving the degradation the
-    legacy single-slot check used.
+    The shared liveness probe uses Win32 process handles on Windows and
+    preserves a lease when the OS cannot decide. The fallback still preserves
+    the legacy behavior for unexpected errors escaping other platform probes.
     """
     try:
         return not is_process_identity_alive(pid, start_time)
