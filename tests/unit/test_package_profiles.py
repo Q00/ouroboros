@@ -69,4 +69,7 @@ def test_sdk_runtime_message_names_the_fix_not_a_reinstall() -> None:
     assert "claude-cli" in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
     # It must not send the reader back to the package extras.
     assert "[mcp]" not in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE
+    # Dependency validation happens later, so this early runtime diagnostic
+    # must not make an unconditional claim about installation health.
+    assert "install" not in SDK_RUNTIME_IN_MCP_SERVER_MESSAGE.lower()
     assert SDK_RUNTIME_IN_MCP_SERVER_MESSAGE != UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
