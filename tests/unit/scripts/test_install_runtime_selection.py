@@ -844,6 +844,117 @@ def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_pat
     assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
 
 
+def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
+    tmp_path: Path,
+) -> None:
+    """A UUID nested somewhere other than the TOP LEVEL of a valid JSON
+    document is not a real identity -- telemetry.py's loader only ever looks
+    at `data["distinct_id"]` on the top-level dict, so the installer must
+    match that instead of a text search that finds a match anywhere. Salvage
+    (reusing an in-file value) also must NOT apply here: telemetry.py only
+    salvages from genuinely unparseable text, never from valid-but-wrong-
+    shaped JSON, so this must mint an unrelated fresh id, not the nested one.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    nested_uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+    # notice_shown deliberately omitted: this state needs a real repair (a
+    # fresh mint, since there's no usable top-level id), and the repair
+    # candidate always starts `notice_shown: false` -- pre-seeding `true`
+    # here would race `_telemetry_notice`'s own raw-text "already shown"
+    # check against that overwrite for no reason relevant to this test.
+    state.write_text(
+        f'{{"wrapper":{{"distinct_id":"{nested_uuid}"}}}}',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired_text = state.read_text(encoding="utf-8")
+    repaired_id = _extract_distinct_id(repaired_text)
+    assert _UUID_RE.fullmatch(repaired_id)
+    assert repaired_id != nested_uuid
+    assert _TELEMETRY_SHAPE_RE.match(repaired_text), repaired_text  # top-level, canonical shape
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert f'"distinct_id":"{repaired_id}"' in captures
+    assert f'"distinct_id":"{nested_uuid}"' not in captures
+
+
+def test_installer_adopts_last_value_for_duplicate_top_level_distinct_id(
+    tmp_path: Path,
+) -> None:
+    """Duplicate top-level `distinct_id` keys: a JSON parser (and
+    telemetry.py's loader, which uses one) keeps the LAST occurrence. A
+    sed-based first-match would silently disagree with what Python adopts
+    from the exact same file -- fragmenting one installation across two
+    identities. The installer must match Python's last-wins semantics.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    uuid_a = "11111111-1111-1111-1111-111111111111"
+    uuid_b = "22222222-2222-2222-2222-222222222222"
+    state.write_text(
+        f'{{"distinct_id":"{uuid_a}","distinct_id":"{uuid_b}",'
+        f'"created_at":"2020-01-01T00:00:00Z","notice_shown":true}}',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert f'"distinct_id":"{uuid_b}"' in captures
+    assert f'"distinct_id":"{uuid_a}"' not in captures
+
+
+def test_installer_still_salvages_uuid_from_unparseable_text_with_nested_shape(
+    tmp_path: Path,
+) -> None:
+    """Unparseable text containing what LOOKS like a nested `distinct_id`
+    field must still be salvaged via the lenient text search -- the
+    top-level-only rule applies to VALID JSON; telemetry.py's own salvage
+    path for genuinely unparseable text is the same raw-text regex search,
+    unaware of "nesting" since there's no successfully parsed structure to
+    speak of.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(
+        'garbage {"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301"} more garbage',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired_text = state.read_text(encoding="utf-8")
+    assert _extract_distinct_id(repaired_text) == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    json.loads(repaired_text)
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
+
+
 def _extract_distinct_id_function() -> str:
     """Pull `_telemetry_distinct_id` verbatim out of install.sh.
 

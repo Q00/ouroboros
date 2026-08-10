@@ -293,29 +293,49 @@ _telemetry_distinct_id() {
   local salvage_id=""
   local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-  # Two extraction helpers, deliberately different strictness, both nested
-  # (and `unset -f` below) so extracting just this outer function's source
-  # -- e.g. for an isolated concurrency-test driver -- carries them along
-  # automatically instead of leaving a dangling reference:
+  # Four nested helpers, all `unset -f` below so extracting just this outer
+  # function's source -- e.g. for an isolated concurrency-test driver --
+  # carries them along automatically instead of leaving a dangling
+  # reference:
   #
-  #   _telemetry_extract_uuid  -- LENIENT. Prints the id, canonicalized to
-  #   lowercase, whenever the sed-extracted value merely matches the
-  #   hyphenated UUID shape -- uppercase or a file with broken JSON around
-  #   it are still accepted. Used only to find a SALVAGE candidate: a real
-  #   identity worth keeping instead of discarding for a fresh mint.
+  #   _telemetry_extract_uuid  -- LENIENT, TEXT-ONLY. Prints the id,
+  #   canonicalized to lowercase, whenever a sed match ANYWHERE in the raw
+  #   text looks UUID-shaped -- ignorant of JSON structure entirely. This is
+  #   only correct for genuinely unparseable text (telemetry.py salvages the
+  #   same way there, via a raw-text regex): once a document IS valid JSON,
+  #   a sed match found "anywhere" could be nested inside another object, or
+  #   the first of several duplicate top-level keys, and must NOT be trusted
+  #   -- see `_telemetry_read_state`.
   #
-  #   _telemetry_canonical_id  -- STRICT. Prints the id only if it is
-  #   ALREADY fully valid: pattern-valid, lowercase, and (when python3 is on
-  #   PATH) sitting inside well-formed JSON. This is the "has a real repair
-  #   already landed on disk" check. It must be strict: sed's regex
-  #   extraction can't tell a still-broken file with a lowercase id in it
-  #   apart from a freshly repaired one, so the lenient helper would report
-  #   the pre-repair state as already valid and every racer would skip its
-  #   own `mv`, permanently leaving the malformed JSON on disk even though
-  #   every process returned a clean canonical id in memory. Without
-  #   python3 we cannot check JSON well-formedness in pure shell, so that
-  #   part of the check is skipped -- best-effort, matching the rest of
-  #   this file.
+  #   _telemetry_read_state  -- the structural source of truth. Requires
+  #   python3 (a soft dependency elsewhere in this installer too). Parses
+  #   the file as JSON and looks at the TOP-LEVEL `distinct_id` field only
+  #   -- Python's own json.load naturally resolves duplicate keys to the
+  #   LAST occurrence, matching telemetry.py's loader exactly, and a value
+  #   nested inside another object is correctly invisible to a plain
+  #   `data.get(...)`. Prints one of: `CANONICAL:<id>` (top-level, pattern-
+  #   valid, already lowercase -- fully valid, no repair needed),
+  #   `REPAIR:<id>` (top-level, pattern-valid, wrong case -- a real identity
+  #   worth salvaging, canonicalized), `INVALID` (valid JSON, but no usable
+  #   top-level id -- missing, non-string, non-UUID, or only present nested
+  #   -- telemetry.py does NOT salvage from a valid-but-wrong-shaped
+  #   document, only from unparseable text, so this must NOT fall through to
+  #   the lenient text search), `MALFORMED` (not valid JSON at all -- the
+  #   lenient, text-only salvage path legitimately applies here), or
+  #   `NO_PYTHON3` when python3 isn't on PATH -- without a JSON parser, pure
+  #   shell cannot tell top-level from nested or resolve duplicate keys, so
+  #   this is a documented best-effort gap.
+  #
+  #   _telemetry_canonical_id  -- STRICT adopt-without-repair check ("has a
+  #   real repair already landed on disk"): CANONICAL only when python3 is
+  #   present; falls back to the old pattern+case-only sed check (no
+  #   structural awareness) when it is not.
+  #
+  #   _telemetry_salvage_candidate  -- the repair candidate getter: reuses a
+  #   REPAIR-state top-level id or a MALFORMED-text lenient match; withholds
+  #   entirely on INVALID (mirrors telemetry.py: no salvage from valid JSON
+  #   lacking a usable top-level id); falls back to the lenient text search
+  #   without python3.
   _telemetry_extract_uuid() {
     local r
     r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
@@ -323,31 +343,71 @@ _telemetry_distinct_id() {
       printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
     fi
   }
-  _telemetry_canonical_id() {
-    local r py
-    r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
-    [[ "$r" =~ $uuid_re ]] || return 0
-    [ "$r" = "$(printf '%s' "$r" | tr '[:upper:]' '[:lower:]')" ] || return 0
+  _telemetry_read_state() {
+    local py
     py=$(command -v python3 2>/dev/null || true)
-    if [ -n "$py" ]; then
-      "$py" -c '
-import json, sys
-json.load(open(sys.argv[1], encoding="utf-8"))
-' "$1" >/dev/null 2>&1 || return 0
+    if [ -z "$py" ]; then
+      printf 'NO_PYTHON3'
+      return 0
     fi
-    printf '%s' "$r"
+    "$py" -c '
+import json, re, sys
+
+uuid_re = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    print("MALFORMED")
+else:
+    value = data.get("distinct_id") if isinstance(data, dict) else None
+    if isinstance(value, str) and uuid_re.match(value):
+        lowered = value.lower()
+        print(("CANONICAL:" if lowered == value else "REPAIR:") + lowered)
+    else:
+        print("INVALID")
+' "$1" 2>/dev/null
+  }
+  _telemetry_canonical_id() {
+    local state r
+    state=$(_telemetry_read_state "$1")
+    case "$state" in
+      CANONICAL:*)
+        printf '%s' "${state#CANONICAL:}"
+        ;;
+      NO_PYTHON3)
+        r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
+        [[ "$r" =~ $uuid_re ]] || return 0
+        [ "$r" = "$(printf '%s' "$r" | tr '[:upper:]' '[:lower:]')" ] || return 0
+        printf '%s' "$r"
+        ;;
+      *) ;; # REPAIR / INVALID / MALFORMED: not yet fully valid
+    esac
+  }
+  _telemetry_salvage_candidate() {
+    local state
+    state=$(_telemetry_read_state "$1")
+    case "$state" in
+      CANONICAL:*) printf '%s' "${state#CANONICAL:}" ;;
+      REPAIR:*) printf '%s' "${state#REPAIR:}" ;;
+      INVALID) ;; # valid JSON, no usable top-level id -- no salvage
+      *) _telemetry_extract_uuid "$1" ;; # MALFORMED or NO_PYTHON3
+    esac
   }
 
   if [ -f "$f" ]; then
     file_existed=true
     id=$(_telemetry_canonical_id "$f")
     if [ -z "$id" ]; then
-      # Not already fully valid. Keep any pattern-valid id as a SALVAGE
-      # candidate (a real identity worth repairing-in-place) rather than
-      # discarding it for a fresh mint; an id that isn't even UUID-shaped
-      # (e.g. a stray email address, or no `distinct_id` field at all)
-      # leaves `salvage_id` empty and is treated as fully corrupt below.
-      salvage_id=$(_telemetry_extract_uuid "$f")
+      # Not already fully valid. Keep a real (top-level, or -- only for
+      # genuinely unparseable text -- lenient-text) id as a SALVAGE
+      # candidate rather than discarding it for a fresh mint; an id that
+      # isn't usable at all (no field, a non-UUID value, or only nested
+      # inside otherwise-valid JSON) leaves `salvage_id` empty and is
+      # treated as fully corrupt below.
+      salvage_id=$(_telemetry_salvage_candidate "$f")
     fi
   fi
 
@@ -360,11 +420,11 @@ json.load(open(sys.argv[1], encoding="utf-8"))
       id=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
     fi
     if [ -z "$id" ]; then
-      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
       return 1
     fi
     if ! mkdir -p "$HOME/.ouroboros" 2>/dev/null; then
-      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
       return 1
     fi
     # Publish the (fresh or salvaged) identity via a same-directory temp
@@ -434,28 +494,32 @@ json.load(open(sys.argv[1], encoding="utf-8"))
     fi
     rm -f "$tmp" 2>/dev/null || true
     # Fail-closed reread: if neither our own publish/repair attempt nor
-    # anyone else's landed a pattern-valid id on disk (e.g. `$HOME/.ouroboros`
-    # is unwritable/read-only, so every `mv`/`ln` above silently failed),
+    # anyone else's landed a usable id on disk (e.g. `$HOME/.ouroboros` is
+    # unwritable/read-only, so every `mv`/`ln` above silently failed),
     # printing the local candidate would emit under an ephemeral,
     # never-persisted identity that no other process -- or a later run of
     # this same one -- could ever reproduce, permanently fragmenting
     # identity instead of just skipping a run's telemetry. Drop instead
     # (callers already treat a nonzero return as "skip telemetry"), matching
-    # telemetry.py's stable-identity contract. Deliberately the LENIENT
-    # extractor here, not the strict one: this is a "is there now a real,
-    # reusable identity at all" check, not a "was it perfectly repaired"
-    # check -- a pattern-valid id already sitting in a file we couldn't
-    # write to is still a stable value every future read of that same file
-    # will keep finding, so it's the best available anchor, not a reason to
-    # go fully ephemeral.
-    winner_id=$(_telemetry_extract_uuid "$f")
+    # telemetry.py's stable-identity contract. Deliberately
+    # `_telemetry_salvage_candidate`, not the strict `_telemetry_canonical_id`:
+    # this is a "is there now a real, reusable identity at all" check, not a
+    # "was it perfectly repaired" check -- a top-level id already sitting in
+    # a file we couldn't write to is still a stable value every future read
+    # of that same file will keep finding, so it's the best available
+    # anchor, not a reason to go fully ephemeral. It still withholds on a
+    # valid-JSON `INVALID` state (no usable top-level id) exactly as the
+    # top-of-function salvage check does, so this reread can never resurrect
+    # a nested-only or otherwise-unusable value that was correctly rejected
+    # earlier in this same call.
+    winner_id=$(_telemetry_salvage_candidate "$f")
     if [ -z "$winner_id" ]; then
-      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
       return 1
     fi
     id="$winner_id"
   fi
-  unset -f _telemetry_extract_uuid _telemetry_canonical_id
+  unset -f _telemetry_extract_uuid _telemetry_read_state _telemetry_canonical_id _telemetry_salvage_candidate
   printf '%s' "$id"
 }
 

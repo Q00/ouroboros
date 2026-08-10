@@ -272,6 +272,60 @@ class TestDistinctIdValidation:
         repaired = json.loads(state_path.read_text(encoding="utf-8"))
         assert repaired["distinct_id"] == transmitted
 
+    def test_nested_distinct_id_is_invalid_and_never_salvaged(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        """A UUID that only exists nested under another key is not a valid
+        top-level identity -- _canonical_distinct_id only ever looks at
+        raw.get("distinct_id"), so this document has no distinct_id at all
+        as far as the identity contract is concerned. It's also valid JSON,
+        so _build_repair_candidate's malformed-JSON salvage regex (which
+        would happily find the nested UUID by text search alone, with no
+        notion of nesting) must never run against it -- only genuinely
+        unparseable JSON is eligible for salvage. Python mints a fresh id
+        and repairs the file to top-level shape."""
+        nested_uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text(
+            json.dumps({"wrapper": {"distinct_id": nested_uuid}, "notice_shown": True}),
+            encoding="utf-8",
+        )
+
+        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        transmitted = sent[0]["distinct_id"]
+        assert telemetry._UUID_PATTERN.fullmatch(transmitted)
+        assert transmitted != nested_uuid
+
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["distinct_id"] == transmitted
+        assert "wrapper" not in repaired
+
+    def test_duplicate_top_level_keys_json_loads_keeps_last_no_repair(self, tmp_path: Path) -> None:
+        """json.loads (like most JSON parsers) silently keeps the LAST
+        occurrence of a duplicate key, so raw text with two distinct
+        top-level "distinct_id" values parses to a single, already-valid
+        id -- the second one. Nothing about that looks invalid once parsed,
+        so no repair is triggered and the file is left byte-identical."""
+        uuid_a = "11111111-1111-4111-8111-111111111111"
+        uuid_b = "22222222-2222-4222-8222-222222222222"
+        raw_text = (
+            f'{{"distinct_id": "{uuid_a}", "distinct_id": "{uuid_b}", "notice_shown": false}}'
+        )
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text(raw_text, encoding="utf-8")
+
+        result = telemetry.distinct_id()
+
+        assert result == uuid_b
+        assert state_path.read_text(encoding="utf-8") == raw_text  # untouched, no repair mint
+
     def test_malformed_json_with_salvageable_uuid_is_recovered(self, tmp_path: Path) -> None:
         state_dir = tmp_path / ".ouroboros"
         state_dir.mkdir(parents=True)
