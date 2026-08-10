@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Awaitable, Callable
-import sys
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -34,35 +34,97 @@ _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
 # error_type is a plain exception-class name, so it is just as capable of
 # smuggling a caller-controlled/extension-defined identifier as `tool` was
-# (e.g. a registered extension raising AcmePrivateProjectError). Only class
-# names we can vouch for -- stdlib, builtins, or our own `ouroboros`
-# package -- are ever queued verbatim; every third-party/extension class
-# folds to this fixed literal instead. Kept distinct from _UNKNOWN_TOOL_NAME
-# (a different axis: that one is about an unresolved tool name, this one is
-# about an error class we don't recognize).
+# (e.g. a registered extension raising AcmePrivateProjectError). A prior
+# version of this gate trusted the class's own __module__ string -- but
+# __module__ is just an attribute an extension-defined class can set to
+# anything ("builtins", "ouroboros_acme_private.errors", ...), and it is not
+# even guaranteed to be a string, so reading it could itself raise and
+# replace the real Result.err with an AttributeError (breaking the
+# never-raises contract this module promises). This gate instead uses a
+# CLOSED output vocabulary: only class *names* enumerated in
+# _SAFE_ERROR_TYPE_NAMES are ever serialized verbatim, and that set is built
+# from sources we control, never from anything the error object claims about
+# itself. This makes even a spoofed name harmless -- a class calling itself
+# "ValueError" serializes the audited string "ValueError", which identifies
+# no one. Kept distinct from _UNKNOWN_TOOL_NAME (a different axis: that one
+# is about an unresolved tool name, this one is about an error class).
 _EXTENSION_ERROR_TYPE = "ExtensionError"
+
+# Enumerated by inspecting the interpreter's own `builtins` module -- this is
+# OUR enumeration of what CPython ships, not a claim the error object makes
+# about itself, so it cannot be spoofed by a class naming itself e.g.
+# "ValueError" while living in a completely different, extension-owned type.
+_BUILTIN_ERROR_NAMES = frozenset(
+    name
+    for name, obj in vars(builtins).items()
+    if isinstance(obj, type) and issubclass(obj, BaseException)
+)
+
+# The complete, literal exception hierarchy from ouroboros/mcp/errors.py --
+# every class this module's own MCP request/security/tool-dispatch path can
+# construct and put into a Result.err. Keep this list in sync with that file
+# (grep '^class ' src/ouroboros/mcp/errors.py) whenever it changes.
+_OUROBOROS_ERROR_NAMES = frozenset(
+    {
+        "MCPError",
+        "MCPClientError",
+        "MCPConnectionError",
+        "MCPTimeoutError",
+        "MCPProtocolError",
+        "MCPServerError",
+        "MCPAuthError",
+        "MCPResourceNotFoundError",
+        "MCPToolError",
+    }
+)
+
+# Common stdlib exception names that are NOT in `builtins` (they live in
+# their own stdlib module, e.g. asyncio.CancelledError, json.JSONDecodeError)
+# but are common/expected enough here to keep distinct rather than folding
+# to the generic extension literal. Folding a rarer stdlib name is harmless
+# -- this list only needs to cover what's worth keeping distinct, not be
+# exhaustive.
+_EXTRA_STDLIB_ERROR_NAMES = frozenset({"CancelledError", "JSONDecodeError"})
+
+_SAFE_ERROR_TYPE_NAMES = _BUILTIN_ERROR_NAMES | _OUROBOROS_ERROR_NAMES | _EXTRA_STDLIB_ERROR_NAMES
 
 
 def _safe_error_type(error: object) -> str:
     """Fold a non-audited exception/error class name to a fixed literal.
 
-    Verbatim only for: builtins (``ValueError``, ``RuntimeError``, ...),
-    the standard library (top-level package in ``sys.stdlib_module_names``),
-    or our own code (``__module__`` starting with ``"ouroboros"`` -- covers
-    ``MCPToolError``/``MCPServerError`` and every internal exception).
-    Everything else -- a third-party dependency's exception, or a class an
-    extension/registered tool defines itself -- is a class name we cannot
-    vouch for as non-identifying, so it folds to ``_EXTENSION_ERROR_TYPE``.
+    Total and failure-isolated by construction: this can never raise, even
+    against an error object with hostile metaclass behavior (a __name__
+    that raises on access, a non-string __name__, ...), because every step
+    is wrapped and any exception folds to the same safe literal a
+    non-audited name would. The boundary's never-raises contract must hold
+    even when the error value it is describing is itself adversarial.
     """
-    module = type(error).__module__
-    top_level = module.partition(".")[0]
-    if (
-        module == "builtins"
-        or top_level in sys.stdlib_module_names
-        or module.startswith("ouroboros")
-    ):
-        return type(error).__name__
+    try:
+        name = type(error).__name__
+        if isinstance(name, str) and name in _SAFE_ERROR_TYPE_NAMES:
+            return name
+    except Exception:
+        pass
     return _EXTENSION_ERROR_TYPE
+
+
+def _is_logical_error(value: object) -> bool:
+    """Total/failure-isolated read of ``MCPToolResult.is_error``.
+
+    Mirrors :func:`_safe_error_type`'s isolation. ``getattr(value,
+    "is_error", False)`` alone is not enough: its ``default`` only stands in
+    when the attribute is genuinely *missing* (raises ``AttributeError``
+    internally) -- if ``is_error`` were a property whose getter itself
+    raises anything else against a hostile/malformed value, that exception
+    would propagate straight past the default and out of this boundary,
+    corrupting the real handler result the caller is waiting on. Falls back
+    to ``False`` (not a logical error, so the outer ``Result.is_ok`` alone
+    decides) rather than guessing either way.
+    """
+    try:
+        return bool(getattr(value, "is_error", False))
+    except Exception:
+        return False
 
 
 def _duration_ms(started_at: float) -> float:
@@ -106,10 +168,7 @@ async def observe_adapter_tool_call[T, E](
             )
         raise
     if enabled:
-        # getattr, not a direct attribute access: this function is generic
-        # over T, and a telemetry-shape assumption must never be able to
-        # crash the real call it is only supposed to be observing.
-        logical_error = result.is_ok and bool(getattr(result.value, "is_error", False))
+        logical_error = result.is_ok and _is_logical_error(result.value)
         usage_telemetry.capture_tool_call(
             safe_name,
             ok=result.is_ok and not logical_error,
@@ -173,10 +232,7 @@ async def call_sdk_tool(
             error_type=error_type or _safe_error_type(exc),
         )
         raise
-    # getattr, not a direct attribute access: value is always MCPToolResult
-    # at the sole current call site, but this must never crash a genuinely
-    # successful call over a telemetry-shape assumption.
-    logical_error = bool(getattr(value, "is_error", False))
+    logical_error = _is_logical_error(value)
     usage_telemetry.capture_tool_call(
         safe_name, ok=not logical_error, duration_ms=_duration_ms(started_at)
     )
