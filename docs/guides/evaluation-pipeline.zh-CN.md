@@ -324,7 +324,7 @@ openrouter/google/gemini-2.5-pro
 ### 审议式共识（Deliberative Consensus）
 
 一种可选的两轮模式：
-1. **第 1 轮（并行）：** Advocate（找出优点）和 Devil's Advocate（用本体论分析做根因验证）各自独立陈述立场。
+1. **第 1 轮（并行）：** Advocate（找出优点）和 Devil's Advocate（用本体论分析做根因验证）**并行**陈述各自的立场（这里的「独立」指立场，不指模型——两者仍走同一个适配器）。
 2. **第 2 轮：** Judge 复核两方立场，给出判定：`approved`、`rejected` 或 `conditional`。
 
 > **注意：** `conditional` 是审议模式下 Judge 的合法判定。在 `DeliberationResult.approved` 属性里，`conditional` 映射为**拒绝**（该属性只有 `approved` 时才返回 `True`）。附加条件列在 `JudgmentResult.conditions` 中。
@@ -456,6 +456,8 @@ config = PipelineConfig(stage3_enabled=False)
 ```
 
 > **警告：** 关闭 Stage 1 意味着坏掉的代码可以直接进入语义评估。关闭 Stage 3 意味着高漂移、高不确定度的输出永远不会被送去多模型复核。
+
+> **先说清楚这些开关在哪里生效。** 本节讨论的 `stage1_enabled` / `stage2_enabled` / `stage3_enabled` 是**直接构造 `PipelineConfig` 时的 Python 运行时控制项**。`~/.ouroboros/config.yaml` 里**同名**的顶层键 `evaluation.stage1_enabled`、`stage2_enabled`、`stage3_enabled` 目前只会通过 schema 校验，**运行时构造器并不会把它们写进 `PipelineConfig`**。同理，顶层 `evaluation.uncertainty_threshold` 也不会写入 `TriggerConfig.uncertainty_threshold`。改 YAML 里的这几个键不会改变行为。
 
 > **关闭 Stage 2 并不会关闭 Stage 3。** 触发上下文被刻意构建在 Stage 2 代码块之外，正是为了让 `trigger_consensus=True` 在 `stage2_enabled=False` 时依然有效——它会触发 `manual_request`，Stage 3 独立跑起来。真正会悄悄关掉 Stage 3 的是这个组合：`stage2_enabled=False`、`trigger_consensus=False`、且没有外部 `trigger_context`——此时所有触发字段都是默认值，没有一条能命中。要在不跑 Stage 2 的情况下到达 Stage 3，要么设置 `trigger_consensus=True`，要么向 `EvaluationPipeline.evaluate()` 传入一个预填好的 `TriggerContext`。
 
