@@ -1075,12 +1075,10 @@ def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> N
     and skipped-only banners start with their own words — so a gatekeeper
     matching on that would have been wrong on arrival.
 
-    The constants live in two languages and cannot import each other, so this
-    pins them equal. That is what "written once so emitter and stripper cannot
-    drift" has to mean across a language boundary.
+    The constants live in two languages and cannot import each other. Their
+    source-level parity is pinned by ``test_bridge_literal_contract.py``; this
+    test exercises recognition of the bridge shape that parity protects.
     """
-    from pathlib import Path
-
     from ouroboros.mcp.tools.advisory_dispatch import (
         _BRIDGE_NOTICE_OPENING,
         echo_carries_dispatch,
@@ -1088,12 +1086,6 @@ def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> N
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
     )
-
-    bridge_source = (
-        Path(__file__).resolve().parents[4] / "src/ouroboros/opencode/plugin/ouroboros-bridge.ts"
-    ).read_text(encoding="utf-8")
-    assert f'export const OUROBOROS_DISPATCH_MARKER = "{marker}"' in bridge_source
-    assert f'export const BRIDGE_NOTICE_OPENING = "{_BRIDGE_NOTICE_OPENING}"' in bridge_source
 
     # The shape the bridge actually stamps, banner and identifiers and all.
     bridge_echo = (
