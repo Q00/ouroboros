@@ -73,6 +73,8 @@ class TestHostClassification:
             "localhost",
             "LOCALHOST",
             "LOCALHOST.",
+            "localhost.localdomain",
+            "LOCALHOST.LOCALDOMAIN.",
             "::1",
             "[::1]",
             "127.0.0.2",
@@ -89,6 +91,23 @@ class TestHostClassification:
     )
     def test_routable_hosts_are_not_loopback(self, host: str) -> None:
         """Anything reachable from elsewhere -- including unresolvable names."""
+        assert is_loopback_host(host) is False
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "local\u115fhost",
+            "xn--localhost-fj9a",
+            "localhost\u3002",
+            "localhost\uff0e",
+            "\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54",
+            "localhost..",
+            "[localhost]",
+            "[127.0.0.1]",
+        ],
+    )
+    def test_idna_and_compatibility_lookalikes_are_not_loopback(self, host: str) -> None:
+        """Wire normalization must never broaden the credential-free trust set."""
         assert is_loopback_host(host) is False
 
     @pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]", ""])
@@ -118,6 +137,40 @@ class TestServeRefusesUnauthenticatedExposure:
             await adapter.serve(transport=transport, host=host, port=9000)
 
         cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("host", ["local\u115fhost", "xn--localhost-fj9a"])
+    async def test_resolver_lookalike_without_auth_is_refused(self, host: str) -> None:
+        """A UTS-46 or resolver alias cannot bypass the adapter auth gate."""
+        adapter = MCPServerAdapter()
+
+        cls, _ = _mock_sdk_server()
+        with (
+            patch("ouroboros.mcp.server.adapter._OuroborosSDKServer", cls),
+            pytest.raises(ValueError, match="Refusing to serve"),
+        ):
+            await adapter.serve(transport="streamable-http", host=host, port=9000)
+
+        cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_authenticated_compatibility_hostname_uses_exact_wire_host(self) -> None:
+        """Authentication stays required while Host policy follows HTTPX UTS-46."""
+        adapter = MCPServerAdapter(auth_config=_auth_config())
+
+        cls, instance = _mock_sdk_server()
+        with patch("ouroboros.mcp.server.adapter._OuroborosSDKServer", cls):
+            await adapter.serve(
+                transport="streamable-http",
+                host="local\u115fhost",
+                port=9000,
+            )
+
+        assert isinstance(cls.call_args.kwargs["token_verifier"], OuroborosTokenVerifier)
+        assert cls.call_args.kwargs["auth"] is not None
+        settings = instance.run_streamable_http_async.await_args.kwargs["transport_security"]
+        assert settings.allowed_hosts == ["localhost:9000"]
+        assert settings.allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_refusal_names_the_capability_at_risk(self) -> None:
@@ -519,6 +572,38 @@ class TestTransportSecurityBuilder:
         assert middleware._validate_host(wire_request.headers["host"]) is True
         assert await middleware.validate_request(request) is None
 
+    @pytest.mark.asyncio
+    async def test_compatibility_mapped_host_uses_exact_wire_port(self) -> None:
+        """A deceptive bind gets UTS-46 wire policy, never loopback wildcards."""
+        import httpx2
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
+
+        host = "local\u115fhost"
+        settings = build_transport_security(
+            host=host,
+            port=8080,
+            allowed_hosts=(),
+            allowed_origins=(),
+        )
+        middleware = TransportSecurityMiddleware(settings)
+
+        assert as_url_authority(host) == "localhost"
+        assert settings.allowed_hosts == ["localhost:8080"]
+
+        wire_request = httpx2.Request("GET", "http://localhost:8080/mcp")
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [(name.lower(), value) for name, value in wire_request.headers.raw],
+            }
+        )
+
+        assert await middleware.validate_request(request) is None
+        assert middleware._validate_host("localhost:8081") is False
+
     @pytest.mark.parametrize(
         "authority",
         ["[2001:db8::1]", "[2001:0DB8:0:0:0:0:0:1]"],
@@ -896,6 +981,23 @@ class TestCliExposureGate:
                 auth_token="",
                 allow_remote=True,
                 allowed_hosts=("a.example:8080",),
+            )
+
+    @pytest.mark.parametrize("host", ["local\u115fhost", "xn--localhost-fj9a"])
+    def test_resolver_lookalike_without_token_exits(self, host: str) -> None:
+        """The CLI shares the adapter's strict, non-UTS-46 trust classifier."""
+        import typer
+
+        from ouroboros.cli.commands.mcp import _resolve_network_security
+
+        with pytest.raises(typer.Exit):
+            _resolve_network_security(
+                transport="streamable-http",
+                host=host,
+                port=8080,
+                auth_token="",
+                allow_remote=True,
+                allowed_hosts=(),
             )
 
     def test_remote_bind_without_acknowledgement_exits(self) -> None:

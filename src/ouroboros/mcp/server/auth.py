@@ -69,21 +69,31 @@ def is_loopback_host(host: str) -> bool:
         host: The bind address as written on the command line.
 
     Returns:
-        True for loopback literals and loopback hostnames. A name that cannot
-        be classified without a DNS lookup (``build-box.internal``) returns
-        False: refusing to guess is the safe direction, since the caller uses
-        this to decide whether credentials are mandatory.
+        True for loopback IP literals and the exact ASCII hostnames
+        ``localhost`` and ``localhost.localdomain`` (case-insensitive, with at
+        most one trailing root dot). A name that would need DNS, IDNA, or
+        Unicode compatibility normalization returns False: refusing to guess
+        is the safe direction, since the caller uses this result to decide
+        whether credentials are mandatory.
     """
+    candidate = host.strip()
+    bracketed = candidate.startswith("[") and candidate.endswith("]")
+    ip_candidate = candidate[1:-1] if bracketed else candidate
     try:
-        candidate = _canonical_host_identity(host)
-    except UnicodeError:
-        return False
-    if candidate in _LOOPBACK_HOSTNAMES:
-        return True
-    try:
-        return ipaddress.ip_address(candidate).is_loopback
+        address = ipaddress.ip_address(ip_candidate)
     except ValueError:
+        # Wire serialization deliberately uses UTS-46 in ``as_url_authority``.
+        # It must never participate in this trust decision: compatibility
+        # mappings can turn a distinct resolver name such as ``local\u115fhost``
+        # into ``localhost``. Brackets are valid only around IPv6 literals.
+        if bracketed or not candidate.isascii():
+            return False
+        identity = candidate.removesuffix(".").lower()
+        return identity in _LOOPBACK_HOSTNAMES
+
+    if bracketed and address.version != 6:
         return False
+    return address.is_loopback
 
 
 def is_wildcard_host(host: str) -> bool:
@@ -148,16 +158,6 @@ def _input_ipv6_authority(host: str) -> str | None:
     if address.version != 6:
         return None
     return f"[{candidate}]"
-
-
-def _canonical_host_identity(host: str) -> str:
-    """Return the canonical form used only for loopback identity checks.
-
-    Wire and advertised URL authorities retain an absolute DNS root dot. DNS
-    identity does not: ``localhost`` and ``localhost.`` classify the same way
-    without forcing their case-sensitive Host values to share one spelling.
-    """
-    return as_url_authority(host).strip("[]").removesuffix(".")
 
 
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
@@ -335,10 +335,8 @@ def build_transport_security(
         authority = as_url_authority(host)
         input_ipv6_authority = _input_ipv6_authority(host)
         wire_identity = authority.strip("[]")
-        canonical_identity = _canonical_host_identity(host)
         uses_sdk_loopback_defaults = (
-            canonical_identity in _SDK_LOOPBACK_DEFAULT_IDENTITIES
-            and wire_identity == canonical_identity
+            is_loopback_host(host) and wire_identity in _SDK_LOOPBACK_DEFAULT_IDENTITIES
         )
         has_distinct_ipv6_spelling = (
             input_ipv6_authority is not None and input_ipv6_authority != authority
