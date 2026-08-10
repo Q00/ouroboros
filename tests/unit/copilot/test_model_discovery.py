@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import subprocess
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.copilot import model_discovery as md
 
 _FAKE_API_PAYLOAD: dict[str, Any] = {
     "data": [
+        {
+            "id": "claude-opus-4.8",
+            "name": "Claude Opus 4.8",
+            "vendor": "Anthropic",
+            "capabilities": {"family": "claude-opus-4.8"},
+        },
         {
             "id": "claude-opus-4.6",
             "name": "Claude Opus 4.6",
@@ -32,6 +46,26 @@ _FAKE_API_PAYLOAD: dict[str, Any] = {
         },
     ]
 }
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    "guide_path",
+    (
+        "docs/runtime-guides/copilot.md",
+        "docs/runtime-guides/copilot.ko.md",
+    ),
+)
+def test_runtime_guide_documents_current_anthropic_default_mappings(guide_path: str) -> None:
+    guide = (_REPO_ROOT / guide_path).read_text(encoding="utf-8")
+
+    assert f"`{DEFAULT_OPUS_MODEL}`" in guide
+    assert "`claude-opus-4.8`" in guide
+    assert f"`{DEFAULT_SONNET_MODEL}`" in guide
+    assert "`claude-sonnet-4.6`" in guide
+    assert "`claude-sonnet-4-5`" not in guide
+    assert "`claude-sonnet-4.5`" not in guide
 
 
 class _FakeUrlResponse:
@@ -66,6 +100,7 @@ class TestListCopilotModels:
             models = md.list_copilot_models(refresh=True)
 
         assert [m.id for m in models] == [
+            "claude-opus-4.8",
             "claude-opus-4.6",
             "claude-sonnet-4.5",
             "gpt-5.2",
@@ -77,6 +112,7 @@ class TestListCopilotModels:
             models = md.list_copilot_models(refresh=True)
 
         assert models, "fallback list should be non-empty"
+        assert any(m.id == "claude-opus-4.8" for m in models)
         assert any(m.id == "claude-opus-4.6" for m in models)
         assert md.used_fallback() is True
 
@@ -133,13 +169,90 @@ class TestMapToCopilotModel:
         with patch.object(md, "_resolve_token", side_effect=AssertionError("called")):
             assert md.map_to_copilot_model("default") == "default"
 
-    def test_static_map_handles_anthropic_hyphen_form(self) -> None:
+    def test_static_map_handles_anthropic_hyphen_form_when_available(self) -> None:
+        pool = [
+            md.CopilotModel(id="claude-opus-4.6", family="claude-opus-4.6"),
+            md.CopilotModel(id="claude-sonnet-4.6", family="claude-sonnet-4.6"),
+        ]
         with patch.object(md, "_resolve_token", side_effect=AssertionError("called")):
-            assert md.map_to_copilot_model("claude-opus-4-6") == "claude-opus-4.6"
-            assert md.map_to_copilot_model("claude-sonnet-4-6") == "claude-sonnet-4.6"
+            assert md.map_to_copilot_model("claude-opus-4-6", available=pool) == "claude-opus-4.6"
             assert (
-                md.map_to_copilot_model("openrouter/anthropic/claude-opus-4-6") == "claude-opus-4.6"
+                md.map_to_copilot_model("claude-sonnet-4-6", available=pool) == "claude-sonnet-4.6"
             )
+            assert (
+                md.map_to_copilot_model(
+                    "openrouter/anthropic/claude-opus-4-6",
+                    available=pool,
+                )
+                == "claude-opus-4.6"
+            )
+
+    def test_current_default_maps_to_exact_catalog_id(self) -> None:
+        pool = [md.CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+
+        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=pool) == "claude-opus-4.8"
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=pool)
+            == "claude-opus-4.8"
+        )
+
+    def test_current_default_maps_from_bundled_catalog_when_discovery_fails(self) -> None:
+        with patch.object(md, "_resolve_token", return_value=None):
+            assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL) == "claude-opus-4.8"
+            assert md.used_fallback() is True
+
+    def test_future_anthropic_version_uses_catalog_driven_candidate(self) -> None:
+        pool = [md.CopilotModel(id="claude-sonnet-5.1", family="claude-sonnet-5.1")]
+
+        assert md.map_to_copilot_model("claude-sonnet-5-1", available=pool) == "claude-sonnet-5.1"
+        assert (
+            md.map_to_copilot_model(
+                "openrouter/anthropic/claude-sonnet-5-1",
+                available=pool,
+            )
+            == "claude-sonnet-5.1"
+        )
+
+    def test_candidate_must_be_available_in_catalog(self) -> None:
+        pool = [md.CopilotModel(id="claude-opus-4.7", family="claude-opus-4.7")]
+
+        assert md.map_to_copilot_model(DEFAULT_OPUS_MODEL, available=pool) == DEFAULT_OPUS_MODEL
+        assert (
+            md.map_to_copilot_model(DEFAULT_CONSENSUS_OPUS_MODEL, available=pool)
+            == DEFAULT_CONSENSUS_OPUS_MODEL
+        )
+
+    def test_openrouter_prefix_is_removed_only_for_an_exact_catalog_id(self) -> None:
+        model = "openrouter/anthropic/claude-fable-5"
+        exact_pool = [md.CopilotModel(id="claude-fable-5", family="claude-fable-5")]
+        family_only_pool = [md.CopilotModel(id="claude-fable-5-fast", family="claude-fable-5")]
+
+        assert md.map_to_copilot_model(model, available=exact_pool) == "claude-fable-5"
+        assert md.map_to_copilot_model(model, available=family_only_pool) == model
+
+    def test_static_alias_is_catalog_gated_by_exact_id(self) -> None:
+        alias = "legacy-opus"
+        target = "claude-opus-4.6"
+        exact_pool = [md.CopilotModel(id=target, family=target)]
+        family_only_pool = [md.CopilotModel(id="claude-opus-fast", family=target)]
+
+        with patch.dict(md._STATIC_NAME_MAP, {alias: target}):
+            assert md.map_to_copilot_model(alias, available=exact_pool) == target
+            assert md.map_to_copilot_model(alias, available=family_only_pool) == alias
+
+    def test_fallback_never_replaces_every_hyphen(self) -> None:
+        malformed_old_candidate = "claude.opus.beta.4.8"
+        pool = [md.CopilotModel(id=malformed_old_candidate, family=malformed_old_candidate)]
+
+        assert (
+            md.map_to_copilot_model("claude-opus-beta-4-8", available=pool)
+            == "claude-opus-beta-4-8"
+        )
+
+    def test_non_anthropic_unknown_id_is_preserved_even_if_dotted_shape_exists(self) -> None:
+        pool = [md.CopilotModel(id="acme-future-9.0", family="acme-future-9.0")]
+
+        assert md.map_to_copilot_model("acme-future-9-0", available=pool) == "acme-future-9-0"
 
     def test_unknown_hyphen_id_returns_unchanged(self) -> None:
         with patch.object(md, "_resolve_token", return_value=None):

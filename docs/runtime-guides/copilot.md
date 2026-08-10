@@ -86,8 +86,8 @@ at the start of the wizard. The flow:
 3. Parse `data[].id` and `capabilities.family` into a typed list.
 4. Cache the result in process for the rest of the setup run.
 5. If any of the above fails (no `gh`, network down, rate limited, parse
-   error), fall back silently to a bundled snapshot of well-known IDs so
-   setup still completes.
+   error), print a warning and fall back to a bundled snapshot of well-known
+   IDs so setup still completes.
 
 Setup prints the chosen default model and persists it through supported
 model fields in `~/.ouroboros/config.yaml` — for example
@@ -100,26 +100,27 @@ a new default after GitHub ships new models.
 ### Hyphen versus dotted model IDs
 
 Ouroboros' defaults use the hyphenated Anthropic SDK form
-(`claude-opus-4-8`, `claude-sonnet-4-5`). Copilot CLI expects the dotted form
-(`claude-opus-4.6`, `claude-sonnet-4.5`). The adapter maps *some* of these, and
-the boundary is narrower than it looks — check your explicit overrides before
-switching.
+(`claude-opus-4-8`, `claude-sonnet-4-6`). Copilot CLI expects the dotted form
+(`claude-opus-4.8`, `claude-sonnet-4.6`). The adapter resolves these forms
+against the discovered Copilot catalog rather than rewriting arbitrary model
+names.
 
-`map_to_copilot_model()` ([`copilot/model_discovery.py:247`](../../src/ouroboros/copilot/model_discovery.py))
-resolves in order: a verbatim match against the discovered catalog; a static
-name map that currently covers `claude-opus-4-6`, `claude-sonnet-4-5`, and their
-`openrouter/anthropic/` forms; then a hyphen-to-dot fallback. Two consequences:
+`map_to_copilot_model()` ([`copilot/model_discovery.py`](../../src/ouroboros/copilot/model_discovery.py))
+passes through an explicit dotted Copilot ID, then derives candidates by
+removing the known `openrouter/anthropic/` prefix, preserving exact legacy
+aliases, or changing only the trailing numeric version separator. For example,
+`claude-opus-4-8` becomes the candidate `claude-opus-4.8`; the hyphens in
+`claude-opus` are never touched. Every transformed candidate, including a
+prefix-stripped or statically mapped one, is returned only when that exact ID
+is in the discovered or bundled catalog.
 
-- Any ID already containing a `.` short-circuits at the top and passes through
-  unchanged (`:276`).
-- The fallback calls `replace("-", ".")`, which rewrites *every* hyphen, so
-  `claude-opus-4-8` becomes `claude.opus.4.8` — not a Copilot ID — and also
-  passes through unchanged.
-
-So the current `DEFAULT_OPUS_MODEL` (`claude-opus-4-8`) has **no** Copilot
-mapping, unlike the previous default. Tracked in
-[#1995](https://github.com/Q00/ouroboros/issues/1995). Leave role models unset so
-setup writes a discovered ID, or set a dotted Copilot ID explicitly.
+The current `DEFAULT_OPUS_MODEL` therefore resolves to the published
+`claude-opus-4.8`, as does `openrouter/anthropic/claude-opus-4-8`. Future
+Anthropic versions use the same catalog-gated trailing-version rule without
+another static-map entry. An unknown model, or any derived candidate that the
+active catalog does not publish, remains unchanged—including its OpenRouter
+prefix—so the existing Copilot unavailable-model error stays explicit rather
+than silently selecting a different model.
 
 If you set a model that Copilot does not recognise, the subprocess will
 fail with `Model "<id>" from --model flag is not available.` Pass a model

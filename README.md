@@ -207,7 +207,7 @@ See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for
 <details>
 <summary><strong>Other install methods</strong></summary>
 
-**Claude Code plugin only** (no system package):
+**Claude Code plugin only** (no Python package to install; the host needs `uvx` and `python3` >= 3.11, 3.12 recommended — see #2001):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

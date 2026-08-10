@@ -13,11 +13,12 @@ This module:
 * Caches the result in process so setup wizards and adapters don't re-hit the
   API on every call.
 * Falls back to a hardcoded snapshot when the API or auth fails so offline
-  setup still produces a usable list.
+  setup still produces a usable list, with setup warning that the snapshot
+  may be stale.
 * Exposes :func:`map_to_copilot_model` which translates an internal Ouroboros
   model name (typically the Anthropic hyphen form) to a Copilot-valid ID by
-  consulting the discovered list, falling back to a static map of well-known
-  Anthropic IDs.
+  consulting the discovered list, preserving legacy aliases, and converting
+  only a catalog-backed trailing Anthropic version separator.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -40,6 +42,8 @@ _MODELS_URL = "https://api.githubcopilot.com/models"
 _REQUEST_TIMEOUT_SECONDS = 5.0
 _INTEGRATION_ID = "copilot-cli"
 _EDITOR_VERSION = "ouroboros-discovery/1.0"
+_OPENROUTER_ANTHROPIC_PREFIX = "openrouter/anthropic/"
+_ANTHROPIC_HYPHEN_VERSION = re.compile(r"^(?P<stem>claude-[a-z0-9]+-\d+)-(?P<minor>\d+)$")
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,9 @@ class CopilotModel:
 
 
 _FALLBACK_MODELS: tuple[CopilotModel, ...] = (
+    CopilotModel(
+        id="claude-opus-4.8", family="claude-opus-4.8", vendor="Anthropic", name="Claude Opus 4.8"
+    ),
     CopilotModel(
         id="claude-opus-4.7", family="claude-opus-4.7", vendor="Anthropic", name="Claude Opus 4.7"
     ),
@@ -244,6 +251,26 @@ def used_fallback() -> bool:
     return _cached_used_fallback
 
 
+def _unqualified_anthropic_model(model: str) -> str:
+    """Return the Copilot candidate behind a known provider prefix."""
+    if model.startswith(_OPENROUTER_ANTHROPIC_PREFIX):
+        return model[len(_OPENROUTER_ANTHROPIC_PREFIX) :]
+    return model
+
+
+def _anthropic_dotted_candidate(model: str) -> str | None:
+    """Convert only an Anthropic model's trailing numeric version separator.
+
+    ``claude-opus-4-8`` becomes ``claude-opus-4.8``. Other hyphens remain
+    untouched, and non-Anthropic identifiers do not produce a candidate.
+    Availability is checked separately against the discovered catalog.
+    """
+    match = _ANTHROPIC_HYPHEN_VERSION.fullmatch(model)
+    if match is None:
+        return None
+    return f"{match.group('stem')}.{match.group('minor')}"
+
+
 def map_to_copilot_model(
     model: str,
     *,
@@ -253,12 +280,12 @@ def map_to_copilot_model(
 
     Resolution order:
 
-    1. If ``model`` already matches one of ``available`` model IDs verbatim,
-       return it unchanged.
-    2. If ``model`` is in the static name map (well-known Anthropic IDs),
-       return the mapped form.
-    3. If ``model`` strips to a known dotted family present in ``available``,
-       return that ID.
+    1. Trust the ``default`` marker and direct dotted Copilot IDs.
+    2. Derive candidates by removing a known ``openrouter/anthropic/`` prefix,
+       applying a legacy alias, or changing only the trailing Anthropic version
+       separator from a hyphen to a dot.
+    3. Return a derived candidate only when its exact ID is in the discovered
+       Copilot catalog.
     4. Otherwise return ``model`` unchanged so the caller can decide whether
        to fail or pass it through.
     """
@@ -268,34 +295,30 @@ def map_to_copilot_model(
     model_clean = model.strip()
     if not model_clean:
         return model
+    has_openrouter_prefix = model_clean.startswith(_OPENROUTER_ANTHROPIC_PREFIX)
+    unqualified_model = _unqualified_anthropic_model(model_clean)
 
-    # Fast path: dotted forms (the Copilot canonical shape) and explicit
-    # passthrough markers skip discovery entirely. This keeps the adapter
-    # zero-cost in unit tests and avoids spawning ``gh auth token`` for
-    # callers that already supply a Copilot-valid ID.
-    if model_clean == "default" or "." in model_clean:
+    # Direct dotted forms are already in Copilot's canonical shape. A dotted
+    # OpenRouter value is different: removing its provider prefix is a
+    # transformation, so it must still be checked against the catalog below.
+    if model_clean == "default" or (not has_openrouter_prefix and "." in model_clean):
         return model_clean
 
     mapped_static = _STATIC_NAME_MAP.get(model_clean)
-    if mapped_static is not None and available is None:
-        return mapped_static
 
     pool = list(available) if available is not None else list_copilot_models()
     available_ids = {entry.id for entry in pool}
-    families = {entry.family for entry in pool if entry.family}
 
-    if model_clean in available_ids:
-        return model_clean
+    if unqualified_model in available_ids:
+        return unqualified_model
 
-    if mapped_static and (
-        not available_ids or mapped_static in available_ids or mapped_static in families
-    ):
+    if mapped_static and mapped_static in available_ids:
         return mapped_static
 
-    # Last attempt: hyphen-to-dot conversion when the dotted variant exists.
-    if "-" in model_clean:
-        dotted_candidate = model_clean.replace("-", ".")
-        if dotted_candidate in available_ids:
-            return dotted_candidate
+    # Last attempt: convert only the trailing numeric version separator, and
+    # only accept the result when Copilot's catalog publishes that exact ID.
+    dotted_candidate = _anthropic_dotted_candidate(unqualified_model)
+    if dotted_candidate is not None and dotted_candidate in available_ids:
+        return dotted_candidate
 
     return model_clean

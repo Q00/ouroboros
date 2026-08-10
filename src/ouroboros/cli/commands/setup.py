@@ -3384,8 +3384,9 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
         return False
 
-    # Live-discover available Copilot models. Falls back silently to a
-    # bundled snapshot when the GitHub API is unreachable or unauthenticated.
+    # Live-discover available Copilot models. When the GitHub API is
+    # unreachable or unauthenticated, use a bundled snapshot and warn that it
+    # may be stale.
     models = list_copilot_models(refresh=True)
     if used_fallback():
         print_warning(
