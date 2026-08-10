@@ -68,7 +68,16 @@ class TestHostClassification:
 
     @pytest.mark.parametrize(
         "host",
-        ["127.0.0.1", "localhost", "LOCALHOST", "::1", "[::1]", "127.0.0.2", " 127.0.0.1 "],
+        [
+            "127.0.0.1",
+            "localhost",
+            "LOCALHOST",
+            "LOCALHOST.",
+            "::1",
+            "[::1]",
+            "127.0.0.2",
+            " 127.0.0.1 ",
+        ],
     )
     def test_loopback_hosts_recognized(self, host: str) -> None:
         """Every spelling that only this machine can reach counts as loopback."""
@@ -252,8 +261,63 @@ class TestResolveNetworkSecurity:
         )
 
         assert wiring.token_verifier is None
-        # The SDK builds its own settings for this spelling.
-        assert wiring.transport_security is None
+        assert wiring.transport_security is not None
+        assert wiring.transport_security.allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert wiring.transport_security.allowed_origins == []
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
+    def test_explicit_host_override_replaces_sdk_loopback_defaults(self, host: str) -> None:
+        """Documented Host overrides must reach even SDK-autoprotected binds."""
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host=host,
+            port=8080,
+            security=SecurityLayer(),
+            allowed_hosts=("proxy.internal:8443",),
+        )
+
+        assert wiring.transport_security is not None
+        assert wiring.transport_security.allowed_hosts == ["proxy.internal:8443"]
+        assert wiring.transport_security.allowed_origins == []
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "::1"])
+    def test_explicit_origin_override_replaces_sdk_loopback_defaults(self, host: str) -> None:
+        """A browser Origin override must not be discarded on loopback."""
+        wiring = resolve_network_security(
+            transport="sse",
+            host=host,
+            port=8080,
+            security=SecurityLayer(),
+            allowed_origins=("https://app.example",),
+        )
+
+        assert wiring.transport_security is not None
+        assert wiring.transport_security.allowed_origins == ["https://app.example"]
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("LOCALHOST", ["127.0.0.1:*", "localhost:*", "[::1]:*"]),
+            ("LOCALHOST.", ["127.0.0.1:*", "localhost:*", "[::1]:*"]),
+        ],
+    )
+    def test_nonliteral_loopback_spelling_uses_normalized_explicit_settings(
+        self, host: str, expected: list[str]
+    ) -> None:
+        """Safe loopback aliases and their wire Host spelling must agree."""
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host=host,
+            port=8080,
+            security=SecurityLayer(),
+        )
+
+        assert wiring.transport_security is not None
+        assert wiring.transport_security.allowed_hosts == expected
 
 
 class TestIPv6Binds:
@@ -270,11 +334,14 @@ class TestIPv6Binds:
             ("::1", "[::1]"),
             ("2001:db8::1", "[2001:db8::1]"),
             ("[::1]", "[::1]"),
+            ("[2001:0DB8:0:0:0:0:0:1]", "[2001:db8::1]"),
             ("127.0.0.1", "127.0.0.1"),
             ("example.com", "example.com"),
+            ("EXAMPLE.COM.", "example.com"),
+            ("BÜCHER.Example.", "xn--bcher-kva.example"),
         ],
     )
-    def test_url_authority_brackets_only_ipv6(self, host: str, expected: str) -> None:
+    def test_url_authority_normalizes_wire_spelling(self, host: str, expected: str) -> None:
         assert as_url_authority(host) == expected
 
     @pytest.mark.parametrize("host", ["::1", "2001:db8::1"])
@@ -304,8 +371,12 @@ class TestIPv6Binds:
         )
 
         assert isinstance(wiring.token_verifier, OuroborosTokenVerifier)
-        # The SDK auto-protects this spelling, so we add nothing of our own.
-        assert wiring.transport_security is None
+        assert wiring.transport_security.allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert wiring.transport_security.allowed_origins == []
 
     def test_authenticated_ipv6_routable_bind_resolves(self) -> None:
         wiring = resolve_network_security(
@@ -363,6 +434,124 @@ class TestTransportSecurityBuilder:
 
         assert settings.allowed_hosts == ["a.example:8080", "b.example:*"]
         assert settings.allowed_origins == ["https://a.example"]
+
+    @pytest.mark.parametrize(
+        ("host", "wire_host", "expected"),
+        [
+            (
+                "LOCALHOST",
+                "localhost:8080",
+                ["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            ),
+            ("Example.COM.", "example.com:8080", ["example.com:8080", "example.com:*"]),
+            (
+                "BÜCHER.Example.",
+                "xn--bcher-kva.example:8080",
+                ["xn--bcher-kva.example:8080", "xn--bcher-kva.example:*"],
+            ),
+            (
+                "127.0.0.1",
+                "127.0.0.1:8080",
+                ["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            ),
+            (
+                "2001:0DB8:0:0:0:0:0:1",
+                "[2001:db8::1]:8080",
+                ["[2001:db8::1]:8080", "[2001:db8::1]:*"],
+            ),
+        ],
+    )
+    def test_inferred_allowlist_matches_normalized_wire_host(
+        self, host: str, wire_host: str, expected: list[str]
+    ) -> None:
+        """SDK matching is case-sensitive, so inference emits wire-normal form."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        settings = build_transport_security(
+            host=host,
+            port=8080,
+            allowed_hosts=(),
+            allowed_origins=(),
+        )
+        middleware = TransportSecurityMiddleware(settings)
+
+        assert settings.allowed_hosts == expected
+        assert middleware._validate_host(wire_host) is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_loopback_origin_is_honored_at_wire_boundary(self) -> None:
+        """Explicit loopback Origin policy replaces the SDK's fixed defaults."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
+
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="localhost",
+            port=8080,
+            security=SecurityLayer(),
+            allowed_origins=("https://app.example",),
+        )
+        middleware = TransportSecurityMiddleware(wiring.transport_security)
+
+        allowed = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [
+                    (b"host", b"localhost:8080"),
+                    (b"origin", b"https://app.example"),
+                ],
+            }
+        )
+        refused = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [
+                    (b"host", b"localhost:8080"),
+                    (b"origin", b"http://localhost:3000"),
+                ],
+            }
+        )
+
+        assert await middleware.validate_request(allowed) is None
+        response = await middleware.validate_request(refused)
+        assert response is not None and response.status_code == 403
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"],
+    )
+    @pytest.mark.asyncio
+    async def test_empty_loopback_origins_reject_every_browser_origin(self, origin: str) -> None:
+        """The documented empty-origin default must override SDK browser defaults."""
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
+
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="localhost",
+            port=8080,
+            security=SecurityLayer(),
+        )
+        middleware = TransportSecurityMiddleware(wiring.transport_security)
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [
+                    (b"host", b"localhost:8080"),
+                    (b"origin", origin.encode()),
+                ],
+            }
+        )
+
+        response = await middleware.validate_request(request)
+        assert response is not None and response.status_code == 403
 
 
 class TestTokenVerifier:

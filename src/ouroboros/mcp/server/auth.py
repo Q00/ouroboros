@@ -11,11 +11,12 @@ Without this bridge the two halves were disconnected: ``SecurityLayer`` could
 be configured with credentials that no network client had any way to present,
 which is why network transports used to refuse every auth method outright.
 
-Loopback binds keep the historical credential-free behaviour -- the SDK's own
-DNS-rebinding protection already fences them off from other machines. Binding a
-network transport to a routable address without credentials is refused by
-:func:`resolve_network_security`, which every serve path goes through before
-the SDK starts listening.
+Loopback binds keep the historical credential-free behaviour. Ouroboros passes
+the SDK explicit DNS-rebinding settings even there so the documented empty
+Origin policy remains fail-closed instead of silently inheriting the SDK's
+browser-origin defaults. Binding a network transport to a routable address
+without credentials is refused by :func:`resolve_network_security`, which every
+serve path goes through before the SDK starts listening.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ NETWORK_TRANSPORTS = ("sse", "streamable-http")
 # literally, so any other host -- including other loopback spellings -- is left
 # bare unless settings are passed explicitly.
 _SDK_AUTOPROTECTED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_SDK_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 
 # Hostnames that always resolve to this machine. ``""`` is deliberately absent:
 # an empty bind host means "every interface" to uvicorn, not loopback.
@@ -71,7 +73,10 @@ def is_loopback_host(host: str) -> bool:
         False: refusing to guess is the safe direction, since the caller uses
         this to decide whether credentials are mandatory.
     """
-    candidate = host.strip().strip("[]").lower()
+    try:
+        candidate = as_url_authority(host).strip("[]")
+    except UnicodeError:
+        return False
     if candidate in _LOOPBACK_HOSTNAMES:
         return True
     try:
@@ -91,23 +96,32 @@ def is_wildcard_host(host: str) -> bool:
 
 
 def as_url_authority(host: str) -> str:
-    """Return ``host`` spelled the way a URL or ``Host`` header needs it.
+    """Return ``host`` in the canonical spelling used on the HTTP wire.
 
     A bind address and its URL spelling differ for IPv6: the socket layer takes
     the bare literal (``::1``) and rejects the bracketed form, while a URL or
     ``Host`` value needs brackets or the trailing ``:port`` cannot be told apart
-    from another hextet. Callers keep the bare value for binding and pass it
-    through here for anything address-shaped that carries a port.
+    from another hextet. DNS names have a similar bind-to-wire boundary: HTTP
+    clients normally lowercase them, encode Unicode labels as IDNA, and omit the
+    DNS root's trailing dot. The SDK compares Host allowlists case-sensitively,
+    so inferred values must use that wire spelling rather than the operator's
+    original bind spelling.
+
+    Callers keep the original value for socket binding and pass it through here
+    only for URL- and Host-shaped values.
     """
     candidate = host.strip()
-    if candidate.startswith("["):
-        return candidate
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
     try:
-        if ipaddress.ip_address(candidate).version == 6:
-            return f"[{candidate}]"
+        address = ipaddress.ip_address(candidate)
     except ValueError:
-        pass
-    return candidate
+        if candidate.endswith("."):
+            candidate = candidate[:-1]
+        return candidate.encode("idna").decode("ascii").lower()
+    if address.version == 6:
+        return f"[{address.compressed}]"
+    return address.compressed
 
 
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
@@ -247,9 +261,11 @@ def build_transport_security(
 ) -> Any:
     """Build DNS-rebinding protection settings for a network bind.
 
-    The SDK only auto-enables this protection for loopback binds; a routable
-    bind is left unprotected unless settings are passed explicitly, which is
-    what this produces.
+    The SDK only auto-enables this protection for three loopback literals and
+    couples that default to a permissive local-browser Origin list. This
+    builder makes the policy explicit for every network bind: it preserves the
+    SDK's interchangeable loopback Host spellings, while an empty Origin list
+    remains empty and therefore rejects browser-originated requests.
 
     Args:
         host: The bind address.
@@ -280,7 +296,12 @@ def build_transport_security(
             )
             raise ValueError(msg)
         authority = as_url_authority(host)
-        hosts = [f"{authority}:{port}", f"{authority}:*"]
+        if authority.strip("[]") in _SDK_AUTOPROTECTED_HOSTS:
+            # Preserve the SDK's three interchangeable loopback Host spellings
+            # while making the Origin policy explicit and fail-closed.
+            hosts = list(_SDK_LOOPBACK_ALLOWED_HOSTS)
+        else:
+            hosts = [f"{authority}:{port}", f"{authority}:*"]
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -308,8 +329,9 @@ def current_auth_context() -> AuthContext | None:
 class NetworkSecurityWiring:
     """SDK security objects resolved for one bind.
 
-    All three are None for stdio and for a credential-free loopback bind, which
-    is what leaves local use exactly as it was.
+    All three are None for stdio. Credential-free loopback binds still have no
+    verifier or auth settings, but carry explicit transport security so an
+    empty Origin allowlist rejects browser-originated requests as documented.
     """
 
     token_verifier: Any | None = None
@@ -395,14 +417,12 @@ def resolve_network_security(
         )
         auth_settings = build_auth_settings(host=host, port=port)
 
-    transport_security = None
-    if host not in _SDK_AUTOPROTECTED_HOSTS:
-        transport_security = build_transport_security(
-            host=host,
-            port=port,
-            allowed_hosts=allowed_hosts,
-            allowed_origins=allowed_origins,
-        )
+    transport_security = build_transport_security(
+        host=host,
+        port=port,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
     return NetworkSecurityWiring(
         token_verifier=token_verifier,
