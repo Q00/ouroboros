@@ -671,6 +671,8 @@ _NON_PRODUCT_HEAD_WORDS = frozenset(
         "frameworks",
         "runner",
         "runners",
+        "worker",
+        "workers",
         "cli",
         "clis",
         "tool",
@@ -731,11 +733,6 @@ _NON_PRODUCT_HEAD_WORDS = frozenset(
         "wrappers",
         "adapter",
         "adapters",
-        # Supporting browser artifacts are not themselves browser products
-        # (#1813 R119): "a service worker for a PWA" produces the worker;
-        # the PWA is the consumed target of the ``for`` relation.
-        "worker",
-        "workers",
     ]
 )
 

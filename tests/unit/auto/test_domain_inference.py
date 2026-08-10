@@ -4993,45 +4993,6 @@ def test_pwa_abbreviation_owns_like_its_expansion() -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_service_worker_for_pwa_is_supporting_artifact_not_web_app() -> None:
-    """R119 guard: the produced worker does not inherit its PWA target's class."""
-    ledger = _bare_ledger("Build a service worker for a PWA")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Offline support for the login page and checkout form",
-    )
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-
-    result = derive_domain_from_ledger(ledger)
-
-    assert TaskClass.WEB_APP not in result.classes
-
-
-@pytest.mark.parametrize(
-    "goal",
-    [
-        "Build a browser game",
-        "Build a web game",
-        "Build an online game",
-    ],
-)
-def test_explicit_browser_game_owns_game_class_without_render_vocabulary(goal: str) -> None:
-    """R119 guard: explicit games need no render-loop wording in ordinary outputs."""
-    ledger = _bare_ledger(goal)
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Player controls, score updates, and level transitions",
-    )
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-
-    result = derive_domain_from_ledger(ledger)
-
-    assert result.is_single
-    assert result.single is TaskClass.GAME_2D
-
-
 def test_browser_consuming_a_document_is_not_web_app_ownership() -> None:
     """R117 guard: a browser merely viewing a document is its consumer,
     not proof that the produced artifact is a browser application."""
@@ -5417,3 +5378,58 @@ def test_definite_produced_destinations_keep_ownership(
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a service worker for a PWA",
+            "Offline support for the login page and checkout form",
+        ),
+        (
+            "Build a web worker for the analytics dashboard",
+            "Background aggregation for the metrics pages",
+        ),
+    ],
+)
+def test_supporting_worker_artifacts_do_not_own(goal: str, outputs: str) -> None:
+    """R120 probe: a worker is a supporting component head — the web
+    product it serves is its consumer, and page mentions in its outputs
+    are targets of the support, not produced UI."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a browser game", "Runs in browsers"),
+        ("Build a web game", "Modern browsers"),
+        ("Build an online game", "Runs in browsers"),
+    ],
+)
+def test_explicit_game_product_heads_stay_games(goal: str, runtime: str) -> None:
+    """R120 probe: an explicit game-product goal head owns game_2d even
+    with ordinary standardized outputs — browser hosting must not swap
+    the task class to web_app and bind browser AC/probes."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Player controls, score updates, and level transitions")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D
+
+
+def test_denied_game_heads_do_not_claim_ownership() -> None:
+    """R120 guard: the game-product head is read from the negation-stripped
+    goal, so a denial cannot claim game ownership."""
+    ledger = _bare_ledger("Build a web app, not a browser game")
+    _seed_section(ledger, "outputs", value="Interactive signup page and settings panels")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
