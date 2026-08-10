@@ -236,12 +236,26 @@ This dual representation is a transitional surface, not a second contract:
   `resume_workspace_comparison` and a `prepared_live_execution` context flag.
   An activation is counted only when a durable start-identity snapshot is
   present and still lacks the anchor; current prepared executions restore an
-  intentionally anchorless contract-only snapshot and never count. The metric
-  therefore stays trustworthy for the removal decision.
-- **Removal criterion.** Delete `legacy_identity.py` and the legacy branch
-  once no `project_map.legacy_identity_path` activation has been observed for
-  90 consecutive days of production logs, and in no case while any session
-  started before the anchor is still within the operator's retention window.
+  intentionally anchorless contract-only snapshot and never count. The event
+  is an advisory liveness signal only — the default file sink rotates away
+  after `LoggingConfig.max_log_days` (seven) days, file logging may be
+  disabled, and a sink that cannot be created is skipped — so absence from
+  available logs can never prove inactivity and carries no removal
+  authority.
+- **Removal criterion.** Delete `legacy_identity.py` and the runner's legacy
+  branch only after a fail-closed pre-anchor inventory preflight over the
+  durable EventStore — the same store resume itself reads — finds no
+  remaining pre-anchor session. The preflight enumerates every persisted
+  session with `EventStore.get_all_sessions()`, reads each session's
+  immutable start-identity snapshot (the `_session_start_identity` value
+  persisted at session start), and applies the runner's own
+  `_project_start_identity` predicate: any snapshot without the complete
+  anchor is pre-anchor. A session that cannot be enumerated or whose
+  snapshot cannot be read also counts as pre-anchor, so missing or
+  unreadable evidence blocks removal instead of authorizing it. An empty
+  inventory is a structural guarantee — every session the store could still
+  be asked to resume carries the anchor — not an inference from log
+  absence.
 
 ## Authority boundary
 

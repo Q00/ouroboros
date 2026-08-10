@@ -14,13 +14,16 @@ This surface is transitional, not permanent:
   ``project_map.legacy_identity_path`` only when a durable start-identity
   snapshot is present and still lacks the anchor; current prepared
   executions restore an intentionally anchorless contract-only snapshot and
-  never count. The removal decision can therefore be argued from evidence
-  instead of a guess.
+  never count. The event is an advisory liveness signal only — the default
+  log sink retains seven days and may be absent — so log absence carries no
+  removal authority.
 - **Removal criterion** (mirrored in ``docs/rfc/project-map-v1.md``):
-  delete this module and the ``has_project_anchor`` legacy branch once no
-  ``project_map.legacy_identity_path`` activation has been observed for 90
-  consecutive days of production logs — and in no case while any
-  pre-2026-07-29 session is still within the operator's retention window.
+  delete this module and the ``has_project_anchor`` legacy branch only
+  after a fail-closed inventory preflight over the durable EventStore
+  finds no persisted session whose start-identity snapshot still lacks the
+  anchor. A session that cannot be enumerated or whose snapshot cannot be
+  read counts as pre-anchor, so missing evidence blocks removal instead of
+  authorizing it.
 """
 
 from __future__ import annotations

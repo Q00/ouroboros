@@ -6353,9 +6353,10 @@ class OrchestratorRunner:
             # Historical v9 session starts predate the additive project anchor.
             # Preserve their exact direct-cwd representation rather than
             # rewriting durable resume authority under the new resolver.
-            # Transitional (#1799): remove this branch once the criterion in
-            # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md is
-            # met (90 activation-free days past the retention window).
+            # Transitional (#1799): remove this branch once the fail-closed
+            # EventStore inventory preflight in orchestrator/legacy_identity.py
+            # and docs/rfc/project-map-v1.md finds no persisted pre-anchor
+            # start snapshot.
             #
             # Current prepared executions intentionally restore an anchorless
             # contract-only mapping; only a durable historical start snapshot
