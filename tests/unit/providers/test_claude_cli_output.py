@@ -335,6 +335,54 @@ def test_rejects_unbounded_or_non_finite_numbers(stdout: str, message: str) -> N
         normalize_claude_cli_output(stdout)
 
 
+@pytest.mark.parametrize(
+    "token_key",
+    [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+    ],
+)
+def test_rejects_thousand_digit_token_counters_and_aliases(token_key: str) -> None:
+    stdout = (
+        '{"type":"result","is_error":false,"result":"done","usage":{"'
+        + token_key
+        + '":'
+        + "9" * 1000
+        + "}}"
+    )
+
+    with pytest.raises(
+        ClaudeCliOutputError,
+        match=rf"usage\.{token_key} must be a bounded non-negative integer",
+    ):
+        normalize_claude_cli_output(stdout)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(True, id="boolean"),
+        pytest.param(-1, id="negative"),
+        pytest.param(1.5, id="fractional"),
+    ],
+)
+def test_rejects_invalid_secondary_token_counter_types(value: object) -> None:
+    payload = _result(usage={"input_tokens": 1, "cache_read_input_tokens": value})
+
+    with pytest.raises(
+        ClaudeCliOutputError,
+        match="usage.cache_read_input_tokens must be a bounded non-negative integer",
+    ):
+        normalize_claude_cli_output(json.dumps(payload))
+
+
 def test_rejects_oversized_stdout_before_decoding() -> None:
     with pytest.raises(ClaudeCliOutputError, match="character safety limit"):
         normalize_claude_cli_output("x" * (MAX_CLAUDE_CLI_OUTPUT_CHARS + 1))

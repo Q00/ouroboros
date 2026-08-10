@@ -2653,6 +2653,12 @@ class TestCLIFallbackWhenSDKAbsent:
                 "non-finite JSON number",
                 id="non-finite-secondary-usage",
             ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"cache_read_input_tokens":' + b"9" * 1000 + b"}}",
+                "bounded non-negative integer",
+                id="thousand-digit-secondary-usage",
+            ),
         ],
     )
     def test_hostile_number_becomes_structured_provider_error(

@@ -26,6 +26,20 @@ MAX_CLAUDE_CLI_OUTPUT_CHARS = 8 * 1024 * 1024
 MAX_CLAUDE_CLI_EVENTS = 4096
 _MAX_SESSION_ID_CHARS = 4096
 _MAX_TOKEN_COUNT = (1 << 63) - 1
+# Keep this trust-boundary schema aligned with the worker telemetry consumers
+# in ``orchestrator.adapter`` and ``orchestrator.frugality_evidence``.  Aliases
+# ending in ``_tokens`` are validated by the same contract below even when a
+# current consumer does not attribute them.
+_TOKEN_USAGE_KEYS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "total_tokens",
+    }
+)
 # Stay well below CPython's configurable 4,300-digit default so hostile JSON
 # cannot escape this boundary as an interpreter-level ``ValueError``.
 _MAX_JSON_INTEGER_DIGITS = 1024
@@ -280,9 +294,8 @@ def _result_usage(
         raise ClaudeCliOutputError("usage must be a JSON object")
 
     usage = dict(raw_usage)
-    for key in ("input_tokens", "output_tokens"):
-        value = usage.get(key)
-        if value is None:
+    for key, value in usage.items():
+        if key not in _TOKEN_USAGE_KEYS and not key.endswith("_tokens"):
             continue
         if (
             isinstance(value, bool)

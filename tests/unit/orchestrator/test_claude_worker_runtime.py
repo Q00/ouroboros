@@ -18,6 +18,7 @@ from ouroboros.orchestrator.claude_worker_runtime import (
     ClaudeWorkerTransport,
     build_claude_worker_runtime,
 )
+from ouroboros.orchestrator.frugality_evidence import harvest_token_spend
 from ouroboros.orchestrator.worker_runtime import WorkerTurn
 
 
@@ -161,6 +162,12 @@ class TestParseTurn:
                 '"usage":{"cache_read_input_tokens":1e9999}}',
                 "non-finite JSON number",
                 id="non-finite-secondary-usage",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}",
+                "bounded non-negative integer",
+                id="thousand-digit-secondary-usage",
             ),
         ],
     )
@@ -369,6 +376,76 @@ class TestRuntimeWiring:
             "output_tokens": 1,
             "cache_creation_input_tokens": 20,
         }
+
+    @pytest.mark.asyncio
+    async def test_hostile_secondary_usage_never_reaches_frugality_consumer(self) -> None:
+        stdout = (
+            '{"type":"result","is_error":false,"result":"done",'
+            '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}"
+        )
+        turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0)
+        assert turn.is_error is True
+        assert turn.usage is None
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].is_error is True
+        assert "usage" not in messages[-1].data
+        assert harvest_token_spend(messages) is None
+
+    @pytest.mark.asyncio
+    async def test_bounded_all_counter_usage_preserves_spend_semantics(self) -> None:
+        usage = {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 40,
+            "cached_input_tokens": 7,
+            "total_tokens": 66,
+        }
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "ok",
+                    "usage": usage,
+                }
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == usage
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == usage
+        assert harvest_token_spend(messages) == (
+            66.0,
+            {
+                "input_tokens": 5.0,
+                "output_tokens": 1.0,
+                "cache_creation_input_tokens": 20.0,
+                "cache_read_input_tokens": 40.0,
+                "cached_input_tokens": 7.0,
+                "total_tokens": 66.0,
+            },
+        )
 
     def test_resume_is_cwd_pinned(self) -> None:
         # The transport must pin cwd so --resume targets the session's store.
