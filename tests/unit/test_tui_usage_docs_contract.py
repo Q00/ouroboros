@@ -161,12 +161,23 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         text = _read(guide)
         screens = _contract_section(text, "<!-- tui-contract:slt-screens -->")
         lifecycle = _contract_section(text, "<!-- tui-contract:slt-lifecycle -->")
-        for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`"):
+        for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`", "`Esc`"):
             assert key in screens
         assert "**Logs**" not in screens and "**Debug**" not in screens
         assert "**로그**" not in screens and "**디버그**" not in screens
         assert "--mock" in lifecycle
         assert "`p` / `r`" in lifecycle
+
+    assert "`l` opens" in _read(EN_GUIDE)
+    assert "`Esc` closes" in _read(EN_GUIDE)
+    assert "While the filter has\nfocus, `l` enters filter text" in _read(EN_GUIDE)
+    assert "global `q`,\n`1`-`4`, and `Ctrl+P` shortcuts remain reserved" in _read(EN_GUIDE)
+    assert "`l`은 실행" in _read(KO_GUIDE)
+    assert "`Esc`는 닫습니다" in _read(KO_GUIDE)
+    assert "필터에 포커스가 있을 때 `l`은\n패널을 닫지 않고 필터 문자로 입력됩니다" in _read(
+        KO_GUIDE
+    )
+    assert "`q`, `1`-`4`, `Ctrl+P`는 계속 예약됩니다" in _read(KO_GUIDE)
 
     assert "contains no events" in _read(EN_GUIDE)
     assert "cannot be opened" in _read(EN_GUIDE)
@@ -174,11 +185,14 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     assert "열 수 없어" in _read(KO_GUIDE)
 
     slt_readme = _read(SLT_README)
+    assert "global `q`, `1-4`, and `Ctrl+P` remain reserved" in slt_readme
     for row in (
         "| `1` | | Dashboard",
         "| `2` | | Execution",
         "| `3` | `e` | Lineage",
         "| `4` | `s` | Sessions",
+        "| | `l` | Open the log panel",
+        "| | `Esc` | Close the open log panel",
     ):
         assert row in slt_readme
     assert "`1-5` screens" not in slt_readme

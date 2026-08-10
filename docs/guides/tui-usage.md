@@ -51,7 +51,9 @@ Lineage screens:
 ### SLT screens (native backend)
 
 SLT has a different four-screen set. It has no separate Logs or Debug screen;
-`l` toggles a log panel inside Execution.
+`l` opens a log panel inside Execution and `Esc` closes it. While the filter has
+focus, `l` enters filter text instead of closing the panel. The global `q`,
+`1`-`4`, and `Ctrl+P` shortcuts remain reserved while the panel is open.
 
 | Key | Shortcut | Screen | Purpose |
 |-----|----------|--------|---------|
@@ -59,7 +61,8 @@ SLT has a different four-screen set. It has no separate Logs or Debug screen;
 | `2` | | **Execution** | Phase outputs, event timeline, optional log panel |
 | `3` | `e` | **Lineage** | Evolutionary generation history |
 | `4` | `s` | **Sessions** | Browse and load sessions |
-| | `l` | **Execution log panel** | Toggle only while Execution is active |
+| | `l` | **Execution log panel** | Open only while Execution is active |
+| | `Esc` | **Execution log panel** | Close the open panel |
 
 ## Textual Dashboard Screen (Key: 1)
 
@@ -197,7 +200,8 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 | `1` - `4` | Switch to SLT screen 1-4 |
 | `e` | Lineage screen (`3`) |
 | `s` | Sessions screen (`4`) |
-| `l` | Toggle the log panel while Execution (`2`) is active |
+| `l` | Open the log panel while Execution (`2`) is active |
+| `Esc` | Close the open Execution log panel |
 | `Ctrl+P` | Open the command palette |
 | `q` | Quit the TUI |
 | `p` / `r` | Pause/resume only when SLT owns a demo simulation |

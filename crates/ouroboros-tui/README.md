@@ -32,11 +32,14 @@ ouroboros-tui --help                    # show all options
 | `2` | | Execution — Phase outputs, event timeline, optional log panel |
 | `3` | `e` | Lineage — Evolutionary generation history |
 | `4` | `s` | Sessions — Browse and load sessions |
-| | `l` | Toggle the log panel while Execution is active |
+| | `l` | Open the log panel while Execution is active |
+| | `Esc` | Close the open log panel |
 
 ## Keys
 
-`q` quit · `1-4` screens · `Ctrl+P` command palette · `↑↓` navigate · `Enter` select · mouse click
+`q` quit · `1-4` screens · `Ctrl+P` command palette · `l` open logs · `Esc` close logs · `↑↓` navigate · `Enter` select · mouse click
+
+With the log filter focused, `l` enters filter text; global `q`, `1-4`, and `Ctrl+P` remain reserved.
 
 `p`/`r` pause/resume are available in demo mode only, where this process owns the simulation
 it is pausing. Demo mode is entered with `--mock`, and also as a fallback when the database
