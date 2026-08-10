@@ -131,10 +131,14 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_PLUGIN_TRUST_ROOT",
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
         # Operator-owned telemetry preference and destination must never be
-        # supplied by a cloned repository.
+        # supplied by a cloned repository. DO_NOT_TRACK belongs here too: it
+        # is the cross-tool opt-out signal get_telemetry_enabled() checks
+        # first, and an untrusted project .env loads before the trusted
+        # ~/.ouroboros/.env and never overrides an already-set value.
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        "DO_NOT_TRACK",
         # Runtime/backend selectors + permission/capability overrides.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
@@ -363,6 +367,68 @@ def test_untrusted_env_cannot_set_bare_opencode_alias(
     _load_env_file(env_file, trusted=False)
 
     assert "OPENCODE_CLI_PATH" not in os.environ
+
+
+def test_untrusted_env_cannot_set_do_not_track(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Simple case: a project .env's DO_NOT_TRACK is simply never loaded --
+    no value from an untrusted source can reach os.environ at all, so it
+    can neither force-disable telemetry nor block a later trusted value."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("DO_NOT_TRACK=0\n")
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "DO_NOT_TRACK" not in os.environ
+
+
+def test_project_do_not_track_cannot_override_persisted_user_opt_out(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's exact probe: project DO_NOT_TRACK=0 must not prevent a
+    user's persisted DO_NOT_TRACK=1 (in the trusted ~/.ouroboros/.env) from
+    ever being applied. Before the fix, the untrusted project .env loaded
+    first (module import order), set DO_NOT_TRACK=0 unconditionally, and the
+    trusted home .env's "do not override an already-set value" precedence
+    then silently discarded the user's opt-out -- get_telemetry_enabled()
+    returned True. Spawned as a real subprocess so both module-import-time
+    _load_env_file() calls run in their real order, exactly like production."""
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (home / ".ouroboros").mkdir(parents=True)
+    (project / ".env").write_text("DO_NOT_TRACK=0\n", encoding="utf-8")
+    (home / ".ouroboros" / ".env").write_text("DO_NOT_TRACK=1\n", encoding="utf-8")
+
+    script = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+home = Path({str(home)!r})
+with patch.object(Path, "home", side_effect=lambda: home):
+    import ouroboros.config.loader
+    from ouroboros.config.loader import get_telemetry_enabled
+    print(os.environ.get("DO_NOT_TRACK", "<unset>"))
+    print(get_telemetry_enabled())
+"""
+    environment = os.environ.copy()
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "DO_NOT_TRACK"):
+        environment.pop(key, None)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["1", "False"]
 
 
 def test_untrusted_env_cannot_set_node_options(

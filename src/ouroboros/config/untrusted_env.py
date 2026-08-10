@@ -146,10 +146,17 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # must not be able to re-enable collection, replace the public ingest
         # key, or redirect the stable anonymous identifier to an arbitrary
         # endpoint. These remain available from the real process environment
-        # and the trusted ~/.ouroboros/.env file.
+        # and the trusted ~/.ouroboros/.env file. DO_NOT_TRACK belongs to the
+        # same boundary from the opposite direction: the loader applies the
+        # untrusted project `.env` before the trusted `~/.ouroboros/.env` and
+        # never overrides an already-set value, so an unset DO_NOT_TRACK here
+        # would let a cloned repo's `.env` (e.g. `DO_NOT_TRACK=0`) win the
+        # race and silently suppress a user's persisted opt-out before the
+        # trusted file ever gets a chance to set it.
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        "DO_NOT_TRACK",
         # Runtime/backend selectors — choose which adapter is spawned.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",

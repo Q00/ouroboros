@@ -1034,6 +1034,111 @@ class TestNotice:
         state = json.loads((state_dir / "telemetry.json").read_text(encoding="utf-8"))
         assert state.get("notice_shown") is False
 
+    def test_string_false_notice_shown_is_repaired_and_notice_prints(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        sent: list[dict[str, Any]],
+    ) -> None:
+        """A non-bool value must not be read as "already shown" via plain
+        truthiness -- "false" is a non-empty, therefore truthy, STRING.
+        It's structurally invalid, so it's coerced to False (never-shown):
+        the notice actually prints, gets repaired to a real bool, and a
+        subsequent capture still transmits under the same (already valid)
+        identity."""
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        valid_id = str(uuid.uuid4())
+        state_path.write_text(
+            json.dumps({"distinct_id": valid_id, "notice_shown": "false"}), encoding="utf-8"
+        )
+
+        telemetry.show_first_run_notice()
+
+        assert "anonymous" in capsys.readouterr().err.lower()
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["notice_shown"] is True
+        assert repaired["distinct_id"] == valid_id
+
+        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        assert sent[0]["distinct_id"] == valid_id
+
+    def test_string_true_notice_shown_still_prints_fail_toward_disclosure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A structurally invalid value that happens to spell "true" must
+        still print: coercing toward "already shown" based on the string's
+        content rather than its real type would be exactly the silent-
+        suppression bug this validates against -- fail toward disclosure
+        regardless of what the corrupted value looks like."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        valid_id = str(uuid.uuid4())
+        state_path.write_text(
+            json.dumps({"distinct_id": valid_id, "notice_shown": "true"}), encoding="utf-8"
+        )
+
+        telemetry.show_first_run_notice()
+
+        assert "anonymous" in capsys.readouterr().err.lower()
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["notice_shown"] is True
+
+    def test_nested_only_notice_shown_is_treated_as_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """notice_shown nested under another key is not visible at the top
+        level -- same "no notion of nesting" principle as distinct_id."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        valid_id = str(uuid.uuid4())
+        state_path.write_text(
+            json.dumps({"distinct_id": valid_id, "wrapper": {"notice_shown": True}}),
+            encoding="utf-8",
+        )
+
+        telemetry.show_first_run_notice()
+
+        assert "anonymous" in capsys.readouterr().err.lower()
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["notice_shown"] is True
+        assert repaired["distinct_id"] == valid_id
+
+    def test_literal_true_notice_shown_is_not_reprinted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A genuinely valid, already-true notice_shown must not trigger a
+        repair write -- only structurally invalid state should ever be
+        rewritten."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        valid_id = str(uuid.uuid4())
+        original = json.dumps({"distinct_id": valid_id, "notice_shown": True})
+        state_path.write_text(original, encoding="utf-8")
+
+        telemetry.show_first_run_notice()
+
+        assert capsys.readouterr().err == ""
+        assert state_path.read_text(encoding="utf-8") == original  # untouched, no repair write
+
 
 class TestExitDoesNotBlock:
     """Regression for the atexit-flush blocking bug.

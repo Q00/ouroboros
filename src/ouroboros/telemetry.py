@@ -281,22 +281,43 @@ def _canonical_distinct_id(value: Any) -> str | None:
 
 
 def _validate_state(raw: Any) -> dict[str, Any] | None:
-    """Validate a parsed JSON value as telemetry state; canonicalize the id.
+    """Validate a parsed JSON value as telemetry state; canonicalize the id
+    and structurally validate notice_shown.
 
     Returns `raw` with `distinct_id` replaced by its canonical lowercase
-    form when the shape and the id are both valid, or None otherwise.
-    Centralizing this means every read path (a fresh parse in _load_state,
-    _read_valid_state's re-read-and-adopt loops, the repair-lock
-    re-validation in _repair_state) agrees on exactly what "valid" means.
+    form and `notice_shown` coerced to a literal bool, when the shape and
+    the id are both valid; None otherwise (invalid id -- e.g. missing,
+    nested, or not a UUID -- is still the only thing that invalidates the
+    whole state; notice_shown is repaired in place, never a rejection
+    reason). Centralizing this means every read path (a fresh parse in
+    _load_state, _read_valid_state's re-read-and-adopt loops, the
+    repair-lock re-validation in _repair_state) agrees on exactly what
+    "valid" means.
+
+    notice_shown must be a real bool, not merely truthy: show_first_run_notice()
+    reads it with plain truthiness, so a corrupted value like "false" -- a
+    non-empty, therefore truthy, STRING -- would otherwise be read as
+    "already shown" and permanently suppress the disclosure the notice
+    exists to guarantee. Anything that isn't a
+    literal bool -- missing, a string (even one that spells "true"), an
+    int, anything -- is coerced to False (never-shown). A benign repeated
+    notice print costs nothing; treating corrupted state as "already
+    disclosed" would violate the contract. This fails toward disclosure
+    even when the corrupted value happened to look truthy.
     """
     if not isinstance(raw, dict):
         return None
     canonical = _canonical_distinct_id(raw.get("distinct_id"))
     if canonical is None:
         return None
-    if canonical == raw.get("distinct_id"):
+
+    notice_shown = raw.get("notice_shown")
+    if not isinstance(notice_shown, bool):
+        notice_shown = False
+
+    if canonical == raw.get("distinct_id") and notice_shown == raw.get("notice_shown"):
         return raw
-    return {**raw, "distinct_id": canonical}
+    return {**raw, "distinct_id": canonical, "notice_shown": notice_shown}
 
 
 def _read_valid_state(path: Path) -> dict[str, Any] | None:
@@ -415,15 +436,18 @@ def _load_state() -> dict[str, Any] | None:
                 validated = _validate_state(raw)
                 if validated is not None:
                     state = validated
-                    if isinstance(raw, dict) and raw.get("distinct_id") != validated["distinct_id"]:
-                        # Valid but non-canonical case (e.g. uppercase) --
-                        # persist the canonical form so every future reader,
-                        # this process included, converges on the exact same
-                        # bytes instead of re-canonicalizing on every load.
-                        # Best-effort: the underlying UUID was already
-                        # durable and valid, so a failed rewrite here still
-                        # means `state` is adopted below -- see
-                        # _write_state's never-raises contract.
+                    if isinstance(raw, dict) and raw != validated:
+                        # _validate_state repaired something in place without
+                        # rejecting the whole file -- a non-canonical UUID
+                        # case (e.g. uppercase) or a structurally invalid
+                        # notice_shown (e.g. the string "false"). Persist the
+                        # repaired form so every future reader, this process
+                        # included, converges on the exact same bytes instead
+                        # of re-repairing on every load. Best-effort: the
+                        # underlying state was already valid enough to adopt,
+                        # so a failed rewrite here still means `state` is
+                        # adopted below -- see _write_state's never-raises
+                        # contract.
                         _write_state(validated)
 
         if not state.get("distinct_id"):
@@ -966,6 +990,13 @@ def show_first_run_notice() -> None:
     durable id anyway, and claiming notice_shown against a state that was
     never actually persisted would be the same silent-non-disclosure
     failure mode this function exists to avoid.
+
+    ``state.get("notice_shown")`` below is a plain truthiness check, which
+    is safe because _validate_state (and every candidate constructor --
+    _fresh_candidate, _build_repair_candidate) guarantees the field is
+    always a literal bool by the time state reaches here: a structurally
+    corrupted value fails toward disclosure (coerced to False), never
+    toward silent suppression.
     """
     try:
         if not is_enabled():

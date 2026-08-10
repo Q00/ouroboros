@@ -525,10 +525,40 @@ else:
 
 _telemetry_notice() {
   _telemetry_enabled || return 0
-  local f="$HOME/.ouroboros/telemetry.json" tmp id
-  if [ -f "$f" ] && grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f"; then
-    return 0
+  local f="$HOME/.ouroboros/telemetry.json" tmp id py already_shown
+
+  # Skip only when the persisted state is valid JSON, a dict, and its
+  # TOP-LEVEL `notice_shown` is the literal boolean `true` -- mirrors the
+  # identity reader's structural approach above (and telemetry.py's own
+  # check). Fail toward disclosure: missing, nested-only (e.g. a
+  # `{"wrapper": {"notice_shown": true}}` sibling object), a string
+  # "true"/"false", any other non-bool, or malformed JSON must all still
+  # show the notice -- a duplicate notice is harmless, a suppressed one
+  # breaks the privacy contract. Without python3 on PATH we cannot parse
+  # JSON structure in pure shell, so this falls back to the old raw-text
+  # grep (documented best-effort gap, matches the identity reader's
+  # NO_PYTHON3 fallback).
+  py=$(command -v python3 2>/dev/null || true)
+  already_shown=false
+  if [ -f "$f" ]; then
+    if [ -n "$py" ]; then
+      if "$py" -c '
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and data.get("notice_shown") is True else 1)
+' "$f" 2>/dev/null; then
+        already_shown=true
+      fi
+    elif grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f" 2>/dev/null; then
+      already_shown=true
+    fi
   fi
+  [ "$already_shown" = false ] || return 0
 
   _blank
   _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
@@ -540,7 +570,33 @@ _telemetry_notice() {
   id=$(_telemetry_distinct_id) || return 0
   [ -n "$id" ] || return 0
   tmp="${f}.notice.$$"
-  if sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
+  if [ -n "$py" ]; then
+    # Structural set: parses the file, sets the TOP-LEVEL `notice_shown` to
+    # the literal boolean `true`, and preserves every other field as-is.
+    # Unlike the sed fallback below, this also covers a document whose
+    # top-level `notice_shown` never existed in the first place (e.g. an
+    # already-valid identity file that was never rewritten by the repair
+    # path above) -- a blind "replace false with true" text substitution
+    # has nothing to match there and would silently leave the field
+    # missing forever, so a later run would show the notice again.
+    if "$py" -c '
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("top-level JSON value is not an object")
+except Exception:
+    sys.exit(1)
+data["notice_shown"] = True
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+    fh.write("\n")
+' "$f" "$tmp" 2>/dev/null; then
+      mv "$tmp" "$f" 2>/dev/null || true
+    fi
+  elif sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$f" 2>/dev/null || true
   fi
   rm -f "$tmp" 2>/dev/null || true

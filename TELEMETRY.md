@@ -62,7 +62,7 @@ Deleting `~/.ouroboros/telemetry.json` resets your anonymous ID.
 
 Telemetry controls and destination overrides are operator-owned. The real
 process environment and `~/.ouroboros/.env` are trusted; a project-directory
-`.env` cannot set `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_HOST`, or
+`.env` cannot set `DO_NOT_TRACK`, `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_HOST`, or
 `OUROBOROS_POSTHOG_API_KEY`. Invalid or unreadable user configuration disables
 collection rather than silently restoring the default. An explicit
 `OUROBOROS_TELEMETRY=1` is never an override: any disabling control above —

@@ -823,6 +823,9 @@ def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_pat
     # notice_shown is pre-set to true: flipping it also needs a write, which
     # this scenario cannot do, and that's an orthogonal concern from what
     # this test is checking (event capture using the existing identity).
+    # This is also a literal top-level `true` fixture, so it doubles as the
+    # "notice correctly skipped, no duplicate" regression for the
+    # structural notice_shown check.
     state.write_text(
         '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", '
         '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true}\n',
@@ -839,9 +842,77 @@ def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_pat
         state_dir.chmod(0o700)
 
     assert result.returncode == 0, result.stderr
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
     captures = _wait_for_telemetry(tmp_path)
     assert '"event":"install_completed"' in captures
     assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
+
+
+def test_installer_shows_notice_when_only_nested_and_persists_top_level(
+    tmp_path: Path,
+) -> None:
+    """A `notice_shown` sitting only inside another top-level object (not
+    the document's own top level) must not suppress the disclosure --
+    mirrors the reviewer's exact document and the distinct_id top-level-only
+    rule from the previous round. Also verifies the notice is actually
+    persisted at the top level afterward, not just printed once and lost.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    top_level_uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    state.write_text(
+        f'{{"distinct_id": "{top_level_uuid}", "wrapper": {{"notice_shown": true}}}}',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert "capture-before-notice" not in captures
+    assert '"event":"install_completed"' in captures
+    assert f'"distinct_id":"{top_level_uuid}"' in captures
+
+    final_state = json.loads(state.read_text(encoding="utf-8"))
+    assert final_state.get("distinct_id") == top_level_uuid
+    assert final_state.get("notice_shown") is True
+
+
+def test_installer_shows_notice_when_top_level_value_is_a_string_not_bool(
+    tmp_path: Path,
+) -> None:
+    """A top-level `notice_shown` that isn't the literal boolean `true` (a
+    string "true", here) must not suppress the disclosure either -- the
+    check requires an actual bool, matching telemetry.py's `is True`.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    top_level_uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    state.write_text(
+        f'{{"distinct_id": "{top_level_uuid}", "created_at": "2020-01-01T00:00:00Z", '
+        f'"notice_shown": "true"}}',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+    final_state = json.loads(state.read_text(encoding="utf-8"))
+    assert final_state.get("notice_shown") is True
 
 
 def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
