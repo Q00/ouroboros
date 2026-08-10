@@ -247,7 +247,12 @@ class ClaudeWorkerTransport:
         is_error = payload.is_error or returncode not in (0, None)
         error: str | None = None
         if is_error:
-            error = stderr or payload.result or f"claude exited with status {returncode}"
+            error = (
+                stderr
+                or payload.result
+                or payload.subtype
+                or f"claude exited with status {returncode}"
+            )
         return WorkerTurn(
             text=payload.result,
             session_id=payload.session_id,

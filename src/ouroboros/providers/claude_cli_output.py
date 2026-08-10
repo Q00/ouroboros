@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
+import math
 from typing import Any
 
 # ``communicate()`` has already materialized stdout when this parser runs, but
@@ -25,6 +26,9 @@ MAX_CLAUDE_CLI_OUTPUT_CHARS = 8 * 1024 * 1024
 MAX_CLAUDE_CLI_EVENTS = 4096
 _MAX_SESSION_ID_CHARS = 4096
 _MAX_TOKEN_COUNT = (1 << 63) - 1
+# Stay well below CPython's configurable 4,300-digit default so hostile JSON
+# cannot escape this boundary as an interpreter-level ``ValueError``.
+_MAX_JSON_INTEGER_DIGITS = 1024
 
 
 class ClaudeCliOutputError(ValueError):
@@ -69,10 +73,10 @@ def normalize_claude_cli_output(stdout: str) -> ClaudeCliResult:
     documents = _decode_documents(stripped)
     events = _flatten_events(documents)
     final = _terminal_result(events)
+    is_error = _optional_bool(final, "is_error", default=False)
     session_id = _consistent_session_id(events)
     usage = _result_usage(events, final)
-    result_text = _result_text(final)
-    is_error = _optional_bool(final, "is_error", default=False)
+    result_text = _result_text(final, is_error=is_error)
     subtype = _optional_string(final, "subtype")
     stop_reason = _optional_string(final, "stop_reason")
 
@@ -106,10 +110,13 @@ def _decode_documents(stdout: str) -> list[Any]:
     """
     decoder = json.JSONDecoder(
         parse_constant=_reject_constant,
+        parse_float=_finite_json_float,
+        parse_int=_bounded_json_int,
         object_pairs_hook=_unique_object,
     )
     documents: list[Any] = []
     position = 0
+    previous_document_end: int | None = None
     while position < len(stdout):
         while position < len(stdout) and stdout[position].isspace():
             position += 1
@@ -124,10 +131,16 @@ def _decode_documents(stdout: str) -> list[Any]:
             position = len(stdout) if newline < 0 else newline + 1
             continue
 
+        if previous_document_end is not None:
+            separator = stdout[previous_document_end:position]
+            if "\n" not in separator and "\r" not in separator:
+                raise ClaudeCliOutputError("multiple JSON documents must have a newline boundary")
+
         line_number = stdout.count("\n", 0, position) + 1
         try:
             document, position = decoder.raw_decode(stdout, position)
             documents.append(document)
+            previous_document_end = position
         except json.JSONDecodeError as exc:
             raise ClaudeCliOutputError(
                 f"malformed JSON-looking stdout line {line_number}: {exc.msg}"
@@ -141,6 +154,28 @@ def _decode_documents(stdout: str) -> list[Any]:
 
 def _reject_constant(token: str) -> None:
     raise ClaudeCliOutputError(f"non-finite JSON number is not allowed: {token}")
+
+
+def _bounded_json_int(token: str) -> int:
+    digits = token[1:] if token.startswith("-") else token
+    if len(digits) > _MAX_JSON_INTEGER_DIGITS:
+        raise ClaudeCliOutputError(
+            f"JSON integer exceeds {_MAX_JSON_INTEGER_DIGITS} digit safety limit"
+        )
+    try:
+        return int(token)
+    except ValueError as exc:  # pragma: no cover - decoder supplies JSON integer syntax
+        raise ClaudeCliOutputError("invalid JSON integer") from exc
+
+
+def _finite_json_float(token: str) -> float:
+    try:
+        value = float(token)
+    except (OverflowError, ValueError) as exc:  # pragma: no cover - decoder validates syntax
+        raise ClaudeCliOutputError("invalid JSON number") from exc
+    if not math.isfinite(value):
+        raise ClaudeCliOutputError(f"non-finite JSON number is not allowed: {token}")
+    return value
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -258,19 +293,21 @@ def _result_usage(
     return usage
 
 
-def _result_text(final: Mapping[str, Any]) -> str:
+def _result_text(final: Mapping[str, Any], *, is_error: bool) -> str:
     if "result" in final:
         value = final["result"]
+        if value is None and is_error:
+            return ""
     else:
         # Some stream wrappers retain the terminal text in the same nested
         # message/content shape used by assistant events.
         message = final.get("message")
         if isinstance(message, Mapping) and "content" in message:
             value = message["content"]
-        elif final.get("type") is None and "is_error" in final:
-            # Legacy untyped result envelopes used omission and ``result: null``
-            # interchangeably for an empty response.  The caller's existing
-            # empty-content policy decides whether to retry or report it.
+        elif is_error:
+            # Typed and legacy untyped error envelopes use omission and
+            # ``result: null`` interchangeably when no human-readable detail is
+            # available.  Metadata remains authoritative completion evidence.
             return ""
         else:
             raise ClaudeCliOutputError("terminal result event has no result content")

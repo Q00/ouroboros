@@ -112,6 +112,67 @@ class TestParseTurn:
         assert turn.is_error is True
         assert turn.error == "maximum turns reached"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "result": None,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="typed-null",
+            ),
+            pytest.param(
+                {
+                    "is_error": True,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="untyped-omitted",
+            ),
+        ],
+    )
+    def test_empty_structured_error_preserves_metadata(self, payload: dict[str, object]) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(json.dumps(payload), "", 0)
+
+        assert turn == WorkerTurn(
+            text="",
+            session_id="error-session",
+            is_error=True,
+            error="error_max_turns",
+            usage={"input_tokens": 9, "output_tokens": 2},
+        )
+
+    @pytest.mark.parametrize(
+        ("stdout", "message"),
+        [
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done","trace":' + "9" * 4301 + "}",
+                "integer exceeds",
+                id="oversized-integer",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":1e9999}}',
+                "non-finite JSON number",
+                id="non-finite-secondary-usage",
+            ),
+        ],
+    )
+    def test_hostile_number_becomes_structured_worker_error(
+        self, stdout: str, message: str
+    ) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0)
+
+        assert turn.is_error is True
+        assert turn.session_id is None
+        assert message in (turn.error or "")
+
     def test_nonzero_exit_cannot_be_overridden_by_success_payload(self) -> None:
         out = json.dumps({"type": "result", "is_error": False, "result": "looks okay"})
 

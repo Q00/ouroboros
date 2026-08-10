@@ -112,6 +112,14 @@ def test_flattens_array_documents_inside_ndjson() -> None:
     assert normalized.event_count == 3
 
 
+@pytest.mark.parametrize("separator", ["", " ", "\t"])
+def test_rejects_concatenated_json_documents_without_newline(separator: str) -> None:
+    stdout = json.dumps({"type": "assistant"}) + separator + json.dumps(_result())
+
+    with pytest.raises(ClaudeCliOutputError, match="newline boundary"):
+        normalize_claude_cli_output(stdout)
+
+
 @pytest.mark.parametrize(
     ("result_value", "expected"),
     [
@@ -150,6 +158,77 @@ def test_error_result_preserves_diagnostics_and_metadata() -> None:
     assert normalized.is_error is True
     assert normalized.result == "reached maximum number of turns"
     assert normalized.subtype == "error_max_turns"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {
+                "type": "result",
+                "is_error": True,
+                "result": None,
+                "subtype": "error_max_turns",
+                "session_id": "error-session",
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+            id="typed-null",
+        ),
+        pytest.param(
+            {
+                "type": "result",
+                "is_error": True,
+                "subtype": "error_max_turns",
+                "session_id": "error-session",
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+            id="typed-omitted",
+        ),
+        pytest.param(
+            {
+                "is_error": True,
+                "result": None,
+                "subtype": "error_max_turns",
+                "session_id": "error-session",
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+            id="untyped-null",
+        ),
+        pytest.param(
+            {
+                "is_error": True,
+                "subtype": "error_max_turns",
+                "session_id": "error-session",
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+            id="untyped-omitted",
+        ),
+    ],
+)
+def test_error_envelope_allows_empty_result_and_preserves_metadata(
+    payload: dict[str, object],
+) -> None:
+    normalized = normalize_claude_cli_output(json.dumps(payload))
+
+    assert normalized.result == ""
+    assert normalized.is_error is True
+    assert normalized.subtype == "error_max_turns"
+    assert normalized.session_id == "error-session"
+    assert normalized.usage == {"input_tokens": 9, "output_tokens": 2}
+    assert normalized.raw_payload["result"] == ""
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["untyped", "typed"])
+@pytest.mark.parametrize("include_null", [False, True], ids=["omitted", "null"])
+def test_success_envelope_rejects_empty_result(typed: bool, include_null: bool) -> None:
+    payload: dict[str, object] = {"is_error": False}
+    if typed:
+        payload["type"] = "result"
+    if include_null:
+        payload["result"] = None
+
+    with pytest.raises(ClaudeCliOutputError, match="result"):
+        normalize_claude_cli_output(json.dumps(payload))
 
 
 def test_usage_falls_back_to_nested_assistant_usage() -> None:
@@ -227,6 +306,32 @@ def test_rejects_garbage_appended_to_json_on_the_same_line() -> None:
 )
 def test_rejects_ambiguous_json(stdout: str) -> None:
     with pytest.raises(ClaudeCliOutputError):
+        normalize_claude_cli_output(stdout)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        pytest.param(
+            '{"type":"result","is_error":false,"result":"done","trace":' + "9" * 4301 + "}",
+            "integer exceeds",
+            id="oversized-integer",
+        ),
+        pytest.param(
+            '{"type":"result","is_error":false,"result":"done","score":1e9999}',
+            "non-finite JSON number",
+            id="raw-overflowing-float",
+        ),
+        pytest.param(
+            '{"type":"result","is_error":false,"result":"done",'
+            '"usage":{"input_tokens":1,"cache_read_input_tokens":1e9999}}',
+            "non-finite JSON number",
+            id="secondary-usage-overflowing-float",
+        ),
+    ],
+)
+def test_rejects_unbounded_or_non_finite_numbers(stdout: str, message: str) -> None:
+    with pytest.raises(ClaudeCliOutputError, match=message):
         normalize_claude_cli_output(stdout)
 
 

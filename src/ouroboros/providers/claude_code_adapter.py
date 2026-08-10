@@ -800,6 +800,8 @@ class ClaudeCodeAdapter:
                         "subtype": normalized.subtype,
                         "returncode": proc.returncode,
                         "session_id": normalized.session_id,
+                        "usage": normalized.usage,
+                        "stop_reason": normalized.stop_reason,
                         "stderr": stderr_text[:2000],
                     },
                 )

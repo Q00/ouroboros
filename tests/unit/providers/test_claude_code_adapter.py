@@ -2587,6 +2587,95 @@ class TestCLIFallbackWhenSDKAbsent:
         assert "maximum number of turns" in result.error.message
         assert result.error.details["subtype"] == "error_max_turns"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "result": None,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "stop_reason": "max_turns",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="typed-null",
+            ),
+            pytest.param(
+                {
+                    "is_error": True,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "stop_reason": "max_turns",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="untyped-omitted",
+            ),
+        ],
+    )
+    def test_empty_cli_error_preserves_structured_metadata(
+        self, payload: dict[str, object]
+    ) -> None:
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(json.dumps(payload).encode())),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert result.error.message == "claude CLI reported an error"
+        assert result.error.details["subtype"] == "error_max_turns"
+        assert result.error.details["session_id"] == "error-session"
+        assert result.error.details["stop_reason"] == "max_turns"
+        assert result.error.details["usage"] == {"input_tokens": 9, "output_tokens": 2}
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done","trace":' + b"9" * 4301 + b"}",
+                "integer exceeds",
+                id="oversized-integer",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"cache_read_input_tokens":1e9999}}',
+                "non-finite JSON number",
+                id="non-finite-secondary-usage",
+            ),
+        ],
+    )
+    def test_hostile_number_becomes_structured_provider_error(
+        self, payload: bytes, message: str
+    ) -> None:
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert message in result.error.details["parse_error"]
+
     def test_a_non_json_body_surfaces_stderr(self) -> None:
         """An auth prompt or a bad flag never reaches the result envelope.
 
@@ -2919,8 +3008,8 @@ class TestCLIFallbackWhenSDKAbsent:
         assert "Empty response" in result.error.message
         assert result.error.details["content_length"] == 0
 
-    def test_a_missing_result_key_is_treated_the_same_as_an_empty_one(self) -> None:
-        """No `result` key at all is the same absence, not a different one."""
+    def test_a_success_envelope_with_missing_result_fails_closed(self) -> None:
+        """Only an explicit error envelope may omit its result content."""
         adapter = self._adapter()
         with (
             patch.dict("sys.modules", {"claude_agent_sdk": None}),
@@ -2942,7 +3031,8 @@ class TestCLIFallbackWhenSDKAbsent:
             )
 
         assert result.is_err
-        assert "Empty response" in result.error.message
+        assert "no valid JSON result" in result.error.message
+        assert "no result content" in result.error.details["parse_error"]
 
     def test_unencodable_caller_text_never_reaches_a_spawn(self) -> None:
         """A lone surrogate must fail before there is a child to orphan.
