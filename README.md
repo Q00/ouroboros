@@ -6,7 +6,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -40,6 +40,14 @@
   <a href="#the-loop">How It Works</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#from-wonder-to-ontology">Philosophy</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
+</p>
+
+<p align="center">
+  <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command above runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
 </p>
 
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
@@ -137,11 +145,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
-</p>
-
-<p align="center">
-  <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command above runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
+  <sub>That recording is this exact command. It is at the top of this page so you can see the tool before installing it.</sub>
 </p>
 
 <p align="center">
