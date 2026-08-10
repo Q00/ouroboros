@@ -9,6 +9,8 @@ built on it could target a healthy server owned by a live session.
 from __future__ import annotations
 
 import os
+import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -23,6 +25,23 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp, "_own_pid_file", None)
     monkeypatch.setattr(mcp, "_own_pid_payload", None)
     return registry_dir
+
+
+def test_managed_process_identity_uses_integer_windows_creation_marker() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows-only creation-time marker")
+    pid, marker = mcp._managed_process_identity()
+    assert pid == os.getpid()
+    assert isinstance(marker, int)
+    assert marker > 0
+
+
+def test_managed_process_identity_fails_closed_when_windows_api_fails() -> None:
+    with patch.object(mcp.sys, "platform", "win32"):
+        with patch("ctypes.WinDLL", side_effect=OSError):
+            pid, marker = mcp._managed_process_identity()
+    assert pid == os.getpid()
+    assert marker is None
 
 
 class TestPidRegistry:

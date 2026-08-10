@@ -2356,6 +2356,51 @@ class TestCodexSetup:
         assert any("Configure Ouroboros runtime" in message for message in info_messages)
         assert any("profiles you manage yourself" in message for message in info_messages)
 
+    @pytest.mark.parametrize(
+        ("plugin_config", "case"),
+        [
+            ("", "without_plugin"),
+            (
+                '\n[plugins."ouroboros@ouroboros"]\nenabled = true\n'
+                '[plugins."ouroboros@ouroboros".mcp_servers.ouroboros]\nenabled = true\n',
+                "with_active_plugin",
+            ),
+        ],
+    )
+    def test_setup_codex_preserve_mode_skips_windows_mcp_service_finalization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugin_config: str, case: str
+    ) -> None:
+        """Preserve mode must not provision or remove the managed HTTP service."""
+        monkeypatch.setattr(setup_cmd.sys, "platform", "win32")
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n",
+            encoding="utf-8",
+        )
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir()
+        original = setup_cmd.render_codex_mcp_http_section() + plugin_config
+        codex_config.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=True),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.finalize_windows_codex_mcp_service"
+            ) as finalize_service,
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex", mcp_mode="preserve") is True, case
+
+        assert codex_config.read_text(encoding="utf-8") == original
+        finalize_service.assert_not_called()
+
     def test_setup_codex_fresh_setup_creates_secure_credentials(self, tmp_path: Path) -> None:
         """Fresh Codex setup must leave config_exists() true by creating credentials.yaml."""
         config_dir = tmp_path / ".ouroboros"

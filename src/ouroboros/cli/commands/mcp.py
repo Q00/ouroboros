@@ -425,6 +425,40 @@ def _process_start_marker(pid: int) -> float | None:
         return None
 
 
+def _managed_process_identity() -> tuple[int, int | float | None]:
+    """Return a process identity with a Windows creation-time marker."""
+    pid = os.getpid()
+    if sys.platform != "win32":
+        return current_process_identity()
+
+    import ctypes
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except OSError:
+        return pid, None
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return pid, None
+    try:
+        creation = ctypes.c_uint64()
+        exit_time = ctypes.c_uint64()
+        kernel_time = ctypes.c_uint64()
+        user_time = ctypes.c_uint64()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return pid, None
+        # FILETIME is a stable 100 ns marker and does not need locale/time-zone conversion.
+        return pid, creation.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _client_is_alive(pid: int, start_marker: float | None) -> bool:
     """Client liveness = identity-alive AND not a defunct (zombie) entry.
 
@@ -546,6 +580,10 @@ async def _run_mcp_server(
     allowed_hosts: tuple[str, ...] = (),
     allowed_origins: tuple[str, ...] = (),
     workspace_roots: tuple[str, ...] = (),
+    lifecycle_root: str | None = None,
+    lifecycle_generation: str | None = None,
+    lifecycle_installation: str | None = None,
+    lifecycle_token: str | None = None,
 ) -> None:
     """Run the MCP server.
 
@@ -574,6 +612,56 @@ async def _run_mcp_server(
             f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
+    lifecycle_values = (
+        lifecycle_root,
+        lifecycle_generation,
+        lifecycle_installation,
+        lifecycle_token,
+    )
+    lifecycle_lease: Any | None = None
+    managed_lifecycle = any(value is not None for value in lifecycle_values)
+    if managed_lifecycle:
+        if not all(isinstance(value, str) and value for value in lifecycle_values):
+            raise typer.Exit(code=1)
+        assert lifecycle_root is not None
+        assert lifecycle_generation is not None
+        assert lifecycle_installation is not None
+        assert lifecycle_token is not None
+        from ouroboros.cli.codex_http_mcp import (
+            publish_server_receipt,
+            recover_managed_lifecycle,
+            validate_managed_lifecycle,
+            wait_for_standby_handoff,
+        )
+        from ouroboros.core.file_lock import _windows_directory_lease
+
+        lifecycle_lease = _windows_directory_lease(Path(lifecycle_root))
+        lifecycle_lease.__enter__()
+        if not validate_managed_lifecycle(
+            lifecycle_root, lifecycle_generation, lifecycle_installation, lifecycle_token
+        ):
+            lifecycle_lease.__exit__(None, None, None)
+            lifecycle_lease = None
+            recover_managed_lifecycle(lifecycle_root, lifecycle_generation)
+            raise typer.Exit(code=1)
+
+        managed_pid, managed_start_marker = _managed_process_identity()
+        if (
+            managed_start_marker is None
+            or not publish_server_receipt(
+                lifecycle_root,
+                lifecycle_generation,
+                "standby",
+                managed_pid,
+                managed_start_marker,
+                lifecycle_token,
+            )
+            or not wait_for_standby_handoff(lifecycle_root, lifecycle_generation)
+        ):
+            recover_managed_lifecycle(lifecycle_root, lifecycle_generation)
+            lifecycle_lease.__exit__(None, None, None)
+            lifecycle_lease = None
+            raise typer.Exit(code=1)
 
     _require_mcp_dependency()
 
@@ -619,7 +707,9 @@ async def _run_mcp_server(
     stop_task: asyncio.Task[bool] | None = None
     watchdog_task: asyncio.Task[None] | None = None
     idle_checkpoint_task: asyncio.Task[None] | None = None
+    lifecycle_task: asyncio.Task[None] | None = None
     serve_exc: BaseException | None = None
+    lifecycle_recovery_required = False
 
     # The protective try spans store init -> composition -> serve: a failure
     # anywhere after a store initialized (bridge discovery, backend validation
@@ -863,6 +953,65 @@ async def _run_mcp_server(
             ),
             name="ouroboros-mcp-serve",
         )
+        if managed_lifecycle:
+            from ouroboros.cli.codex_http_mcp import (
+                _WATCH_INTERVAL_SECONDS,
+                _wait_for_http_readiness,
+                lifecycle_should_stop,
+                managed_prepare_requires_recovery,
+                publish_server_receipt,
+                tcp_listener_owned_by,
+            )
+
+            pid, start_marker = _managed_process_identity()
+
+            async def _watch_lifecycle() -> None:
+                nonlocal lifecycle_recovery_required
+                # The process that bound the socket is the only process allowed to
+                # attest readiness or stop. Invalid state fails closed without a
+                # receipt, so setup never mistakes ambiguity for a handoff.
+                if (
+                    not await asyncio.to_thread(_wait_for_http_readiness)
+                    or not tcp_listener_owned_by(pid, port)
+                    or start_marker is None
+                ):
+                    stop.set()
+                    return
+                if not publish_server_receipt(
+                    lifecycle_root,
+                    lifecycle_generation,
+                    "ready",
+                    pid,
+                    start_marker,
+                    lifecycle_token,
+                ):
+                    stop.set()
+                    return
+                while not stop.is_set():
+                    await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
+                    if lifecycle_should_stop(
+                        lifecycle_root,
+                        lifecycle_generation,
+                        lifecycle_installation,
+                        lifecycle_token,
+                    ):
+                        lifecycle_recovery_required = managed_prepare_requires_recovery(
+                            lifecycle_root, lifecycle_generation
+                        )
+                        publish_server_receipt(
+                            lifecycle_root,
+                            lifecycle_generation,
+                            "stopped",
+                            pid,
+                            start_marker,
+                            lifecycle_token,
+                        )
+                        stop.set()
+                        return
+
+            lifecycle_task = asyncio.create_task(
+                _watch_lifecycle(), name="ouroboros-mcp-lifecycle-watcher"
+            )
         stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
         watchdog_task = asyncio.create_task(_orphan_watchdog(), name="ouroboros-mcp-watchdog")
         idle_checkpoint_task = asyncio.create_task(
@@ -877,7 +1026,9 @@ async def _run_mcp_server(
         # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
         # EventStore.close() always gets to collapse the WAL.
         helper_tasks = [
-            t for t in (watchdog_task, stop_task, idle_checkpoint_task) if t is not None
+            t
+            for t in (watchdog_task, stop_task, idle_checkpoint_task, lifecycle_task)
+            if t is not None
         ]
         for _task in helper_tasks:
             if not _task.done():
@@ -958,6 +1109,10 @@ async def _run_mcp_server(
             with contextlib.suppress(Exception):
                 await event_store.close()
         _cleanup_pid_file()
+        if lifecycle_recovery_required:
+            # The adapter shutdown above closes the bound listener before the
+            # predecessor task is allowed to bind the same port.
+            recover_managed_lifecycle(lifecycle_root, lifecycle_generation)
         # Single error-propagation point: preserve a serve-loop failure (bind/
         # listen/runtime errors — asyncio.wait() leaves the exception parked on
         # the task) but raise it only after cleanup, from OUTSIDE this finally.
@@ -972,6 +1127,9 @@ async def _run_mcp_server(
     # released the stores. This preserves the error-propagation contract of the
     # prior ``await server.serve(...)`` so ``ouroboros mcp serve`` exits non-zero
     # on startup/runtime failures instead of reporting a clean stop.
+    if lifecycle_lease is not None:
+        lifecycle_lease.__exit__(None, None, None)
+
     if serve_exc is not None:
         raise serve_exc
 
@@ -1169,6 +1327,22 @@ def serve(
             case_sensitive=False,
         ),
     ] = None,
+    codex_lifecycle_root: Annotated[
+        str | None,
+        typer.Option("--codex-lifecycle-root", hidden=True),
+    ] = None,
+    codex_lifecycle_generation: Annotated[
+        str | None,
+        typer.Option("--codex-lifecycle-generation", hidden=True),
+    ] = None,
+    codex_lifecycle_installation: Annotated[
+        str | None,
+        typer.Option("--codex-lifecycle-installation", hidden=True),
+    ] = None,
+    codex_lifecycle_token: Annotated[
+        str | None,
+        typer.Option("--codex-lifecycle-token", hidden=True),
+    ] = None,
 ) -> None:
     """Start the MCP server.
 
@@ -1265,6 +1439,10 @@ def serve(
                 allowed_hosts=allowed_hosts,
                 allowed_origins=allowed_origins,
                 workspace_roots=workspace_roots,
+                lifecycle_root=codex_lifecycle_root,
+                lifecycle_generation=codex_lifecycle_generation,
+                lifecycle_installation=codex_lifecycle_installation,
+                lifecycle_token=codex_lifecycle_token,
             )
         )
     except KeyboardInterrupt:

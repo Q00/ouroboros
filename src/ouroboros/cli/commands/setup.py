@@ -2874,7 +2874,7 @@ def _setup_codex(
             expected_snapshots=managed_codex_expected_snapshot,
         ):
             raise OSError("Codex worker profile registration failed")
-        if not _finalize_windows_codex_mcp_service(config_dir):
+        if mcp_mode != "preserve" and not _finalize_windows_codex_mcp_service(config_dir):
             raise OSError("Codex MCP service finalization failed")
     except (OSError, TypeError, ValueError) as exc:
         _restore_managed_codex_setup_paths(
