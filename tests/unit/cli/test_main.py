@@ -268,6 +268,10 @@ class TestMCPCommands:
             None,
             "pi",
             "pi",
+            auth_token="",
+            allowed_hosts=(),
+            allowed_origins=(),
+            workspace_roots=(),
         )
 
     def test_mcp_info(self) -> None:

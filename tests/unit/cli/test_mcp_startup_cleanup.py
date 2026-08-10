@@ -321,6 +321,8 @@ class TestMCPStartupAutoCleanup:
             transport="streamable-http",
             host="127.0.0.1",
             port=9100,
+            allowed_hosts=(),
+            allowed_origins=(),
         )
 
     @pytest.mark.asyncio

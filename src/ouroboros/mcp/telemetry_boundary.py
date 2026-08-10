@@ -209,6 +209,7 @@ async def call_sdk_tool(
 
     from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
     from ouroboros.mcp.server.adapter import _validate_parameter_constraints
+    from ouroboros.mcp.server.auth import current_auth_context
 
     started_at = time.monotonic()
     error_type: str | None = None
@@ -230,7 +231,15 @@ async def call_sdk_tool(
         Draft202012Validator(definition.to_input_schema()).validate(arguments)
         # The private impl skips call_tool's observer wrapper: this SDK path
         # owns the one request-outcome event itself (no double counting).
-        result = await adapter._call_tool_impl(name, arguments)
+        # On a token-protected network bind the SDK already verified the bearer
+        # token and the raw credential is gone by now, so carry its decision
+        # across instead -- that restores the client identity authorization and
+        # rate limiting key on.
+        result = await adapter._call_tool_impl(
+            name,
+            arguments,
+            auth_context=current_auth_context(),
+        )
         if result.is_err:
             error_type = _safe_error_type(result.error)
             raise RuntimeError(str(result.error))

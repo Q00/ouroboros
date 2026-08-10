@@ -540,6 +540,11 @@ async def _run_mcp_server(
     db_path: str | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    *,
+    auth_token: str = "",
+    allowed_hosts: tuple[str, ...] = (),
+    allowed_origins: tuple[str, ...] = (),
+    workspace_roots: tuple[str, ...] = (),
 ) -> None:
     """Run the MCP server.
 
@@ -550,6 +555,12 @@ async def _run_mcp_server(
         db_path: Optional path to EventStore database.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
+        auth_token: Shared secret network clients must present. Empty leaves
+            the server credential-free, which serving only permits on loopback.
+        allowed_hosts: ``Host`` header allowlist for network transports.
+        allowed_origins: ``Origin`` header allowlist for network transports.
+        workspace_roots: Directories seed execution is confined to. Empty
+            leaves execution unrestricted, the historical local behaviour.
     """
     from ouroboros.mcp.server.adapter import validate_transport
 
@@ -656,8 +667,28 @@ async def _run_mcp_server(
         # Create server with all tools pre-registered via dependency injection.
         # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
         # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
+        # Install before any tool can run: the policy is what keeps a caller
+        # from naming an arbitrary directory as an agent's working tree.
+        if workspace_roots:
+            from ouroboros.mcp.server.workspace import WorkspacePolicy, set_workspace_policy
+
+            set_workspace_policy(WorkspacePolicy.from_paths(workspace_roots))
+
+        # A token turns on the SDK's bearer-auth middleware; without one the
+        # server stays credential-free, which serve() only allows on loopback.
+        auth_config = None
+        if auth_token:
+            from ouroboros.mcp.server.security import AuthConfig, AuthMethod
+
+            auth_config = AuthConfig(
+                method=AuthMethod.API_KEY,
+                api_keys=frozenset({auth_token}),
+                required=True,
+            )
+
         server = create_ouroboros_server(
             name="ouroboros-mcp",
+            auth_config=auth_config,
             event_store=event_store,
             brownfield_store=brownfield_store,
             runtime_backend=runtime_backend,
@@ -690,6 +721,21 @@ async def _run_mcp_server(
                 print_info(f"Listening on http://{host}:{port}/mcp")
             else:
                 print_info(f"Listening on {host}:{port}")
+
+            # State the posture plainly: these two lines are what an operator
+            # needs to see to know whether this port is safe where it sits.
+            if auth_token:
+                print_info("Auth: bearer token required")
+            else:
+                print_info("Auth: none — reachable only from this machine")
+            if workspace_roots:
+                print_info(f"Seed execution confined to: {', '.join(workspace_roots)}")
+            else:
+                _console_out.print(
+                    "[yellow]Seed execution is not confined: a caller may name any "
+                    "existing directory on this machine as an agent working tree. "
+                    "Pass --workspace-root to restrict it.[/yellow]"
+                )
             print_info("Press Ctrl+C to stop")
 
         if _sandbox_network_disabled:
@@ -807,7 +853,13 @@ async def _run_mcp_server(
                     await event_store.checkpoint_wal()
 
         serve_task = asyncio.create_task(
-            server.serve(transport=transport, host=host, port=port),
+            server.serve(
+                transport=transport,
+                host=host,
+                port=port,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+            ),
             name="ouroboros-mcp-serve",
         )
         stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
@@ -923,6 +975,83 @@ async def _run_mcp_server(
         raise serve_exc
 
 
+def _resolve_network_security(
+    *,
+    transport: str,
+    host: str,
+    port: int,
+    auth_token: str,
+    allow_remote: bool,
+    allowed_hosts: tuple[str, ...],
+) -> str:
+    """Validate the requested exposure and return the token to enforce.
+
+    ``MCPServerAdapter.serve`` holds the same boundary for embedders. This runs
+    first so an operator gets an actionable message rather than a traceback,
+    and so the reason a bind was refused names the flag that would allow it.
+
+    Args:
+        transport: The already-validated transport name.
+        host: The requested bind address.
+        port: The requested bind port, quoted back in the guidance.
+        auth_token: The shared secret, from the flag or the environment.
+        allow_remote: Whether the operator acknowledged remote exposure.
+        allowed_hosts: The ``Host`` header allowlist.
+
+    Returns:
+        The token to enforce, or "" when the bind requires no credential.
+
+    Raises:
+        typer.Exit: If the requested bind would expose seed execution.
+    """
+    from ouroboros.mcp.server.auth import (
+        NETWORK_TRANSPORTS,
+        is_loopback_host,
+        is_wildcard_host,
+    )
+
+    if transport not in NETWORK_TRANSPORTS:
+        if auth_token:
+            _stderr_console.print(
+                "[yellow]Ignoring --auth-token: stdio has no request headers to "
+                "carry it, and the client already owns this process.[/yellow]"
+            )
+        return ""
+
+    if is_loopback_host(host):
+        return auth_token
+
+    problems: list[str] = []
+    if not auth_token:
+        problems.append(
+            "  --auth-token <secret>   (or set OUROBOROS_MCP_AUTH_TOKEN)\n"
+            "      Without it, anyone who can reach this port can execute seeds\n"
+            "      through your local agent runtime."
+        )
+    if not allow_remote:
+        problems.append(
+            "  --allow-remote\n      Confirms you intend to expose this server beyond this machine."
+        )
+    if is_wildcard_host(host) and not allowed_hosts:
+        problems.append(
+            f"  --allowed-host <name:{port}>\n"
+            f"      A {host} bind is reached under a name this process cannot see,\n"
+            "      so the Host allowlist that blocks DNS rebinding must be given."
+        )
+
+    if not problems:
+        return auth_token
+
+    _stderr_console.print(
+        f"[red]Refusing to serve {transport} on non-loopback host {host!r}.[/red]\n"
+        "[red]Missing:[/red]\n" + "\n".join(problems)
+    )
+    _stderr_console.print(
+        "\n[blue]To serve locally instead, drop --host (it defaults to localhost).[/blue]"
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(
     host: Annotated[
@@ -949,6 +1078,62 @@ def serve(
             help="Transport type: stdio, sse, or streamable-http.",
         ),
     ] = "stdio",
+    auth_token: Annotated[
+        str,
+        typer.Option(
+            "--auth-token",
+            envvar="OUROBOROS_MCP_AUTH_TOKEN",
+            help=(
+                "Shared secret clients must present as 'Authorization: Bearer <token>'. "
+                "Required for network transports on a non-loopback host. Prefer the "
+                "OUROBOROS_MCP_AUTH_TOKEN environment variable: a token on the command "
+                "line is visible to every process on this machine via 'ps'."
+            ),
+        ),
+    ] = "",
+    allow_remote: Annotated[
+        bool,
+        typer.Option(
+            "--allow-remote",
+            help=(
+                "Acknowledge that a non-loopback bind exposes seed execution to "
+                "everyone who can reach the port. Required alongside --auth-token "
+                "to serve on a routable address."
+            ),
+        ),
+    ] = False,
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-host",
+            help=(
+                "Host header value clients will use, e.g. 'ouroboros.internal:8080'. "
+                "Repeatable. Required for wildcard binds (--host 0.0.0.0), whose "
+                "reachable name cannot be inferred. A ':*' suffix allows any port."
+            ),
+        ),
+    ] = None,
+    allowed_origin: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-origin",
+            help=(
+                "Origin header value to permit. Repeatable. Empty by default, which "
+                "rejects every browser-originated request."
+            ),
+        ),
+    ] = None,
+    workspace_root: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--workspace-root",
+            help=(
+                "Restrict seed execution to directories under this path. Repeatable. "
+                "Strongly recommended for network binds; unset means any existing "
+                "directory on this machine may be used as a working directory."
+            ),
+        ),
+    ] = None,
     db: Annotated[
         str,
         typer.Option(
@@ -1032,16 +1217,45 @@ def serve(
         raise typer.Exit(0)
     os.environ["_OUROBOROS_NESTED"] = "1"
 
+    # Transport is re-validated inside _run_mcp_server; normalize here first so
+    # the exposure check below classifies 'SSE' the same way serving will.
+    from ouroboros.mcp.server.adapter import validate_transport
+
+    try:
+        normalized_transport = validate_transport(transport)
+    except ValueError:
+        _stderr_console.print(
+            "[red]Invalid transport "
+            f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
+        )
+        raise typer.Exit(code=1) from None
+
+    allowed_hosts = tuple(allowed_host or ())
+    allowed_origins = tuple(allowed_origin or ())
+    workspace_roots = tuple(workspace_root or ())
+    enforced_token = _resolve_network_security(
+        transport=normalized_transport,
+        host=host,
+        port=port,
+        auth_token=auth_token,
+        allow_remote=allow_remote,
+        allowed_hosts=allowed_hosts,
+    )
+
     try:
         db_path = db if db else None
         asyncio.run(
             _run_mcp_server(
                 host,
                 port,
-                transport,
+                normalized_transport,
                 db_path,
                 selected_runtime,
                 llm_backend.value if llm_backend else None,
+                auth_token=enforced_token,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+                workspace_roots=workspace_roots,
             )
         )
     except KeyboardInterrupt:

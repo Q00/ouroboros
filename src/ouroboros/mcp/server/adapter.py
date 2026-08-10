@@ -32,6 +32,7 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
 
 # Re-exported: split out in #1754, still imported from here by evaluation tests.
 from ouroboros.mcp.server.project_dir import (  # noqa: F401
@@ -41,7 +42,12 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
     _project_dir_from_seed,
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
-from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
+from ouroboros.mcp.server.security import (
+    AuthConfig,
+    AuthContext,
+    RateLimitConfig,
+    SecurityLayer,
+)
 
 # Re-exported: kept here for existing adapter-level tests and callers.
 from ouroboros.mcp.server.spec_verification_adapter import (
@@ -837,11 +843,12 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        auth_context: AuthContext | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool through the complete request observer."""
         return await observe_adapter_tool_call(
             name,
-            lambda: self._call_tool_impl(name, arguments, credentials),
+            lambda: self._call_tool_impl(name, arguments, credentials, auth_context),
             registered=name in self._tool_handlers,
         )
 
@@ -850,6 +857,7 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        auth_context: AuthContext | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool.
 
@@ -857,6 +865,9 @@ class MCPServerAdapter:
             name: Name of the tool to call.
             arguments: Arguments for the tool.
             credentials: Optional credentials for authentication.
+            auth_context: Identity already established by the transport, for
+                network transports where the SDK verified the bearer token
+                before dispatch and the raw credential is no longer in reach.
 
         Returns:
             Result containing the tool result or an error.
@@ -890,7 +901,12 @@ class MCPServerAdapter:
             return Result.err(error)
 
         # Security check
-        security_result = await self._security.check_request(name, arguments, credentials)
+        security_result = await self._security.check_request(
+            name,
+            arguments,
+            credentials,
+            pre_authenticated=auth_context,
+        )
         if security_result.is_err:
             log.info(
                 "mcp.server.call_tool.return",
@@ -1051,39 +1067,50 @@ class MCPServerAdapter:
         transport: str = "stdio",
         host: str = "localhost",
         port: int = 8080,
+        *,
+        allowed_hosts: tuple[str, ...] = (),
+        allowed_origins: tuple[str, ...] = (),
     ) -> None:
         """Start serving MCP requests.
 
         This method blocks until the server is stopped.
         Uses the MCP SDK v2's public ``MCPServer`` implementation.
 
+        Network transports are gated here rather than at the CLI, because this
+        is the one place every embedder passes through. The rule: a bind that
+        other machines can reach must carry credentials. A loopback bind may
+        stay credential-free -- the client already owns this process, and the
+        SDK auto-enables DNS-rebinding protection there.
+
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
                 (case-insensitive).
             host: Host to bind to for network transports. Defaults to "localhost".
             port: Port to bind to for network transports. Defaults to 8080.
+            allowed_hosts: ``Host`` header allowlist for network transports.
+                Required for wildcard binds, where the name clients use cannot
+                be inferred from the bind address.
+            allowed_origins: ``Origin`` header allowlist. Empty means every
+                browser-originated request is rejected, which is the intent for
+                a server whose clients are all non-browser MCP hosts.
 
         Raises:
-            ValueError: If transport is invalid or incompatible with security config.
+            ValueError: If transport is invalid, or the requested bind would
+                expose tool execution without credentials.
         """
         transport = validate_transport(transport)
 
-        # The SDK transport cannot provide credentials or client identity.
-        if self._security.auth_config.method != AuthMethod.NONE:
-            msg = (
-                f"MCPServer transport does not support authentication. "
-                f"Configured auth method: {self._security.auth_config.method.value}. "
-                f"All tool calls will be rejected. Use AuthMethod.NONE for MCPServer transports."
-            )
-            raise ValueError(msg)
-
-        if self._security.rate_limit_config.enabled:
-            msg = (
-                "MCPServer transport does not support rate limiting "
-                "(requires client identity). Configured rate_limit_config.enabled=True "
-                "will have no effect. Disable rate limiting for MCPServer transports."
-            )
-            raise ValueError(msg)
+        # Refuses an exposing bind and builds the SDK's credential and
+        # DNS-rebinding wiring. Lives in `auth` so this method stays a
+        # transport, not a second home for security policy.
+        wiring = resolve_network_security(
+            transport=transport,
+            host=host,
+            port=port,
+            security=self._security,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
 
         if _SDKMCPServer is None:
             msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
@@ -1091,11 +1118,14 @@ class MCPServerAdapter:
 
         if _OuroborosSDKServer is None:  # pragma: no cover - mirrors import guard.
             raise ImportError("MCP SDK server boundary unavailable")
+
         self._mcp_server = _OuroborosSDKServer(
             self,
             name=self._name,
             instructions=self._instructions,
             version=self._version,
+            token_verifier=wiring.token_verifier,
+            auth=wiring.auth_settings,
         )
 
         # Register tools with MCPServer.
@@ -1146,12 +1176,16 @@ class MCPServerAdapter:
                         normalized_kwargs,
                     )
 
-                    # Route through call_tool() to enforce security checks.
-                    # MCPServer does not provide credentials, so:
-                    # - Input validation is enforced
-                    # - Auth/authorization will reject if any auth method configured
-                    # - Rate limiting cannot apply (requires client_id)
-                    result = await self.call_tool(h.definition.name, normalized_kwargs)
+                    # Route through call_tool() to enforce security checks. On a
+                    # token-protected network bind the SDK has already verified
+                    # the bearer token and the raw credential is gone by now, so
+                    # carry its decision across instead: that restores the client
+                    # identity authorization and rate limiting both key on.
+                    result = await self.call_tool(
+                        h.definition.name,
+                        normalized_kwargs,
+                        auth_context=current_auth_context(),
+                    )
                     if result.is_ok:
                         # Convert MCPToolResult to the SDK boundary type.
                         tool_result = result.value
@@ -1320,12 +1354,17 @@ class MCPServerAdapter:
         # Run the server with the appropriate transport
         try:
             if transport == "sse":
-                await self._mcp_server.run_sse_async(host=host, port=port)
+                await self._mcp_server.run_sse_async(
+                    host=host,
+                    port=port,
+                    transport_security=wiring.transport_security,
+                )
             elif transport == "streamable-http":
                 await self._mcp_server.run_streamable_http_async(
                     host=host,
                     port=port,
                     stateless_http=True,
+                    transport_security=wiring.transport_security,
                 )
             else:
                 await self._mcp_server.run_stdio_async()

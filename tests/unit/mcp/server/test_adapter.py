@@ -2998,12 +2998,18 @@ class TestServeTransport:
             "ouroboros.mcp.server.adapter._OuroborosSDKServer",
             mock_fastmcp_cls,
         ):
-            await adapter.serve(transport="sse", host="0.0.0.0", port=9000)
+            await adapter.serve(transport="sse", host="127.0.0.1", port=9000)
 
         mock_fastmcp_cls.assert_called_once()
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
-        mock_instance.run_sse_async.assert_awaited_once_with(host="0.0.0.0", port=9000)
+        # The SDK builds its own DNS-rebinding settings for this bind spelling,
+        # so the adapter passes none of its own.
+        mock_instance.run_sse_async.assert_awaited_once_with(
+            host="127.0.0.1",
+            port=9000,
+            transport_security=None,
+        )
 
     @pytest.mark.asyncio
     async def test_stdio_serve_logs_exit(self) -> None:
@@ -3054,7 +3060,11 @@ class TestServeTransport:
         ):
             await adapter.serve(transport="sse", host="localhost", port=0)
 
-        mock_instance.run_sse_async.assert_awaited_once_with(host="localhost", port=0)
+        mock_instance.run_sse_async.assert_awaited_once_with(
+            host="localhost",
+            port=0,
+            transport_security=None,
+        )
 
     @pytest.mark.asyncio
     async def test_streamable_http_uses_modern_stateless_run_options(self):
@@ -3083,6 +3093,7 @@ class TestServeTransport:
             host="127.0.0.1",
             port=9100,
             stateless_http=True,
+            transport_security=None,
         )
 
     @pytest.mark.asyncio
@@ -3844,11 +3855,13 @@ class TestServeTransport:
         handler.handle_mock.assert_awaited_with("test://resource/child")
 
     @pytest.mark.asyncio
-    async def test_fastmcp_rejects_auth_config_at_startup(self):
-        """FastMCP serve() rejects auth config upfront with clear error.
+    async def test_stdio_rejects_auth_config_at_startup(self):
+        """stdio serve() rejects auth config upfront with a clear error.
 
-        This guard prevents the confusing failure mode where the server
-        starts successfully but then rejects every tool call at runtime.
+        stdio has no header to carry a credential on, so this guard prevents
+        the confusing failure mode where the server starts successfully but
+        then rejects every tool call at runtime. Network transports do support
+        authentication -- see the network security suite.
         """
         from ouroboros.mcp.server.security import AuthConfig, AuthMethod
 
@@ -3863,7 +3876,7 @@ class TestServeTransport:
         # serve() should reject the incompatible configuration immediately
         with pytest.raises(
             ValueError,
-            match="MCPServer transport does not support authentication",
+            match="stdio transport does not support authentication",
         ):
             await adapter.serve(transport="stdio")
 
@@ -3909,11 +3922,12 @@ class TestServeTransport:
             await adapter.serve(transport="stdio")
 
     @pytest.mark.asyncio
-    async def test_fastmcp_rejects_rate_limit_config(self):
-        """FastMCP serve() rejects rate limiting config upfront.
+    async def test_rejects_rate_limit_config_without_auth(self):
+        """serve() rejects rate limiting that has no client identity to bucket by.
 
-        Rate limiting requires client identity which FastMCP cannot provide,
-        so the guard prevents the false sense of security.
+        Only a credential supplies that identity, so rate limiting without an
+        auth method would put every caller in one shared bucket -- a false
+        sense of security. With auth configured it is supported.
         """
         from ouroboros.mcp.server.security import RateLimitConfig
 
@@ -3926,7 +3940,7 @@ class TestServeTransport:
 
         with pytest.raises(
             ValueError,
-            match="MCPServer transport does not support rate limiting",
+            match="Rate limiting requires client identity",
         ):
             await adapter.serve(transport="stdio")
 

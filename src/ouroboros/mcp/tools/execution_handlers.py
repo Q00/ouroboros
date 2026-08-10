@@ -2088,8 +2088,26 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         requested cwd is missing or is not a directory.  Otherwise the actual
         execution fails later inside the runtime with a less actionable
         ``FileNotFoundError``.
+
+        The same fail-closed reasoning covers the workspace policy: ``cwd``
+        arrives from the caller and becomes an agent runtime's working tree, so
+        a server started with confined roots must reject an outside directory
+        here rather than hand it to the runtime.
         """
+        from ouroboros.mcp.server.workspace import get_workspace_policy
+
         resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(raw_cwd)
+
+        policy = get_workspace_policy()
+        if not policy.permits(resolved_cwd):
+            return Result.err(
+                MCPToolError(
+                    f"Working directory is outside the permitted workspace: "
+                    f"{resolved_cwd} (allowed: {policy.describe()})",
+                    tool_name=tool_name,
+                )
+            )
+
         if not resolved_cwd.exists():
             return Result.err(
                 MCPToolError(

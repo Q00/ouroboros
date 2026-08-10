@@ -1136,6 +1136,11 @@ ouroboros mcp serve [OPTIONS]
 | `-h, --host TEXT` | Host to bind to (default: localhost) |
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
+| `--auth-token TEXT` | Shared secret clients present as `Authorization: Bearer <token>`. Required for a network transport on a non-loopback host. Prefer the `OUROBOROS_MCP_AUTH_TOKEN` environment variable — a token on the command line is visible to every process on the machine through `ps`. |
+| `--allow-remote` | Acknowledges that a non-loopback bind exposes seed execution beyond this machine. Required alongside `--auth-token` to serve on a routable address. |
+| `--allowed-host TEXT` | `Host` header value clients will use, e.g. `ouroboros.internal:8080`. Repeatable. Required for wildcard binds (`--host 0.0.0.0`), whose reachable name cannot be inferred. A `:*` suffix allows any port. |
+| `--allowed-origin TEXT` | `Origin` header value to permit. Repeatable. Empty by default, which rejects every browser-originated request. |
+| `--workspace-root TEXT` | Confines seed execution to directories under this path. Repeatable. Strongly recommended for network binds; unset means a caller may name any existing directory on the machine as an agent working tree. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
@@ -1155,8 +1160,14 @@ ouroboros mcp serve --runtime claude-cli --transport streamable-http --port 9000
 # Start with Codex-backed orchestrator tools
 ouroboros mcp serve --runtime codex --llm-backend codex
 
-# Start on specific host
-ouroboros mcp serve --runtime claude-cli --host 0.0.0.0 --port 8080 --transport sse
+# Serve to other machines. Every flag below is required, not optional:
+# the bind is refused without them.
+export OUROBOROS_MCP_AUTH_TOKEN="$(openssl rand -hex 32)"
+ouroboros mcp serve --runtime claude-cli \
+  --transport streamable-http --host 0.0.0.0 --port 8080 \
+  --allow-remote \
+  --allowed-host ouroboros.internal:8080 \
+  --workspace-root /srv/ouroboros/projects
 ```
 
 For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
@@ -1167,7 +1178,23 @@ uses MCP 2, it fails closed before startup if that effective runtime is
 SDK-backed. Pass an explicit MCP-2-compatible runtime or persist one with
 `ouroboros setup`.
 
-MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for SDK-managed transports because the handler boundary does not expose credentials or stable client identity; protect `0.0.0.0` binds with normal network controls.
+MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`.
+
+**Network exposure:**
+
+Reaching an Ouroboros MCP port is enough to call `ouroboros_execute_seed`, which runs caller-supplied seed YAML through a real agent runtime with that runtime's full file and shell authority. The port is therefore as privileged as a shell on the host, and `mcp serve` treats it that way.
+
+The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and the SDK enables DNS-rebinding protection for loopback binds automatically.
+
+A bind that other machines can reach is refused unless all of the following are supplied:
+
+- `--auth-token` (or `OUROBOROS_MCP_AUTH_TOKEN`), enforced by the SDK's bearer-auth middleware. Requests without a valid token get `401` before any tool dispatch.
+- `--allow-remote`, an explicit acknowledgement of the exposure.
+- `--allowed-host` for wildcard binds, which pins the `Host` allowlist that blocks DNS rebinding. A forged `Host` gets `421`.
+
+`--workspace-root` is not required but should be treated as such for any shared deployment: without it a caller may name any existing directory on the host as an agent's working tree.
+
+Rate limiting (`RateLimitConfig`) is available once an auth method is configured, because the token supplies the per-client identity it buckets by. Without authentication it is refused rather than silently sharing one bucket across all callers.
 
 **Startup behavior:**
 

@@ -641,6 +641,16 @@ class SecurityLayer:
                 self.rate_limit_config.burst_size,
             )
 
+    @property
+    def authenticator(self) -> Authenticator:
+        """Return the credential authority backing this layer.
+
+        Exposed so a transport that authenticates at its own edge (the MCP
+        SDK's HTTP boundary) can verify against the same credentials this
+        layer would, instead of maintaining a second set.
+        """
+        return self._authenticator
+
     def register_tool_permission(self, permission: ToolPermission) -> None:
         """Register permission requirements for a tool."""
         self._authorizer.register_tool_permission(permission)
@@ -658,6 +668,7 @@ class SecurityLayer:
         tool_name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        pre_authenticated: AuthContext | None = None,
     ) -> Result[AuthContext, MCPServerError]:
         """Check if a request passes all security checks.
 
@@ -665,16 +676,24 @@ class SecurityLayer:
             tool_name: Name of the tool being called.
             arguments: Arguments for the tool.
             credentials: Client credentials.
+            pre_authenticated: Context established by a transport that already
+                verified the caller's credentials against this layer's own
+                authenticator. When given, step 1 is skipped -- the credential
+                itself is gone by this point, so re-running it would fail a
+                request that was in fact authenticated.
 
         Returns:
             Result containing auth context or security error.
         """
         # 1. Authenticate
-        auth_result = self._authenticator.authenticate(credentials)
-        if auth_result.is_err:
-            return Result.err(auth_result.error)
+        if pre_authenticated is not None:
+            auth_context = pre_authenticated
+        else:
+            auth_result = self._authenticator.authenticate(credentials)
+            if auth_result.is_err:
+                return Result.err(auth_result.error)
 
-        auth_context = auth_result.value
+            auth_context = auth_result.value
 
         # 2. Rate limit (if enabled)
         if (

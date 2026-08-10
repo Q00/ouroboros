@@ -152,6 +152,10 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
         None,
         "claude_mcp",
         None,
+        auth_token="",
+        allowed_hosts=(),
+        allowed_origins=(),
+        workspace_roots=(),
     )
 
 
@@ -174,6 +178,10 @@ def test_public_claude_cli_runtime_selects_cli_worker(monkeypatch):
         None,
         "claude_mcp",
         None,
+        auth_token="",
+        allowed_hosts=(),
+        allowed_origins=(),
+        workspace_roots=(),
     )
 
 
@@ -287,4 +295,15 @@ def test_bare_serve_allows_configured_cli_worker(monkeypatch, tmp_path) -> None:
         result = runner.invoke(app, ["serve"])
 
     assert result.exit_code == 0
-    run_mcp_server.assert_awaited_once_with("localhost", 8080, "stdio", None, "claude_mcp", None)
+    run_mcp_server.assert_awaited_once_with(
+        "localhost",
+        8080,
+        "stdio",
+        None,
+        "claude_mcp",
+        None,
+        auth_token="",
+        allowed_hosts=(),
+        allowed_origins=(),
+        workspace_roots=(),
+    )
