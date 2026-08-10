@@ -302,7 +302,7 @@ class TestResolveNetworkSecurity:
         ("host", "expected"),
         [
             ("LOCALHOST", ["127.0.0.1:*", "localhost:*", "[::1]:*"]),
-            ("LOCALHOST.", ["127.0.0.1:*", "localhost:*", "[::1]:*"]),
+            ("LOCALHOST.", ["localhost.:8080", "localhost.:*"]),
         ],
     )
     def test_nonliteral_loopback_spelling_uses_normalized_explicit_settings(
@@ -337,8 +337,9 @@ class TestIPv6Binds:
             ("[2001:0DB8:0:0:0:0:0:1]", "[2001:db8::1]"),
             ("127.0.0.1", "127.0.0.1"),
             ("example.com", "example.com"),
-            ("EXAMPLE.COM.", "example.com"),
-            ("BÜCHER.Example.", "xn--bcher-kva.example"),
+            ("EXAMPLE.COM.", "example.com."),
+            ("BÜCHER.Example.", "xn--bcher-kva.example."),
+            ("faß.de", "xn--fa-hia.de"),
         ],
     )
     def test_url_authority_normalizes_wire_spelling(self, host: str, expected: str) -> None:
@@ -350,6 +351,22 @@ class TestIPv6Binds:
         settings = build_auth_settings(host=host, port=8080)
 
         assert str(settings.issuer_url).startswith(f"http://[{host.strip('[]')}]:8080")
+
+    @pytest.mark.parametrize(
+        "host",
+        ["Example.COM.", "BÜCHER.Example.", "faß.de"],
+    )
+    def test_auth_settings_match_httpx2_advertised_authority(self, host: str) -> None:
+        """Advertised URLs use the same authority MCP 2 clients serialize."""
+        import httpx2
+
+        wire_request = httpx2.Request("GET", f"http://{host}:8080/mcp")
+        settings = build_auth_settings(host=host, port=8080)
+
+        assert str(settings.issuer_url).rstrip("/") == f"http://{wire_request.headers['host']}"
+        assert str(settings.resource_server_url).rstrip("/") == (
+            f"http://{wire_request.headers['host']}"
+        )
 
     def test_inferred_host_allowlist_is_unambiguous_for_ipv6(self) -> None:
         settings = build_transport_security(
@@ -436,36 +453,25 @@ class TestTransportSecurityBuilder:
         assert settings.allowed_origins == ["https://a.example"]
 
     @pytest.mark.parametrize(
-        ("host", "wire_host", "expected"),
+        ("host", "url"),
         [
-            (
-                "LOCALHOST",
-                "localhost:8080",
-                ["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            ),
-            ("Example.COM.", "example.com:8080", ["example.com:8080", "example.com:*"]),
-            (
-                "BÜCHER.Example.",
-                "xn--bcher-kva.example:8080",
-                ["xn--bcher-kva.example:8080", "xn--bcher-kva.example:*"],
-            ),
-            (
-                "127.0.0.1",
-                "127.0.0.1:8080",
-                ["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            ),
-            (
-                "2001:0DB8:0:0:0:0:0:1",
-                "[2001:db8::1]:8080",
-                ["[2001:db8::1]:8080", "[2001:db8::1]:*"],
-            ),
+            ("LOCALHOST", "http://LOCALHOST:8080/mcp"),
+            ("LOCALHOST.", "http://LOCALHOST.:8080/mcp"),
+            ("Example.COM.", "http://Example.COM.:8080/mcp"),
+            ("BÜCHER.Example.", "http://BÜCHER.Example.:8080/mcp"),
+            ("faß.de", "http://faß.de:8080/mcp"),
+            ("127.0.0.1", "http://127.0.0.1:8080/mcp"),
+            ("2001:0DB8:0:0:0:0:0:1", "http://[2001:db8::1]:8080/mcp"),
         ],
     )
-    def test_inferred_allowlist_matches_normalized_wire_host(
-        self, host: str, wire_host: str, expected: list[str]
+    @pytest.mark.asyncio
+    async def test_inferred_allowlist_accepts_real_httpx2_wire_host(
+        self, host: str, url: str
     ) -> None:
-        """SDK matching is case-sensitive, so inference emits wire-normal form."""
+        """Inference accepts the Host bytes emitted by MCP 2's HTTP runtime."""
+        import httpx2
         from mcp.server.transport_security import TransportSecurityMiddleware
+        from starlette.requests import Request
 
         settings = build_transport_security(
             host=host,
@@ -474,9 +480,18 @@ class TestTransportSecurityBuilder:
             allowed_origins=(),
         )
         middleware = TransportSecurityMiddleware(settings)
+        wire_request = httpx2.Request("GET", url)
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/mcp",
+                "headers": [(name.lower(), value) for name, value in wire_request.headers.raw],
+            }
+        )
 
-        assert settings.allowed_hosts == expected
-        assert middleware._validate_host(wire_host) is True
+        assert middleware._validate_host(wire_request.headers["host"]) is True
+        assert await middleware.validate_request(request) is None
 
     @pytest.mark.asyncio
     async def test_explicit_loopback_origin_is_honored_at_wire_boundary(self) -> None:

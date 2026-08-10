@@ -41,11 +41,12 @@ log = structlog.get_logger(__name__)
 #: and be reached by someone other than the process that started the server.
 NETWORK_TRANSPORTS = ("sse", "streamable-http")
 
-# Bind addresses for which the SDK builds DNS-rebinding protection on its own
-# (``mcp/server/lowlevel/server.py``). It matches these three spellings
-# literally, so any other host -- including other loopback spellings -- is left
-# bare unless settings are passed explicitly.
-_SDK_AUTOPROTECTED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Exact loopback wire spellings covered by the SDK-compatible default Host set.
+# Ouroboros always supplies explicit settings; this identity set only decides
+# when those three interchangeable defaults remain an exact match for the bind
+# authority. An absolute spelling such as ``localhost.`` needs its own dotted
+# wire entry instead.
+_SDK_LOOPBACK_DEFAULT_IDENTITIES = frozenset({"127.0.0.1", "localhost", "::1"})
 _SDK_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 
 # Hostnames that always resolve to this machine. ``""`` is deliberately absent:
@@ -74,7 +75,7 @@ def is_loopback_host(host: str) -> bool:
         this to decide whether credentials are mandatory.
     """
     try:
-        candidate = as_url_authority(host).strip("[]")
+        candidate = _canonical_host_identity(host)
     except UnicodeError:
         return False
     if candidate in _LOOPBACK_HOSTNAMES:
@@ -102,10 +103,10 @@ def as_url_authority(host: str) -> str:
     the bare literal (``::1``) and rejects the bracketed form, while a URL or
     ``Host`` value needs brackets or the trailing ``:port`` cannot be told apart
     from another hextet. DNS names have a similar bind-to-wire boundary: HTTP
-    clients normally lowercase them, encode Unicode labels as IDNA, and omit the
-    DNS root's trailing dot. The SDK compares Host allowlists case-sensitively,
-    so inferred values must use that wire spelling rather than the operator's
-    original bind spelling.
+    clients normally lowercase them and encode Unicode labels using modern IDNA.
+    An absolute DNS name keeps its trailing root dot on the HTTP wire. The SDK
+    compares Host allowlists case-sensitively, so inferred values must use that
+    wire spelling rather than a separately canonicalized DNS identity.
 
     Callers keep the original value for socket binding and pass it through here
     only for URL- and Host-shaped values.
@@ -116,12 +117,28 @@ def as_url_authority(host: str) -> str:
     try:
         address = ipaddress.ip_address(candidate)
     except ValueError:
-        if candidate.endswith("."):
-            candidate = candidate[:-1]
-        return candidate.encode("idna").decode("ascii").lower()
+        # MCP 2's pinned HTTP runtime uses the third-party ``idna`` package,
+        # whose modern processing preserves ``faß`` as ``xn--fa-hia`` rather
+        # than applying Python's built-in IDNA 2003 mapping to ``fass``.
+        import idna
+
+        try:
+            return idna.encode(candidate.lower(), uts46=True).decode("ascii")
+        except idna.IDNAError as exc:
+            raise UnicodeError(f"invalid IDNA hostname: {host!r}") from exc
     if address.version == 6:
         return f"[{address.compressed}]"
     return address.compressed
+
+
+def _canonical_host_identity(host: str) -> str:
+    """Return the canonical form used only for loopback identity checks.
+
+    Wire and advertised URL authorities retain an absolute DNS root dot. DNS
+    identity does not: ``localhost`` and ``localhost.`` classify the same way
+    without forcing their case-sensitive Host values to share one spelling.
+    """
+    return as_url_authority(host).strip("[]").removesuffix(".")
 
 
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
@@ -296,7 +313,12 @@ def build_transport_security(
             )
             raise ValueError(msg)
         authority = as_url_authority(host)
-        if authority.strip("[]") in _SDK_AUTOPROTECTED_HOSTS:
+        wire_identity = authority.strip("[]")
+        canonical_identity = _canonical_host_identity(host)
+        if (
+            canonical_identity in _SDK_LOOPBACK_DEFAULT_IDENTITIES
+            and wire_identity == canonical_identity
+        ):
             # Preserve the SDK's three interchangeable loopback Host spellings
             # while making the Origin policy explicit and fail-closed.
             hosts = list(_SDK_LOOPBACK_ALLOWED_HOSTS)
