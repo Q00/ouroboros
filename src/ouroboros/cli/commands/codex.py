@@ -62,6 +62,7 @@ _CODEX_RUNTIME_ENV = {
     "OUROBOROS_LLM_BACKEND": "codex",
 }
 _CODEX_RUNTIME_SELECTOR_ENV_KEYS = frozenset({*_CODEX_RUNTIME_ENV, "OUROBOROS_RUNTIME"})
+_OUROBOROS_NESTED_ENV_KEY = "_OUROBOROS_NESTED"
 _CODEX_MCP_APPROVAL_MODES = frozenset({"auto", "prompt", "approve"})
 _CODEX_MCP_CONFIG_FIELDS = frozenset(
     {
@@ -794,6 +795,14 @@ def _check_codex_runtime_env(
     env: Mapping[str, str], failures: list[str], *, required: bool
 ) -> None:
     """Validate runtime selectors accompanying a canonical Codex uvx launcher."""
+    if _OUROBOROS_NESTED_ENV_KEY in env:
+        failures.append(
+            "Codex MCP runtime environment persists `_OUROBOROS_NESTED`, but this "
+            "reserved internal recursion sentinel can make the server exit before MCP "
+            "initialization; "
+            "remove it from [mcp_servers.ouroboros.env]"
+        )
+
     hostile = {
         key: value
         for key, value in env.items()

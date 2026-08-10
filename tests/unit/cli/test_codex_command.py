@@ -1363,6 +1363,44 @@ class TestCodexDoctor:
         live_probe.assert_not_awaited()
 
     @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize("nested_value", ["", "0", "false", "1"])
+    def test_check_auto_dispatch_surface_rejects_persisted_nested_guard_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        nested_value: str,
+    ) -> None:
+        """The process-internal recursion guard cannot be persisted in Codex config."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        with (codex_dir / "config.toml").open("a", encoding="utf-8") as config:
+            config.write(f'_OUROBOROS_NESTED = "{nested_value}"\n')
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any("persists `_OUROBOROS_NESTED`" in failure for failure in failures)
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "near_miss_key",
+        ["OUROBOROS_NESTED", "_ouroboros_nested", "_OUROBOROS_NESTED_EXTRA"],
+    )
+    def test_check_auto_dispatch_surface_matches_nested_guard_key_exactly(
+        self,
+        tmp_path: Path,
+        near_miss_key: str,
+    ) -> None:
+        """Unrelated environment keys must not be mistaken for the private sentinel."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        with (codex_dir / "config.toml").open("a", encoding="utf-8") as config:
+            config.write(f'{near_miss_key} = "1"\n')
+
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
     @pytest.mark.parametrize(
         ("replacement", "expected_failure"),
         [
