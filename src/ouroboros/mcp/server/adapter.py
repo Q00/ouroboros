@@ -1996,6 +1996,22 @@ def create_ouroboros_server(
 
         # Fallback: LLM-based evaluation when no structured AC results
         acs = getattr(seed, "acceptance_criteria", None)
+
+        # The mechanical path needs ``### Task N: [COMPLETED]`` markers in the
+        # worker's report.  When they are absent this silently degrades to a
+        # single model verdict covering every AC at once, and on this path
+        # Stage 1 is off by default and Stage 3 is disabled, so nothing else
+        # intervenes.  Say so rather than letting every generation look the
+        # same from the outside.
+        log.warning(
+            "evolution.evaluation.mechanical_skipped",
+            reason="no '### Task N: [COMPLETED|FAILED]' markers in execution output",
+            seed_id=getattr(seed.metadata, "seed_id", None),
+            acceptance_criteria=len(acs) if acs else 0,
+            artifact_chars=len(artifact),
+            consequence=("falling back to one LLM verdict over all acceptance criteria combined"),
+        )
+
         if acs:
             current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(ac_texts(acs)))
         else:
