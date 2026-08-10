@@ -384,31 +384,51 @@ class EvaluationResult:
 
     @property
     def failure_reason(self) -> str | None:
-        """Return the reason for failure, if any.
+        """Return the reason for failure, if any."""
+        return build_failure_reason(
+            final_approved=self.final_approved,
+            stage1_result=self.stage1_result,
+            stage2_result=self.stage2_result,
+            stage3_result=self.stage3_result,
+        )
 
-        Stage 3 is checked before Stage 2 because when Stage 3 ran,
-        it is the authoritative verdict (Stage 2 may have been bypassed
-        via trigger_consensus).
-        """
-        if self.final_approved:
-            return None
-        if self.stage1_result and not self.stage1_result.passed:
-            failed = self.stage1_result.failed_checks
-            return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
-        if self.stage3_result and not self.stage3_result.approved:
-            return (
-                f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
-            )
-        if self.stage2_result and not self.stage2_result.ac_compliance:
-            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
-        if (
-            self.stage2_result
-            and self.stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
-        ):
-            return (
-                "Stage 2 veto: reward-hacking risk "
-                f"{self.stage2_result.reward_hacking_risk:.2f} >= "
-                f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game the "
-                "evaluator rather than solve the real task"
-            )
-        return "Unknown failure"
+
+def build_failure_reason(
+    *,
+    final_approved: bool,
+    stage1_result: MechanicalResult | None,
+    stage2_result: SemanticResult | None,
+    stage3_result: ConsensusResult | None,
+) -> str | None:
+    """Return why an evaluation was rejected, or ``None`` when it passed.
+
+    Stage 3 is checked before Stage 2 because when Stage 3 ran, it is the
+    authoritative verdict (Stage 2 may have been bypassed via
+    ``trigger_consensus``).
+
+    The Stage 2 branch names ``ac_compliance`` explicitly. That boolean is the
+    gate; the semantic score is reported for context and does not decide this
+    branch, so a run can be rejected here while its score reads well above the
+    0.8 used at the approval site.
+    """
+    if final_approved:
+        return None
+    if stage1_result and not stage1_result.passed:
+        failed = stage1_result.failed_checks
+        return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
+    if stage3_result and not stage3_result.approved:
+        return f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+    if stage2_result and not stage2_result.ac_compliance:
+        return (
+            "Stage 2 failed: AC non-compliance "
+            f"(ac_compliance=false; semantic score {stage2_result.score:.2f} "
+            "did not gate this)"
+        )
+    if stage2_result and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD:
+        return (
+            "Stage 2 veto: reward-hacking risk "
+            f"{stage2_result.reward_hacking_risk:.2f} >= "
+            f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game the "
+            "evaluator rather than solve the real task"
+        )
+    return "Unknown failure"
