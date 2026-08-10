@@ -25,24 +25,26 @@ Before running any shell snippet below, define this resolver in the same shell.
 It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
 uses uv as the final fallback. Call `ouroboros_python` directly and quote every
 argument passed to it; the function preserves arguments and heredoc/stdin input.
+Only the probe and child interpreter discard inherited CPython path-selection
+overrides; the caller shell keeps its environment unchanged.
 
 <!-- ouroboros-python-resolver:start -->
 ```bash
 ouroboros_python() {
   if command -v python3 >/dev/null 2>&1 &&
-    (unset PYTHONHOME; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
   then
-    (unset PYTHONHOME; command python3 "$@")
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 "$@")
     return
   fi
   if command -v python >/dev/null 2>&1 &&
-    (unset PYTHONHOME; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
   then
-    (unset PYTHONHOME; command python "$@")
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python "$@")
     return
   fi
   if command -v uv >/dev/null 2>&1; then
-    (unset PYTHONHOME; command uv run --no-project --quiet --python '>=3.12' python "$@")
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command uv run --no-project --quiet --python '>=3.12' python "$@")
     return
   fi
   printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
