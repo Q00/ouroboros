@@ -60,6 +60,7 @@ from ouroboros.auto.web_ownership import (
     _WEB_APP_GOAL_SIGNAL_RE,
     _WEB_SIMILARITY_MODIFIER_RE,
     _goal_first_np_has_ui_shape,
+    _goal_first_np_head,
     _goal_first_np_is_ui_headed,
 )
 
@@ -718,6 +719,10 @@ _GAME_GOAL_SIGNAL_FRAGMENT = (
 # canvas/scene/frame join render/screen as shared rendering vocabulary
 # (#1813 R18) — browser drawing surfaces and scene editors are UIs.
 _GAME_CORE_RE = re.compile(r"\b(?:game\s+loops?|playable|2d\s+games?)\b")
+# Game PRODUCT heads for the goal's artifact noun phrase (#1813 R120):
+# "a browser game" is a game whose host is a browser — hosting vocabulary
+# in the premodifiers cannot re-class the produced artifact.
+_GAME_PRODUCT_HEAD_RE = re.compile(r"(?:games?|platformers?|shooters?)$")
 _GAME_SHARED_SHAPE_RE = re.compile(
     r"\b(?:render(?:s|ing|ed)?|screens?|canvas(?:es)?|scenes?|frames?)\b"
 )
@@ -739,6 +744,16 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     # "frame" and would accept similar embeddings for the other terms.
     if _GAME_CORE_RE.search(visible):
         return True
+    # An explicit game-product goal head owns the class without shared
+    # rendering vocabulary (#1813 R120): "Build a browser game" with
+    # standardized player/score outputs is a game whose host happens to
+    # be a browser. The head is read from the negation-stripped goal so
+    # denials ("not a browser game") cannot claim it, and domain
+    # evidence is still required from the visible text.
+    stripped_goal = _strip_negated_signals(goal, _GAME_GOAL_SIGNAL_FRAGMENT)
+    goal_head = _goal_first_np_head(stripped_goal)
+    if goal_head is not None and _GAME_PRODUCT_HEAD_RE.fullmatch(goal_head):
+        return bool(_GAME_DOMAIN_RE.search(visible))
     if not _GAME_SHARED_SHAPE_RE.search(visible):
         return False
     # Shared render/screen/frame vocabulary requires POSITIVE game

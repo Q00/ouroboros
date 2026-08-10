@@ -671,6 +671,8 @@ _NON_PRODUCT_HEAD_WORDS = frozenset(
         "frameworks",
         "runner",
         "runners",
+        "worker",
+        "workers",
         "cli",
         "clis",
         "tool",
