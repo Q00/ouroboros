@@ -205,6 +205,8 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         failures.append("Codex config does not contain [mcp_servers.ouroboros]")
         return failures
 
+    _check_mcp_activation_surface(ouroboros_entry, failures)
+
     url = ouroboros_entry.get("url")
     if isinstance(url, str) and url.strip():
         if live_mcp:
@@ -276,6 +278,63 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         )
 
     return failures
+
+
+def _check_mcp_activation_surface(
+    ouroboros_entry: Mapping[str, object], failures: list[str]
+) -> None:
+    """Validate the Codex fields that decide whether tools are reachable.
+
+    Codex defaults an omitted ``enabled`` field to true.  When an
+    ``enabled_tools`` allow-list is present, only its members are registered;
+    ``disabled_tools`` is then applied as a deny-list.  A direct live launch
+    bypasses all three filters, so doctor must validate their persisted types
+    and effects before it considers probing the configured transport.
+    """
+    enabled = ouroboros_entry.get("enabled", True)
+    if not isinstance(enabled, bool):
+        failures.append("[mcp_servers.ouroboros].enabled must be a boolean")
+    elif not enabled:
+        failures.append("[mcp_servers.ouroboros] is disabled (`enabled = false`)")
+
+    tool_filters: dict[str, frozenset[str]] = {}
+    for field in ("enabled_tools", "disabled_tools"):
+        if field not in ouroboros_entry:
+            continue
+        value = ouroboros_entry[field]
+        if not isinstance(value, list):
+            failures.append(f"[mcp_servers.ouroboros].{field} must be an array of strings")
+            continue
+        invalid_values = [
+            f"index {index} ({type(tool_name).__name__})"
+            for index, tool_name in enumerate(value)
+            if not isinstance(tool_name, str)
+        ]
+        if invalid_values:
+            failures.append(
+                f"[mcp_servers.ouroboros].{field} contains non-string values: "
+                + ", ".join(invalid_values)
+            )
+            continue
+        tool_filters[field] = frozenset(cast(list[str], value))
+
+    enabled_tools = tool_filters.get("enabled_tools")
+    if enabled_tools is not None:
+        missing_tools = sorted(_REQUIRED_CODEX_AUTO_TOOLS - enabled_tools)
+        if missing_tools:
+            failures.append(
+                "[mcp_servers.ouroboros].enabled_tools omits required auto tools: "
+                + ", ".join(missing_tools)
+            )
+
+    disabled_tools = tool_filters.get("disabled_tools")
+    if disabled_tools is not None:
+        blocked_tools = sorted(_REQUIRED_CODEX_AUTO_TOOLS & disabled_tools)
+        if blocked_tools:
+            failures.append(
+                "[mcp_servers.ouroboros].disabled_tools blocks required auto tools: "
+                + ", ".join(blocked_tools)
+            )
 
 
 def _check_mcp_runtime_dependency_surface(
@@ -858,6 +917,11 @@ async def _wait_for_stdio_mcp_process_group_exit(process_group_id: int) -> None:
             os.killpg(process_group_id, 0)
         except ProcessLookupError:
             return
+        except PermissionError:
+            # EPERM still proves that the group exists.  This can occur when
+            # the session-leading wrapper exits before a surviving child and
+            # the probe no longer owns permission to inspect that group.
+            pass
         await asyncio.sleep(0.02)
 
 

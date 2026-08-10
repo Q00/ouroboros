@@ -538,6 +538,137 @@ class TestCodexDoctor:
         assert any("uses `url`" in failure for failure in failures)
         assert any("verifies only stdio `command` entries" in failure for failure in failures)
 
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("activation_config", "expected_failure"),
+        [
+            ("enabled = false\n", "is disabled (`enabled = false`)"),
+            (
+                'disabled_tools = ["ouroboros_start_auto"]\n',
+                ".disabled_tools blocks required auto tools: ouroboros_start_auto",
+            ),
+            (
+                'enabled_tools = ["ouroboros_start_auto"]\n',
+                ".enabled_tools omits required auto tools:",
+            ),
+        ],
+        ids=["server-disabled", "required-tool-denied", "required-tools-not-allowed"],
+    )
+    def test_check_auto_dispatch_surface_rejects_inactive_mcp_contract_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        activation_config: str,
+        expected_failure: str,
+    ) -> None:
+        """A manually launchable server is not proof that Codex exposes its tools."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            + activation_config
+            + 'command = "uvx"\n'
+            + 'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any(expected_failure in failure for failure in failures)
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    def test_check_auto_dispatch_surface_accepts_positive_mcp_tool_filters(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+    ) -> None:
+        """Allow-lists may include extras and deny-lists may block unrelated tools."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        enabled_tools = sorted({*_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST, "unrelated_extra"})
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            "enabled = true\n"
+            f"enabled_tools = {json.dumps(enabled_tools)}\n"
+            'disabled_tools = ["unrelated_disabled"]\n'
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp) == []
+
+        if live_mcp:
+            live_probe.assert_awaited_once()
+        else:
+            live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("activation_config", "expected_failure"),
+        [
+            ('enabled = "false"\n', ".enabled must be a boolean"),
+            ('enabled_tools = "ouroboros_start_auto"\n', ".enabled_tools must be an array"),
+            (
+                'enabled_tools = ["ouroboros_start_auto", 7]\n',
+                ".enabled_tools contains non-string values: index 1 (int)",
+            ),
+            ('disabled_tools = "unrelated"\n', ".disabled_tools must be an array"),
+            (
+                'disabled_tools = ["unrelated", false]\n',
+                ".disabled_tools contains non-string values: index 1 (bool)",
+            ),
+        ],
+        ids=[
+            "untyped-enabled",
+            "scalar-enabled-tools",
+            "untyped-enabled-tool",
+            "scalar-disabled-tools",
+            "untyped-disabled-tool",
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_untyped_activation_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        activation_config: str,
+        expected_failure: str,
+    ) -> None:
+        """Doctor mirrors Codex's boolean and array-of-string config types."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            + activation_config
+            + 'command = "uvx"\n'
+            + 'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any(expected_failure in failure for failure in failures)
+        live_probe.assert_not_awaited()
+
     def test_check_auto_dispatch_surface_rejects_custom_command_mcp_entry(
         self,
         tmp_path: Path,
@@ -1394,6 +1525,67 @@ class TestCodexDoctor:
                 break
             time.sleep(0.02)
         assert not live_pids
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+    @pytest.mark.parametrize(
+        ("probe_errors", "expected_sleeps"),
+        [
+            ([ProcessLookupError()], 0),
+            ([PermissionError(), ProcessLookupError()], 1),
+        ],
+        ids=["missing-group-is-gone", "inaccessible-group-still-exists"],
+    )
+    def test_wait_for_stdio_mcp_process_group_exit_classifies_probe_errors(
+        self,
+        probe_errors: list[OSError],
+        expected_sleeps: int,
+    ) -> None:
+        """EPERM is existence evidence while ESRCH proves the group is gone."""
+        sleep = AsyncMock()
+        with (
+            patch("ouroboros.cli.commands.codex.os.killpg", side_effect=probe_errors) as probe,
+            patch("ouroboros.cli.commands.codex.asyncio.sleep", sleep),
+        ):
+            asyncio.run(codex_command._wait_for_stdio_mcp_process_group_exit(4321))
+
+        assert probe.call_count == len(probe_errors)
+        assert sleep.await_count == expected_sleeps
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+    def test_terminate_stdio_mcp_process_kills_group_when_wrapper_exits_first(self) -> None:
+        """A reaped wrapper must not prevent TERM -> wait -> KILL for its child group."""
+
+        class _WrapperProcess:
+            stdin = None
+            pid = 4321
+            returncode: int | None = None
+            wait = AsyncMock()
+
+        proc = _WrapperProcess()
+        signal_forces: list[bool] = []
+
+        def _record_signal(process: _WrapperProcess, *, force: bool) -> None:
+            assert process is proc
+            signal_forces.append(force)
+            if not force:
+                process.returncode = 0
+
+        group_wait = AsyncMock(side_effect=TimeoutError)
+        with (
+            patch(
+                "ouroboros.cli.commands.codex._signal_stdio_mcp_process",
+                side_effect=_record_signal,
+            ),
+            patch(
+                "ouroboros.cli.commands.codex._wait_for_stdio_mcp_process_group_exit",
+                group_wait,
+            ),
+        ):
+            asyncio.run(codex_command._terminate_stdio_mcp_process(proc))  # type: ignore[arg-type]
+
+        assert signal_forces == [False, True]
+        group_wait.assert_awaited_once_with(proc.pid)
+        proc.wait.assert_not_awaited()
 
     def test_list_stdio_mcp_tool_names_preserves_content_length_fallback(
         self,
