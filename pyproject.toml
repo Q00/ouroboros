@@ -1,7 +1,7 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Pins the acceptance spec before the run and withholds each criterion's verify command and expected output from the worker. Works with Claude Code, Codex CLI, OpenCode and 10 more runtimes."
+description = "Pins an acceptance spec and omits any verify command or expected output from the worker. Works with Claude Code, Codex CLI, OpenCode and 10 more runtimes."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }
