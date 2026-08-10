@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
 from unittest.mock import patch
 
@@ -14,6 +14,23 @@ from ouroboros.cli import codex_http_mcp as mcp
 
 IDENTITY = "S-1-5-21-100-200-300-400"
 LAUNCHER = ("ouroboros.exe", ["mcp", "serve"])
+SCHEDULER = r"C:\Windows\System32\schtasks.exe"
+POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+class _WindowsPath(PureWindowsPath):
+    """Pure Windows paths with a mockable filesystem predicate."""
+
+    def is_file(self) -> bool:
+        return False
+
+
+class _NoEnvironment:
+    def __getitem__(self, name: str) -> str:
+        raise AssertionError(f"unexpected environment lookup: {name}")
+
+    def get(self, name: str, _default: object = None) -> object:
+        raise AssertionError(f"unexpected environment lookup: {name}")
 
 
 class _Response:
@@ -79,7 +96,8 @@ def _generation(root: Path, mode: str = "serve") -> tuple[str, str | None]:
 
 
 def _task_xml(root: Path, generation: str, token: str) -> tuple[str, str]:
-    arguments = mcp._task_arguments(LAUNCHER[1], root, generation, token)
+    action = mcp._task_arguments(LAUNCHER[1], root, generation, token)
+    arguments = " ".join(mcp._windows_command_line_argument(value) for value in action)
     return mcp._create_task_xml(IDENTITY, LAUNCHER[0], arguments), arguments
 
 
@@ -316,7 +334,10 @@ def test_recovery_restarts_live_listenerless_replacement_after_expiry(tmp_path: 
     manifest["expires_ns"] = 0
     manifest_path.write_text(json.dumps(manifest))
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._ensure_task", return_value=mcp._task_name(prior)),
         patch(
@@ -342,7 +363,10 @@ def test_recovery_rejects_live_replacement_that_owns_listener(tmp_path: Path) ->
     mcp._abort_generation(root, generation)
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._process_identity_alive", return_value=True),
         patch("ouroboros.cli.codex_http_mcp.tcp_listener_owned_by", return_value=True),
@@ -370,7 +394,10 @@ def test_recovery_requires_token_bound_ready_proof(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest))
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._ensure_task", return_value=mcp._task_name(prior)),
         patch(
@@ -397,7 +424,10 @@ def test_provision_waits_for_standby_before_prior_stop(tmp_path: Path) -> None:
         return True
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -427,7 +457,10 @@ def test_serve_commit_authorization_failure_aborts_new_generation(tmp_path: Path
     mcp._commit_generation(root, prior)
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -452,7 +485,7 @@ def test_serve_commit_authorization_failure_aborts_new_generation(tmp_path: Path
     aborted = [path for path in (root / mcp._GENERATIONS_NAME).iterdir() if path.name != prior]
     assert len(aborted) == 1
     assert (aborted[0] / "abort.json").is_file()
-    restart_prior.assert_called_once_with("schtasks.exe", root, IDENTITY)
+    restart_prior.assert_called_once_with(SCHEDULER, root, IDENTITY)
     wait_receipt.assert_any_call(root, prior, "ready", prior_token)
 
 
@@ -476,7 +509,10 @@ def test_serve_rollback_reports_unverified_predecessor_recovery(
         return receipt_generation != prior or prior_ready
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -515,7 +551,10 @@ def test_disabled_commit_authorization_failure_aborts_new_generation(tmp_path: P
     mcp._commit_generation(root, prior)
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -547,7 +586,10 @@ def test_serve_post_commit_authorization_failure_restores_predecessor(tmp_path: 
         authorized = False
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -598,7 +640,10 @@ def test_serve_post_commit_authorization_failure_without_predecessor_stops_repla
         authorized = False
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -648,7 +693,10 @@ def test_disabled_post_commit_authorization_failure_restores_predecessor(tmp_pat
         authorized = False
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._bootstrap"),
@@ -726,7 +774,7 @@ def test_disable_compensation_requires_death_then_restarts_and_verifies_prior(
         patch("ouroboros.cli.codex_http_mcp._wait_for_receipt", return_value=ready) as wait_ready,
     ):
         error = mcp._compensate_disabled_transition(
-            "schtasks.exe", IDENTITY, root, disabled, prior, (42, 99)
+            SCHEDULER, IDENTITY, root, disabled, prior, (42, 99)
         )
 
     assert expected in error
@@ -739,7 +787,7 @@ def test_disable_compensation_requires_death_then_restarts_and_verifies_prior(
         restart_prior.assert_not_called()
         wait_ready.assert_not_called()
     else:
-        restart_prior.assert_called_once_with("schtasks.exe", root, IDENTITY)
+        restart_prior.assert_called_once_with(SCHEDULER, root, IDENTITY)
         if restart:
             wait_ready.assert_called_once_with(root, prior, "ready", prior_token)
         else:
@@ -752,7 +800,10 @@ def test_disable_does_not_succeed_when_prior_stop_is_unverified(tmp_path: Path) 
     mcp._commit_generation(root, prior)
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
@@ -768,9 +819,7 @@ def test_disable_does_not_succeed_when_prior_stop_is_unverified(tmp_path: Path) 
 
     assert error == "Existing MCP server did not stop. Prior HTTP service was restored."
     disabled = max((root / mcp._GENERATIONS_NAME).iterdir(), key=lambda path: path.name)
-    compensate.assert_called_once_with(
-        "schtasks.exe", IDENTITY, root, disabled.name, prior, (42, 99)
-    )
+    compensate.assert_called_once_with(SCHEDULER, IDENTITY, root, disabled.name, prior, (42, 99))
 
 
 def test_disable_fails_closed_without_committing_when_prior_ready_identity_is_missing(
@@ -781,7 +830,10 @@ def test_disable_fails_closed_without_committing_when_prior_ready_identity_is_mi
     mcp._commit_generation(root, prior)
 
     with (
-        patch("ouroboros.cli.codex_http_mcp.shutil.which", return_value="schtasks.exe"),
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
         patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
         patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
         patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
@@ -819,6 +871,266 @@ def test_task_xml_rejects_unmodeled_root_and_exec_content(tmp_path: Path) -> Non
         LAUNCHER[0],
         arguments,
     )
+
+
+def test_persisted_action_is_reused_for_creation_and_recovery(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    created: list[tuple[object, ...]] = []
+
+    def ensure(*args: object) -> str:
+        created.append(args)
+        return "new-task"
+
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
+        patch("ouroboros.cli.codex_http_mcp._current_windows_identity", return_value=IDENTITY),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._bootstrap"),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=None),
+        patch("ouroboros.cli.codex_http_mcp._ensure_task", side_effect=ensure),
+        patch(
+            "ouroboros.cli.codex_http_mcp.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_receipt", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_http_readiness", return_value=True),
+    ):
+        assert mcp.provision_windows_codex_mcp_http(tmp_path, LAUNCHER) is None
+
+    generation, manifest, _ = mcp._desired_generation(root)
+    action = manifest["arguments"]
+    assert isinstance(action, list)
+    assert all(isinstance(argument, str) for argument in action)
+    assert created[0][4:6] == (manifest["command"], action)
+    assert action[:12] == [
+        *LAUNCHER[1],
+        "--runtime",
+        "codex",
+        "--llm-backend",
+        "codex",
+        "--transport",
+        "streamable-http",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+    ]
+    assert "--codex-lifecycle-token" in action
+
+    persisted_arguments = " ".join(mcp._windows_command_line_argument(value) for value in action)
+    xml = mcp._create_task_xml(IDENTITY, manifest["command"], persisted_arguments)
+    old_arguments = " ".join(mcp._windows_command_line_argument(value) for value in LAUNCHER[1])
+    assert not mcp._is_owned_task(xml, IDENTITY, manifest["command"], old_arguments)
+    assert mcp._is_owned_task(xml, IDENTITY, manifest["command"], persisted_arguments)
+
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._ensure_task",
+            return_value=mcp._task_name(generation),
+        ) as restart,
+        patch(
+            "ouroboros.cli.codex_http_mcp.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ),
+    ):
+        assert mcp._restart_prior(SCHEDULER, root, IDENTITY)
+    assert restart.call_args.args[4:6] == (manifest["command"], action)
+
+
+def test_windows_system_executables_non_windows_skips_path_and_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with (
+        patch("ouroboros.cli.codex_http_mcp.sys.platform", "linux"),
+        patch("ouroboros.cli.codex_http_mcp.ctypes.WinDLL", create=True) as windll,
+        patch("ouroboros.cli.codex_http_mcp.os.getcwd", side_effect=AssertionError),
+        patch("ouroboros.cli.codex_http_mcp.os.environ", _NoEnvironment()),
+    ):
+        assert mcp._windows_system_executables() is None
+    windll.assert_not_called()
+
+
+def test_windows_system_executables_uses_only_system32_utilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for impostor in ("schtasks.exe", "powershell.exe"):
+        (tmp_path / impostor).write_text("impostor")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    system_directory = _WindowsPath(r"C:\Windows\System32")
+    schtasks = system_directory / "schtasks.exe"
+    powershell = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    expected = {schtasks, powershell}
+
+    def get_system_directory(buffer: object, _size: int) -> int:
+        buffer.value = str(system_directory)
+        return len(str(system_directory))
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.sys.platform", "win32"),
+        patch("ouroboros.cli.codex_http_mcp.ctypes.WinDLL", create=True) as windll,
+        patch("ouroboros.cli.codex_http_mcp.Path", _WindowsPath),
+        patch.object(
+            _WindowsPath,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path in expected,
+        ) as is_file,
+        patch("ouroboros.cli.codex_http_mcp.os.getcwd", side_effect=AssertionError),
+        patch("ouroboros.cli.codex_http_mcp.os.environ", _NoEnvironment()),
+    ):
+        windll.return_value.GetSystemDirectoryW.side_effect = get_system_directory
+        assert mcp._windows_system_executables() == (str(schtasks), str(powershell))
+
+    windll.assert_called_once_with("kernel32", use_last_error=True)
+    assert [call.args[0] for call in is_file.call_args_list] == [schtasks, powershell]
+
+
+@pytest.mark.parametrize(
+    ("directory", "result", "failure"),
+    [
+        (None, 0, None),
+        (None, 32768, None),
+        (None, None, OSError("GetSystemDirectoryW failed")),
+        (r"relative\System32", len(r"relative\System32"), None),
+    ],
+)
+def test_windows_system_executables_rejects_failed_or_invalid_system_directory(
+    directory: str | None, result: int | None, failure: OSError | None
+) -> None:
+    def get_system_directory(buffer: object, _size: int) -> int:
+        if failure is not None:
+            raise failure
+        if directory is not None:
+            buffer.value = directory
+        assert result is not None
+        return result
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.sys.platform", "win32"),
+        patch("ouroboros.cli.codex_http_mcp.ctypes.WinDLL", create=True) as windll,
+        patch("ouroboros.cli.codex_http_mcp.Path", _WindowsPath),
+    ):
+        windll.return_value.GetSystemDirectoryW.side_effect = get_system_directory
+        assert mcp._windows_system_executables() is None
+
+
+@pytest.mark.parametrize(
+    ("available", "checked"),
+    [
+        (
+            {_WindowsPath(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")},
+            [_WindowsPath(r"C:\Windows\System32\schtasks.exe")],
+        ),
+        (
+            {_WindowsPath(r"C:\Windows\System32\schtasks.exe")},
+            [
+                _WindowsPath(r"C:\Windows\System32\schtasks.exe"),
+                _WindowsPath(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            ],
+        ),
+    ],
+)
+def test_windows_system_executables_rejects_missing_required_utility(
+    available: set[_WindowsPath], checked: list[_WindowsPath]
+) -> None:
+    system_directory = _WindowsPath(r"C:\Windows\System32")
+
+    def get_system_directory(buffer: object, _size: int) -> int:
+        buffer.value = str(system_directory)
+        return len(str(system_directory))
+
+    with (
+        patch("ouroboros.cli.codex_http_mcp.sys.platform", "win32"),
+        patch("ouroboros.cli.codex_http_mcp.ctypes.WinDLL", create=True) as windll,
+        patch("ouroboros.cli.codex_http_mcp.Path", _WindowsPath),
+        patch.object(
+            _WindowsPath, "is_file", autospec=True, side_effect=lambda path: path in available
+        ) as is_file,
+    ):
+        windll.return_value.GetSystemDirectoryW.side_effect = get_system_directory
+        assert mcp._windows_system_executables() is None
+
+    assert [call.args[0] for call in is_file.call_args_list] == checked
+
+
+def test_operate_fails_closed_without_utility_resolver(tmp_path: Path) -> None:
+    with (
+        patch("ouroboros.cli.codex_http_mcp._windows_system_executables", return_value=None),
+        patch("ouroboros.cli.codex_http_mcp.subprocess.run") as run,
+        patch("ouroboros.cli.codex_http_mcp._windows_operation_lock") as operation_lock,
+        patch("ouroboros.cli.codex_http_mcp._bootstrap") as bootstrap,
+        patch("ouroboros.cli.codex_http_mcp._publish_generation") as publish_generation,
+    ):
+        assert (
+            mcp._operate(tmp_path, LAUNCHER, "serve")
+            == "Could not find Windows Task Scheduler or current user."
+        )
+
+    run.assert_not_called()
+    operation_lock.assert_not_called()
+    bootstrap.assert_not_called()
+    publish_generation.assert_not_called()
+
+
+def test_recovery_fails_closed_without_utility_resolver() -> None:
+    with (
+        patch("ouroboros.cli.codex_http_mcp._windows_system_executables", return_value=None),
+        patch("ouroboros.cli.codex_http_mcp.subprocess.run") as run,
+        patch("ouroboros.cli.codex_http_mcp._abort_generation") as abort_generation,
+        patch("ouroboros.cli.codex_http_mcp._restore_committed_serve_predecessor") as restore,
+    ):
+        assert not mcp.recover_managed_lifecycle("ignored", "ignored")
+
+    run.assert_not_called()
+    abort_generation.assert_not_called()
+    restore.assert_not_called()
+
+
+def test_lifecycle_uses_only_mocked_system_directory_utilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for impostor in ("schtasks.exe", "powershell.exe"):
+        (tmp_path / impostor).write_text("impostor")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    calls: list[list[str]] = []
+
+    def run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        stdout = IDENTITY if arguments[0] == POWERSHELL else ""
+        return subprocess.CompletedProcess(arguments, 0, stdout=stdout)
+
+    root = _root(tmp_path)
+    with (
+        patch(
+            "ouroboros.cli.codex_http_mcp._windows_system_executables",
+            return_value=(SCHEDULER, POWERSHELL),
+        ),
+        patch("ouroboros.cli.codex_http_mcp._physical_config_dir", return_value=tmp_path),
+        patch("ouroboros.cli.codex_http_mcp._bootstrap"),
+        patch("ouroboros.cli.codex_http_mcp._windows_directory_lease"),
+        patch("ouroboros.cli.codex_http_mcp._legacy_artifacts_present", return_value=False),
+        patch("ouroboros.cli.codex_http_mcp._latest_ready_identity", return_value=None),
+        patch("ouroboros.cli.codex_http_mcp._ensure_task", return_value="new-task"),
+        patch("ouroboros.cli.codex_http_mcp.subprocess.run", side_effect=run),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_receipt", return_value=True),
+        patch("ouroboros.cli.codex_http_mcp._wait_for_http_readiness", return_value=True),
+    ):
+        assert mcp.provision_windows_codex_mcp_http(tmp_path, LAUNCHER) is None
+
+    assert root.is_dir()
+    assert calls
+    assert POWERSHELL in (call[0] for call in calls)
+    assert SCHEDULER in (call[0] for call in calls)
+    assert all(call[0] in {SCHEDULER, POWERSHELL} for call in calls)
 
 
 def test_task_xml_is_unique_direct_command_and_exactly_owned(tmp_path: Path) -> None:
@@ -873,7 +1185,12 @@ def test_task_create_race_accepts_only_exact_owned_task(tmp_path: Path) -> None:
         ) as run,
     ):
         mcp._ensure_task(
-            "schtasks.exe", IDENTITY, root, generation, LAUNCHER[0], LAUNCHER[1], token
+            SCHEDULER,
+            IDENTITY,
+            root,
+            generation,
+            LAUNCHER[0],
+            mcp._task_arguments(LAUNCHER[1], root, generation, token),
         )
     assert all("/F" not in call.args[0] for call in run.call_args_list)
 

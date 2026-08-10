@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import stat
 import subprocess
 import sys
@@ -179,11 +178,39 @@ def _windows_command_line_argument(value: str) -> str:
     return "".join(escaped)
 
 
-def _current_windows_identity() -> str | None:
+def _windows_system_executables() -> tuple[str, str] | None:
+    """Return trusted Scheduler and PowerShell executables from Windows System32."""
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_system_directory = kernel32.GetSystemDirectoryW
+        get_system_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+        get_system_directory.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_system_directory(buffer, len(buffer))
+        if length == 0 or length >= len(buffer):
+            return None
+        system_directory = Path(buffer.value)
+        schtasks = system_directory / "schtasks.exe"
+        powershell = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if not system_directory.is_absolute() or not schtasks.is_file() or not powershell.is_file():
+            return None
+        return str(schtasks), str(powershell)
+    except (AttributeError, OSError):
+        return None
+
+
+def _current_windows_identity(powershell: str | None = None) -> str | None:
+    if powershell is None:
+        executables = _windows_system_executables()
+        if executables is None:
+            return None
+        _, powershell = executables
     try:
         result = subprocess.run(
             [
-                "powershell.exe",
+                powershell,
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
@@ -411,11 +438,37 @@ def _generation_name(generations: Path) -> str:
     return f"gen-{sequence:020d}-{uuid.uuid4().hex}"
 
 
+def _normalized_managed_launcher(launcher: tuple[str, list[str]]) -> tuple[str, list[str]]:
+    command, arguments = launcher
+    managed_options = (
+        ("--runtime", "codex"),
+        ("--llm-backend", "codex"),
+        ("--transport", "streamable-http"),
+        ("--host", "127.0.0.1"),
+        ("--port", "8765"),
+    )
+    managed_names = {option for option, _ in managed_options}
+    normalized: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        option = argument.split("=", 1)[0]
+        if option in managed_names:
+            index += 2 if argument == option and index + 1 < len(arguments) else 1
+            continue
+        normalized.append(argument)
+        index += 1
+    normalized.extend(value for pair in managed_options for value in pair)
+    return command, normalized
+
+
 def _publish_generation(
     root: Path, mode: str, launcher: tuple[str, list[str]] | None = None
 ) -> tuple[str, str | None]:
     if mode not in {"serve", "disabled"} or (mode == "serve" and launcher is None):
         raise ValueError("Invalid lifecycle generation.")
+    if launcher is not None:
+        launcher = _normalized_managed_launcher(launcher)
     generations = root / _GENERATIONS_NAME
     prior = _desired_generation(root)
     _safe_descendant(root, generations, directory=True)
@@ -439,8 +492,9 @@ def _publish_generation(
             if prior is not None and prior[2] and prior[1].get("mode") == "serve":
                 manifest["prior_generation"] = prior[0]
             if launcher is not None:
+                assert token is not None
                 manifest["command"] = launcher[0]
-                manifest["arguments"] = launcher[1]
+                manifest["arguments"] = _task_arguments(launcher[1], root, generation, token)
             if token is not None:
                 manifest["prepare_token"] = token
             _write_new(
@@ -635,8 +689,8 @@ def _task_name(generation: str) -> str:
     return f"Ouroboros Codex MCP v1 {generation}"
 
 
-def _task_arguments(arguments: list[str], root: Path, generation: str, token: str) -> str:
-    values = [
+def _task_arguments(arguments: list[str], root: Path, generation: str, token: str) -> list[str]:
+    return [
         *arguments,
         "--codex-lifecycle-root",
         str(root),
@@ -647,7 +701,6 @@ def _task_arguments(arguments: list[str], root: Path, generation: str, token: st
         "--codex-lifecycle-token",
         token,
     ]
-    return " ".join(_windows_command_line_argument(value) for value in values)
 
 
 def _children(element: ElementTree.Element, name: str) -> list[ElementTree.Element]:
@@ -824,10 +877,9 @@ def _ensure_task(
     generation: str,
     command: str,
     arguments: list[str],
-    token: str,
 ) -> str:
     name = _task_name(generation)
-    task_args = _task_arguments(arguments, root, generation, token)
+    task_args = " ".join(_windows_command_line_argument(value) for value in arguments)
     existing = _task_xml(schtasks, name)
     if existing is not None:
         if not _is_owned_task(existing, identity, command, task_args, name):
@@ -1173,8 +1225,7 @@ def _restart_prior(schtasks: str, root: Path, identity: str) -> bool:
         or not all(isinstance(argument, str) for argument in arguments)
     ):
         return False
-    token = manifest.get("prepare_token") if isinstance(manifest.get("prepare_token"), str) else ""
-    name = _ensure_task(schtasks, identity, root, desired[0], command, arguments, token)
+    name = _ensure_task(schtasks, identity, root, desired[0], command, arguments)
     result = subprocess.run(
         [schtasks, "/Run", "/TN", name], capture_output=True, text=True, check=False
     )
@@ -1196,9 +1247,12 @@ def _restore_committed_serve_predecessor(schtasks: str, root: Path, identity: st
 
 def recover_managed_lifecycle(root_value: str, generation: str) -> bool:
     """Restore a failed prepare once its replacement no longer owns the listener."""
-    schtasks = shutil.which("schtasks")
-    identity = _current_windows_identity()
-    if schtasks is None or identity is None:
+    executables = _windows_system_executables()
+    if executables is None:
+        return False
+    schtasks, powershell = executables
+    identity = _current_windows_identity(powershell)
+    if identity is None:
         return False
 
     try:
@@ -1288,8 +1342,12 @@ def _operate(
     *,
     commit_authorized: Callable[[], bool] | None = None,
 ) -> str | None:
-    schtasks, identity = (shutil.which("schtasks"), _current_windows_identity())
-    if schtasks is None or identity is None:
+    executables = _windows_system_executables()
+    if executables is None:
+        return "Could not find Windows Task Scheduler or current user."
+    schtasks, powershell = executables
+    identity = _current_windows_identity(powershell)
+    if identity is None:
         return "Could not find Windows Task Scheduler or current user."
     generation: str | None = None
     root: Path | None = None
@@ -1316,6 +1374,8 @@ def _operate(
             _check_ancestors(root)
             _require_directory(root)
             prior = _desired_generation(root)
+            if launcher is not None:
+                launcher = _normalized_managed_launcher(launcher)
             has_committed_serve_predecessor = (
                 prior is not None and prior[2] and prior[1].get("mode") == "serve"
             )
@@ -1361,17 +1421,15 @@ def _operate(
                 return None
 
             assert launcher is not None and token is not None
-            command, arguments = (launcher[0], list(launcher[1]))
-            for option, value in (
-                ("--runtime", "codex"),
-                ("--llm-backend", "codex"),
-                ("--transport", "streamable-http"),
-                ("--host", "127.0.0.1"),
-                ("--port", "8765"),
+            manifest = _load_generation(root, generation)
+            command, arguments = manifest.get("command"), manifest.get("arguments")
+            if (
+                not isinstance(command, str)
+                or not isinstance(arguments, list)
+                or not all(isinstance(argument, str) for argument in arguments)
             ):
-                if option not in arguments:
-                    arguments.extend((option, value))
-            name = _ensure_task(schtasks, identity, root, generation, command, arguments, token)
+                raise OSError("Lifecycle manifest ownership mismatch.")
+            name = _ensure_task(schtasks, identity, root, generation, command, arguments)
             if (
                 subprocess.run(
                     [schtasks, "/Run", "/TN", name],
