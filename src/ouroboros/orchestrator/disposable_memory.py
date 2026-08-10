@@ -28,6 +28,7 @@ class DisposableMemory:
     artifact_store: ContentAddressedArtifactStore
     event_store: Any | None = None
     checkpoint_store: CheckpointStore | None = None
+    ensure_ready: Callable[[], Awaitable[None]] | None = None
 
     async def run(
         self,
@@ -40,6 +41,8 @@ class DisposableMemory:
         timeout: float | None = None,
     ) -> DisposableResultEnvelope:
         """Execute child work and return only a bounded result envelope."""
+        if self.ensure_ready is not None:
+            await self.ensure_ready()
         resolved_contract_id = contract_id or new_call_id()
         async with asyncio.timeout(timeout):
             return await self._run_within_timeout(

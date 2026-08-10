@@ -726,6 +726,11 @@ class MCPServerAdapter:
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
         self._owned_resources: list[Any] = []  # objects with async close()
+        self._startup_resources: list[Any] = []  # objects with async initialize()
+        self._lifecycle_lock = asyncio.Lock()
+        self._startup_complete = False
+        self._startup_error: Exception | None = None
+        self._shutdown_complete = False
         self._runtime_context: AgentRuntimeContext | None = None
         self._job_manager: JobManager | None = None
         self._last_tool_activity = time.monotonic()
@@ -920,6 +925,7 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
+            await self.startup()
             timeout = getattr(handler, "TIMEOUT_SECONDS", None)
 
             async def invoke_handler() -> Result[MCPToolResult, MCPServerError]:
@@ -1119,6 +1125,7 @@ class MCPServerAdapter:
         if _OuroborosSDKServer is None:  # pragma: no cover - mirrors import guard.
             raise ImportError("MCP SDK server boundary unavailable")
 
+        await self.startup()
         self._mcp_server = _OuroborosSDKServer(
             self,
             name=self._name,
@@ -1398,9 +1405,42 @@ class MCPServerAdapter:
         """Attach the session-scoped runtime context to the server object graph."""
         self._runtime_context = context
 
-    def register_owned_resource(self, resource: Any) -> None:
-        """Register a resource whose ``close()`` will be called on shutdown."""
+    def register_owned_resource(
+        self,
+        resource: Any,
+        *,
+        initialize_on_startup: bool = False,
+    ) -> None:
+        """Register a resource owned across explicit startup and shutdown."""
+        if self._startup_complete or self._startup_error is not None:
+            raise RuntimeError("Cannot register resources after server startup")
+        if self._shutdown_complete:
+            raise RuntimeError("Cannot register resources after server shutdown")
+        if initialize_on_startup and not callable(getattr(resource, "initialize", None)):
+            raise TypeError("Startup resources must provide initialize()")
         self._owned_resources.append(resource)
+        if initialize_on_startup:
+            self._startup_resources.append(resource)
+
+    async def startup(self) -> None:
+        """Initialize startup-owned resources exactly once before request work."""
+        async with self._lifecycle_lock:
+            if self._shutdown_complete:
+                raise RuntimeError("Cannot start a shut down MCP server")
+            if self._startup_complete:
+                return
+            if self._startup_error is not None:
+                raise self._startup_error
+            try:
+                for resource in self._startup_resources:
+                    initialize = resource.initialize
+                    initialized = initialize()
+                    if inspect.isawaitable(initialized):
+                        await initialized
+            except Exception as exc:
+                self._startup_error = exc
+                raise
+            self._startup_complete = True
 
     @property
     def job_manager(self) -> JobManager | None:
@@ -1467,25 +1507,30 @@ class MCPServerAdapter:
 
     async def shutdown(self) -> None:
         """Shutdown the server gracefully, closing owned resources."""
-        log.info("mcp.server.shutdown", name=self._name)
-        for resource in self._owned_resources:
-            close_fn = getattr(resource, "close", None)
-            if callable(close_fn):
-                try:
-                    await close_fn()
-                except ControlBusDrainError:
-                    log.error(
-                        "mcp.server.control_bus_close_failed",
-                        resource=type(resource).__name__,
-                    )
-                    raise
-                except Exception as exc:
-                    log.warning(
-                        "mcp.server.resource_close_failed",
-                        resource=type(resource).__name__,
-                        error=str(exc),
-                    )
-        self._owned_resources.clear()
+        async with self._lifecycle_lock:
+            if self._shutdown_complete:
+                return
+            log.info("mcp.server.shutdown", name=self._name)
+            for resource in self._owned_resources:
+                close_fn = getattr(resource, "close", None)
+                if callable(close_fn):
+                    try:
+                        await close_fn()
+                    except ControlBusDrainError:
+                        log.error(
+                            "mcp.server.control_bus_close_failed",
+                            resource=type(resource).__name__,
+                        )
+                        raise
+                    except Exception as exc:
+                        log.warning(
+                            "mcp.server.resource_close_failed",
+                            resource=type(resource).__name__,
+                            error=str(exc),
+                        )
+            self._owned_resources.clear()
+            self._startup_resources.clear()
+            self._shutdown_complete = True
 
 
 def create_ouroboros_server(
@@ -1772,9 +1817,9 @@ def create_ouroboros_server(
     )
 
     # Create or use provided EventStore
-    if event_store is None:
-        from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore
 
+    if event_store is None:
         event_store = EventStore()
 
     # Create state directory for interviews
@@ -2365,6 +2410,19 @@ def create_ouroboros_server(
     # issued fan-out id, whose valid submission then returns
     # ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
+    # Create the lifecycle owner before its production handlers. Raw builtin
+    # runtime interception calls handlers directly rather than through
+    # ``call_tool()``, so durable fan-out publication receives this same
+    # explicit readiness boundary as server transport requests.
+    from ouroboros.backends import render_mcp_server_instructions
+
+    server = MCPServerAdapter(
+        name=name,
+        version=version,
+        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
+        auth_config=auth_config,
+        rate_limit_config=rate_limit_config,
+    )
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
@@ -2484,7 +2542,12 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        *create_fanout_handlers(fanout_registry, effective_cwd, event_store),
+        *create_fanout_handlers(
+            fanout_registry,
+            effective_cwd,
+            event_store,
+            ensure_ready=server.startup,
+        ),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,
@@ -2525,19 +2588,6 @@ def create_ouroboros_server(
         EventsResourceHandler(event_store=event_store),
     ]
 
-    # Create server adapter. The MCP ``instructions`` field is the cross-provider
-    # "ubiquitous language" channel — default to the registry-rendered guidance so
-    # every MCP client (Claude included) receives it at session start.
-    from ouroboros.backends import render_mcp_server_instructions
-
-    server = MCPServerAdapter(
-        name=name,
-        version=version,
-        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
-        auth_config=auth_config,
-        rate_limit_config=rate_limit_config,
-    )
-
     # Build the AgentRuntimeContext that #474 funnels through every
     # handler. For now the context only exposes the EventStore, the
     # backend labels, the optional MCP bridge, and a fresh ControlBus
@@ -2558,7 +2608,10 @@ def create_ouroboros_server(
     # Close the reactive control surface before stores/bridges it may
     # reference from subscriber tasks.
     server.register_owned_resource(control_bus)
-    server.register_owned_resource(event_store)
+    server.register_owned_resource(
+        event_store,
+        initialize_on_startup=type(event_store) is EventStore,
+    )
     if brownfield_store is not None:
         server.register_owned_resource(brownfield_store)
 

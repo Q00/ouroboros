@@ -2087,6 +2087,84 @@ class TestMCPServerAdapterTools:
         assert result.value.text_content == "Success"
         handler.handle_mock.assert_called_once_with({"input": "test"})
 
+    async def test_concurrent_calls_share_startup_before_handler_dispatch(self) -> None:
+        """Owned startup runs once and gates every concurrent request."""
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("my_tool")
+        adapter.register_tool(handler)
+        initialize_started = asyncio.Event()
+        release_initialize = asyncio.Event()
+
+        class _StartupResource:
+            initialize_calls = 0
+            close_calls = 0
+
+            async def initialize(self) -> None:
+                self.initialize_calls += 1
+                initialize_started.set()
+                await release_initialize.wait()
+
+            async def close(self) -> None:
+                self.close_calls += 1
+
+        resource = _StartupResource()
+        adapter.register_owned_resource(resource, initialize_on_startup=True)
+
+        calls = [
+            asyncio.create_task(adapter.call_tool("my_tool", {"input": str(index)}))
+            for index in range(2)
+        ]
+        await asyncio.wait_for(initialize_started.wait(), timeout=0.5)
+        assert handler.handle_mock.await_count == 0
+        release_initialize.set()
+
+        results = await asyncio.gather(*calls)
+        assert all(result.is_ok for result in results)
+        assert resource.initialize_calls == 1
+        assert handler.handle_mock.await_count == 2
+
+        await asyncio.gather(adapter.shutdown(), adapter.shutdown())
+        assert resource.close_calls == 1
+
+    async def test_startup_failure_prevents_handler_work_and_remains_owned(self) -> None:
+        """A failed initializer blocks dispatch but shutdown still releases resources."""
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("my_tool")
+        adapter.register_tool(handler)
+        close_order: list[str] = []
+
+        class _Resource:
+            def __init__(self, name: str, *, fail: bool = False) -> None:
+                self.name = name
+                self.fail = fail
+                self.initialize_calls = 0
+
+            async def initialize(self) -> None:
+                self.initialize_calls += 1
+                if self.fail:
+                    raise RuntimeError("startup exploded")
+
+            async def close(self) -> None:
+                close_order.append(self.name)
+
+        first = _Resource("first")
+        failing = _Resource("failing", fail=True)
+        adapter.register_owned_resource(first, initialize_on_startup=True)
+        adapter.register_owned_resource(failing, initialize_on_startup=True)
+
+        first_result = await adapter.call_tool("my_tool", {"input": "one"})
+        second_result = await adapter.call_tool("my_tool", {"input": "two"})
+
+        assert first_result.is_err and second_result.is_err
+        assert "startup exploded" in str(first_result.error)
+        assert "startup exploded" in str(second_result.error)
+        assert first.initialize_calls == 1
+        assert failing.initialize_calls == 1
+        handler.handle_mock.assert_not_awaited()
+
+        await adapter.shutdown()
+        assert close_order == ["first", "failing"]
+
     async def test_call_tool_logs_lifecycle_without_argument_values(self) -> None:
         """call_tool emits boundary logs without leaking argument payloads."""
         adapter = MCPServerAdapter(name="test-server")
@@ -3039,6 +3117,41 @@ class TestServeTransport:
         assert exit_event["transport"] == "stdio"
         assert isinstance(exit_event["duration_ms"], int)
         assert exit_event["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_serve_initializes_owned_resources_before_transport(self) -> None:
+        """No transport accepts work before the explicit startup boundary."""
+        from unittest.mock import MagicMock, patch
+
+        lifecycle: list[str] = []
+
+        class _StartupResource:
+            async def initialize(self) -> None:
+                lifecycle.append("initialize")
+
+            async def close(self) -> None:
+                lifecycle.append("close")
+
+        async def run_stdio() -> None:
+            lifecycle.append("serve")
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock(side_effect=run_stdio)
+        mock_fastmcp_cls.return_value = mock_instance
+        adapter = MCPServerAdapter()
+        adapter.register_owned_resource(_StartupResource(), initialize_on_startup=True)
+
+        with patch(
+            "ouroboros.mcp.server.adapter._OuroborosSDKServer",
+            mock_fastmcp_cls,
+        ):
+            await adapter.serve(transport="stdio")
+        await adapter.shutdown()
+
+        assert lifecycle == ["initialize", "serve", "close"]
 
     @pytest.mark.asyncio
     async def test_sse_ephemeral_port_zero(self):
@@ -4649,4 +4762,120 @@ async def test_production_fanout_returns_only_disposable_envelope(
         assert len(changed_events) == 1
         assert changed_marker not in json.dumps(changed_events[0].data)
     finally:
-        await event_store.close()
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_production_fanout_surfaces_owned_store_startup_failure_before_work(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production readiness boundary fails before synthesis or publication."""
+    from ouroboros.mcp.server import adapter as adapter_module
+    from ouroboros.mcp.tools import fanout_handler
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
+
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    server = adapter_module.create_ouroboros_server(
+        name="fanout-startup-failure-probe",
+        event_store=event_store,
+        state_dir=tmp_path / "state",
+        project_dir=tmp_path,
+    )
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    registry = handler.fanout_registry
+    assert registry is not None
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="session-startup-failure",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"lane_ids": ["code_context"]},
+        required_keys=["code_context"],
+    )
+    assert fanout_id is not None
+    synthesize = AsyncMock()
+    monkeypatch.setattr(fanout_handler, "synthesize_fanout_results", synthesize)
+    initialize = AsyncMock(side_effect=RuntimeError("event store startup failed"))
+    monkeypatch.setattr(event_store, "initialize", initialize)
+
+    try:
+        result = await handler.handle(
+            {
+                "session_id": "session-startup-failure",
+                "fanout_id": fanout_id,
+                "correlation_key": "context.lane_id",
+                "results": [{"key": "code_context", "content": "child output"}],
+            }
+        )
+
+        assert result.is_err
+        assert "event store startup failed" in str(result.error)
+        initialize.assert_awaited_once()
+        synthesize.assert_not_awaited()
+    finally:
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_production_fanout_does_not_initialize_custom_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production ownership must not weaken custom-store durable fail-fast."""
+    from ouroboros.mcp.server import adapter as adapter_module
+    from ouroboros.mcp.tools import fanout_handler
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
+
+    class _CustomStore:
+        initialize_calls = 0
+        close_calls = 0
+
+        async def initialize(self) -> None:
+            self.initialize_calls += 1
+
+        async def append_durable(self, _event: BaseEvent, *, timeout: float) -> None:
+            del timeout
+            raise RuntimeError("custom store remains uninitialized")
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    custom_store = _CustomStore()
+    server = adapter_module.create_ouroboros_server(
+        name="fanout-custom-store-probe",
+        event_store=custom_store,
+        state_dir=tmp_path / "state",
+        project_dir=tmp_path,
+    )
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    registry = handler.fanout_registry
+    assert registry is not None
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="session-custom-store",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"lane_ids": ["code_context"]},
+        required_keys=["code_context"],
+    )
+    assert fanout_id is not None
+    synthesize = AsyncMock()
+    monkeypatch.setattr(fanout_handler, "synthesize_fanout_results", synthesize)
+
+    try:
+        result = await handler.handle(
+            {
+                "session_id": "session-custom-store",
+                "fanout_id": fanout_id,
+                "correlation_key": "context.lane_id",
+                "results": [{"key": "code_context", "content": "child output"}],
+            }
+        )
+
+        assert result.is_err
+        assert "custom store remains uninitialized" in str(result.error)
+        assert custom_store.initialize_calls == 0
+        synthesize.assert_not_awaited()
+    finally:
+        await server.shutdown()
+
+    assert custom_store.close_calls == 1

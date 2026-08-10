@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -286,6 +287,8 @@ def create_fanout_handler(
     fanout_registry: FanoutRegistry,
     project_dir: Any,
     event_store: Any,
+    *,
+    ensure_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> SubmitFanoutResultsHandler:
     """Build the production fan-out boundary for a resolved workspace."""
     from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
@@ -295,6 +298,7 @@ def create_fanout_handler(
         disposable_memory=DisposableMemory(
             artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
             event_store=event_store,
+            ensure_ready=ensure_ready,
         ),
     )
 
@@ -314,9 +318,16 @@ def create_fanout_handlers(
     fanout_registry: FanoutRegistry,
     project_dir: Any,
     event_store: Any,
+    *,
+    ensure_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[SubmitFanoutResultsHandler, FetchArtifactHandler]:
     """Build the paired submit/fetch production boundary for one workspace."""
-    submit = create_fanout_handler(fanout_registry, project_dir, event_store)
+    submit = create_fanout_handler(
+        fanout_registry,
+        project_dir,
+        event_store,
+        ensure_ready=ensure_ready,
+    )
     return submit, FetchArtifactHandler(disposable_memory=submit.disposable_memory)
 
 
