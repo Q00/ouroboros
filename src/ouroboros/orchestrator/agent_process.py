@@ -70,6 +70,43 @@ _CANCEL_CONTROL_SEED_PREFIX: Final[str] = "__ouroboros_agent_process_cancel__:"
 _CANCELLED_WORK_DRAIN_GRACE_SECONDS: Final[float] = 10.0
 
 
+async def _run_cancellation_atomic_handoff[T](awaitable: Awaitable[T]) -> T:
+    """Settle one bounded lifecycle handoff before surfacing cancellation.
+
+    A durable resume has two inseparable halves: commit ``CONTINUE`` and
+    release the live waiter.  EventStore already settles the SQLite half
+    before re-raising caller cancellation, but that re-raise used to strand
+    the live handle in ``PAUSED`` after the journal had committed ``RUNNING``.
+    Shield the complete handoff and, if its caller is cancelled, wait until
+    it either fails before commit or finishes the post-commit release.  The
+    original cancellation is then re-raised so cancellation semantics are
+    preserved without allowing a persisted/live split.
+
+    The durable append keeps its persistence-owned timeout, so a wedged write
+    still rolls back and settles within that deadline rather than making this
+    wrapper an unbounded database wait.
+    """
+    inner = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError as caller_cancellation:
+        while not inner.done():
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                # Repeated cancellation cannot abandon a half-applied handoff.
+                continue
+            except Exception:
+                # The pre-commit failure has settled; preserve cancellation below.
+                break
+        handoff_error: BaseException | None = None
+        if not inner.cancelled():
+            handoff_error = inner.exception()
+        if handoff_error is not None:
+            raise caller_cancellation from handoff_error
+        raise
+
+
 class AgentProcessStatus(StrEnum):
     """Lifecycle state of an :class:`AgentProcessHandle`.
 
@@ -371,21 +408,31 @@ class AgentProcessHandle:
                 return
 
             if self._journal_mode is AgentProcessJournalMode.DURABLE:
-                # Commit replay authority before changing any checkpoint or
-                # releasing the waiter.  The waiter never retries this write.
-                await self._emit_lifecycle_transition(
-                    Directive.CONTINUE,
-                    "resume requested",
-                    AgentProcessStatus.RUNNING,
-                )
-                self._save_lifecycle_checkpoint(
-                    phase="agent_process_running",
-                    status="running",
-                    event_key="resumed_at",
-                    log_key="resume_projection",
-                    store=self._pause_checkpoint_store,
-                    strict=False,
-                )
+
+                async def commit_and_release() -> None:
+                    # Commit replay authority before changing any checkpoint
+                    # or releasing the waiter.  Cancellation settles this
+                    # complete handoff before it reaches the caller.
+                    await self._emit_lifecycle_transition(
+                        Directive.CONTINUE,
+                        "resume requested",
+                        AgentProcessStatus.RUNNING,
+                    )
+                    self._save_lifecycle_checkpoint(
+                        phase="agent_process_running",
+                        status="running",
+                        event_key="resumed_at",
+                        log_key="resume_projection",
+                        store=self._pause_checkpoint_store,
+                        strict=False,
+                    )
+                    self._status = AgentProcessStatus.RUNNING
+                    self._pause_checkpoint_reason = None
+                    self._pause_checkpoint_requested = False
+                    self._paused_event.set()
+
+                await _run_cancellation_atomic_handoff(commit_and_release())
+                return
             else:
                 # Preserve the direct-AgentProcess compatibility contract:
                 # checkpoint persistence is strict while journal emission is
@@ -408,11 +455,6 @@ class AgentProcessHandle:
                     AgentProcessStatus.RUNNING,
                 )
                 return
-
-            self._status = AgentProcessStatus.RUNNING
-            self._pause_checkpoint_reason = None
-            self._pause_checkpoint_requested = False
-            self._paused_event.set()
 
     async def cancel(
         self,

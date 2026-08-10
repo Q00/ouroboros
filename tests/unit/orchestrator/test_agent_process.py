@@ -146,6 +146,43 @@ class _FailOnceAttemptReplayStore(_FakeEventStore):
         await super().append(event)
 
 
+class _CommittedResumeHandoffStore(_FakeEventStore):
+    """Hold the third append after commit to expose the resume handoff race."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_attempts = 0
+        self.resume_committed = asyncio.Event()
+        self.release_append = asyncio.Event()
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        self.append_attempts += 1
+        await self.append(event)
+        if self.append_attempts == 3:
+            self.resume_committed.set()
+            async with asyncio.timeout(timeout):
+                await self.release_append.wait()
+
+
+class _PreCommitResumeFailureStore(_FakeEventStore):
+    """Hold then fail the third append before it reaches durable history."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_attempts = 0
+        self.resume_append_started = asyncio.Event()
+        self.release_failure = asyncio.Event()
+
+    async def append_durable(self, event: BaseEvent, *, timeout: float) -> None:
+        self.append_attempts += 1
+        if self.append_attempts == 3:
+            self.resume_append_started.set()
+            async with asyncio.timeout(timeout):
+                await self.release_failure.wait()
+            raise RuntimeError("resume failed before commit")
+        await self.append(event)
+
+
 class _CancellationResistantDeadlineStore(_FakeEventStore):
     """Model a persistence operation that settles only after interruption."""
 
@@ -2390,6 +2427,200 @@ async def test_durable_transient_resume_failure_stays_paused_until_explicit_retr
     assert committed_resume_checkpoint.value.phase == "agent_process_running"
     with pytest.raises(RuntimeError, match="requires lifecycle replay"):
         AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_durable_resume_preserves_pause_when_append_fails_pre_commit() -> None:
+    """Cancellation still surfaces after a pre-commit failure settles PAUSED."""
+    store = _PreCommitResumeFailureStore()
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+    work_released = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        reached_pause.set()
+        await handle.wait_unpaused()
+        work_released.set()
+        return "done"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+    )
+    await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+    handle = handle_box[0]
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    resume_task = asyncio.create_task(handle.resume())
+    await asyncio.wait_for(store.resume_append_started.wait(), timeout=1.0)
+    resume_task.cancel()
+    store.release_failure.set()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await resume_task
+
+    assert isinstance(cancelled.value.__cause__, RuntimeError)
+    assert handle.status() is AgentProcessStatus.PAUSED
+    assert work_released.is_set() is False
+    assert _directives(store.appended) == ["continue", "wait"]
+    assert (await handle.replay()).status is AgentProcessStatus.PAUSED
+
+    await handle.resume()
+    assert await asyncio.wait_for(run_task, timeout=1.0) == "done"
+    assert work_released.is_set()
+    assert _directives(store.appended) == ["continue", "wait", "continue", "converge"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_durable_resume_settles_release_after_committed_continue() -> None:
+    """Repeated cancellation cannot strand a committed resume in live PAUSED."""
+    store = _CommittedResumeHandoffStore()
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+    work_released = asyncio.Event()
+    finish_work = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        reached_pause.set()
+        await handle.wait_unpaused()
+        work_released.set()
+        await finish_work.wait()
+        return "done"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(event_store=store, intent="durable", work_fn=work)
+    )
+    await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+    handle = handle_box[0]
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    resume_task = asyncio.create_task(handle.resume())
+    await asyncio.wait_for(store.resume_committed.wait(), timeout=1.0)
+    resume_task.cancel()
+    await asyncio.sleep(0)
+    resume_task.cancel()
+    competing_resume = asyncio.create_task(handle.resume())
+    await asyncio.sleep(0)
+
+    assert resume_task.done() is False
+    assert competing_resume.done() is False
+    assert _directives(store.appended) == ["continue", "wait", "continue"]
+    committed_snapshot = project_agent_process_snapshot(
+        store.appended,
+        process_id=handle.process_id,
+    )
+    assert committed_snapshot is not None
+    assert committed_snapshot.status is AgentProcessStatus.RUNNING
+    assert handle.status() is AgentProcessStatus.PAUSED
+    assert work_released.is_set() is False
+
+    store.release_append.set()
+    with pytest.raises(asyncio.CancelledError):
+        await resume_task
+    await competing_resume
+    await asyncio.wait_for(work_released.wait(), timeout=1.0)
+
+    assert handle.status() is AgentProcessStatus.RUNNING
+    assert (await handle.replay()).status is AgentProcessStatus.RUNNING
+    assert store.append_attempts == 3
+    assert _directives(store.appended) == ["continue", "wait", "continue"]
+
+    finish_work.set()
+    assert await asyncio.wait_for(run_task, timeout=1.0) == "done"
+    assert _directives(store.appended) == ["continue", "wait", "continue", "converge"]
+
+
+@pytest.mark.asyncio
+async def test_real_event_store_cancel_after_resume_commit_releases_live_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real SQLite commit and live release settle before cancellation surfaces."""
+    process_id = "durable-real-store-cancelled-resume"
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    await store.initialize()
+    original_append = store._append_durable_registered
+    resume_committed = asyncio.Event()
+    release_append = asyncio.Event()
+
+    async def append_then_hold_after_resume_commit(
+        event: BaseEvent,
+        *,
+        overall_deadline: float,
+    ) -> None:
+        await original_append(event, overall_deadline=overall_deadline)
+        if event.data.get("directive") == "continue" and "resume requested" in str(
+            event.data.get("reason")
+        ):
+            resume_committed.set()
+            await release_append.wait()
+
+    monkeypatch.setattr(store, "_append_durable_registered", append_then_hold_after_resume_commit)
+    handle_box: list[AgentProcessHandle] = []
+    reached_pause = asyncio.Event()
+    work_released = asyncio.Event()
+    finish_work = asyncio.Event()
+
+    async def work(handle: AgentProcessHandle) -> str:
+        handle_box.append(handle)
+        await handle.pause()
+        reached_pause.set()
+        await handle.wait_unpaused()
+        work_released.set()
+        await finish_work.wait()
+        return "done"
+
+    run_task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=store,
+            intent="durable",
+            work_fn=work,
+            process_id=process_id,
+        )
+    )
+    try:
+        await asyncio.wait_for(reached_pause.wait(), timeout=1.0)
+        handle = handle_box[0]
+        await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+        resume_task = asyncio.create_task(handle.resume())
+        await asyncio.wait_for(resume_committed.wait(), timeout=1.0)
+        resume_task.cancel()
+        await asyncio.sleep(0)
+
+        assert resume_task.done() is False
+        assert handle.status() is AgentProcessStatus.PAUSED
+        assert work_released.is_set() is False
+
+        release_append.set()
+        with pytest.raises(asyncio.CancelledError):
+            await resume_task
+        await asyncio.wait_for(work_released.wait(), timeout=1.0)
+
+        events = await store.replay("agent_process", process_id)
+        assert _directives(events) == ["continue", "wait", "continue"]
+        snapshot = project_agent_process_snapshot(events, process_id=process_id)
+        assert snapshot is not None
+        assert snapshot.status is AgentProcessStatus.RUNNING
+        assert handle.status() is AgentProcessStatus.RUNNING
+
+        finish_work.set()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == "done"
+        assert _directives(await store.replay("agent_process", process_id)) == [
+            "continue",
+            "wait",
+            "continue",
+            "converge",
+        ]
+    finally:
+        release_append.set()
+        finish_work.set()
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+        await store.close()
 
 
 @pytest.mark.asyncio
