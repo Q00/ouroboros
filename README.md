@@ -502,7 +502,7 @@ Each dimension is scored 0.0-1.0 by the LLM (temperature 0.1 for reproducibility
 | **Success Criteria** -- *Are outcomes measurable?*            |    30%     |    25%     |
 | **Context Clarity** -- *Is the existing codebase understood?* |     --     |    15%     |
 
-**Threshold: Ambiguity <= 0.2.** While the interview is still open, a score above that blocks Seed generation. Two things get past the check: passing `force` explicitly, which the CLI offers on screen, or marking the interview complete, which does not look like a bypass at all. The gate is a default worth arguing with, not a lock.
+**Threshold: Ambiguity <= 0.2.** A score above that blocks Seed generation. Passing `force` explicitly is what gets past it, and the CLI puts that choice on screen next to continue and cancel. The gate is a default worth arguing with, not a lock.
 
 ```
 Example (Greenfield):
