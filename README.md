@@ -16,7 +16,7 @@
 
 
 <p align="center">
-  <strong>Pins an acceptance spec and omits any verify command or expected output from the worker's contract block.</strong>
+  <strong>When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back.</strong>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
