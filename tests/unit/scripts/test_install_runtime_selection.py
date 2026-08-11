@@ -1375,6 +1375,7 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         "is_local",
         "pre",
         "version",
+        "ref",
     }
     assert set(events["install_completed"]["properties"].keys()) == {
         "source",
@@ -1384,7 +1385,96 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         "runtime",
         "detected_runtimes",
         "version",
+        "ref",
     }
+
+
+def test_installer_ping_ref_defaults_to_direct_when_unset(tmp_path: Path) -> None:
+    """No `OUROBOROS_INSTALL_REF` in the environment -- both telemetry events
+    must carry `ref=direct`, the documented fallback for an install with no
+    channel attribution. `drop_env` (not just omitting it from `env`) is
+    required here: a set-but-empty variable still counts as "set" for shell
+    parameter expansion, so this must genuinely unset the key rather than
+    rely on it being absent from the test's own `env` dict.
+    """
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        drop_env=("OUROBOROS_INSTALL_REF",),
+        fake_commands={
+            **_telemetry_fake_commands(tmp_path),
+            "curl": _capture_dashd_curl(tmp_path / "telemetry.log"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_started"]["properties"]["ref"] == "direct"
+    assert events["install_completed"]["properties"]["ref"] == "direct"
+
+
+def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
+    """A well-formed `OUROBOROS_INSTALL_REF` (matches `^[A-Za-z0-9._-]{1,32}$`)
+    is carried through to both events verbatim -- this is the actual
+    attribution path a docs page or listing is meant to use.
+    """
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "hellogithub"},
+        fake_commands={
+            **_telemetry_fake_commands(tmp_path),
+            "curl": _capture_dashd_curl(tmp_path / "telemetry.log"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_started"]["properties"]["ref"] == "hellogithub"
+    assert events["install_completed"]["properties"]["ref"] == "hellogithub"
+
+
+def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> None:
+    """A value outside `^[A-Za-z0-9._-]{1,32}$` (shell metacharacters, spaces,
+    or over-length) must never reach the telemetry payload -- it degrades to
+    `direct` exactly like an unset value. `[[ =~ ]]` never executes its
+    operand, so this is a payload-shape guarantee, not a shell-injection
+    probe; the point is that a hostile value chosen by whoever writes the
+    install command cannot ride into what we record.
+    """
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "evil; rm -rf /"},
+        fake_commands={
+            **_telemetry_fake_commands(tmp_path),
+            "curl": _capture_dashd_curl(tmp_path / "telemetry.log"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_started"]["properties"]["ref"] == "direct"
+    assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
 def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
