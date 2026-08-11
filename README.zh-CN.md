@@ -102,7 +102,7 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 **安装** —— 一条命令，环境自动识别：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+OUROBOROS_INSTALL_REF=readme-zh curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
 **开始** —— 打开你的 AI 编码 agent，直接上：

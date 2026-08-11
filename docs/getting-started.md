@@ -180,7 +180,7 @@ ouroboros --version                   # verify CLI
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+OUROBOROS_INSTALL_REF=docs-getting-started curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
 ### Option 3: From Source (Contributors)
