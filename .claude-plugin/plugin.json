@@ -17,7 +17,9 @@
     "seed",
     "evaluation",
     "self-improving",
-    "drift-detection"
+    "drift-detection",
+    "agentic-loop",
+    "loop-engineering"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json"

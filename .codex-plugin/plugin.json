@@ -15,7 +15,9 @@
     "requirements",
     "socratic",
     "interview",
-    "evaluation"
+    "evaluation",
+    "agentic-loop",
+    "loop-engineering"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.codex.json",
