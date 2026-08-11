@@ -621,6 +621,124 @@ def _matches_only_a_blank_subject(pattern: str, flags: int = 0) -> bool:
     return unpinned_at_start is False and unpinned_at_end is False
 
 
+# A binding word has to be a word: something long enough that its appearance in
+# both the criterion and the pattern is a naming rather than a coincidence.
+# `a+` finds an "a" in the criterion "a CameraProvider interface" and in almost
+# every file there is; three characters is where English stops handing those
+# out for free.
+_MIN_BINDING_WORD_LENGTH = 3
+
+_WORD_RUNS = re.compile(r"[A-Za-z0-9]+")
+# One identifier, three spellings: `CameraProvider`, `camera_provider` and
+# `CAMERA_PROVIDER` all name the same thing, and a criterion written in prose
+# names it as "camera provider". Splitting on case transitions and reading
+# every piece lowercase is what lets each spelling find the others.
+_IDENTIFIER_PIECES = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+
+
+def _words(text: str) -> list[str]:
+    """The word sequence of a text, spelled the way comparisons want it."""
+    pieces: list[str] = []
+    for run in _WORD_RUNS.findall(text):
+        pieces.extend(piece.lower() for piece in _IDENTIFIER_PIECES.findall(run))
+    return pieces
+
+
+def _required_literal_runs(
+    sequence: object,
+    depth: int = 0,
+) -> frozenset[str]:
+    """The literal texts every subject this pattern matches must contain.
+
+    Read off the parse tree, never run. A literal in the main walk is consumed
+    by every match; one inside a repeat that must run at least once, or inside
+    a positive lookaround, is present in every matched subject even when the
+    match does not consume it, which is the fact binding actually needs. An
+    alternation requires only what every branch requires, a repeat that may run
+    zero times requires nothing, and anything this walk cannot read requires
+    nothing either — fewer required runs can only make a pattern harder to
+    admit, so the unknown falls on the side of refusal.
+    """
+    runs: set[str] = set()
+    if depth > _MAX_PARSE_DEPTH:
+        return frozenset()
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            runs.add("".join(current))
+            current.clear()
+
+    for opcode, argument in sequence:  # type: ignore[attr-defined]
+        name = getattr(opcode, "name", str(opcode))
+        if name == "LITERAL" and isinstance(argument, int):
+            current.append(chr(argument))
+            continue
+        flush()
+        if name in _REPEATS:
+            minimum, _maximum, item = argument
+            if minimum >= 1:
+                runs |= _required_literal_runs(item, depth + 1)
+        elif name == "SUBPATTERN":
+            runs |= _required_literal_runs(argument[-1], depth + 1)
+        elif name == "ATOMIC_GROUP":
+            runs |= _required_literal_runs(argument, depth + 1)
+        elif name == "ASSERT":
+            runs |= _required_literal_runs(argument[1], depth + 1)
+        elif name == "BRANCH":
+            branch_runs = [_required_literal_runs(branch, depth + 1) for branch in argument[1]]
+            if branch_runs:
+                runs |= frozenset.intersection(*branch_runs)
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if no_arm is not None:
+                runs |= _required_literal_runs(yes_arm, depth + 1) & _required_literal_runs(
+                    no_arm, depth + 1
+                )
+        # AT, IN, ANY, RANGE, CATEGORY, NOT_LITERAL, ASSERT_NOT, GROUPREF,
+        # FAILURE and anything unrecognised require no particular text.
+    flush()
+    return frozenset(runs)
+
+
+def _binds_criterion(pattern: str, ac_text: str) -> bool:
+    """Whether a match of this pattern is about what the criterion names.
+
+    True when some text every match must contain spells out, word for word, a
+    run of words the caller wrote in the acceptance criterion — with at least
+    one word of substance among them. Such a pattern cannot match a file that
+    lacks what the criterion asked about; whatever else its match fails to
+    prove, it is evidence *about the criterion*. A pattern with no such text —
+    `[\\s\\S]+`, `CameraProvider|[\\s\\S]+` — matches files the criterion has
+    nothing to say about, so its match says nothing back.
+
+    The comparison is over words, not characters, so `CameraProvider`,
+    `camera_provider` and the criterion's own "CameraProvider interface" all
+    reach each other. Flags are not consulted: what words a literal spells is
+    not something a flag changes.
+    """
+    try:
+        parsed = regex_parser.parse(pattern)
+    except Exception:
+        return False
+    criterion_words = _words(ac_text)
+    if not criterion_words:
+        return False
+    for run in _required_literal_runs(parsed):
+        run_words = _words(run)
+        if not run_words:
+            continue
+        if max(len(word) for word in run_words) < _MIN_BINDING_WORD_LENGTH:
+            continue
+        span = len(run_words)
+        if any(
+            criterion_words[start : start + span] == run_words
+            for start in range(len(criterion_words) - span + 1)
+        ):
+            return True
+    return False
+
+
 def _skip_inline_space(text: str, index: int) -> int:
     while index < len(text) and text[index] in " \t\f\v":
         index += 1
@@ -764,7 +882,10 @@ class SpecVerifier:
 
             results: list[SpecVerificationResult] = []
             for assertion in ac_assertions:
-                results.append(self._verify_one(assertion))
+                result = self._verify_one(assertion)
+                if agent_pass is False:
+                    result = self._demoted_unless_bound(result)
+                results.append(result)
 
             reports.append(
                 ACVerificationReport(
@@ -833,6 +954,55 @@ class SpecVerifier:
             )
             return None
         return compiled
+
+    def _demoted_unless_bound(self, result: SpecVerificationResult) -> SpecVerificationResult:
+        """Refuse a VERIFIED that would overturn an agent FAIL on unbound evidence.
+
+        The agent reported this criterion failed, and the caller is asking this
+        scanner to overrule that. Overruling an honest FAIL with a formal PASS
+        is the highest-authority thing a report can do, so it is reserved for
+        evidence that is *about the criterion*: a pattern some part of which —
+        a part every match must contain — names what the criterion names. A
+        non-nullable pattern that matches any file with content in it,
+        `[\\s\\S]+` or `CameraProvider|[\\s\\S]+`, passes the emptiness guard
+        above and still fabricates that PASS; what it lacks is not width but
+        binding, and binding is what is checked here.
+
+        Only the overturn direction is gated. A VERIFIED that agrees with the
+        agent adds no authority the agent's own report did not already claim,
+        and gating it would fail honest confirmations over vocabulary the
+        extractor chose. A pattern that can only match a file with nothing in
+        it is exempt for the same reason it was admitted at all: it names its
+        criterion by matching exactly one possible subject, which no wording
+        check could improve on.
+
+        The demotion is to UNVERIFIABLE, not DISCREPANCY: the pattern is not
+        usable as evidence here, which is different from evidence that the
+        criterion is unmet.
+        """
+        if result.outcome is not VerificationOutcome.VERIFIED:
+            return result
+        pattern = result.assertion.pattern
+        if not pattern:
+            return result
+        if _matches_only_a_blank_subject(pattern):
+            return result
+        if _binds_criterion(pattern, result.assertion.ac_text):
+            return result
+        logger.warning(
+            "Refusing unbound pattern as grounds to overturn an agent FAIL: %r",
+            pattern,
+        )
+        return SpecVerificationResult(
+            assertion=result.assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            file_path=result.file_path,
+            detail=(
+                "Pattern matched, but nothing every match must contain names what "
+                "the criterion names; unbound evidence cannot overturn an "
+                "agent-reported FAIL"
+            ),
+        )
 
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify one assertion, including tiers this scanner deliberately skips."""

@@ -2007,6 +2007,170 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 1
 
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"[\s\S]+",
+            r"CameraProvider|[\s\S]+",
+            r"(?:CameraProvider)?[\s\S]+",
+            r".+",
+            r"a+",
+            r"def\s+\w+",
+        ],
+        ids=[
+            "consume-everything",
+            "target-or-anything",
+            "optional-target-then-anything",
+            "any-content",
+            "single-letter",
+            "vocabulary-the-criterion-never-used",
+        ],
+    )
+    def test_unbound_pattern_cannot_overturn_an_agent_fail(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        r"""A non-nullable match of nothing in particular must not mint a PASS.
+
+        The emptiness guard cannot see these: each consumes at least one
+        character, so none is nullable, and each matches the first file with
+        content in it — or, on the T2 filename path, the first filename. What
+        every one of them lacks is any required text the criterion named, and
+        that is the reading that refuses them here. The agent honestly reported
+        this criterion FAILED; the fabricated match is demoted to UNVERIFIABLE
+        rather than being allowed to overturn that report, and it is not a
+        DISCREPANCY either, because a refused pattern is not evidence of
+        absence.
+        """
+        project = self._create_project({"main.py": "print('hello')\ndef anything(): pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=tier,
+            pattern=pattern,
+            expected_value="",
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is False
+        assert report.results[0].outcome is VerificationOutcome.UNVERIFIABLE
+        assert "cannot overturn" in report.results[0].detail
+
+    def test_bound_pattern_still_overturns_an_agent_fail(self) -> None:
+        """Overturning stays available to evidence that is about the criterion.
+
+        The agent reported FAIL, the project really does define the class, and
+        the pattern's required text names it. This is the verifier doing its
+        job — catching a wrong self-report in the honest direction too — and
+        the binding gate must not take it away.
+        """
+        project = self._create_project({"camera.py": "class CameraProvider:\n    pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is True
+        assert report.results[0].outcome is VerificationOutcome.VERIFIED
+
+    def test_unbound_pattern_still_confirms_an_agent_pass(self) -> None:
+        """Only the overturn direction is gated.
+
+        A VERIFIED that agrees with the agent's own PASS claims no authority
+        the agent did not already claim, and refusing it would fail honest
+        confirmations over vocabulary the extractor happened to choose.
+        """
+        project = self._create_project({"main.py": "def entrypoint(): pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"def\s+\w+",
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: True})
+            .reports[0]
+        )
+
+        assert report.results[0].outcome is VerificationOutcome.VERIFIED
+
+    def test_blank_subject_pattern_may_still_overturn_an_agent_fail(self) -> None:
+        r"""The emptiness rescue is exempt from binding.
+
+        `\A\Z` can spell no word the criterion uses, and it does not need to:
+        admitted only against the one file the hint names, it matches exactly
+        one possible subject, which binds it to its criterion more tightly
+        than any wording check could.
+        """
+        project = self._create_project({"notes.txt": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="notes.txt MUST be left empty",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"\A\Z",
+            file_hint="notes.txt",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is True
+
+    @pytest.mark.parametrize(
+        ("pattern", "ac_text"),
+        [
+            (r"WARMUP_FRAMES\s*=\s*", "Warmup frames should be set to 10"),
+            (r"camera_provider", "MUST define a CameraProvider interface"),
+            (r"RETRIES\s*=\s*", "maximum 5 retries"),
+        ],
+        ids=["prose-finds-screaming-snake", "snake-finds-camel", "case-folds"],
+    )
+    def test_binding_reads_identifiers_across_spellings(self, pattern: str, ac_text: str) -> None:
+        """One identifier, three spellings, and each finds the others.
+
+        A criterion written in prose names `WARMUP_FRAMES` as "warmup frames";
+        refusing the pattern over an underscore would gate honest overturns on
+        the extractor's casing luck.
+        """
+        source = {"config.py": "WARMUP_FRAMES = 10\nRETRIES = 5\nclass camera_provider: pass\n"}
+        project = self._create_project(source)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is True
+
 
 # -- Extractor Tests --
 
