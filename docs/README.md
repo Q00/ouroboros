@@ -106,7 +106,7 @@ for current AgentOS sequencing.
 ### Core Principles
 
 - **Frugal by default, rigorous in verification** - Start with the simplest approach, escalate only when needed
-- **Ambiguity threshold** - While the interview is open, a requirement scoring above 0.2 does not proceed to execution. Passing `force`, or marking the interview complete, both get past that check
+- **Ambiguity threshold** - A requirement scoring above 0.2 does not proceed to Seed generation unless `force` is passed explicitly
 - **Lateral thinking** - When stuck, switch persona and think differently rather than retry harder
 
 ## Quick Links
