@@ -701,21 +701,72 @@ def _required_literal_runs(
     return frozenset(runs)
 
 
+def _contains(words: list[str], run: list[str]) -> bool:
+    """Whether `run` appears in `words` as a contiguous stretch."""
+    span = len(run)
+    if not span or span > len(words):
+        return False
+    return any(words[start : start + span] == run for start in range(len(words) - span + 1))
+
+
+# A criterion is prose, and somewhere in the prose is the thing it is about.
+# What separates that thing from the words around it is how the caller spelled
+# it: code names are written as code — `CameraProvider`, `camera_provider`,
+# `WARMUP_FRAMES`, `notes.txt` — or, for a one-word name, capitalised where
+# ordinary words are not. Reading that is what tells `CameraProvider` apart
+# from the `class` beside it.
+#
+# Read from spelling and not from a list of words too ordinary to name
+# anything. Such a list would have to hold every structural noun in English —
+# class, interface, file, module, handler, service — and the next criterion
+# would use the one it had not thought of yet. Spelling is a rule; a list of
+# ordinary words is an argument that never finishes.
+_CRITERION_TOKENS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.]*")
+
+
+def _named_targets(ac_text: str) -> list[list[str]]:
+    """What the criterion names, read from how the caller spelled it.
+
+    A token spelled as a compound — more than one word inside a single token,
+    which is what CamelCase, snake_case, SCREAMING_CASE and a dotted filename
+    all are — names something. So does a capitalised token standing among
+    ordinary words. The criterion's first token is not read as capitalised,
+    because starting a sentence with a capital is English rather than naming.
+    """
+    targets: list[list[str]] = []
+    for position, token in enumerate(_CRITERION_TOKENS.findall(ac_text)):
+        pieces = _words(token)
+        if not pieces:
+            continue
+        if len(pieces) > 1 or (position > 0 and token[:1].isupper()):
+            targets.append(pieces)
+    return targets
+
+
 def _binds_criterion(pattern: str, ac_text: str) -> bool:
     """Whether a match of this pattern is about what the criterion names.
 
-    True when some text every match must contain spells out, word for word, a
-    run of words the caller wrote in the acceptance criterion — with at least
-    one word of substance among them. Such a pattern cannot match a file that
-    lacks what the criterion asked about; whatever else its match fails to
-    prove, it is evidence *about the criterion*. A pattern with no such text —
-    `[\\s\\S]+`, `CameraProvider|[\\s\\S]+` — matches files the criterion has
-    nothing to say about, so its match says nothing back.
+    Some text every match must contain has to spell out the thing the
+    criterion named. `class\\s+CameraProvider` requires `CameraProvider` and
+    cannot match a file without it; `class\\s+\\w+` requires only `class`, so
+    it matches `class Unrelated` in a project that has no CameraProvider at
+    all, and calling that evidence for the criterion is the defect this guard
+    exists to close. Sharing the criterion's structural vocabulary is not
+    naming its target.
 
-    The comparison is over words, not characters, so `CameraProvider`,
-    `camera_provider` and the criterion's own "CameraProvider interface" all
-    reach each other. Flags are not consulted: what words a literal spells is
-    not something a flag changes.
+    Where the criterion names nothing in code spelling — "maximum 5 retries",
+    all ordinary lowercase words — there is no target to read, and this falls
+    back on the criterion's longest words. That is a weaker reading, and
+    deliberately so: it is the strongest one available from a criterion whose
+    own text does not distinguish its target, and tightening it further would
+    refuse `RETRIES\\s*=\\s*` for that criterion, which is exactly the evidence
+    a T1 assertion is supposed to bring. Its limit is that a criterion written
+    that way can be bound by a long structural word; a criterion that names
+    what it is about — `Cache`, `CameraProvider` — never reaches it.
+
+    The comparison is over words, so `CameraProvider`, `camera_provider` and
+    `CAMERA_PROVIDER` all reach each other. Flags are not consulted: what
+    words a literal spells is not something a flag changes.
     """
     try:
         parsed = regex_parser.parse(pattern)
@@ -724,19 +775,21 @@ def _binds_criterion(pattern: str, ac_text: str) -> bool:
     criterion_words = _words(ac_text)
     if not criterion_words:
         return False
-    for run in _required_literal_runs(parsed):
-        run_words = _words(run)
-        if not run_words:
-            continue
-        if max(len(word) for word in run_words) < _MIN_BINDING_WORD_LENGTH:
-            continue
-        span = len(run_words)
-        if any(
-            criterion_words[start : start + span] == run_words
-            for start in range(len(criterion_words) - span + 1)
-        ):
-            return True
-    return False
+    run_words = [words for words in map(_words, _required_literal_runs(parsed)) if words]
+    if not run_words:
+        return False
+
+    targets = _named_targets(ac_text)
+    if targets:
+        return any(_contains(words, target) for words in run_words for target in targets)
+
+    longest = max(len(word) for word in criterion_words)
+    if longest < _MIN_BINDING_WORD_LENGTH:
+        return False
+    return any(
+        _contains(criterion_words, words) and any(len(word) == longest for word in words)
+        for words in run_words
+    )
 
 
 def _skip_inline_space(text: str, index: int) -> int:

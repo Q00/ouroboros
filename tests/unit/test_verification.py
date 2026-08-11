@@ -2171,6 +2171,146 @@ class TestSpecVerifier:
 
         assert report.verified_pass is True
 
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+\w+",
+                {"unrelated.py": "class Unrelated:\n    pass\n"},
+            ),
+            (
+                "MUST create a CameraProvider file",
+                "file",
+                {"profile.py": "x = 1\n"},
+            ),
+            (
+                "MUST add a Cache interface",
+                r"interface\s+\w+",
+                {"unrelated.ts": "interface Unrelated {}\n"},
+            ),
+            (
+                "MUST register a CameraProvider handler",
+                r"def\s+\w+",
+                {"unrelated.py": "def unrelated():\n    pass\n"},
+            ),
+        ],
+        ids=[
+            "structural-keyword-class",
+            "structural-keyword-file-via-filename-path",
+            "structural-keyword-interface-is-the-longest-word",
+            "structural-keyword-def",
+        ],
+    )
+    def test_structural_vocabulary_alone_does_not_bind_a_named_target(
+        self, ac_text: str, pattern: str, files: dict[str, str]
+    ) -> None:
+        """Sharing the criterion's structural words is not naming its target.
+
+        Every pattern here spells a word the criterion really does contain —
+        `class`, `file`, `interface`, and a `def` for its "handler" — and every
+        one of them matches source that has nothing to do with what the
+        criterion asked for. Binding has to be to the thing the criterion
+        named, which the caller spelled as code: `CameraProvider`, `Cache`.
+        Word length cannot make that distinction, and `interface` is the
+        longest word in its own criterion.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="*.*",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is False
+        assert report.results[0].outcome is VerificationOutcome.UNVERIFIABLE
+
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files"),
+        [
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+CameraProvider",
+                {"camera.py": "class CameraProvider:\n    pass\n"},
+            ),
+            (
+                "MUST add a Cache interface",
+                r"class\s+Cache\b",
+                {"cache.py": "class Cache:\n    pass\n"},
+            ),
+        ],
+        ids=["compound-name", "single-capitalised-name"],
+    )
+    def test_a_named_target_still_binds_when_spelled_out(
+        self, ac_text: str, pattern: str, files: dict[str, str]
+    ) -> None:
+        """The same structural words bind once the target is spelled with them.
+
+        `class\\s+CameraProvider` differs from `class\\s+\\w+` by exactly the
+        thing that matters: it cannot match a file that lacks the name the
+        criterion gave.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is True
+
+    def test_a_criterion_naming_nothing_in_code_spelling_falls_back_to_its_longest_words(
+        self,
+    ) -> None:
+        """The fallback is reached only when the criterion names nothing.
+
+        "maximum 5 retries" spells no compound and capitalises nothing, so
+        there is no target to read and the longest-word reading admits
+        `RETRIES\\s*=\\s*` — the evidence a T1 assertion exists to bring. The
+        same reading still refuses a short structural word, which is what
+        keeps the fallback from becoming a way around the rule above.
+        """
+        project = self._create_project({"config.py": "RETRIES = 5\n", "profile.py": "x = 1\n"})
+        bound = SpecAssertion(
+            ac_index=0,
+            ac_text="maximum 5 retries",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+        )
+        unbound = SpecAssertion(
+            ac_index=1,
+            ac_text="MUST create a config file",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="file",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (bound, unbound), agent_results={0: False, 1: False}
+        )
+
+        assert summary.reports[0].verified_pass is True
+        assert summary.reports[1].verified_pass is False
+        assert summary.reports[1].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+
 
 # -- Extractor Tests --
 
