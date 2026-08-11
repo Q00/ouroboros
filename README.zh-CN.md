@@ -210,6 +210,14 @@ ouroboros setup                         # 配置运行时
 
 历史兼容：在 extras 迁移期间，`ouroboros-ai[dashboard]` 仍然作为兼容别名保留。
 
+**Homebrew（macOS/Linux）**：
+```bash
+brew tap q00/tap
+brew install ouroboros-ai
+ouroboros setup                         # 配置运行时
+```
+自托管 tap，尚未进入 homebrew-core。安装的是与 PyPI 相同的包。
+
 各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
