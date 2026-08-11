@@ -35,7 +35,8 @@
   <a href="#你能得到什么">效果</a> ·
   <a href="#循环">运作原理</a> ·
   <a href="#命令">命令</a> ·
-  <a href="#从-wonder-到本体论">理念</a>
+  <a href="#从-wonder-到本体论">理念</a> ·
+  <a href="https://ouroboros.page/learn/zh/">指南</a>
 </p>
 
 <p align="center">
