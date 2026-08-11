@@ -10,7 +10,7 @@
     {
       "name": "ouroboros",
       "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is, and a score above the bar blocks spec generation until you pass force explicitly.",
-      "version": "0.51.1",
+      "version": "0.51.2",
       "author": {
         "name": "Q00",
         "email": "jqyu.lee@gmail.com"

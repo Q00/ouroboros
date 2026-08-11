@@ -6,7 +6,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -34,8 +34,22 @@
   <a href="#wonder에서-온톨로지로">철학</a> ·
   <a href="#순환-구조">원리</a> ·
   <a href="#명령어">명령어</a> ·
-  <a href="#아홉-개의-사고">에이전트</a>
+  <a href="#아홉-개의-사고">에이전트</a> ·
+  <a href="https://ouroboros.page/learn/">가이드</a>
 </p>
+
+<p align="center"><sub><b>서로 다른 네 번의 실행, 네 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
+
+<table align="center">
+<tr>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>터미널 CLI</b> — 할 일 관리 CLI 과제. <code>ouroboros init start</code>가 순서와 범위를 묻고 모호도 점수를 보고합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 영상 퍼블리싱 하네스 과제. integration으로 호출되어 인터뷰·어드바이저리 레인·모호도 원장이 한 화면에</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 자동화 과제. 어드바이저리 6개가 병렬로 돌고 나서 인터뷰가 결과를 제출합니다</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 카트 레이싱 게임 과제를 챗봇으로. <code>Final ambiguity: 0.15</code>에서 끝납니다</sub></td>
+</tr>
+</table>
 
 > *AI는 무엇이든 만들 수 있다. 어려운 건 무엇을 만들어야 하는지 아는 것이다.*
 
@@ -140,11 +154,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 순서, 크래시 내구성, v1 범위, 작업을 무엇으로 지목할지를 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
-</p>
-
-<p align="center">
-  <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 위의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
+  <sub>이 페이지 맨 위의 녹화가 바로 이 명령입니다. 설치 전에 먼저 보시라고 위에 뒀습니다.</sub>
 </p>
 
 <p align="center">
