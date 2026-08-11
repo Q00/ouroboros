@@ -16,7 +16,7 @@
 
 
 <p align="center">
-  <strong>Pins an acceptance spec and omits any verify command or expected output from the worker.</strong>
+  <strong>Pins an acceptance spec and omits any verify command or expected output from the worker's contract block.</strong>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
