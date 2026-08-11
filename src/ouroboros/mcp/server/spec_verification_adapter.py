@@ -184,6 +184,26 @@ def evaluation_summary_from_spec_verification(
                 skipped_indices.append(ac_index)
             if not evidence:
                 evidence = "Spec verifier found a discrepancy without evidence details."
+        elif outcomes == {VerificationOutcome.VERIFIED} and not getattr(
+            report, "agent_reported_pass", True
+        ):
+            # Source-scan evidence may confirm a claimed PASS; it may not
+            # reverse a reported FAIL. `SpecVerifier.verify_all` already
+            # refuses to emit this combination, but this adapter is a public
+            # authority boundary that also accepts replayed, legacy and
+            # compatibility summaries built elsewhere. Enforcing the polarity
+            # only in the producer would let a rehydrated report encode the
+            # exact transition the producer forbids, so the boundary that
+            # mints the formal verdict checks it too.
+            unverifiable_indices.append(ac_index)
+            passed = False
+            verdict_state = "not_evaluated"
+            rendered_verdict = "NOT_EVALUATED"
+            evidence = (
+                "Spec verification reported all assertions verified against an "
+                "agent-reported FAIL; source-scan evidence cannot overturn a "
+                "reported FAIL, so the formal AC verdict is not evaluated."
+            )
         elif outcomes == {VerificationOutcome.VERIFIED}:
             passed = True
             verdict_state = "evaluated"
