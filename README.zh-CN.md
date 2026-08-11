@@ -46,6 +46,14 @@
   <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。下方“快速开始”中的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
 </p>
 
+<p align="center">
+  <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, five advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
+</p>
+
+<p align="center">
+  <sub>同一场访谈，跑在 ChatGPT 应用里而不是终端。Ouroboros 是作为 integration 被调用的，所以提问、各个顾问视角、以及模糊度台账都直接出现在你本来就在用的宿主里。</sub>
+</p>
+
 **把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、Zcode、Goose、GJC、Antigravity 和 Grok，变成一份经过验证、可运行的代码库。**
 
 Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把非确定性的 agent 工作转换成一份可重放、可观测、受策略约束的执行契约。它用一套结构化的、规约优先的工作流取代东拼西凑的 prompt：访谈、定型、执行、评估、演化。
