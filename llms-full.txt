@@ -1,6 +1,6 @@
 # Ouroboros — Full Model Context Reference
 
-> Specification-first workflow engine for AI coding agents.
+> Pins an acceptance spec and omits any verify command or expected output from the worker.
 > Package: ouroboros-ai | CLI: ouroboros | Claude Code skills: ooo
 > Python >= 3.12 | License: MIT
 
