@@ -718,6 +718,82 @@ Parallel Execution Verification Report
         assert summary.run_verdict == "FAIL"
 
     @pytest.mark.parametrize(
+        ("report_polarity", "mechanical_pass"),
+        [
+            (True, False),
+            (None, False),
+            (False, True),
+        ],
+        ids=[
+            "report-claims-pass-while-execution-says-fail",
+            "report-omits-polarity-while-execution-says-fail",
+            "report-says-fail-while-execution-says-pass",
+        ],
+    )
+    def test_report_polarity_cannot_outrank_the_execution_record(
+        self, report_polarity: bool | None, mechanical_pass: bool
+    ) -> None:
+        """The report's copy of the agent result is not the authoritative one.
+
+        `agent_reported_pass` on a report is a copy the verifier was handed.
+        A replayed, stale or externally built report carries whatever copy it
+        was constructed with — a `True` contradicting the execution, or no
+        field at all, which reads as `True`. The mechanical summary is the
+        execution's own account, so both are consulted and either one saying
+        "not a pass" settles it. Disagreement is not resolved in favour of the
+        more permissive record.
+        """
+        ac_text = "MUST define a CameraProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"[\s\S]+",
+        )
+        polarity_kwargs = (
+            {} if report_polarity is None else {"agent_reported_pass": report_polarity}
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                            detail="Pattern found in main.py",
+                        ),
+                    ),
+                    **polarity_kwargs,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=ac_text,
+                    passed=mechanical_pass,
+                    score=1.0 if mechanical_pass else 0.0,
+                    evidence="Agent execution record.",
+                ),
+            ),
+            execution_completion_status="completed",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(ac_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+
+    @pytest.mark.parametrize(
         "rehydrate",
         ["direct", "round_trip", "legacy_booleans"],
     )
@@ -1581,7 +1657,17 @@ Parallel Execution Verification Report
         assert summary.failure_reason == "1/1 ACs failed (AC 1)"
 
     def test_spec_verification_does_not_approve_failed_execution(self) -> None:
-        """Passing verifier results must not approve a run whose execution failed."""
+        """Passing verifier results must not approve a run whose execution failed.
+
+        The AC itself is now `NOT_EVALUATED` rather than a passing result
+        carried inside a rejected run. The worker reported this task
+        incomplete, so the execution record says the agent did not claim this
+        AC passed, and the report's own `agent_reported_pass=True` is the
+        contradicting copy rather than the authority. Source-scan evidence
+        cannot resolve that disagreement in favour of a pass — this is the
+        shape #1835 describes, a grep result standing in for work a worker
+        reported it never finished.
+        """
         mechanical = EvaluationSummary(
             final_approved=False,
             highest_stage_passed=2,
@@ -1626,12 +1712,15 @@ Parallel Execution Verification Report
         summary = _evaluation_summary_from_spec_verification(mechanical, verification)
 
         assert summary is not None
-        assert summary.ac_results[0].passed is True
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
         assert summary.execution_completion_status == "failed"
         assert summary.approval_status == "rejected"
         assert summary.final_approved is False
         assert summary.run_verdict == "FAIL"
-        assert summary.failure_reason == "execution_completion_status=failed"
+        assert summary.failure_reason == (
+            "unverifiable assertion evidence for AC 1 [execution_completion_status=failed]"
+        )
 
     def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
         """False-positive legacy PASS claims remain catchable by spec verification."""
