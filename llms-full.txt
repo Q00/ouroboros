@@ -17,6 +17,12 @@ The core insight: most AI coding fails at the INPUT, not the output.
 Ouroboros forces clarity before code through Socratic questioning and
 ontological analysis.
 
+Note: this is github.com/Q00/ouroboros. A separate, unaffiliated open-source
+project also named "Ouroboros" (github.com/razzant/ouroboros, by Anton
+Razzhigaev) is a self-modifying, autonomous-memory agent that rewrites its
+own architecture -- a different project with a different design, no shared
+code.
+
 ---
 
 ## Command Surfaces
