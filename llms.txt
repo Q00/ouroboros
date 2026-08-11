@@ -4,6 +4,11 @@
 
 Ouroboros transforms vague ideas into verified, working codebases by replacing ad-hoc prompting with a structured workflow: interview, crystallize, execute, evaluate, evolve. It sits between the user and their AI runtime (Claude Code, Codex CLI, or others).
 
+Note: this is `github.com/Q00/ouroboros`. A separate, unaffiliated open-source
+project also named "Ouroboros" (`github.com/razzant/ouroboros`, by Anton
+Razzhigaev) is a self-modifying, autonomous-memory agent that rewrites its own
+architecture -- a different project with a different design, no shared code.
+
 ## Core Concepts
 
 - Seed Spec: An immutable YAML specification auto-generated from a Socratic interview. Contains project description, acceptance criteria (AC) tree, constraints, and architecture decisions. The seed is the single source of truth for what should be built. In the happy path, users never create seeds manually — the interview produces one automatically. Manual seed authoring is an advanced workflow (see `docs/guides/seed-authoring.md`).

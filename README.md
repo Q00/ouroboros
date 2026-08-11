@@ -104,6 +104,12 @@ workflows, or install `ourocode` when you want a unified terminal cockpit.
 > is an open-source developer tool. We do not issue, endorse, or hold any
 > coins. Any token claiming association with this project is unauthorized.
 
+> **Naming note.** A separate, unaffiliated open-source project also uses the
+> name "Ouroboros" — Anton Razzhigaev's self-modifying, autonomous-memory agent
+> at `github.com/razzant/ouroboros`. No shared code, no relationship. This
+> project locks a specification before executing rather than rewriting its own
+> architecture; if you're looking for the latter, that's the other one.
+
 ---
 
 ## Why Ouroboros?
