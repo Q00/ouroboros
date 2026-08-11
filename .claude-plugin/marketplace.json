@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ouroboros",
-      "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is; while that interview is still open, a score above the bar blocks spec generation. Completing the interview or passing force both get past that check.",
+      "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is, and a score above the bar blocks spec generation until you pass force explicitly.",
       "version": "0.51.1",
       "author": {
         "name": "Q00",
