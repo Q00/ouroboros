@@ -34,7 +34,8 @@
   <a href="#wonder에서-온톨로지로">철학</a> ·
   <a href="#순환-구조">원리</a> ·
   <a href="#명령어">명령어</a> ·
-  <a href="#아홉-개의-사고">에이전트</a>
+  <a href="#아홉-개의-사고">에이전트</a> ·
+  <a href="https://ouroboros.page/learn/">가이드</a>
 </p>
 
 <p align="center">
