@@ -42,13 +42,18 @@
   <a href="#from-wonder-to-ontology">Philosophy</a>
 </p>
 
-<p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
-</p>
+<p align="center"><sub><b>One spec engine, four places to run it</b></sub></p>
 
-<p align="center">
-  <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command in Quick Start below runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
-</p>
+<table align="center">
+<tr>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b> — <code>ouroboros init start</code> asking about ordering and scope, then reporting an ambiguity score</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — called as an integration: the interview, five advisory lanes, and the ambiguity ledger</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — six advisory lanes running in parallel before the interview submits its results</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — the same interview as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
+</tr>
+</table>
 
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
 
