@@ -123,7 +123,7 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 **Install** — one command, everything auto-detected:
 
 ```bash
-OUROBOROS_INSTALL_REF=readme curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
 
 **First use** — open your AI coding agent and type:
