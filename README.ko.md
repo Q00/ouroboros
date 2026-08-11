@@ -45,6 +45,14 @@
   <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 아래 빠른 시작의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
 </p>
 
+<p align="center">
+  <img src="./docs/images/ooo-codex-host.gif" width="560" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration: the interview asks which outcome the harness must optimize for, five advisory perspectives run beside it, and an ambiguity ledger lists four unresolved tracks">
+</p>
+
+<p align="center">
+  <sub>같은 인터뷰를 터미널이 아니라 ChatGPT 앱 안에서 돌린 화면입니다. Ouroboros가 integration으로 호출되기 때문에 질문도, 어드바이저리 관점들도, 모호도 원장도 이미 쓰고 있는 호스트 안에 그대로 나타납니다.</sub>
+</p>
+
 > *AI는 무엇이든 만들 수 있다. 어려운 건 무엇을 만들어야 하는지 아는 것이다.*
 
 Ouroboros는 **명세 우선 AI 개발 시스템**입니다. 이 시스템은 소크라테스식 질문법과 온톨로지 분석을 적용하여, 단 한 줄의 코드도 작성하기 전에 사용자의 숨겨진 가정을 드러냅니다.
