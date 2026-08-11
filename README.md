@@ -39,7 +39,8 @@
   <a href="#what-you-get">Results</a> ·
   <a href="#the-loop">How It Works</a> ·
   <a href="#commands">Commands</a> ·
-  <a href="#from-wonder-to-ontology">Philosophy</a>
+  <a href="#from-wonder-to-ontology">Philosophy</a> ·
+  <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
 
 <p align="center">
