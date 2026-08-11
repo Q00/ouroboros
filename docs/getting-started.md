@@ -318,7 +318,7 @@ The Socratic Interviewer asks clarifying questions:
 - "Mobile app or web-based?" (Desktop-only with web export)
 - "Data storage preference?" (SQLite, local file)
 
-Answer until the ambiguity score drops below 0.2, and the interview auto-generates a seed spec. If you would rather stop before that, the CLI offers to generate the Seed anyway at whatever score you are on:
+Answer until the ambiguity score drops below 0.2, and the interview auto-generates a seed spec. If you would rather stop before that, the CLI offers to force generation at whatever score you are on:
 
 ```yaml
 # Auto-generated seed (example)
