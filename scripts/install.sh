@@ -835,10 +835,19 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
+# Optional install-channel attribution. A docs page or listing can prepend
+# OUROBOROS_INSTALL_REF=<channel> to the install command so install_started /
+# install_completed carry which surface the install came from. Same privacy
+# contract as every other property here: a short opaque token chosen by us,
+# never derived from the machine. Token-constrained like os/arch above so a
+# hostile value cannot ride into the payload; anything else becomes "direct".
+INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+[[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
+
 _banner
 
 _telemetry_notice
-_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
+_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -1349,7 +1358,7 @@ if command -v claude &>/dev/null; then
 fi
 
 _telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
-  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"

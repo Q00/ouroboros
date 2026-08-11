@@ -88,14 +88,21 @@ together, always.
 
 | Event | When | Properties (exact set) |
 |---|---|---|
-| `install_started` | `install.sh` begins | source, os, arch, version, is_local, pre |
-| `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version |
+| `install_started` | `install.sh` begins | source, os, arch, version, is_local, pre, ref |
+| `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version, ref |
 | `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version, ci |
 | `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
 | `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
 | `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os, ci — no python_version, no backend/provider context |
 
 Notes:
+
+- `ref` on the install events is a short opaque channel token (`hellogithub`,
+  `readme`, `guide-zh`, …) that a docs page or listing prepends to the install
+  command as `OUROBOROS_INSTALL_REF=<channel>`. It says which of OUR surfaces
+  the command was copied from; it is chosen by us, never derived from the
+  machine, defaults to `direct`, and is discarded unless it matches
+  `[A-Za-z0-9._-]{1,32}`.
 
 - `source` separates the two entry surfaces cleanly: `cli` means the user typed
   the command in a terminal; `mcp` means it arrived from inside an AI agent
