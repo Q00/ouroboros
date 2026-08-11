@@ -16,9 +16,9 @@
 
 
 <p align="center">
-  <strong>Stop prompting. Start specifying.</strong>
+  <strong>Pins an acceptance spec and omits any verify command or expected output from the worker.</strong>
   <br/>
-  <sub>The <strong>Agent OS</strong> for replayable, specification-first AI coding workflows</sub>
+  <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
 
 <p align="center">

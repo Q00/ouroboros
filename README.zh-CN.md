@@ -16,9 +16,9 @@
 
 
 <p align="center">
-  <strong>别再堆提示词，先把规约写清楚。</strong>
+  <strong>每条验收标准自己的验证命令和期望输出不会进 worker 的契约块，也没有开关能把它放回去。</strong>
   <br/>
-  <sub>面向 AI 编码工作流的 Agent OS —— 可重放、规约优先</sub>
+  <sub>面向 AI 编码工作流的 Agent OS —— 可重放</sub>
 </p>
 
 <p align="center">
