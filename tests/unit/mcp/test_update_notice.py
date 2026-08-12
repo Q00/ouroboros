@@ -150,6 +150,47 @@ class TestCachedUpdateNotice:
 
         assert update_notice.cached_update_notice() is None
 
+    def test_stale_prerelease_value_does_not_survive_stable_refresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2066 R3: a stable-channel refresh stamps only its own channel,
+        so an older prerelease value is not resurrected by the refreshed
+        shared timestamp — the prerelease reader sees it as stale."""
+        _pin_installed(monkeypatch, "0.52.0b1")
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {
+                "latest_version": "0.52.0",
+                "latest_version_checked_at": time.time(),
+                "latest_version_pre": "0.52.0b3",
+                "timestamp": time.time(),
+            },
+        )
+
+        assert update_notice.cached_update_notice() is None
+
+    def test_stamped_channel_serves_its_fresh_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A per-channel stamp attests its own channel even when the
+        legacy shared timestamp is old."""
+        _pin_installed(monkeypatch, "0.51.0")
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {
+                "latest_version": "0.52.0",
+                "latest_version_checked_at": time.time(),
+                "timestamp": 5,
+            },
+        )
+
+        notice = update_notice.cached_update_notice()
+
+        assert notice is not None
+        assert "0.52.0" in notice
+
 
 class _RecordingThread:
     started: list[str] = []
@@ -230,6 +271,29 @@ class TestBackgroundRefresh:
 
         assert _RecordingThread.started == ["ouroboros-update-notice-refresh"]
 
+    def test_unstamped_channel_in_stamped_cache_refreshes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2066 R3: after a stable-channel refresh, a prerelease process
+        must not trust the leftover prerelease value — it refreshes its
+        own channel instead."""
+        self._fresh_gate(monkeypatch)
+        _pin_installed(monkeypatch, "0.52.0b1")
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {
+                "latest_version": "0.52.0",
+                "latest_version_checked_at": time.time(),
+                "latest_version_pre": "0.52.0b3",
+                "timestamp": time.time(),
+            },
+        )
+
+        update_notice.maybe_schedule_cache_refresh()
+
+        assert _RecordingThread.started == ["ouroboros-update-notice-refresh"]
+
     def test_concurrent_callers_start_exactly_one_refresh(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -283,11 +347,12 @@ class TestBackgroundRefresh:
 
         assert _RecordingThread.started == []
 
-    def test_refresh_writes_channel_and_timestamp(
+    def test_refresh_stamps_only_its_own_channel(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The producer writes the writer's own cache shape, preserving
-        unrelated keys."""
+        """#2066 R3: the producer stamps the refreshed channel and leaves
+        the shared legacy timestamp alone, so its write can never make the
+        other channel's older value look current."""
         _pin_installed(monkeypatch, "0.51.0")
         cache_file = tmp_path / "version-check-cache.json"
         cache_file.write_text(json.dumps({"latest_version_pre": "0.52.0b1", "timestamp": 5}))
@@ -302,8 +367,10 @@ class TestBackgroundRefresh:
 
         payload = json.loads(cache_file.read_text())
         assert payload["latest_version"] == "0.52.0"
+        assert payload["latest_version_checked_at"] > 5
         assert payload["latest_version_pre"] == "0.52.0b1"
-        assert payload["timestamp"] > 5
+        assert "latest_version_pre_checked_at" not in payload
+        assert payload["timestamp"] == 5
 
     def test_refresh_failure_is_swallowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

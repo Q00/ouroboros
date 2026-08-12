@@ -81,6 +81,37 @@ class TestGetLatestVersion:
 
         assert result is None
 
+    def test_stale_prerelease_channel_refetches_after_stable_stamp(self, tmp_path: Path) -> None:
+        """#2066: a stamped stable refresh cannot vouch for the prerelease
+        channel — the unstamped leftover value is stale and refetched."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "2.0.0",
+                    "latest_version_checked_at": time.time(),
+                    "latest_version_pre": "2.0.0b1",
+                    "timestamp": time.time(),
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(
+            {"info": {"version": "2.0.0"}, "releases": {"2.1.0b2": [{}]}}
+        ).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version(current="2.0.0b1")
+
+        assert result == "2.1.0b2"
+        new_cache = json.loads(cache_file.read_text())
+        assert new_cache["latest_version_pre"] == "2.1.0b2"
+        assert "latest_version_pre_checked_at" in new_cache
+
 
 class TestCheckUpdate:
     """Test check_update logic."""

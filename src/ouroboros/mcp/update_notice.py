@@ -50,18 +50,39 @@ def _load_cache_payload() -> dict | None:
     return raw
 
 
-def _cache_is_fresh(payload: dict) -> bool:
-    """True when the cache timestamp is within the writer's TTL."""
-    timestamp = payload.get("timestamp")
-    if not isinstance(timestamp, (int, float)):
+def _stamp_is_fresh(stamp: object) -> bool:
+    """True when *stamp* is a timestamp within the writer's TTL."""
+    if not isinstance(stamp, (int, float)):
         return False
-    age = time.time() - timestamp
+    age = time.time() - stamp
     return 0 <= age < _CACHE_TTL_SECONDS
 
 
 def _channel_key(installed_is_prerelease: bool) -> str:
     """The cache key for the installed release channel, matching the writer."""
     return "latest_version_pre" if installed_is_prerelease else "latest_version"
+
+
+_CHANNEL_KEYS = ("latest_version", "latest_version_pre")
+
+
+def _channel_is_fresh(payload: dict, channel_key: str) -> bool:
+    """Channel-specific freshness (#2066 R3).
+
+    The shared ``timestamp`` cannot attest a channel it did not refresh:
+    a stable-channel refresh must not make an older prerelease value look
+    fresh. Each channel therefore carries its own ``*_checked_at`` stamp.
+    A payload with no per-channel stamps at all was written by the legacy
+    single-timestamp writer and keeps the shared-timestamp semantics for
+    one TTL window; once any stamp is present, an unstamped channel is
+    stale.
+    """
+    stamp = payload.get(f"{channel_key}_checked_at")
+    if stamp is not None:
+        return _stamp_is_fresh(stamp)
+    if any(payload.get(f"{key}_checked_at") is not None for key in _CHANNEL_KEYS):
+        return False
+    return _stamp_is_fresh(payload.get("timestamp"))
 
 
 def cached_update_notice() -> str | None:
@@ -75,9 +96,10 @@ def cached_update_notice() -> str | None:
 
         installed_version = Version(installed)
         payload = _load_cache_payload()
-        if payload is None or not _cache_is_fresh(payload):
+        channel_key = _channel_key(installed_version.is_prerelease)
+        if payload is None or not _channel_is_fresh(payload, channel_key):
             return None
-        latest = payload.get(_channel_key(installed_version.is_prerelease))
+        latest = payload.get(channel_key)
         if not isinstance(latest, str) or not latest:
             return None
         if Version(latest) <= installed_version:
@@ -129,8 +151,13 @@ def _refresh_cache_now() -> None:
         if latest is None:
             return
         payload = _load_cache_payload() or {}
-        payload[_channel_key(include_prerelease)] = latest
-        payload["timestamp"] = time.time()
+        channel_key = _channel_key(include_prerelease)
+        payload[channel_key] = latest
+        # Freshness is attested per channel (#2066 R3): only the refreshed
+        # channel gets a new stamp, and the shared legacy timestamp is left
+        # alone so this write can never make the OTHER channel's older
+        # value look current to any reader.
+        payload[f"{channel_key}_checked_at"] = time.time()
         _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=_CACHE_FILE.parent, suffix=".tmp")
         try:
@@ -178,7 +205,7 @@ def maybe_schedule_cache_refresh() -> None:
         payload = _load_cache_payload()
         if (
             payload is not None
-            and _cache_is_fresh(payload)
+            and _channel_is_fresh(payload, channel_key)
             and _channel_value_usable(payload, channel_key)
         ):
             return

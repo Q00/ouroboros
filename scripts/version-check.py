@@ -100,11 +100,22 @@ def get_latest_version(*, current: str | None = None) -> str | None:
 
     cache_key = "latest_version_pre" if include_pre else "latest_version"
 
-    # Check cache first
+    # Check cache first. Freshness is attested per channel (#2066): the
+    # shared timestamp cannot vouch for a channel another refresh did not
+    # touch, so once any per-channel stamp exists, an unstamped channel is
+    # stale. A cache with no stamps at all predates them and keeps the
+    # shared-timestamp semantics for one TTL window.
     try:
         if _CACHE_FILE.exists():
             cache = json.loads(_CACHE_FILE.read_text())
-            if time.time() - cache.get("timestamp", 0) < _CACHE_TTL:
+            stamp = cache.get(f"{cache_key}_checked_at")
+            if stamp is None:
+                stamped_keys = ("latest_version", "latest_version_pre")
+                if any(cache.get(f"{key}_checked_at") is not None for key in stamped_keys):
+                    stamp = 0
+                else:
+                    stamp = cache.get("timestamp", 0)
+            if time.time() - stamp < _CACHE_TTL:
                 cached = cache.get(cache_key)
                 if cached:
                     return cached
@@ -125,8 +136,12 @@ def get_latest_version(*, current: str | None = None) -> str | None:
                     existing_cache = json.loads(_CACHE_FILE.read_text())
             except Exception:
                 pass
+            now = time.time()
             existing_cache[cache_key] = latest
-            existing_cache["timestamp"] = time.time()
+            # Per-channel freshness stamp (#2066); the shared timestamp is
+            # kept for readers that predate the stamps.
+            existing_cache[f"{cache_key}_checked_at"] = now
+            existing_cache["timestamp"] = now
             cache_content = json.dumps(existing_cache)
             fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix=".tmp")
             try:
