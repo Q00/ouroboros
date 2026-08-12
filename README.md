@@ -18,7 +18,7 @@
 <p align="center">
   <strong>It gets smarter on its own. We just hold the line.</strong>
   <br/>
-  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation. The grading command and expected result never make it into its contract.</sub>
+  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation. The grading command and expected result never make it into the success contract we hand it.</sub>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
