@@ -16,7 +16,9 @@
 
 
 <p align="center">
-  <strong>When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back.</strong>
+  <strong>It gets smarter on its own. We just hold the line.</strong>
+  <br/>
+  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation, without the answer ever entering its own instructions.</sub>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
