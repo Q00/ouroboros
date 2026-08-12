@@ -2030,34 +2030,23 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    resolved = _resolve_llm_backend_for_models(backend)
     # Recognize the current shipped default AND prior-release shipped defaults
     # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and for Claude-incapable backends it must normalize to the sentinel just
-    # like the current default would. Genuinely explicit, never-shipped ids are
-    # absent from this set and fall through to be preserved verbatim.
+    # and it must normalize exactly like the current default would. Genuinely
+    # explicit, never-shipped ids are absent from this set and are preserved
+    # verbatim.
     is_shipped_default = candidate in (
         *recognized_shipped_defaults(default_model),
         *extra_shipped_defaults,
     )
-    if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS and is_shipped_default:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS and is_shipped_default:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
-        return _ZCODE_DEFAULT_MODEL
+    if is_shipped_default:
+        # A recognized shipped default — current or prior-release — is a pin
+        # the user never chose, so every backend maps it to its own default:
+        # Claude-incapable backends keep their sentinel as before, and
+        # Claude-capable backends now take the current default pin instead of
+        # leaking a retired id to the API (#2069). Never-shipped ids are
+        # deliberate user pins and fall through verbatim.
+        return _default_model_for_backend(default_model, backend=backend)
 
     return candidate
 

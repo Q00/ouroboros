@@ -1945,6 +1945,53 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend=backend) == "default"
             assert get_assertion_extraction_model(backend=backend) == "default"
 
+    @pytest.mark.parametrize("backend", ["claude", None])
+    def test_legacy_shipped_defaults_normalize_on_claude_backends(
+        self, backend: str | None
+    ) -> None:
+        """Regression for #2069: the #1324 normalization only fired for
+        Claude-incapable backends, so a persisted legacy shipped default
+        (``claude-sonnet-4-20250514``) reached the Claude API verbatim and
+        was rejected as retired. Claude-capable backends must normalize
+        recognized legacy shipped defaults to the current default pin.
+        """
+        legacy_config = OuroborosConfig(
+            llm=LLMConfig(
+                qa_model="claude-sonnet-4-20250514",
+                dependency_analysis_model="claude-opus-4-6",
+                ontology_analysis_model="claude-sonnet-4-20250514",
+            ),
+            evaluation=EvaluationConfig(
+                assertion_extraction_model="claude-sonnet-4-20250514",
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_qa_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # dependency_analysis recognizes the retired Opus family as
+            # shipped defaults and its current pin is the Sonnet default.
+            assert get_dependency_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_ontology_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_assertion_extraction_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # The explicit legacy per-role field takes precedence over stage
+            # models (#2069) and resolves through the same getter, so the
+            # precedence path can no longer leak the retired id either.
+            assert get_llm_model_for_role("qa", backend=backend) == DEFAULT_SONNET_MODEL
+
+    def test_never_shipped_ids_survive_claude_normalization(self) -> None:
+        """A never-shipped id is a deliberate user pin and stays verbatim
+        on Claude-capable backends (#2069)."""
+        custom_config = OuroborosConfig(
+            llm=LLMConfig(qa_model="my-proxy/claude-custom-build"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=custom_config),
+        ):
+            assert get_qa_model(backend="claude") == "my-proxy/claude-custom-build"
+
     def test_consensus_advocate_legacy_shipped_default_normalizes_to_sentinel(self) -> None:
         """A persisted legacy consensus advocate slug normalizes for Codex (#1324)."""
         legacy_config = OuroborosConfig(
