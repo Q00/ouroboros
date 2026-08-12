@@ -30,6 +30,7 @@ replayable execution contract on your choice of runtime backend.
 ### Architecture
 
 - [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
+- [Native-Windows Codex Desktop HTTP task persistence](./rfc/windows-codex-desktop-http-task.md) - Proposed explicit opt-in loopback HTTP MCP task for native Codex Desktop
 - [Routing B — Route Admission](./rfc/routing-b-route-admission.md) - Deterministic, provider-neutral route contract and Admission Kernel
 - [Routing C — Compatibility Projection](./rfc/routing-c-route-compat.md) - Bridge existing model/effort routing into the Admission Kernel
 - [Routing D — Bounded Escalation](./rfc/routing-d-bounded-escalation.md) - Route observations and finite next-route decisions
