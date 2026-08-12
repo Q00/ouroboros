@@ -7,11 +7,13 @@ appended to the server's ``instructions`` field with no network call on
 the startup hot path.
 
 Hosts without the Claude hook (Codex, OpenCode, Kiro, ...) have no cache
-producer of their own, so a serve start that finds the cache missing or
-stale also schedules one bounded background refresh on a daemon thread:
-the first start primes the cache off the hot path and a later start
-delivers the nudge. The append seam fails open on every error — the
-nudge is advisory and must never delay or fail server startup.
+producer of their own, so the ``mcp serve`` startup path — and only that
+path, never mere server construction — schedules one bounded background
+refresh on a daemon thread when the installed channel has no fresh cached
+value: the first start primes the cache off the hot path and a later
+start delivers the nudge. The append seam is side-effect-free formatting
+and fails open on every error — the nudge is advisory and must never
+delay or fail server startup.
 """
 
 from __future__ import annotations
@@ -30,8 +32,10 @@ _CACHE_FILE = Path.home() / ".ouroboros" / "version-check-cache.json"
 _CACHE_TTL_SECONDS = 86400
 _PYPI_JSON_URL = "https://pypi.org/pypi/ouroboros-ai/json"
 _REFRESH_TIMEOUT_SECONDS = 5
-# One background refresh per process: repeated server constructions must
-# not stack threads or PyPI requests.
+# One background refresh per process: repeated serve starts must not stack
+# threads or PyPI requests. The event is read and set under the lock so
+# concurrent callers cannot both observe it unset.
+_REFRESH_LOCK = threading.Lock()
 _REFRESH_STARTED = threading.Event()
 
 
@@ -140,31 +144,70 @@ def _refresh_cache_now() -> None:
         return
 
 
-def _start_background_refresh_if_stale() -> None:
-    """Schedule one bounded cache refresh when no fresh cache exists."""
-    if _REFRESH_STARTED.is_set():
+def _channel_value_usable(payload: dict, channel_key: str) -> bool:
+    """True when the selected channel holds a parseable version string."""
+    value = payload.get(channel_key)
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        Version(value)
+    except InvalidVersion:
+        return False
+    return True
+
+
+def maybe_schedule_cache_refresh() -> None:
+    """Schedule one bounded cache refresh from the serve startup path.
+
+    Freshness is channel-specific (#2066 R2): a fresh payload that lacks
+    a usable value for the INSTALLED channel — a stable-only cache under
+    a prerelease install, or the reverse — still refreshes, so a channel
+    transition cannot strand the nudge. The once-per-process gate is
+    read and set under a lock, so concurrent callers start exactly one
+    thread. Fails open: this must never delay or fail serve startup.
+    """
+    try:
+        if _REFRESH_STARTED.is_set():
+            return
+        installed = metadata.version("ouroboros-ai")
+        from packaging.version import Version
+
+        channel_key = _channel_key(Version(installed).is_prerelease)
+        payload = _load_cache_payload()
+        if (
+            payload is not None
+            and _cache_is_fresh(payload)
+            and _channel_value_usable(payload, channel_key)
+        ):
+            return
+        with _REFRESH_LOCK:
+            if _REFRESH_STARTED.is_set():
+                return
+            _REFRESH_STARTED.set()
+        threading.Thread(
+            target=_refresh_cache_now,
+            name="ouroboros-update-notice-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
         return
-    payload = _load_cache_payload()
-    if payload is not None and _cache_is_fresh(payload):
-        return
-    _REFRESH_STARTED.set()
-    threading.Thread(
-        target=_refresh_cache_now,
-        name="ouroboros-update-notice-refresh",
-        daemon=True,
-    ).start()
 
 
 def append_cached_update_notice(instructions: str) -> str:
     """Append the cached update nudge to *instructions* when one exists.
 
+    Side-effect-free formatting: the refresh producer is scheduled only
+    by ``maybe_schedule_cache_refresh()`` on the serve startup path, so
+    non-serving ``create_ouroboros_server()`` callers (auto, detached
+    job workers, in-process dispatch) never initiate network activity.
     This is the complete advisory boundary (#2066): any failure —
     including unexpected ``importlib.metadata`` errors — leaves the
     instructions unchanged rather than reaching server construction.
     """
     try:
         notice = cached_update_notice()
-        _start_background_refresh_if_stale()
     except Exception:
         return instructions
     if notice is None:

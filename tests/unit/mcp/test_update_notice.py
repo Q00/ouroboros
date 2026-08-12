@@ -151,41 +151,43 @@ class TestCachedUpdateNotice:
         assert update_notice.cached_update_notice() is None
 
 
+class _RecordingThread:
+    started: list[str] = []
+
+    def __init__(self, *, target, name, daemon):
+        assert daemon is True
+        type(self).started.append(name)
+
+    def start(self) -> None:
+        pass
+
+
 class TestBackgroundRefresh:
-    def _fresh_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fresh_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import threading
 
         monkeypatch.setattr(update_notice, "_REFRESH_STARTED", threading.Event())
+        monkeypatch.setattr(_RecordingThread, "started", [])
+        monkeypatch.setattr(update_notice.threading, "Thread", _RecordingThread)
 
     def test_stale_cache_schedules_one_refresh(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A missing or stale cache schedules exactly one background
         refresh per process (#2066 R1): standalone hosts get a producer."""
-        self._fresh_event(monkeypatch)
+        self._fresh_gate(monkeypatch)
         _pin_installed(monkeypatch, "0.51.0")
         monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "absent.json")
-        started: list[str] = []
 
-        class _RecordingThread:
-            def __init__(self, *, target, name, daemon):
-                assert daemon is True
-                started.append(name)
+        update_notice.maybe_schedule_cache_refresh()
+        update_notice.maybe_schedule_cache_refresh()
 
-            def start(self) -> None:
-                pass
-
-        monkeypatch.setattr(update_notice.threading, "Thread", _RecordingThread)
-
-        update_notice.append_cached_update_notice("Base.\n")
-        update_notice.append_cached_update_notice("Base.\n")
-
-        assert started == ["ouroboros-update-notice-refresh"]
+        assert _RecordingThread.started == ["ouroboros-update-notice-refresh"]
 
     def test_fresh_cache_schedules_no_refresh(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._fresh_event(monkeypatch)
+        self._fresh_gate(monkeypatch)
         _pin_installed(monkeypatch, "0.51.0")
         _write_cache(
             tmp_path,
@@ -193,12 +195,93 @@ class TestBackgroundRefresh:
             {"latest_version": "0.51.0", "timestamp": time.time()},
         )
 
-        def _explode(*_args, **_kwargs):
-            raise AssertionError("no thread with a fresh cache")
+        update_notice.maybe_schedule_cache_refresh()
 
-        monkeypatch.setattr(update_notice.threading, "Thread", _explode)
+        assert _RecordingThread.started == []
 
-        assert update_notice.append_cached_update_notice("Base.\n") == "Base.\n"
+    @pytest.mark.parametrize(
+        ("installed", "payload"),
+        [
+            ("0.52.0b1", {"latest_version": "0.52.0"}),
+            ("0.51.0", {"latest_version_pre": "0.52.0b2"}),
+            ("0.51.0", {"latest_version": "not-a-version"}),
+        ],
+    )
+    def test_missing_channel_value_counts_as_stale(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        installed: str,
+        payload: dict,
+    ) -> None:
+        """#2066 R2: freshness is channel-specific — a fresh payload
+        without a usable value for the INSTALLED channel still refreshes,
+        covering stable-to-prerelease and prerelease-to-stable
+        transitions and unparseable cached values."""
+        self._fresh_gate(monkeypatch)
+        _pin_installed(monkeypatch, installed)
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {**payload, "timestamp": time.time()},
+        )
+
+        update_notice.maybe_schedule_cache_refresh()
+
+        assert _RecordingThread.started == ["ouroboros-update-notice-refresh"]
+
+    def test_concurrent_callers_start_exactly_one_refresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2066 R2: the once gate is atomic — 20 barrier-synchronized
+        callers start exactly one refresh thread."""
+        import threading
+
+        monkeypatch.setattr(update_notice, "_REFRESH_STARTED", threading.Event())
+        _pin_installed(monkeypatch, "0.51.0")
+        monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "absent.json")
+        started: list[str] = []
+        started_lock = threading.Lock()
+
+        def _record_refresh() -> None:
+            with started_lock:
+                started.append("refresh")
+
+        monkeypatch.setattr(update_notice, "_refresh_cache_now", _record_refresh)
+        caller_count = 20
+        barrier = threading.Barrier(caller_count)
+
+        def _call() -> None:
+            barrier.wait()
+            update_notice.maybe_schedule_cache_refresh()
+
+        callers = [threading.Thread(target=_call) for _ in range(caller_count)]
+        for caller in callers:
+            caller.start()
+        for caller in callers:
+            caller.join()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with started_lock:
+                if started:
+                    break
+            time.sleep(0.01)
+
+        time.sleep(0.05)
+        assert started == ["refresh"]
+
+    def test_append_is_side_effect_free(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2066 R2: instruction formatting never schedules the producer —
+        non-serving create_ouroboros_server() callers stay network-free."""
+        self._fresh_gate(monkeypatch)
+        _pin_installed(monkeypatch, "0.51.0")
+        monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "absent.json")
+
+        update_notice.append_cached_update_notice("Base.\n")
+
+        assert _RecordingThread.started == []
 
     def test_refresh_writes_channel_and_timestamp(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
