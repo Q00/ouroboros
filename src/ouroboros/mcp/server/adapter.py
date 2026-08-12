@@ -2369,11 +2369,16 @@ def create_ouroboros_server(
     # ``call_tool()``, so durable fan-out publication receives this same
     # explicit readiness boundary as server transport requests.
     from ouroboros.backends import render_mcp_server_instructions
+    from ouroboros.mcp.update_notice import append_cached_update_notice
 
     server = MCPServerAdapter(
         name=name,
         version=version,
-        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
+        # Every MCP host gets the cached update nudge (#2066); the append is
+        # offline-only and a no-op without a fresh cache entry.
+        instructions=append_cached_update_notice(
+            instructions if instructions is not None else render_mcp_server_instructions()
+        ),
         auth_config=auth_config,
         rate_limit_config=rate_limit_config,
     )

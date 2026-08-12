@@ -33,7 +33,10 @@ class TestSessionStartMain:
         assert captured.out == ""
         assert captured.err == ""
 
-    def test_update_notice_goes_to_stderr(self, monkeypatch, capsys) -> None:
+    def test_update_notice_goes_to_stdout(self, monkeypatch, capsys) -> None:
+        """The notice must reach the user (#2066): stdout on exit 0 enters
+        Claude context and the agent relays it, while stderr on exit 0 is
+        debug-log-only and invisible."""
         monkeypatch.setattr(
             session_start,
             "_load_version_checker",
@@ -48,8 +51,8 @@ class TestSessionStartMain:
         session_start.main()
 
         captured = capsys.readouterr()
-        assert captured.out == ""
-        assert captured.err == "Ouroboros update available\n"
+        assert captured.out == "Ouroboros update available\n"
+        assert captured.err == ""
 
     def test_loader_failure_reports_stderr(self, monkeypatch, capsys) -> None:
         def _raise() -> None:
