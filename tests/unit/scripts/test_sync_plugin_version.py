@@ -190,12 +190,15 @@ def _mcp_descriptor(from_spec: str) -> dict:
     }
 
 
-def test_write_pins_mcp_server_requirement(monkeypatch, tmp_path: Path, capsys) -> None:
-    """The plugin MCP descriptor pins the served package to the plugin
-    version (#2066), so a plugin update changes the uvx cache key."""
+def test_write_pins_both_plugin_mcp_descriptors(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Both shipped plugin MCP descriptors — Claude and Codex — pin the
+    served package to the plugin version (#2066), so a plugin update
+    changes the uvx cache key on every plugin surface."""
     _seed_sync_fixture(tmp_path, monkeypatch)
     mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    codex_mcp_json = tmp_path / ".mcp.codex.json"
     mcp_json.write_text(json.dumps(_mcp_descriptor("ouroboros-ai[mcp]")))
+    codex_mcp_json.write_text(json.dumps(_mcp_descriptor("ouroboros-ai[mcp]==0.50.4")))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -204,10 +207,12 @@ def test_write_pins_mcp_server_requirement(monkeypatch, tmp_path: Path, capsys) 
 
     sync_plugin_version.main()
 
-    args = json.loads(mcp_json.read_text())["mcpServers"]["ouroboros"]["args"]
-    assert args[args.index("--from") + 1] == "ouroboros-ai[mcp]==0.50.5"
+    for descriptor in (mcp_json, codex_mcp_json):
+        args = json.loads(descriptor.read_text())["mcpServers"]["ouroboros"]["args"]
+        assert args[args.index("--from") + 1] == "ouroboros-ai[mcp]==0.50.5"
     captured = capsys.readouterr()
     assert "WRITE .claude-plugin/.mcp.json (unpinned -> 0.50.5)" in captured.out
+    assert "WRITE .mcp.codex.json (0.50.4 -> 0.50.5)" in captured.out
 
 
 def test_mcp_pin_already_current_reports_ok(monkeypatch, tmp_path: Path, capsys) -> None:

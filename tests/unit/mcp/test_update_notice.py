@@ -151,6 +151,93 @@ class TestCachedUpdateNotice:
         assert update_notice.cached_update_notice() is None
 
 
+class TestBackgroundRefresh:
+    def _fresh_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import threading
+
+        monkeypatch.setattr(update_notice, "_REFRESH_STARTED", threading.Event())
+
+    def test_stale_cache_schedules_one_refresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing or stale cache schedules exactly one background
+        refresh per process (#2066 R1): standalone hosts get a producer."""
+        self._fresh_event(monkeypatch)
+        _pin_installed(monkeypatch, "0.51.0")
+        monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "absent.json")
+        started: list[str] = []
+
+        class _RecordingThread:
+            def __init__(self, *, target, name, daemon):
+                assert daemon is True
+                started.append(name)
+
+            def start(self) -> None:
+                pass
+
+        monkeypatch.setattr(update_notice.threading, "Thread", _RecordingThread)
+
+        update_notice.append_cached_update_notice("Base.\n")
+        update_notice.append_cached_update_notice("Base.\n")
+
+        assert started == ["ouroboros-update-notice-refresh"]
+
+    def test_fresh_cache_schedules_no_refresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fresh_event(monkeypatch)
+        _pin_installed(monkeypatch, "0.51.0")
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {"latest_version": "0.51.0", "timestamp": time.time()},
+        )
+
+        def _explode(*_args, **_kwargs):
+            raise AssertionError("no thread with a fresh cache")
+
+        monkeypatch.setattr(update_notice.threading, "Thread", _explode)
+
+        assert update_notice.append_cached_update_notice("Base.\n") == "Base.\n"
+
+    def test_refresh_writes_channel_and_timestamp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The producer writes the writer's own cache shape, preserving
+        unrelated keys."""
+        _pin_installed(monkeypatch, "0.51.0")
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(json.dumps({"latest_version_pre": "0.52.0b1", "timestamp": 5}))
+        monkeypatch.setattr(update_notice, "_CACHE_FILE", cache_file)
+        monkeypatch.setattr(
+            update_notice,
+            "_fetch_latest_from_pypi",
+            lambda *, include_prerelease: "0.52.0",  # noqa: ARG005
+        )
+
+        update_notice._refresh_cache_now()
+
+        payload = json.loads(cache_file.read_text())
+        assert payload["latest_version"] == "0.52.0"
+        assert payload["latest_version_pre"] == "0.52.0b1"
+        assert payload["timestamp"] > 5
+
+    def test_refresh_failure_is_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pin_installed(monkeypatch, "0.51.0")
+        monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "cache.json")
+
+        def _explode(*, include_prerelease):
+            raise OSError("network down")
+
+        monkeypatch.setattr(update_notice, "_fetch_latest_from_pypi", _explode)
+
+        update_notice._refresh_cache_now()
+
+        assert not (tmp_path / "cache.json").exists()
+
+
 class TestAppendCachedUpdateNotice:
     def test_appends_notice_after_blank_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -172,5 +259,28 @@ class TestAppendCachedUpdateNotice:
     ) -> None:
         _pin_installed(monkeypatch, "0.51.0")
         monkeypatch.setattr(update_notice, "_CACHE_FILE", tmp_path / "absent.json")
+
+        assert update_notice.append_cached_update_notice("Base.\n") == "Base.\n"
+
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("corrupt dist-info"), RuntimeError("metadata backend failure")],
+    )
+    def test_unexpected_metadata_errors_fail_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        """#2066 R1: the seam is the complete advisory boundary — errors
+        beyond PackageNotFoundError must not escape toward server
+        construction."""
+
+        def _raise(_name: str) -> str:
+            raise error
+
+        monkeypatch.setattr(update_notice.metadata, "version", _raise)
+        _write_cache(
+            tmp_path,
+            monkeypatch,
+            {"latest_version": "0.52.0", "timestamp": time.time()},
+        )
 
         assert update_notice.append_cached_update_notice("Base.\n") == "Base.\n"

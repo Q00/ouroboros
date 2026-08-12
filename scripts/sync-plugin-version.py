@@ -33,10 +33,14 @@ CODEX_PLUGIN_JSON = ROOT / ".codex-plugin" / "plugin.json"
 _DEFAULT_CODEX_PLUGIN_JSON = CODEX_PLUGIN_JSON
 MCP_JSON = ROOT / ".claude-plugin" / ".mcp.json"
 _DEFAULT_MCP_JSON = MCP_JSON
-# The uvx --from requirement for the plugin MCP server (#2066): pinned to the
-# plugin version so a plugin update changes the uvx cache key and the served
-# package moves with it. An unpinned spec is accepted on read so the first
-# sync can introduce the pin.
+CODEX_MCP_JSON = ROOT / ".mcp.codex.json"
+_DEFAULT_CODEX_MCP_JSON = CODEX_MCP_JSON
+# The uvx --from requirement in the SHIPPED plugin MCP descriptors (#2066):
+# pinned to the plugin version so a plugin update changes the uvx cache key
+# and the served package moves with it. Both the Claude plugin descriptor
+# and the Codex plugin descriptor (declared by .codex-plugin/plugin.json)
+# share this pin; repository-root development launchers stay unpinned. An
+# unpinned spec is accepted on read so the first sync can introduce the pin.
 MCP_FROM_SPEC_RE = re.compile(r"^ouroboros-ai\[mcp\](?:==(?P<version>[0-9A-Za-z.!+]+))?$")
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
@@ -671,24 +675,30 @@ def _run() -> None:
             sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
         json_targets.append((path, nested, data, old))
 
-    # The plugin MCP descriptor pins the served package to the plugin version
-    # (#2066). Optional like the Codex manifest so relocated test roots
-    # without the descriptor skip it; the real repository always has it.
-    mcp_json = (
+    # The shipped plugin MCP descriptors pin the served package to the plugin
+    # version (#2066). Optional like the Codex manifest so relocated test
+    # roots without a descriptor skip it; the real repository has both.
+    descriptor_candidates = (
         ROOT / ".claude-plugin" / ".mcp.json"
         if MCP_JSON == _DEFAULT_MCP_JSON and ROOT != _DEFAULT_ROOT
-        else MCP_JSON
+        else MCP_JSON,
+        ROOT / ".mcp.codex.json"
+        if CODEX_MCP_JSON == _DEFAULT_CODEX_MCP_JSON and ROOT != _DEFAULT_ROOT
+        else CODEX_MCP_JSON,
     )
-    mcp_old_pin: str | None = None
-    if mcp_json.exists():
+    mcp_descriptors: list[tuple[Path, str]] = []
+    for descriptor in descriptor_candidates:
+        if not descriptor.exists():
+            continue
         try:
-            original_generations[mcp_json] = _path_generation(mcp_json)
-            original = mcp_json.read_bytes()
-            originals[mcp_json] = original
-            pinned_content, mcp_old_pin = _mcp_pinned_content(original, version)
-            expected_writes[mcp_json] = original if mcp_old_pin == version else pinned_content
+            original_generations[descriptor] = _path_generation(descriptor)
+            original = descriptor.read_bytes()
+            originals[descriptor] = original
+            pinned_content, old_pin = _mcp_pinned_content(original, version)
+            expected_writes[descriptor] = original if old_pin == version else pinned_content
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            sys.exit(f"Error: could not validate {mcp_json.relative_to(ROOT)}: {exc}")
+            sys.exit(f"Error: could not validate {descriptor.relative_to(ROOT)}: {exc}")
+        mcp_descriptors.append((descriptor, old_pin))
 
     changed = False
     for path, (_text, old_marker) in setup_markers.items():
@@ -721,25 +731,25 @@ def _run() -> None:
                 print(f"  DRIFT {path.relative_to(ROOT)} ({old} != {version})")
                 changed = True
 
-        if mcp_old_pin is not None:
-            shown_pin = mcp_old_pin or "unpinned"
-            if mcp_old_pin == version:
-                print(f"  OK    {mcp_json.relative_to(ROOT)} ({shown_pin})")
+        for descriptor, old_pin in mcp_descriptors:
+            shown_pin = old_pin or "unpinned"
+            if old_pin == version:
+                print(f"  OK    {descriptor.relative_to(ROOT)} ({shown_pin})")
             elif write:
-                attempted.append(mcp_json)
+                attempted.append(descriptor)
                 owned_generation = update_mcp_from_pin(
-                    mcp_json,
+                    descriptor,
                     version,
-                    expected_current=originals[mcp_json],
-                    expected_generation=original_generations[mcp_json],
+                    expected_current=originals[descriptor],
+                    expected_generation=original_generations[descriptor],
                 )
                 if owned_generation is None:
-                    sys.exit(f"Error: failed to update {mcp_json.relative_to(ROOT)}")
-                owned_writes[mcp_json] = owned_generation
-                print(f"  WRITE {mcp_json.relative_to(ROOT)} ({shown_pin} -> {version})")
+                    sys.exit(f"Error: failed to update {descriptor.relative_to(ROOT)}")
+                owned_writes[descriptor] = owned_generation
+                print(f"  WRITE {descriptor.relative_to(ROOT)} ({shown_pin} -> {version})")
                 changed = True
             else:
-                print(f"  DRIFT {mcp_json.relative_to(ROOT)} ({shown_pin} != {version})")
+                print(f"  DRIFT {descriptor.relative_to(ROOT)} ({shown_pin} != {version})")
                 changed = True
 
         for path, (_text, old_marker) in setup_markers.items():
