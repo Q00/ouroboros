@@ -1059,8 +1059,8 @@ Interactive TUI monitor for real-time workflow monitoring.
 Launch the interactive TUI monitor to observe workflow execution in real-time.
 
 <p align="center">
-  <img src="./images/ooo-tui-monitor.gif" width="760" alt="Terminal recording of ooo tui monitor: a session list with goals and statuses, selecting a session to show its AC execution tree with three failed criteria, then the live event log streaming execution events">
-  <br/><sub>Session list &rarr; AC execution tree for one session &rarr; live event log (<code>execution.plan.created</code>, <code>execution.ac.capsule.compiled</code>, &hellip;)</sub>
+  <img src="./images/ooo-tui-monitor.gif" width="760" alt="Terminal recording of ooo tui monitor: a session list with goals and statuses, selecting a session to show its AC execution tree with three failed criteria, then the event log listing received execution events">
+  <br/><sub>Session list &rarr; AC execution tree for one session &rarr; event log (<code>execution.plan.created</code>, <code>execution.ac.capsule.compiled</code>, &hellip;)</sub>
 </p>
 
 ```bash
