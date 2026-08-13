@@ -200,6 +200,43 @@ def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) ->
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
 
 
+@pytest.mark.parametrize(
+    ("install_ref", "expected_surface"),
+    (("readme", "readme_quickstart"), ("docs-getting-started", "getting_started")),
+)
+def test_installer_persists_first_command_surface_hint(
+    tmp_path: Path, install_ref: str, expected_surface: str
+) -> None:
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": install_ref},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
+    assert hint.read_text(encoding="utf-8") == f"{expected_surface}\n"
+
+
+def test_installer_does_not_relabel_existing_first_command_surface_hint(
+    tmp_path: Path,
+) -> None:
+    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
+    hint.parent.mkdir(parents=True)
+    hint.write_text("readme_quickstart\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "docs-getting-started"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert hint.read_text(encoding="utf-8") == "readme_quickstart\n"
+
+
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
     config = tmp_path / "home" / ".ouroboros" / "config.yaml"
     config.parent.mkdir(parents=True)

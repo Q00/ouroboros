@@ -142,6 +142,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

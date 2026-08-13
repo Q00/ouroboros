@@ -167,6 +167,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        # Onboarding attribution is an analytics boundary. A cloned repo must
+        # not rewrite the surface label used to compare activation cohorts.
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

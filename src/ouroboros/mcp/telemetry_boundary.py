@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros import telemetry as usage_telemetry
 from ouroboros.core.types import Result
+from ouroboros.mcp.failure_taxonomy import classify_failure
 
 if TYPE_CHECKING:
     from ouroboros.mcp.server.adapter import MCPServerAdapter
@@ -262,7 +263,12 @@ async def call_sdk_tool(
     return response
 
 
-def record_direct_evaluation_outcome(*, final_approved: bool | None, failed: bool = False) -> None:
+def record_direct_evaluation_outcome(
+    *,
+    final_approved: bool | None,
+    failed: bool = False,
+    failure_reason_code: str | None = None,
+) -> None:
     """Durable-terminal telemetry for the direct (non-job) ouroboros_evaluate path.
 
     Job-backed evaluations reach ``workflow_outcome`` via JobTelemetryBoundary's
@@ -275,16 +281,28 @@ def record_direct_evaluation_outcome(*, final_approved: bool | None, failed: boo
     """
     try:
         status = "failed" if failed else "completed"
+        resolution = classify_failure(
+            status,
+            {"failure_reason_code": failure_reason_code} if failure_reason_code else None,
+        )
+        properties: dict[str, Any] = {
+            "command": "evaluate",
+            "phase": "terminal",
+            "terminal_status": status,
+            "ok": not failed,
+            "verified": (not failed) and final_approved is True,
+            "final_approved": final_approved if isinstance(final_approved, bool) else None,
+        }
+        if resolution is not None:
+            properties.update(
+                {
+                    "failure_reason_code": resolution.reason_code.value,
+                    "recovery_action": resolution.recovery_action.value,
+                }
+            )
         usage_telemetry.capture(
             "workflow_outcome",
-            {
-                "command": "evaluate",
-                "phase": "terminal",
-                "terminal_status": status,
-                "ok": not failed,
-                "verified": (not failed) and final_approved is True,
-                "final_approved": final_approved if isinstance(final_approved, bool) else None,
-            },
+            properties,
         )
     except Exception:
         pass

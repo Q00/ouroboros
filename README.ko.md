@@ -133,23 +133,18 @@ Ouroboros는 이 철학을 **Double Diamond** 구조로 풀어냅니다:
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-ko bash
 ```
 
-**처음 사용** — AI 코딩 에이전트를 열고 입력하세요:
+**첫 명령** — AI 코딩 에이전트를 열고 아래 두 명령을 순서대로 입력하세요:
 
 ```
-> ooo
-```
-
-한 번만 필요한 설정이 있다면, Ouroboros가 변경하기 전에 먼저 물어봅니다.
-설정이 끝나면 Codex는 현재 선택한 모델을 따르고, Claude Code는 권장 기본
-모델 설정으로 시작합니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델
-설정하기**를 선택하세요. 내 컴퓨터의 브라우저에 로컬 설정 화면이 열립니다.
-나중에 `ooo config`로 언제든 다시 바꿀 수 있습니다.
-
-**시작** — 이후 바로 작업할 수 있습니다:
-
-```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup`은 한 번만 하는 실행 환경 설정이고, `ooo interview`가 설치 후
+처음 실행할 워크플로우 명령입니다. 설정이 끝나면 Codex는 현재 선택한 모델을
+따르고, Claude Code는 권장 기본 모델 설정으로 시작합니다. 특정 단계의 모델을
+고정하고 싶을 때만 **직접 모델 설정하기**를 선택하세요. 내 컴퓨터의 브라우저에
+로컬 설정 화면이 열립니다. 나중에 `ooo config`로 언제든 다시 바꿀 수 있습니다.
 
 에이전트 호스트 없이 터미널에서 바로 쓸 수도 있습니다:
 
@@ -183,10 +178,16 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-새 Codex 세션을 연 뒤 `ooo`를 입력하세요. 처음 사용할 때는 Ouroboros가
-변경하기 전에 실행 환경 설정을 제안합니다. 준비가 끝나면 Codex의 현재 기본
-모델을 따릅니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델 설정하기**를
-선택하세요.
+새 Codex 세션을 연 뒤 아래 명령을 순서대로 입력하세요:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup`은 한 번만 하는 실행 환경 설정입니다. 준비가 끝나면 Codex의 현재
+기본 모델을 따릅니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델
+설정하기**를 선택하세요.
 
 </details>
 

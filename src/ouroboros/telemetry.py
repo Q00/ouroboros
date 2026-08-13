@@ -34,6 +34,7 @@ import urllib.request
 import uuid
 
 from ouroboros import __version__
+from ouroboros.mcp.failure_taxonomy import classify_failure
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
@@ -322,6 +323,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "interview_llm_backend",
         "evaluate_llm_backend",
         "frontdoor",
+        "first_command_surface",
         "app_version",
         "os",
         "python_version",
@@ -348,6 +350,8 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "ok",
         "verified",
         "final_approved",
+        "failure_reason_code",
+        "recovery_action",
         "$insert_id",
         "runtime_backend",
         "execute_runtime_backend",
@@ -361,7 +365,18 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
     }
 )
 _MCP_SERVE_STARTED_KEYS = frozenset(
-    {"transport", "tool_count", "frontdoor", "app_version", "os", "ci"}
+    {
+        "transport",
+        "tool_count",
+        "frontdoor",
+        "first_command_surface",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_FIRST_COMMAND_SURFACES = frozenset(
+    {"setup_complete", "readme_quickstart", "getting_started", "unknown"}
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
@@ -820,6 +835,35 @@ def _detect_frontdoor() -> str | None:
     return None
 
 
+def _detect_first_command_surface() -> str:
+    """Return the privacy-safe onboarding surface attribution.
+
+    The value is deliberately a fixed enum. A trusted setup/config file wins
+    only when no install-time hint exists. The hint identifies the surface
+    that brought the user to installation, so it must survive the subsequent
+    setup step; otherwise every README cohort would be relabeled
+    ``setup_complete`` before its first command. ``setup_complete`` is the
+    fallback for users who configured Ouroboros without a known install
+    surface.
+    """
+    candidate = os.environ.get("OUROBOROS_FIRST_COMMAND_SURFACE", "").strip().lower()
+    if candidate in _FIRST_COMMAND_SURFACES:
+        return candidate
+
+    hint_path = Path.home() / ".ouroboros" / "first_command_surface"
+    try:
+        candidate = hint_path.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        candidate = ""
+    if candidate in _FIRST_COMMAND_SURFACES:
+        return candidate
+
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    if config_path.is_file():
+        return "setup_complete"
+    return "unknown"
+
+
 def _base_properties() -> dict[str, Any]:
     props: dict[str, Any] = {
         "app_version": __version__,
@@ -829,6 +873,7 @@ def _base_properties() -> dict[str, Any]:
     frontdoor = _detect_frontdoor()
     if frontdoor:
         props["frontdoor"] = frontdoor
+    props["first_command_surface"] = _detect_first_command_surface()
     # CI runs are excluded from the published counting rule (TELEMETRY.md);
     # stamping them lets every insight filter ci != true.
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
@@ -1065,24 +1110,31 @@ def capture_job_outcome(
         verified = (
             normalized_status == "completed" and job_type == "evaluate" and final_approved is True
         )
+        resolution = classify_failure(normalized_status, meta)
         command = (
             _JOB_FUNNEL.get(job_type, job_type)
             if job_type in _CANONICAL_JOB_TYPES
             else _EXTENSION_JOB_COMMAND
         )
+        properties: dict[str, Any] = {
+            "command": command,
+            "phase": "terminal",
+            "terminal_status": normalized_status,
+            "ok": normalized_status == "completed",
+            "verified": verified,
+            "final_approved": (final_approved if isinstance(final_approved, bool) else None),
+            "$insert_id": hashlib.sha256(f"ouroboros-job-outcome\0{job_id}".encode()).hexdigest(),
+        }
+        if resolution is not None:
+            properties.update(
+                {
+                    "failure_reason_code": resolution.reason_code.value,
+                    "recovery_action": resolution.recovery_action.value,
+                }
+            )
         capture(
             "workflow_outcome",
-            {
-                "command": command,
-                "phase": "terminal",
-                "terminal_status": normalized_status,
-                "ok": normalized_status == "completed",
-                "verified": verified,
-                "final_approved": (final_approved if isinstance(final_approved, bool) else None),
-                "$insert_id": hashlib.sha256(
-                    f"ouroboros-job-outcome\0{job_id}".encode()
-                ).hexdigest(),
-            },
+            properties,
         )
     except Exception:
         pass

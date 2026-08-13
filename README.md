@@ -134,23 +134,19 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
 
-**First use** — open your AI coding agent and type:
+**First command** — open your AI coding agent and run these in order:
 
 ```
-> ooo
-```
-
-If a one-time setup is needed, Ouroboros asks before it makes changes. After
-setup, Codex follows its currently selected model and Claude Code starts with
-its recommended model settings. Choose **Directly configure models** only when
-you want to pin a stage to a specific model; it opens the local settings screen
-in your browser. You can return to those settings any time with `ooo config`.
-
-**Build** — then go:
-
-```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup` is a one-time configuration step. `ooo interview` is the first
+workflow command and starts the Socratic interview. After setup, Codex follows
+its currently selected model and Claude Code starts with its recommended model
+settings. Choose **Directly configure models** only when you want to pin a
+stage to a specific model; it opens the local settings screen in your browser.
+You can return to those settings any time with `ooo config`.
 
 Or from a plain terminal, without an agent host:
 
@@ -184,10 +180,16 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session, then enter `ooo`. On first use, Ouroboros offers to
-prepare the runtime before it changes anything. Once ready, it follows Codex's
-current default model; choose **Directly configure models** only when you want
-to pin a specific model for a pipeline stage.
+Start a new Codex session, then run these commands in order:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is the one-time runtime preparation. Once ready, Ouroboros follows
+Codex's current default model; choose **Directly configure models** only when
+you want to pin a specific model for a pipeline stage.
 
 </details>
 

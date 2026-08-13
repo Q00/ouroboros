@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
     CheckResult,
@@ -182,7 +183,7 @@ class TestDirectEvaluateSingleACTelemetry:
         with (
             patch(
                 "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
-                side_effect=RuntimeError("unsupported backend"),
+                side_effect=ConfigError("unsupported backend"),
             ),
             patch(
                 "ouroboros.persistence.event_store.EventStore",
@@ -205,6 +206,60 @@ class TestDirectEvaluateSingleACTelemetry:
         assert props["terminal_status"] == "failed"
         assert props["ok"] is False
         assert props["final_approved"] is None
+        assert props["failure_reason_code"] == "config"
+
+    async def test_generic_factory_runtime_error_is_not_config(self) -> None:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
+                side_effect=RuntimeError("provider construction failed"),
+            ),
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+            patch(_CAPTURE_TARGET) as capture,
+        ):
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s4c",
+                    "artifact": "def f(): pass",
+                    "acceptance_criterion": "Only AC",
+                }
+            )
+
+        assert result.is_err
+        _, props = capture.call_args.args
+        assert props["failure_reason_code"] == "unknown"
+
+    async def test_pipeline_runtime_error_falls_back_to_unknown(self) -> None:
+        mock_pipeline = _install_pipeline_mock(  # type: ignore[arg-type]
+            Result.ok(_eval_result("s4b", final_approved=True))
+        )
+        mock_pipeline.evaluate = AsyncMock(side_effect=RuntimeError("pipeline bug"))
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+            patch(_CAPTURE_TARGET) as capture,
+        ):
+            MockPipeline.return_value = mock_pipeline
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s4b",
+                    "artifact": "def f(): pass",
+                    "acceptance_criterion": "Only AC",
+                }
+            )
+
+        assert result.is_err
+        _, props = capture.call_args.args
+        assert props["failure_reason_code"] == "unknown"
 
 
 class TestDirectEvaluateMultiACTelemetry:

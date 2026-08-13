@@ -109,11 +109,15 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-zh bash
 ```
 
-**开始** —— 打开你的 AI 编码 agent，直接上：
+**第一条命令** —— 打开你的 AI 编码 agent，按顺序运行：
 
 ```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
+启动第一个工作流的命令。
 
 也可以不经过 agent 宿主，直接在终端里跑：
 
@@ -147,7 +151,15 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-打开一个新的 Codex 会话，输入 `ooo`。首次使用时，Ouroboros 会在改动任何内容之前，先询问是否准备运行环境。准备就绪后，它会沿用 Codex 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
+打开一个新的 Codex 会话，按顺序运行：
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` 只需运行一次，用来准备运行环境。准备就绪后，它会沿用 Codex
+当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
 
 </details>
 
