@@ -1811,6 +1811,134 @@ async def test_pipeline_runs_after_seed_qa_passes(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_seed_qa_transient_error_retries_then_passes(tmp_path) -> None:
+    """#2094: a transient evaluator error retries inside the attempt budget
+    instead of blocking on first occurrence."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_retry",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {"job_id": "job_seed_qa_retry"}
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        if len(calls) < 3:
+            return EvaluateResult(
+                passed=False,
+                score=0.0,
+                verdict="unknown",
+                error="MCPToolError: LLM call failed (overloaded)",
+            )
+        return EvaluateResult(passed=True, score=0.9, verdict="pass")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 3
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert result.job_id == "job_seed_qa_retry"
+    assert len(calls) == 3
+    assert state.last_qa_score == 0.9
+
+
+@pytest.mark.asyncio
+async def test_seed_qa_persistent_error_blocks_with_detail(tmp_path) -> None:
+    """#2094: after the attempt budget is spent, the block persists the
+    concrete evaluator error instead of a generic transient label."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_error",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start when Seed QA keeps erroring")
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        return EvaluateResult(
+            passed=False,
+            score=0.0,
+            verdict="unknown",
+            error="MCPToolError: LLM call failed:\n  model overloaded (429)",
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert len(calls) == 2
+    assert state.last_tool_name == "seed_qa"
+    assert result.blocker is not None
+    assert "MCPToolError: LLM call failed: model overloaded (429)" in result.blocker
+    assert "2 attempt(s)" in result.blocker
+
+
+@pytest.mark.asyncio
 async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn(

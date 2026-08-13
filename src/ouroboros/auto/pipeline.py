@@ -2803,6 +2803,14 @@ class AutoPipeline:
         current_seed = seed
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
+
+        def _blocked_result() -> tuple[AutoPipelineResult, Seed, SeedReview | None]:
+            return (
+                self._result(state, ledger, review=current_review, blocker=state.last_error),
+                current_seed,
+                current_review,
+            )
+
         for attempt in range(1, max_attempts + 1):
             timeout = self._deadline_capped_timeout(
                 state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
@@ -2813,46 +2821,41 @@ class AutoPipeline:
                 )
             except TimeoutError:
                 if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
-                    )
+                    return _blocked_result()
                 state.mark_blocked(
                     f"Seed QA timed out after {timeout:.0f}s",
                     tool_name="seed_qa",
                 )
                 self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
+                return _blocked_result()
             except Exception as exc:
                 state.mark_blocked(
                     f"Seed QA raised {type(exc).__name__}",
                     tool_name="seed_qa",
                 )
                 self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
+                return _blocked_result()
 
             if qa_result.error:
+                # A transient evaluator error retries within the attempt
+                # budget instead of blocking on first occurrence, and the
+                # final block persists the concrete error so the state
+                # stops discarding the diagnostic detail (#2094).
+                detail = " ".join(str(qa_result.error).split())[:200] or "unspecified"
+                if attempt < max_attempts:
+                    state.mark_progress(
+                        f"Seed QA transient evaluator error "
+                        f"(attempt {attempt}/{max_attempts}); retrying: {detail}",
+                        tool_name="seed_qa",
+                    )
+                    self._save(state)
+                    continue
                 state.mark_blocked(
-                    "Seed QA reported a transient evaluator error",
+                    f"Seed QA evaluator error after {max_attempts} attempt(s): {detail}",
                     tool_name="seed_qa",
                 )
                 self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
+                return _blocked_result()
 
             state.last_qa_score = float(qa_result.score)
             state.last_qa_verdict = _safe_seed_qa_verdict(qa_result.verdict)
@@ -2905,13 +2908,7 @@ class AutoPipeline:
                         error_code="seed_qa_feedback_unmapped",
                     )
                     self._save(state)
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
-                    )
+                    return _blocked_result()
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
                     ledger=ledger,
@@ -2928,13 +2925,7 @@ class AutoPipeline:
                     except Exception as exc:
                         state.mark_failed(f"seed save failed: {exc}", tool_name="seed_saver")
                         self._save(state)
-                        return (
-                            self._result(
-                                state, ledger, review=current_review, blocker=state.last_error
-                            ),
-                            current_seed,
-                            current_review,
-                        )
+                        return _blocked_result()
                 state.mark_progress(
                     f"Seed QA repair attempt {attempt}/{max_attempts - 1} applied",
                     tool_name="seed_qa",
@@ -2965,11 +2956,7 @@ class AutoPipeline:
             )
             state.mark_blocked("; ".join(details), tool_name="seed_qa")
             self._save(state)
-            return (
-                self._result(state, ledger, review=current_review, blocker=state.last_error),
-                current_seed,
-                current_review,
-            )
+            return _blocked_result()
 
         return None, current_seed, current_review
 
