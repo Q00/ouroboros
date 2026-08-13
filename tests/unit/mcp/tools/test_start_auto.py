@@ -531,6 +531,66 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_fresh_start_applies_configured_default_policy(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        """#1733: a configured quality_first default reaches a fresh Auto
+        start when the host omits both preference arguments."""
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_fresh_start_explicit_argument_beats_configured_default(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy2"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI", "efficiency_mode": "adaptive"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "adaptive"
+        assert result.value.meta["frugality_assurance"] == "observe"
+
+    @pytest.mark.asyncio
     async def test_now_binds_durable_job_scoped_cancel_key(
         self, event_store, fake_inner_auto, tmp_path, monkeypatch
     ) -> None:

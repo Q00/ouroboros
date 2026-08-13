@@ -84,7 +84,11 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
 Before a fresh Auto start, if the user did not already choose an efficiency
-policy, ask in outcome language: **Efficient execution** maps to
+policy, first check the persistent default: when `execution.default_policy` in
+`~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask — omit
+both arguments and the server applies the configured default (the handoff still
+reports the resolved policy). Otherwise ask in outcome language:
+**Efficient execution** maps to
 `adaptive/observe`; **Quality-first execution** maps to `quality_first/off`.
 `strict` assurance is a separate explicit opt-in because it may spend extra
 work on proof. Never infer strict from the efficiency choice. On resume, do not

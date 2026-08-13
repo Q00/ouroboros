@@ -256,6 +256,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        default_policy: Persistent default execution policy for FRESH runs
+            (#1733). ``ask`` (the default) preserves the host's interactive
+            prompt exactly; ``efficient`` resolves to adaptive/observe and
+            ``quality_first`` to quality_first/off without asking. Explicit
+            invocation arguments always win, resumed sessions keep their
+            persisted immutable contract, and strict frugality assurance
+            never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -273,6 +280,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod

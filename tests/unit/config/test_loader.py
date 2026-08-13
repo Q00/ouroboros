@@ -17,6 +17,7 @@ from ouroboros.config.loader import (
     config_exists,
     create_default_config,
     credentials_file_secure,
+    default_execution_efficiency_mode,
     ensure_config_dir,
     get_agent_permission_mode,
     get_agent_runtime_backend,
@@ -2576,3 +2577,28 @@ class TestConfigEncodingLocaleIndependence:
 
         with pytest.raises(ValueError, match="invalid EventStore configuration"):
             resolve_event_store_path(config_path)
+
+
+class TestDefaultExecutionEfficiencyMode:
+    """#1733: persistent default execution policy for fresh starts."""
+
+    @pytest.mark.parametrize(
+        ("policy", "expected"),
+        [("ask", None), ("efficient", "adaptive"), ("quality_first", "quality_first")],
+    )
+    def test_policy_maps_to_fresh_start_efficiency_mode(
+        self, policy: str, expected: str | None
+    ) -> None:
+        config = OuroborosConfig(execution=ExecutionConfig(default_policy=policy))
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert default_execution_efficiency_mode() == expected
+
+    def test_unreadable_config_preserves_the_ask_contract(self) -> None:
+        with patch(
+            "ouroboros.config.loader.load_config",
+            side_effect=ConfigError("unreadable"),
+        ):
+            assert default_execution_efficiency_mode() is None

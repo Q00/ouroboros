@@ -74,7 +74,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
-from ouroboros.config import get_opencode_mode
+from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -250,7 +250,9 @@ class AutoHandler:
                     (
                         "Execution efficiency policy: adaptive may use lower-cost child "
                         "tiers with recovery escalation; quality_first keeps child ACs "
-                        "at the parent starting tier. Default: adaptive."
+                        "at the parent starting tier. When omitted on a fresh start, a "
+                        "configured execution.default_policy supplies it; otherwise "
+                        "defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -468,7 +470,7 @@ class AutoHandler:
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
             preferences = resolve_execution_preferences(
-                requested_efficiency_mode,
+                requested_efficiency_mode or default_execution_efficiency_mode(),
                 requested_frugality_assurance,
             )
             state.efficiency_mode = preferences.efficiency_mode.value
@@ -1043,7 +1045,7 @@ class StartAutoHandler:
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
         preferences = resolve_execution_preferences(
-            _optional_text_arg(arguments, "efficiency_mode"),
+            _optional_text_arg(arguments, "efficiency_mode") or default_execution_efficiency_mode(),
             _optional_text_arg(arguments, "frugality_assurance"),
         )
         state.efficiency_mode = preferences.efficiency_mode.value

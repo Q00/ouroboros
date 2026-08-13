@@ -28,6 +28,7 @@ from ouroboros.config.loader import (
     config_exists,
     create_default_config,
     credentials_file_secure,
+    default_execution_efficiency_mode,
     ensure_config_dir,
     get_agent_permission_mode,
     get_agent_reasoning_effort,
@@ -136,6 +137,7 @@ __all__ = [
     "OrchestratorConfig",
     "RuntimeProfileConfig",
     # Loader functions
+    "default_execution_efficiency_mode",
     "load_config",
     "load_credentials",
     "create_default_config",

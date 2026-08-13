@@ -1103,6 +1103,28 @@ def get_auto_evolve_enabled() -> bool:
         return True
 
 
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
 def get_auto_evolve_max_generations() -> int:
     """Return the bounded generation budget for automatic Ralph chaining."""
 
