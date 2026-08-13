@@ -112,6 +112,55 @@ class TestGetLatestVersion:
         assert new_cache["latest_version_pre"] == "2.1.0b2"
         assert "latest_version_pre_checked_at" in new_cache
 
+    def test_future_timestamp_is_not_fresh(self, tmp_path: Path) -> None:
+        """A clock-rollback or malformed future stamp must not be trusted —
+        matches the MCP reader's `0 <= age < TTL` rule (src/ouroboros/mcp/update_notice.py)."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "9.9.9",
+                    "latest_version_checked_at": time.time() + 10**9,
+                    "timestamp": time.time() + 10**9,
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": "2.0.0"}}).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version()
+
+        assert result == "2.0.0"
+
+    def test_future_shared_timestamp_is_not_fresh(self, tmp_path: Path) -> None:
+        """Same rejection for the legacy shared `timestamp` fallback used by
+        caches written before per-channel stamps existed."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "9.9.9",
+                    "timestamp": time.time() + 10**9,
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": "2.0.0"}}).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version()
+
+        assert result == "2.0.0"
+
 
 class TestCheckUpdate:
     """Test check_update logic."""

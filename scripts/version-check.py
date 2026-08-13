@@ -115,7 +115,8 @@ def get_latest_version(*, current: str | None = None) -> str | None:
                     stamp = 0
                 else:
                     stamp = cache.get("timestamp", 0)
-            if time.time() - stamp < _CACHE_TTL:
+            age = time.time() - stamp
+            if 0 <= age < _CACHE_TTL:
                 cached = cache.get(cache_key)
                 if cached:
                     return cached
