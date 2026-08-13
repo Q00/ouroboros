@@ -1938,6 +1938,131 @@ async def test_seed_qa_persistent_error_blocks_with_detail(tmp_path) -> None:
     assert "2 attempt(s)" in result.blocker
 
 
+def _seed_qa_pipeline(tmp_path, seed_qa, run_seed):
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_budget",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    return AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_qa_error_budget_survives_restart(tmp_path) -> None:
+    """#2094 R1: consumed error attempts persist, so a session interrupted
+    mid-budget resumes with the remainder — never a fresh budget."""
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        return EvaluateResult(passed=False, score=0.0, verdict="unknown", error="boom")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start while Seed QA errors")
+
+    interrupted = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    interrupted.max_repair_rounds = 2
+    interrupted.seed_qa_error_attempts = 1
+    ledger = SeedDraftLedger.from_goal(interrupted.goal)
+    _fill_ready(ledger)
+    interrupted.ledger = ledger.to_dict()
+    state = AutoPipelineState.from_dict(interrupted.to_dict())
+
+    result = await _seed_qa_pipeline(tmp_path, seed_qa, run_seed).run(state)
+
+    assert result.status == "blocked"
+    assert len(calls) == 1
+    assert state.seed_qa_error_attempts == 2
+    assert result.blocker is not None
+    assert "2 attempt(s)" in result.blocker
+
+
+@pytest.mark.asyncio
+async def test_seed_qa_exhausted_budget_never_calls_evaluator_again(tmp_path) -> None:
+    """#2094 R1: after the budget is spent, a checkpoint/reload resume
+    re-blocks without another evaluator call, so total calls across
+    restarts never exceed max_repair_rounds."""
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        return EvaluateResult(passed=False, score=0.0, verdict="unknown", error="boom")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start while Seed QA errors")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+
+    first = await _seed_qa_pipeline(tmp_path, seed_qa, run_seed).run(state)
+    assert first.status == "blocked"
+    assert len(calls) == 2
+
+    reloaded = AutoPipelineState.from_dict(state.to_dict())
+    second = await _seed_qa_pipeline(tmp_path, seed_qa, run_seed).run(reloaded)
+
+    assert second.status == "blocked"
+    assert len(calls) == 2
+    assert second.blocker is not None
+    assert "budget exhausted" in second.blocker
+
+
+@pytest.mark.asyncio
+async def test_seed_qa_usable_result_restores_error_budget(tmp_path) -> None:
+    """#2094 R1: a usable evaluator result resets the durable counter."""
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        if len(calls) == 1:
+            return EvaluateResult(passed=False, score=0.0, verdict="unknown", error="boom")
+        return EvaluateResult(passed=True, score=0.9, verdict="pass")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {"job_id": "job_budget_reset"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 3
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+
+    result = await _seed_qa_pipeline(tmp_path, seed_qa, run_seed).run(state)
+
+    assert result.status == "complete"
+    assert len(calls) == 2
+    assert state.seed_qa_error_attempts == 0
+
+
 @pytest.mark.asyncio
 async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

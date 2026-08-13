@@ -2803,6 +2803,7 @@ class AutoPipeline:
         current_seed = seed
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
+        consumed_error_attempts = max(0, int(state.seed_qa_error_attempts or 0))
 
         def _blocked_result() -> tuple[AutoPipelineResult, Seed, SeedReview | None]:
             return (
@@ -2810,6 +2811,16 @@ class AutoPipeline:
                 current_seed,
                 current_review,
             )
+
+        # The durable error budget bounds evaluator calls across restarts
+        # (#2094): an exhausted session re-blocks without another call.
+        if consumed_error_attempts >= max_attempts:
+            state.mark_blocked(
+                f"Seed QA evaluator error budget exhausted ({max_attempts} attempt(s))",
+                tool_name="seed_qa",
+            )
+            self._save(state)
+            return _blocked_result()
 
         for attempt in range(1, max_attempts + 1):
             timeout = self._deadline_capped_timeout(
@@ -2837,15 +2848,15 @@ class AutoPipeline:
                 return _blocked_result()
 
             if qa_result.error:
-                # A transient evaluator error retries within the attempt
-                # budget instead of blocking on first occurrence, and the
-                # final block persists the concrete error so the state
-                # stops discarding the diagnostic detail (#2094).
+                # Retry within the DURABLE budget instead of blocking on first
+                # occurrence: the consumed count persists before the retry so an
+                # interrupted session resumes mid-budget, not afresh (#2094).
+                state.seed_qa_error_attempts = consumed_error_attempts = consumed_error_attempts + 1
                 detail = " ".join(str(qa_result.error).split())[:200] or "unspecified"
-                if attempt < max_attempts:
+                if consumed_error_attempts < max_attempts:
                     state.mark_progress(
                         f"Seed QA transient evaluator error "
-                        f"(attempt {attempt}/{max_attempts}); retrying: {detail}",
+                        f"(attempt {consumed_error_attempts}/{max_attempts}); retrying: {detail}",
                         tool_name="seed_qa",
                     )
                     self._save(state)
@@ -2857,6 +2868,8 @@ class AutoPipeline:
                 self._save(state)
                 return _blocked_result()
 
+            # A usable evaluator result restores the full error budget.
+            state.seed_qa_error_attempts = 0
             state.last_qa_score = float(qa_result.score)
             state.last_qa_verdict = _safe_seed_qa_verdict(qa_result.verdict)
             state.last_qa_passed = bool(qa_result.passed)

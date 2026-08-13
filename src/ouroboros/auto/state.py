@@ -604,6 +604,10 @@ class AutoPipelineState:
     last_qa_passed: bool | None = None
     last_qa_differences: list[str] = field(default_factory=list)
     last_qa_suggestions: list[str] = field(default_factory=list)
+    # Durable Seed-QA transient-error budget (#2094): consumed error attempts
+    # survive restart and resume so the evaluator is never invoked more than
+    # max_repair_rounds times for one gate; reset when it returns a result.
+    seed_qa_error_attempts: int = 0
     evaluate_artifact_hash: str | None = None
     # The actual artifact text graded during EVALUATE. Persisted verbatim
     # on first entry into ``_run_evaluate`` so a timeout / exception /
@@ -1088,6 +1092,7 @@ class AutoPipelineState:
         payload.setdefault("last_qa_passed", None)
         payload.setdefault("last_qa_differences", [])
         payload.setdefault("last_qa_suggestions", [])
+        payload.setdefault("seed_qa_error_attempts", 0)
         payload.setdefault("evaluate_artifact_hash", None)
         payload.setdefault("evaluate_artifact", None)
         payload.setdefault("last_lateral_persona", None)
@@ -1340,6 +1345,13 @@ class AutoPipelineState:
             raise ValueError(msg)
         if self.last_qa_passed is not None and not isinstance(self.last_qa_passed, bool):
             msg = "last_qa_passed must be a boolean or null"
+            raise ValueError(msg)
+        if (
+            isinstance(self.seed_qa_error_attempts, bool)
+            or not isinstance(self.seed_qa_error_attempts, int)
+            or self.seed_qa_error_attempts < 0
+        ):
+            msg = "seed_qa_error_attempts must be a non-negative integer"
             raise ValueError(msg)
         if not isinstance(self.last_qa_differences, list) or any(
             not isinstance(item, str) for item in self.last_qa_differences
