@@ -2803,7 +2803,7 @@ class AutoPipeline:
         current_seed = seed
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
-        consumed_error_attempts = max(0, int(state.seed_qa_error_attempts or 0))
+        consumed_calls = max(0, int(state.seed_qa_evaluator_calls or 0))
 
         def _blocked_result() -> tuple[AutoPipelineResult, Seed, SeedReview | None]:
             return (
@@ -2812,20 +2812,20 @@ class AutoPipeline:
                 current_review,
             )
 
-        # The durable error budget bounds evaluator calls across restarts
-        # (#2094): an exhausted session re-blocks without another call.
-        if consumed_error_attempts >= max_attempts:
-            state.mark_blocked(
-                f"Seed QA evaluator error budget exhausted ({max_attempts} attempt(s))",
-                tool_name="seed_qa",
-            )
+        # The durable call budget bounds EVERY evaluator invocation across
+        # restarts (#2094): exhausted sessions re-block with no further call.
+        if consumed_calls >= max_attempts:
+            state.mark_blocked(state.seed_qa_exhausted_blocker(max_attempts), tool_name="seed_qa")
             self._save(state)
             return _blocked_result()
 
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(consumed_calls + 1, max_attempts + 1):
             timeout = self._deadline_capped_timeout(
                 state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
             )
+            # Count the call fail-closed BEFORE making it (#2094).
+            state.seed_qa_evaluator_calls = consumed_calls = attempt
+            self._save(state)
             try:
                 qa_result = await asyncio.wait_for(
                     self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
@@ -2848,34 +2848,33 @@ class AutoPipeline:
                 return _blocked_result()
 
             if qa_result.error:
-                # Retry within the DURABLE budget instead of blocking on first
-                # occurrence: the consumed count persists before the retry so an
-                # interrupted session resumes mid-budget, not afresh (#2094).
-                state.seed_qa_error_attempts = consumed_error_attempts = consumed_error_attempts + 1
+                # Retry within the remaining durable budget; the final block
+                # records the concrete error detail (#2094).
                 detail = " ".join(str(qa_result.error).split())[:200] or "unspecified"
-                if consumed_error_attempts < max_attempts:
+                if attempt < max_attempts:
                     state.mark_progress(
                         f"Seed QA transient evaluator error "
-                        f"(attempt {consumed_error_attempts}/{max_attempts}); retrying: {detail}",
+                        f"(attempt {attempt}/{max_attempts}); retrying: {detail}",
                         tool_name="seed_qa",
                     )
                     self._save(state)
                     continue
-                state.mark_blocked(
-                    f"Seed QA evaluator error after {max_attempts} attempt(s): {detail}",
-                    tool_name="seed_qa",
+                state.seed_qa_block_detail = (
+                    f"Seed QA evaluator error after {max_attempts} attempt(s): {detail}"
                 )
+                state.mark_blocked(state.seed_qa_block_detail, tool_name="seed_qa")
                 self._save(state)
                 return _blocked_result()
 
-            # A usable evaluator result restores the full error budget.
-            state.seed_qa_error_attempts = 0
             state.last_qa_score = float(qa_result.score)
             state.last_qa_verdict = _safe_seed_qa_verdict(qa_result.verdict)
             state.last_qa_passed = bool(qa_result.passed)
             state.last_qa_differences = _safe_seed_qa_evidence(qa_result.differences)
             state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
+                # A pass concludes the gate: restore the durable budget.
+                state.seed_qa_evaluator_calls = 0
+                state.seed_qa_block_detail = None
                 review_blocker = self._seed_review_gate_blocker(state, current_review)
                 if review_blocker is not None:
                     state.mark_blocked(review_blocker, tool_name="grade_gate")
@@ -2967,7 +2966,8 @@ class AutoPipeline:
                     "reason": "repair_budget_exhausted",
                 },
             )
-            state.mark_blocked("; ".join(details), tool_name="seed_qa")
+            state.seed_qa_block_detail = "; ".join(details)
+            state.mark_blocked(state.seed_qa_block_detail, tool_name="seed_qa")
             self._save(state)
             return _blocked_result()
 

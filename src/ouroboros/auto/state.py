@@ -604,10 +604,15 @@ class AutoPipelineState:
     last_qa_passed: bool | None = None
     last_qa_differences: list[str] = field(default_factory=list)
     last_qa_suggestions: list[str] = field(default_factory=list)
-    # Durable Seed-QA transient-error budget (#2094): consumed error attempts
-    # survive restart and resume so the evaluator is never invoked more than
-    # max_repair_rounds times for one gate; reset when it returns a result.
-    seed_qa_error_attempts: int = 0
+    # Durable Seed-QA evaluator-call budget (#2094): every evaluator
+    # invocation is counted fail-closed before it is made and survives
+    # restart and resume, so one gate episode never exceeds
+    # max_repair_rounds calls; reset when the gate concludes with a pass.
+    seed_qa_evaluator_calls: int = 0
+    # The final Seed-QA blocker message, persisted separately because resume
+    # transitions clear last_error: an exhausted-budget re-entry replays the
+    # concrete diagnostic instead of a generic label (#2094).
+    seed_qa_block_detail: str | None = None
     evaluate_artifact_hash: str | None = None
     # The actual artifact text graded during EVALUATE. Persisted verbatim
     # on first entry into ``_run_evaluate`` so a timeout / exception /
@@ -737,6 +742,12 @@ class AutoPipelineState:
     def recover(self, next_phase: AutoPhase, message: str) -> None:
         """Move a session back to a valid recoverable phase."""
         self.transition(next_phase, message)
+
+    def seed_qa_exhausted_blocker(self, max_attempts: int) -> str:
+        """The replayed Seed-QA blocker for an exhausted call budget (#2094)."""
+        return self.seed_qa_block_detail or (
+            f"Seed QA evaluator call budget exhausted ({max_attempts} attempt(s))"
+        )
 
     def mark_blocked(
         self,
@@ -1092,7 +1103,8 @@ class AutoPipelineState:
         payload.setdefault("last_qa_passed", None)
         payload.setdefault("last_qa_differences", [])
         payload.setdefault("last_qa_suggestions", [])
-        payload.setdefault("seed_qa_error_attempts", 0)
+        payload.setdefault("seed_qa_evaluator_calls", 0)
+        payload.setdefault("seed_qa_block_detail", None)
         payload.setdefault("evaluate_artifact_hash", None)
         payload.setdefault("evaluate_artifact", None)
         payload.setdefault("last_lateral_persona", None)
@@ -1347,11 +1359,16 @@ class AutoPipelineState:
             msg = "last_qa_passed must be a boolean or null"
             raise ValueError(msg)
         if (
-            isinstance(self.seed_qa_error_attempts, bool)
-            or not isinstance(self.seed_qa_error_attempts, int)
-            or self.seed_qa_error_attempts < 0
+            isinstance(self.seed_qa_evaluator_calls, bool)
+            or not isinstance(self.seed_qa_evaluator_calls, int)
+            or self.seed_qa_evaluator_calls < 0
         ):
-            msg = "seed_qa_error_attempts must be a non-negative integer"
+            msg = "seed_qa_evaluator_calls must be a non-negative integer"
+            raise ValueError(msg)
+        if self.seed_qa_block_detail is not None and (
+            not isinstance(self.seed_qa_block_detail, str) or not self.seed_qa_block_detail.strip()
+        ):
+            msg = "seed_qa_block_detail must be a non-empty string or null"
             raise ValueError(msg)
         if not isinstance(self.last_qa_differences, list) or any(
             not isinstance(item, str) for item in self.last_qa_differences

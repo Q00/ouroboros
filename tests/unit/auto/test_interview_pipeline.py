@@ -1986,7 +1986,7 @@ async def test_seed_qa_error_budget_survives_restart(tmp_path) -> None:
 
     interrupted = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     interrupted.max_repair_rounds = 2
-    interrupted.seed_qa_error_attempts = 1
+    interrupted.seed_qa_evaluator_calls = 1
     ledger = SeedDraftLedger.from_goal(interrupted.goal)
     _fill_ready(ledger)
     interrupted.ledger = ledger.to_dict()
@@ -1996,7 +1996,7 @@ async def test_seed_qa_error_budget_survives_restart(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert len(calls) == 1
-    assert state.seed_qa_error_attempts == 2
+    assert state.seed_qa_evaluator_calls == 2
     assert result.blocker is not None
     assert "2 attempt(s)" in result.blocker
 
@@ -2032,7 +2032,48 @@ async def test_seed_qa_exhausted_budget_never_calls_evaluator_again(tmp_path) ->
     assert second.status == "blocked"
     assert len(calls) == 2
     assert second.blocker is not None
-    assert "budget exhausted" in second.blocker
+    # #2094 R2: the replayed block keeps the concrete evaluator diagnostic
+    # persisted on the final attempt instead of a generic exhaustion label.
+    assert "boom" in second.blocker
+    assert "2 attempt(s)" in second.blocker
+
+
+@pytest.mark.asyncio
+async def test_seed_qa_failed_result_shares_the_durable_call_budget(tmp_path) -> None:
+    """#2094 R2: max_repair_rounds is one evaluator-call budget — a resumed
+    session with one consumed call gets exactly one more evaluator call, and
+    a normal failed QA result on it cannot trigger a repair that would call
+    the evaluator a third time."""
+
+    calls: list[int] = []
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        calls.append(1)
+        return EvaluateResult(
+            passed=False,
+            score=0.4,
+            verdict="revise",
+            differences=("missing nuance",),
+            suggestions=("carry the decision forward",),
+        )
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("run must not start when Seed QA never passes")
+
+    interrupted = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    interrupted.max_repair_rounds = 2
+    interrupted.seed_qa_evaluator_calls = 1
+    ledger = SeedDraftLedger.from_goal(interrupted.goal)
+    _fill_ready(ledger)
+    interrupted.ledger = ledger.to_dict()
+    state = AutoPipelineState.from_dict(interrupted.to_dict())
+
+    result = await _seed_qa_pipeline(tmp_path, seed_qa, run_seed).run(state)
+
+    assert result.status == "blocked"
+    assert len(calls) == 1
+    assert result.blocker is not None
+    assert "did not pass after 2 attempt(s)" in result.blocker
 
 
 @pytest.mark.asyncio
@@ -2060,7 +2101,7 @@ async def test_seed_qa_usable_result_restores_error_budget(tmp_path) -> None:
 
     assert result.status == "complete"
     assert len(calls) == 2
-    assert state.seed_qa_error_attempts == 0
+    assert state.seed_qa_evaluator_calls == 0
 
 
 @pytest.mark.asyncio
