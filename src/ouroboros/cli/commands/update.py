@@ -64,6 +64,8 @@ _RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
     "zcode": ("OUROBOROS_ZCODE_CLI_PATH", "zcode_cli_path", "zcode"),
 }
 
+_HOST_PLUGIN_RUNTIMES = ("claude", "codex")
+
 # ── Version helpers ──────────────────────────────────────────────
 
 _FALLBACK_VERSION_RE = re.compile(
@@ -485,6 +487,30 @@ def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool
     )
 
 
+def _refresh_codex_plugin(dry_run: bool, codex_executable: str | None) -> bool | None:
+    """Refresh the Codex marketplace snapshot that owns the installed plugin."""
+    if codex_executable is None:
+        print_info("codex CLI not found — skipping Codex plugin refresh.")
+        return None
+    return _run_step(
+        [codex_executable, "plugin", "marketplace", "upgrade", "ouroboros"],
+        description="Refreshed Codex Ouroboros marketplace",
+        dry_run=dry_run,
+    )
+
+
+def _refresh_all_runtime_artifacts(
+    dry_run: bool,
+    identity: InstallationIdentity,
+) -> bool:
+    """Refresh installed host artifacts without changing the selected runtime."""
+    return _run_step(
+        [str(identity.console_path), "setup", "refresh"],
+        description="Refreshed installed runtime artifacts",
+        dry_run=dry_run,
+    )
+
+
 def _refresh_runtime_config(
     runtime: str,
     dry_run: bool,
@@ -536,11 +562,11 @@ def _canonical_runtime_backend(runtime: str) -> str:
 def _validate_runtime_option(runtime: str) -> str:
     """Normalize supported runtime values before update performs any I/O."""
     normalized = runtime.strip().lower()
-    if normalized in {"auto", "none"}:
+    if normalized in {"all", "auto", "none"}:
         return normalized
     backend = _canonical_runtime_backend(normalized)
     if backend not in _RUNTIME_CLI_IDENTITIES:
-        supported = ", ".join(("auto", "none", *_RUNTIME_CLI_IDENTITIES))
+        supported = ", ".join(("all", "auto", "none", *_RUNTIME_CLI_IDENTITIES))
         raise typer.BadParameter(
             f"unsupported runtime {runtime!r}; choose one of: {supported}",
             param_hint="--runtime",
@@ -718,7 +744,8 @@ def update(
             "--runtime",
             "-r",
             help="Runtime integration to refresh after upgrading "
-            "(auto preserves the configured backend; none skips refresh).",
+            "(all refreshes Claude and Codex without changing the configured backend; "
+            "auto preserves the configured backend; none skips refresh).",
             callback=_validate_runtime_option,
         ),
     ] = "auto",
@@ -734,6 +761,7 @@ def update(
     [dim]    ouroboros update --check      # version check only[/dim]
     [dim]    ouroboros update -y           # no prompts (for scripts)[/dim]
     [dim]    ouroboros update --dry-run    # preview the commands[/dim]
+    [dim]    ouroboros update -r all       # refresh Claude and Codex integrations[/dim]
     """
     console.print("\n[bold cyan]Ouroboros Update[/bold cyan]\n")
 
@@ -758,9 +786,15 @@ def update(
         raise typer.Exit()
 
     configured_topology = RuntimeRefreshTopology()
+    configured_host_topologies: dict[str, RuntimeRefreshTopology] = {}
     if runtime != "none":
         try:
-            configured_topology = _configured_runtime_topology(runtime)
+            if runtime == "all":
+                configured_host_topologies = {
+                    host: _configured_runtime_topology(host) for host in _HOST_PLUGIN_RUNTIMES
+                }
+            else:
+                configured_topology = _configured_runtime_topology(runtime)
         except ConfigError as exc:
             print_warning(f"Cannot update safely: runtime configuration is invalid: {exc}")
             console.print("[dim]No changes were made.[/dim]\n")
@@ -826,6 +860,23 @@ def update(
 
     if resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
+    elif resolved_runtime == "all":
+        claude_refreshed = _refresh_claude_plugin(
+            dry_run,
+            configured_host_topologies["claude"].runtime_executable,
+        )
+        if claude_refreshed is False:
+            failed.append("Claude Code plugin refresh")
+
+        codex_refreshed = _refresh_codex_plugin(
+            dry_run,
+            configured_host_topologies["codex"].runtime_executable,
+        )
+        if codex_refreshed is False:
+            failed.append("Codex plugin refresh")
+
+        if not _refresh_all_runtime_artifacts(dry_run, identity):
+            failed.append("installed runtime artifact refresh")
     elif resolved_runtime == "claude":
         plugin_refreshed = _refresh_claude_plugin(
             dry_run,
@@ -876,7 +927,17 @@ def update(
         console.print()
     else:
         console.print(f"[bold green]Updated to v{installed}.[/bold green]")
-    if resolved_runtime == "claude":
+    if resolved_runtime == "all":
+        refreshed_hosts = [
+            host
+            for host, topology in configured_host_topologies.items()
+            if topology.runtime_executable is not None
+        ]
+        if refreshed_hosts:
+            joined_hosts = " and ".join(refreshed_hosts)
+            console.print(f"[dim]Restart active {joined_hosts} sessions to apply the update.[/dim]")
+        console.print("[dim]Claude may use /reload-plugins; Codex sessions must restart.[/dim]")
+    elif resolved_runtime == "claude":
         console.print("[dim]Restart your Claude Code session to apply the update.[/dim]")
         console.print("[dim]If the CLAUDE.md block content changed, regenerate it: ooo setup[/dim]")
     elif resolved_runtime != "none":

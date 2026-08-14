@@ -841,7 +841,7 @@ ouroboros update [OPTIONS]
 | `-y, --yes` | flag | off | Skip confirmation prompt (for scripts) |
 | `--dry-run` | flag | off | Show the commands that would run without executing them |
 | `--prerelease / --no-prerelease` | flag | auto | Include pre-releases (default: only when a pre-release is installed) |
-| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `auto` preserves the configured backend; `none` skips refresh |
+| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `all` refreshes Claude and Codex without changing the configured backend; `auto` preserves the configured backend; `none` skips refresh |
 
 **Examples:**
 
@@ -858,6 +858,9 @@ ouroboros update -y
 # Preview the commands without running them
 ouroboros update --dry-run
 
+# Refresh both Claude Code and Codex integrations
+ouroboros update --runtime all -y
+
 # Upgrade the package but skip runtime integration refresh
 ouroboros update --runtime none -y
 ```
@@ -870,11 +873,18 @@ ouroboros update --runtime none -y
    extras/additional requirements
 3. Verifies that the same environment's console reports at least the target
    version before changing any runtime integration
-4. Refreshes the Claude Code plugin (`marketplace update` + `plugin install` +
-   `plugin update`) when the `claude` CLI is available
-5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
+4. Refreshes the selected host plugin integration
+5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
+   runtime, or `ouroboros setup refresh` for `--runtime all`
 
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
+
+With `--runtime all`, the updater refreshes the Claude plugin, the Codex
+Ouroboros marketplace, and all previously installed runtime artifacts through
+`ouroboros setup refresh`. This path does not rewrite the configured execution
+backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
+active Codex sessions must restart because Codex does not currently retain an
+in-use plugin generation during marketplace cache rotation.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
