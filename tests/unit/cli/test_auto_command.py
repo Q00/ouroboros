@@ -1227,4 +1227,9 @@ def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
 
     start_evaluate = captured["run_starter"].handler.start_evaluate_handler
     assert start_evaluate is not None
-    assert start_evaluate.start_ralph_handler is not None
+    start_ralph = start_evaluate.start_ralph_handler
+    assert start_ralph is not None
+    # A hand-built Ralph handler enqueues a job that dies on its first
+    # generation with "EvolutionaryLoop not configured", so a non-null handler
+    # is not evidence that the chain completes.
+    assert start_ralph._evolve_handler.evolutionary_loop is not None

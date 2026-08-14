@@ -584,7 +584,7 @@ async def _run_auto(
         start_evaluate_handler=build_run_successor_handler(
             agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
             opencode_mode=runtime_plan.evaluate.opencode_mode,
-        ),
+        ),  # composition-root wiring; a hand-built stack dies on its first generation
     )
     seed_qa = QAHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,

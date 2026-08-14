@@ -2913,7 +2913,12 @@ class TestAutoRunSuccessorWiring:
         start_evaluate = handler.start_evaluate_handler
         assert start_evaluate is not None
         # ...and the link below it, or a rejected verdict cannot start Ralph.
-        assert start_evaluate.start_ralph_handler is not None
+        start_ralph = start_evaluate.start_ralph_handler
+        assert start_ralph is not None
+        # A Ralph handler assembled by hand enqueues a job that then dies on its
+        # first generation with "EvolutionaryLoop not configured", so a non-null
+        # handler is not evidence the chain completes.
+        assert start_ralph._evolve_handler.evolutionary_loop is not None
 
     def test_rebuild_preserves_an_injected_successor_stack(self) -> None:
         """Rebuilding for another runtime must not drop the server's wiring."""
