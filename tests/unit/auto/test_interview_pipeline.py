@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -1693,6 +1694,176 @@ async def test_auto_interview_requires_backend_ambiguity_below_threshold(tmp_pat
     assert result.status == "blocked"
     assert "ambiguity_score=0.42" in (result.blocker or "")
     assert state.interview_completed is False
+
+
+class _RecordingEventPipeline(AutoPipeline):
+    """Captures durable runtime events and lets a test stall the append."""
+
+    emitted: list[str]
+    on_emit = None
+
+    async def _emit_runtime_event(self, event_type, aggregate_id, payload):  # noqa: ANN001
+        self.emitted.append(event_type)
+        if self.on_emit is not None:
+            self.on_emit()
+        return await super()._emit_runtime_event(event_type, aggregate_id, payload)
+
+
+def _advisory_pipeline(driver, generate_seed, tmp_path, **kwargs) -> _RecordingEventPipeline:
+    pipeline = _RecordingEventPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        **kwargs,
+    )
+    pipeline.emitted = []
+    return pipeline
+
+
+def _seed_qa_interview_backend() -> FunctionInterviewBackend:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", "interview_seed_qa_gate", seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    return FunctionInterviewBackend(start, answer)
+
+
+@pytest.mark.asyncio
+async def test_advisory_event_is_not_emitted_when_the_grade_gate_then_blocks(tmp_path) -> None:
+    """Durable evidence must not claim the engine continued when it stopped.
+
+    ``attention_relay`` reads ``auto.seed_qa.advisory_override`` as engine
+    ownership ``active`` with no successor action. If the repaired Seed then
+    fails the retained grade gate, emitting that event would make the durable
+    orchestration record contradict what actually happened.
+    """
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("a grade-blocked Seed must not run")
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        # Never passes: the repair lands, the budget closes, and the advisory
+        # path is reached with a repaired Seed the grade gate rejects.
+        return EvaluateResult(
+            passed=False,
+            score=0.58,
+            verdict="revise",
+            suggestions=("introduce review-blocking post-QA constraint",),
+        )
+
+    class ConstraintBlockingGate(GradeGate):
+        def grade_seed(
+            self,
+            seed: Seed,
+            *,
+            ledger: SeedDraftLedger | None = None,  # noqa: ARG002
+            closure_mode: str | None = None,  # noqa: ARG002
+            degraded: bool | None = None,  # noqa: ARG002
+        ) -> GradeResult:
+            if any("review-blocking" in constraint for constraint in seed.constraints):
+                return GradeResult(
+                    grade=SeedGrade.C,
+                    scores={
+                        "coverage": 0.5,
+                        "ambiguity": 0.5,
+                        "testability": 0.5,
+                        "execution_feasibility": 0.4,
+                        "risk": 0.4,
+                    },
+                    blockers=[
+                        GradeFinding(
+                            "post_qa_review_blocker",
+                            "high",
+                            "QA repair introduced a deterministic blocker",
+                            "constraints",
+                            "Remove the post-QA blocker before execution.",
+                        )
+                    ],
+                    may_run=False,
+                )
+            return GradeResult(
+                grade=SeedGrade.A,
+                scores={
+                    "coverage": 0.95,
+                    "ambiguity": 0.05,
+                    "testability": 0.95,
+                    "execution_feasibility": 0.95,
+                    "risk": 0.05,
+                },
+                may_run=True,
+            )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = _advisory_pipeline(
+        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
+        generate_seed,
+        tmp_path,
+        run_starter=run_seed,
+        grade_gate=ConstraintBlockingGate(),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "grade_gate"
+    assert "auto.seed_qa.advisory_override" not in pipeline.emitted
+
+
+@pytest.mark.asyncio
+async def test_deadline_spent_during_the_advisory_append_still_blocks_skip_run(tmp_path) -> None:
+    """The advisory path must not turn an expired deadline into a completion.
+
+    The event append is awaited under the observer-drain timeout, which is not
+    charged against ``deadline_at``, and the skip-run COMPLETE transition
+    performs no deadline check of its own.
+    """
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=False, score=0.58, verdict="revise")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 1
+    state.skip_run = True
+    state.deadline_at = time.monotonic() + 600.0
+    state.deadline_at_epoch = time.time() + 600.0
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = _advisory_pipeline(
+        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
+        generate_seed,
+        tmp_path,
+        seed_qa_evaluator=seed_qa,
+    )
+
+    def _burn_the_budget() -> None:
+        state.deadline_at = time.monotonic() - 1.0
+        state.deadline_at_epoch = time.time() - 1.0
+
+    pipeline.on_emit = _burn_the_budget
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "pipeline_deadline"
+    assert "auto.seed_qa.advisory_override" in pipeline.emitted
 
 
 @pytest.mark.asyncio

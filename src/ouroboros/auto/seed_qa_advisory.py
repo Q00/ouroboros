@@ -17,7 +17,17 @@ execution evidence instead of a static read of the Seed.
 
 The deterministic grade gate keeps its authority: a repaired Seed that no longer
 meets ``required_grade`` (or is no longer cleared to run) is still blocked by
-``grade_gate``, not by this advisory path.
+``grade_gate``, not by this advisory path. So does the pipeline deadline.
+
+**Emission order.** The event is durable orchestration evidence that the engine
+kept driving — ``attention_relay`` classifies it as engine ownership ``active``
+with no successor action offered. Emitting it before the retained gates have
+spoken would make that evidence lie whenever a gate then stops the session, so
+every gate that can still block runs *first* and the event is emitted only on
+the true continuation path. The deadline is re-checked after the append as well:
+the append is awaited under the observer-drain timeout, which is not charged
+against ``deadline_at``, and the skip-run COMPLETE transition downstream
+performs no deadline check of its own.
 """
 
 from __future__ import annotations

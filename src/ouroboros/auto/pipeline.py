@@ -2948,20 +2948,26 @@ class AutoPipeline:
         See :mod:`ouroboros.auto.seed_qa_advisory` for why this gate must never
         dead-end the pipeline.
         """
+
+        def stop(blocker: str | None) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+            return self._result(state, ledger, review=review, blocker=blocker), seed, review
+
+        # Gates first, event second — see the module docstring for why.
+        review_blocker = self._seed_review_gate_blocker(state, review)
+        if review_blocker is not None:
+            state.mark_blocked(review_blocker, tool_name="grade_gate")
+            self._save(state)
+            return stop(review_blocker)
+        if self._enforce_deadline(state):
+            return stop(state.last_error)
         await self._emit_runtime_event(
             SEED_QA_ADVISORY_EVENT,
             state.auto_session_id,
             seed_qa_advisory_payload(state, seed, reason=reason, attempts=attempts, score=score),
         )
-        review_blocker = self._seed_review_gate_blocker(state, review)
-        if review_blocker is not None:
-            state.mark_blocked(review_blocker, tool_name="grade_gate")
-            self._save(state)
-            return (
-                self._result(state, ledger, review=review, blocker=review_blocker),
-                seed,
-                review,
-            )
+        # The append is awaited and its wait is not charged against the deadline.
+        if self._enforce_deadline(state):
+            return stop(state.last_error)
         state.mark_progress(seed_qa_advisory_progress(reason, detail), tool_name="seed_qa")
         self._save(state)
         return None, seed, review
