@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import time
 
 import pytest
@@ -32,6 +33,7 @@ from ouroboros.core.seed import (
     ac_text,
     derive_semantic_ac_key,
 )
+from ouroboros.events.base import BaseEvent
 
 # The unsafe-context matcher / safe-default blocking machinery exercised here
 # is disabled by default under the freedom policy (empty production bank);
@@ -1864,6 +1866,72 @@ async def test_skip_run_completion_enforces_the_pipeline_deadline(tmp_path) -> N
 
     assert result.status == "blocked"
     assert state.last_tool_name == "pipeline_deadline"
+
+
+@pytest.mark.asyncio
+async def test_a_block_after_the_advisory_leaves_no_ownership_claim(tmp_path) -> None:
+    """The append can outlive the budget; the relay must not read that as "active".
+
+    The deadline is checked before the awaited append, but the append itself
+    takes time, so RUN entry can block immediately afterwards. Rather than
+    trying to retract a durable event — which cannot be made reliable, since the
+    correcting append fails exactly when the original succeeded — the advisory
+    event carries no ownership claim at all.
+    """
+    from ouroboros.mcp.tools.attention_relay import classify_relay_events
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("RUN must not start once the deadline has expired")
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=False, score=0.58, verdict="revise")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 1
+    state.deadline_at = time.monotonic() + 600.0
+    state.deadline_at_epoch = time.time() + 600.0
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = _advisory_pipeline(
+        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
+        generate_seed,
+        tmp_path,
+        run_starter=run_seed,
+        seed_qa_evaluator=seed_qa,
+    )
+
+    def _burn_the_budget() -> None:
+        state.deadline_at = time.monotonic() - 1.0
+        state.deadline_at_epoch = time.time() - 1.0
+
+    pipeline.on_emit = _burn_the_budget
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "pipeline_deadline"
+    assert "auto.seed_qa.advisory_override" in pipeline.emitted
+    # The persisted advisory event is reported as progress, never as ownership.
+    relays = classify_relay_events(
+        [
+            BaseEvent(
+                id="event_advisory",
+                type="auto.seed_qa.advisory_override",
+                aggregate_type="auto",
+                aggregate_id=state.auto_session_id,
+                timestamp=datetime(2026, 8, 14, tzinfo=UTC),
+                data=pipeline.payloads[-1],
+            )
+        ],
+        job_id="job_1",
+    )
+    assert relays
+    assert all(relay["kind"] != "attention_required" for relay in relays)
+    assert all("engine_ownership" not in relay for relay in relays)
 
 
 @pytest.mark.asyncio

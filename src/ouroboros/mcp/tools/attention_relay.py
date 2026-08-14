@@ -14,7 +14,6 @@ ATTENTION_SOURCE_EVENT_TYPES = frozenset(
         "execution.ac.deliver_verdict",
         "execution.frugality_proof.evaluated",
         "auto.seed_qa.blocked",
-        "auto.seed_qa.advisory_override",
         "lineage.stagnated",
         "control.session.signal.rejected",
         "control.session.signal.delivery_uncertain",
@@ -38,6 +37,11 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
         "control.session.signal.queued",
         "control.session.signal.applied",
         "control.session.signal.completed",
+        # Informational, deliberately NOT an attention/ownership signal: the
+        # engine may continue past an advisory Seed-QA verdict and still stop at
+        # the next gate. An event that claims ownership can be falsified by what
+        # happens next; a progress event cannot.
+        "auto.seed_qa.advisory_override",
     }
 )
 
@@ -444,6 +448,25 @@ def _proactive_relays(
                     },
                 )
             )
+        elif event.type == "auto.seed_qa.advisory_override":
+            # Reported, not adjudicated. The engine ran the Seed despite an
+            # unresolved verdict; whether it then keeps going is decided by the
+            # gates that follow, and their own events say so.
+            relays.append(
+                _progress(
+                    event,
+                    kind="progress_advanced",
+                    subtype="seed_qa_advisory",
+                    job_id=job_id,
+                    evidence={
+                        "reason": data.get("reason"),
+                        "verdict": _text(data.get("verdict"), limit=80),
+                        "score": data.get("score"),
+                        "differences": _strings(data.get("differences"), limit=5),
+                        "suggestions": _strings(data.get("suggestions"), limit=5),
+                    },
+                )
+            )
         elif event.type == "execution.ac.phase_changed":
             relays.append(
                 _progress(
@@ -824,20 +847,13 @@ def classify_relay_events(
                     available_tools=registered,
                 )
             )
-        elif event.type in {"auto.seed_qa.blocked", "auto.seed_qa.advisory_override"}:
-            # ``blocked`` is retained for history persisted before the Seed QA
-            # gate became advisory: the engine had stopped, so a successor
-            # action was on the menu. ``advisory_override`` means the engine is
-            # still driving the same session (it ran the Seed anyway), so it
-            # stays ``active`` — the conductor is being told, not handed the
-            # wheel.
-            advisory = event.type == "auto.seed_qa.advisory_override"
+        elif event.type == "auto.seed_qa.blocked":
             relays.append(
                 _attention(
                     event,
-                    trigger="seed_qa_advisory" if advisory else "seed_qa_blocked",
+                    trigger="seed_qa_blocked",
                     job_id=job_id,
-                    ownership_state="active" if advisory else "closed",
+                    ownership_state="closed",
                     evidence={
                         "attempts": data.get("attempts"),
                         "verdict": _text(data.get("verdict"), limit=80),

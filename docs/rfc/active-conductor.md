@@ -162,6 +162,13 @@ retraction cannot be made reliable, since the correcting append can fail
 exactly when the original succeeded — so the deadline is enforced at the
 boundaries that follow instead (RUN phase entry, and skip-run completion).
 
+The event therefore carries **no ownership claim**. The append itself takes
+time, so a session can stop at the very next gate; an event that asserted
+"engine still driving" would be falsified by what happens next, in any path
+rather than one special case. Attention classification treats it as progress
+(`progress_advanced` / `seed_qa_advisory`), and ownership is read from the
+events that actually close a session.
+
 `auto.seed_qa.blocked` is retained for history persisted before the gate became
 advisory; nothing emits it now.
 
