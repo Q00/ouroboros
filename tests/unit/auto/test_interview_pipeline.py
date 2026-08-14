@@ -1700,10 +1700,12 @@ class _RecordingEventPipeline(AutoPipeline):
     """Captures durable runtime events and lets a test stall the append."""
 
     emitted: list[str]
+    payloads: list[dict]
     on_emit = None
 
     async def _emit_runtime_event(self, event_type, aggregate_id, payload):  # noqa: ANN001
         self.emitted.append(event_type)
+        self.payloads.append(dict(payload))
         if self.on_emit is not None:
             self.on_emit()
         return await super()._emit_runtime_event(event_type, aggregate_id, payload)
@@ -1717,6 +1719,7 @@ def _advisory_pipeline(driver, generate_seed, tmp_path, **kwargs) -> _RecordingE
         **kwargs,
     )
     pipeline.emitted = []
+    pipeline.payloads = []
     return pipeline
 
 
@@ -1864,6 +1867,71 @@ async def test_deadline_spent_during_the_advisory_append_still_blocks_skip_run(t
     assert result.status == "blocked"
     assert state.last_tool_name == "pipeline_deadline"
     assert "auto.seed_qa.advisory_override" in pipeline.emitted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    ["timeout", "exception", "transient"],
+    ids=["evaluator_timeout", "evaluator_error", "evaluator_transient_error"],
+)
+async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
+    tmp_path, failure: str
+) -> None:
+    """An evaluator that produces no verdict must not inherit the last one.
+
+    ``state.last_qa_*`` is durable, so a resumed session carrying a prior pass
+    would otherwise publish ``verdict="pass"`` inside an evaluator-failure
+    advisory event — and a persisted ``last_qa_passed=True`` alone makes a
+    skip-run terminal report ``artifact_state="complete_verified"``.
+    """
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        if failure == "timeout":
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+        if failure == "exception":
+            raise RuntimeError("evaluator crashed")
+        return EvaluateResult(passed=False, score=0.0, verdict="", error="transient")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 1
+    state.skip_run = True
+    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
+    # A previous attempt's passing verdict, persisted across the resume.
+    state.last_qa_passed = True
+    state.last_qa_verdict = "pass"
+    state.last_qa_score = 0.93
+    state.last_qa_differences = ["stale difference"]
+    state.last_qa_suggestions = ["stale suggestion"]
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = _advisory_pipeline(
+        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
+        generate_seed,
+        tmp_path,
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert "auto.seed_qa.advisory_override" in pipeline.emitted
+    assert state.last_qa_passed is None
+    assert state.last_qa_verdict is None
+    assert state.last_qa_score is None
+    assert state.last_qa_differences == []
+    assert state.last_qa_suggestions == []
+    # The published event describes this attempt, which produced no verdict.
+    advisory = next(p for p in pipeline.payloads if p["reason"].startswith("evaluator_"))
+    assert advisory["verdict"] is None
+    assert advisory["score"] is None
+    assert advisory["differences"] == []
+    assert advisory["suggestions"] == []
+    assert result.status == "complete"
 
 
 @pytest.mark.asyncio

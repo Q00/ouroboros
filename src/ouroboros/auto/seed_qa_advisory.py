@@ -44,6 +44,23 @@ SEED_QA_ADVISORY_EVENT = "auto.seed_qa.advisory_override"
 _MAX_EVIDENCE = 5
 
 
+def clear_seed_qa_verdict(state: AutoPipelineState) -> None:
+    """Drop the previous attempt's verdict before a new Seed-QA attempt runs.
+
+    ``state.last_qa_*`` is durable and is read by surfaces that decide whether a
+    product was verified (a persisted ``last_qa_passed=True`` alone makes a
+    terminal report ``artifact_state="complete_verified"``). An evaluator that
+    times out or raises produces no verdict at all, so without this reset a
+    resumed session would keep publishing the *previous* attempt's pass — inside
+    an ``evaluator_error`` advisory event, and into its own completion state.
+    """
+    state.last_qa_score = None
+    state.last_qa_verdict = None
+    state.last_qa_passed = None
+    state.last_qa_differences = []
+    state.last_qa_suggestions = []
+
+
 def seed_qa_advisory_payload(
     state: AutoPipelineState,
     seed: Seed,

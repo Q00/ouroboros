@@ -58,6 +58,7 @@ from ouroboros.auto.reference_candidate_bridge import (
 )
 from ouroboros.auto.seed_qa_advisory import (
     SEED_QA_ADVISORY_EVENT,
+    clear_seed_qa_verdict,
     seed_qa_advisory_payload,
     seed_qa_advisory_progress,
 )
@@ -2826,6 +2827,7 @@ class AutoPipeline:
             )
 
         for attempt in range(1, max_attempts + 1):
+            clear_seed_qa_verdict(state)  # a stale verdict must not outlive its attempt
             timeout = self._deadline_capped_timeout(
                 state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
             )
