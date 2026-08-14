@@ -14,6 +14,7 @@ ATTENTION_SOURCE_EVENT_TYPES = frozenset(
         "execution.ac.deliver_verdict",
         "execution.frugality_proof.evaluated",
         "auto.seed_qa.blocked",
+        "auto.seed_qa.advisory_override",
         "lineage.stagnated",
         "control.session.signal.rejected",
         "control.session.signal.delivery_uncertain",
@@ -823,13 +824,20 @@ def classify_relay_events(
                     available_tools=registered,
                 )
             )
-        elif event.type == "auto.seed_qa.blocked":
+        elif event.type in {"auto.seed_qa.blocked", "auto.seed_qa.advisory_override"}:
+            # ``blocked`` is retained for history persisted before the Seed QA
+            # gate became advisory: the engine had stopped, so a successor
+            # action was on the menu. ``advisory_override`` means the engine is
+            # still driving the same session (it ran the Seed anyway), so it
+            # stays ``active`` — the conductor is being told, not handed the
+            # wheel.
+            advisory = event.type == "auto.seed_qa.advisory_override"
             relays.append(
                 _attention(
                     event,
-                    trigger="seed_qa_blocked",
+                    trigger="seed_qa_advisory" if advisory else "seed_qa_blocked",
                     job_id=job_id,
-                    ownership_state="closed",
+                    ownership_state="active" if advisory else "closed",
                     evidence={
                         "attempts": data.get("attempts"),
                         "verdict": _text(data.get("verdict"), limit=80),

@@ -239,6 +239,7 @@ def test_frugality_attention_respects_persisted_assurance() -> None:
     ("event_type", "expected_trigger"),
     [
         ("auto.seed_qa.blocked", "seed_qa_blocked"),
+        ("auto.seed_qa.advisory_override", "seed_qa_advisory"),
         ("lineage.stagnated", "lineage_stagnated"),
         ("control.session.signal.delivery_uncertain", "session_signal_delivery_uncertain"),
     ],
@@ -249,6 +250,23 @@ def test_direct_attention_triggers(event_type: str, expected_trigger: str) -> No
     relays = classify_relay_events([event], job_id="job_1")
 
     assert any(relay.get("trigger") == expected_trigger for relay in relays)
+
+
+def test_seed_qa_advisory_keeps_engine_ownership_active() -> None:
+    """The advisory override means the engine kept driving the same session.
+
+    ``blocked`` handed the wheel to the conductor (ownership closed, successor
+    action offered); ``advisory_override`` only informs, so ownership stays
+    active and no successor action is proposed.
+    """
+    blocked = _event(1, "auto.seed_qa.blocked", {"reason": "repair_budget_exhausted"})
+    advisory = _event(2, "auto.seed_qa.advisory_override", {"reason": "repair_budget_exhausted"})
+
+    relays = classify_relay_events([blocked, advisory], job_id="job_1")
+    by_trigger = {cast(str, relay.get("trigger")): relay for relay in relays}
+
+    assert cast(dict, by_trigger["seed_qa_blocked"]["engine_ownership"])["state"] == "closed"
+    assert cast(dict, by_trigger["seed_qa_advisory"]["engine_ownership"])["state"] == "active"
 
 
 def test_proactive_relay_has_no_action_menu_and_deduplicates_unchanged_route() -> None:

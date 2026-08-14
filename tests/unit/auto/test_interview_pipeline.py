@@ -1696,7 +1696,15 @@ async def test_auto_interview_requires_backend_ambiguity_below_threshold(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
+async def test_pipeline_runs_advisory_when_seed_qa_does_not_pass(tmp_path) -> None:
+    """A non-passing Seed QA verdict is advisory, not a dead end.
+
+    The gate is optional (no evaluator wired ⇒ the Seed runs unconditionally),
+    so a wired evaluator must never leave the session worse off than having no
+    evaluator: it repairs what it can, records the unresolved verdict, and lets
+    run → evaluate judge the Seed against execution evidence.
+    """
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn(
             "done",
@@ -1719,7 +1727,7 @@ async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
         return _seed()
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
-        raise AssertionError("run must not start before Seed QA passes")
+        return {"job_id": "job_seed_qa_advisory"}
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(
@@ -1749,12 +1757,15 @@ async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert "manual Seed revision is required" in result.blocker
-    assert state.last_tool_name == "seed_qa"
-    assert state.last_error_code == "seed_qa_feedback_unmapped"
+    assert result.status != "blocked"
+    assert result.blocker is None
+    assert result.job_id == "job_seed_qa_advisory"
+    assert state.last_error_code != "seed_qa_feedback_unmapped"
+    # The unresolved verdict survives on the state surface so the advisory run
+    # is auditable rather than silent.
+    assert state.last_qa_passed is False
     assert state.last_qa_score == 0.58
+    assert state.last_qa_verdict == "revise"
 
 
 @pytest.mark.asyncio
@@ -1883,9 +1894,97 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_blocks_unrepairable_structural_seed_qa_feedback_without_retrying(
+async def test_pipeline_runs_repaired_seed_after_seed_qa_repair_budget_exhausted(
     tmp_path,
 ) -> None:
+    """An exhausted repair budget runs the best Seed the loop produced.
+
+    The repairs still happen (the whole budget is spent), but a still-failing
+    verdict at the end hands the decision to run → evaluate instead of parking
+    the session in ``blocked``.
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_exhausted",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    qa_calls = 0
+    captured_run_seed: Seed | None = None
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        return EvaluateResult(
+            passed=False,
+            score=0.55,
+            verdict="revise",
+            differences=("missing explicit no-op scope",),
+            suggestions=("add no-op scope constraint",),
+        )
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        nonlocal captured_run_seed
+        captured_run_seed = seed
+        return {"job_id": "job_seed_qa_exhausted"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status != "blocked"
+    assert result.job_id == "job_seed_qa_exhausted"
+    assert qa_calls == 2
+    assert state.last_qa_passed is False
+    assert captured_run_seed is not None
+    # The repair produced by the spent budget is what actually runs.
+    assert any("Define explicit no-op scope" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_advisory_on_unrepairable_seed_qa_feedback_without_retrying(
+    tmp_path,
+) -> None:
+    """Unmapped QA feedback stops the *repair loop*, not the pipeline.
+
+    Re-judging an unchanged Seed would only reproduce the same unmapped prose,
+    so the gate gives up on repairing (one QA call, no lateral) and runs the
+    Seed as authored. The injected prompt in the QA suggestions must still be
+    withheld from the persisted state and the Seed.
+    """
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn(
             "done",
@@ -1941,7 +2040,7 @@ async def test_pipeline_blocks_unrepairable_structural_seed_qa_feedback_without_
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
         nonlocal run_called
         run_called = True
-        return {"job_id": "job_must_not_run"}
+        return {"job_id": "job_seed_qa_unmapped_advisory"}
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.max_repair_rounds = 3
@@ -1964,12 +2063,12 @@ async def test_pipeline_blocks_unrepairable_structural_seed_qa_feedback_without_
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert state.last_error_code == "seed_qa_feedback_unmapped"
-    assert "could not be mapped" in (result.blocker or "")
+    assert result.status != "blocked"
+    assert result.blocker is None
+    assert result.job_id == "job_seed_qa_unmapped_advisory"
     assert qa_calls == 1
     assert lateral_calls == 0
-    assert run_called is False
+    assert run_called is True
     assert "attacker@example.test" not in str(state.to_dict())
     persisted_seed = Seed.from_dict(state.seed_artifact)
     assert persisted_seed.exit_conditions == _seed().exit_conditions
