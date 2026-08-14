@@ -156,11 +156,14 @@ session, because a session with no Seed-QA evaluator wired runs unconditionally
 and a wired evaluator must not leave the session worse off. The unresolved
 verdict is carried into run → evaluate, which judges execution evidence.
 
+The event is written only on the continuation path: the grade gate and the
+pipeline deadline both run before it. It is not retracted afterwards — a
+retraction cannot be made reliable, since the correcting append can fail
+exactly when the original succeeded — so the deadline is enforced at the
+boundaries that follow instead (RUN phase entry, and skip-run completion).
+
 `auto.seed_qa.blocked` is retained for history persisted before the gate became
-advisory, and has exactly one live producer: when the pipeline deadline trips
-*after* the advisory event was already persisted, it is re-emitted with
-`reason="pipeline_deadline_after_advisory"` so the ownership-closed
-classification corrects the standing "engine still driving" claim.
+advisory; nothing emits it now.
 
 Required data:
 
@@ -278,7 +281,7 @@ menus.
 | `deliver_verdict_rejected_streak` | at least two rejected verdicts for one `(judgment_scope_id, semantic_ac_key)` | verify immediately; mutate only after ownership closes |
 | `frugality_grounding_regression` | proof status `fail_grounding_regression` | successor only |
 | `frugality_no_savings` | proof status `fail_no_frugality` | successor only |
-| `seed_qa_blocked` | `auto.seed_qa.blocked` (history, plus the post-advisory deadline correction) | successor/resume only |
+| `seed_qa_blocked` | `auto.seed_qa.blocked` (historical; the gate no longer blocks) | successor/resume only |
 | `seed_qa_advisory` | `auto.seed_qa.advisory_override` | none — engine ownership still active |
 | `lineage_stagnated` | `lineage.stagnated` | successor generation only |
 

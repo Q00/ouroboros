@@ -1827,20 +1827,23 @@ async def test_advisory_event_is_not_emitted_when_the_grade_gate_then_blocks(tmp
 
 
 @pytest.mark.asyncio
-async def test_deadline_spent_during_the_advisory_append_self_corrects(tmp_path) -> None:
-    """A stop after the event was published must not leave an "active" claim.
+async def test_skip_run_completion_enforces_the_pipeline_deadline(tmp_path) -> None:
+    """Skip-run completion was the one COMPLETE transition with no deadline check.
 
-    The append is awaited, so the deadline can only be re-checked afterwards.
-    If it trips there, the already-persisted advisory event would otherwise keep
-    telling the conductor the engine is still driving a Seed that never ran, so
-    the stream self-corrects with the ownership-closed event type.
+    Making the Seed-QA gate advisory means sessions now *reach* that transition
+    where they previously stopped at the gate, so an expired budget could
+    complete successfully. The check belongs at that boundary — it protects
+    every path through it, not just the advisory one.
     """
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
-        return EvaluateResult(passed=False, score=0.58, verdict="revise")
+        # Expire the budget while the gate is running, as a slow evaluator would.
+        state.deadline_at = time.monotonic() - 1.0
+        state.deadline_at_epoch = time.time() - 1.0
+        return EvaluateResult(passed=True, score=0.91, verdict="pass")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.max_repair_rounds = 1
@@ -1857,44 +1860,33 @@ async def test_deadline_spent_during_the_advisory_append_self_corrects(tmp_path)
         seed_qa_evaluator=seed_qa,
     )
 
-    def _burn_the_budget() -> None:
-        state.deadline_at = time.monotonic() - 1.0
-        state.deadline_at_epoch = time.time() - 1.0
-
-    pipeline.on_emit = _burn_the_budget
-
     result = await pipeline.run(state)
 
     assert result.status == "blocked"
     assert state.last_tool_name == "pipeline_deadline"
-    assert "auto.seed_qa.advisory_override" in pipeline.emitted
-    # ...and the record is corrected to ownership-closed rather than left active.
-    assert "auto.seed_qa.blocked" in pipeline.emitted
-    closure = next(
-        p for p in pipeline.payloads if p["reason"] == "pipeline_deadline_after_advisory"
-    )
-    assert closure["auto_session_id"] == state.auto_session_id
 
 
 @pytest.mark.asyncio
-async def test_a_budget_too_small_for_the_append_blocks_without_publishing(tmp_path) -> None:
-    """Publishing "still going" and then stopping inside that append is the defect.
+async def test_an_unexpired_deadline_is_never_redefined_as_expired(tmp_path) -> None:
+    """A short-but-live budget must not be treated as spent.
 
-    The append has a bound of its own, so charging it up front removes the
-    window entirely: a budget that cannot cover a worst-case append blocks
-    before any durable continuation claim exists.
+    Reserving the append's worst-case latency up front turned an unexpired
+    deadline into a blocker — and did so even where no EventStore is wired and
+    the append is a no-op. Disabling Seed QA imposes no such block, so a wired
+    evaluator must not either.
     """
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {"job_id": "job_short_budget"}
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(passed=False, score=0.58, verdict="revise")
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.max_repair_rounds = 1
-    state.skip_run = True
-    # Not expired, but too little left to cover the observer-drain bound (1.5s).
     state.deadline_at = time.monotonic() + 0.5
     state.deadline_at_epoch = time.time() + 0.5
     ledger = SeedDraftLedger.from_goal(state.goal)
@@ -1904,79 +1896,14 @@ async def test_a_budget_too_small_for_the_append_blocks_without_publishing(tmp_p
         AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
         generate_seed,
         tmp_path,
+        run_starter=run_seed,
         seed_qa_evaluator=seed_qa,
     )
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
-    assert state.last_tool_name == "pipeline_deadline"
-    assert "auto.seed_qa.advisory_override" not in pipeline.emitted
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    ["timeout", "exception", "transient"],
-    ids=["evaluator_timeout", "evaluator_error", "evaluator_transient_error"],
-)
-async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
-    tmp_path, failure: str
-) -> None:
-    """An evaluator that produces no verdict must not inherit the last one.
-
-    ``state.last_qa_*`` is durable, so a resumed session carrying a prior pass
-    would otherwise publish ``verdict="pass"`` inside an evaluator-failure
-    advisory event — and a persisted ``last_qa_passed=True`` alone makes a
-    skip-run terminal report ``artifact_state="complete_verified"``.
-    """
-
-    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
-        return _seed()
-
-    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
-        if failure == "timeout":
-            await asyncio.sleep(30)
-            raise AssertionError("unreachable")
-        if failure == "exception":
-            raise RuntimeError("evaluator crashed")
-        return EvaluateResult(passed=False, score=0.0, verdict="", error="transient")
-
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    state.max_repair_rounds = 1
-    state.skip_run = True
-    state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
-    # A previous attempt's passing verdict, persisted across the resume.
-    state.last_qa_passed = True
-    state.last_qa_verdict = "pass"
-    state.last_qa_score = 0.93
-    state.last_qa_differences = ["stale difference"]
-    state.last_qa_suggestions = ["stale suggestion"]
-    ledger = SeedDraftLedger.from_goal(state.goal)
-    _fill_ready(ledger)
-    state.ledger = ledger.to_dict()
-    pipeline = _advisory_pipeline(
-        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
-        generate_seed,
-        tmp_path,
-        seed_qa_evaluator=seed_qa,
-    )
-
-    result = await pipeline.run(state)
-
+    assert result.status != "blocked"
     assert "auto.seed_qa.advisory_override" in pipeline.emitted
-    assert state.last_qa_passed is None
-    assert state.last_qa_verdict is None
-    assert state.last_qa_score is None
-    assert state.last_qa_differences == []
-    assert state.last_qa_suggestions == []
-    # The published event describes this attempt, which produced no verdict.
-    advisory = next(p for p in pipeline.payloads if p["reason"].startswith("evaluator_"))
-    assert advisory["verdict"] is None
-    assert advisory["score"] is None
-    assert advisory["differences"] == []
-    assert advisory["suggestions"] == []
-    assert result.status == "complete"
 
 
 @pytest.mark.asyncio

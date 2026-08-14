@@ -58,7 +58,7 @@ from ouroboros.auto.reference_candidate_bridge import (
 )
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
-    publish_advisory_or_block,
+    publish_advisory,
     seed_qa_advisory_progress,
 )
 from ouroboros.auto.seed_repairer import SeedRepairer
@@ -1323,6 +1323,10 @@ class AutoPipeline:
                 return seed_qa
 
             if self.skip_run or state.skip_run:
+                # The only COMPLETE transition with no deadline check of its
+                # own; RUN enforces it at ``_run_execution_phase`` entry.
+                if self._enforce_deadline(state):
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
                 state.transition(
                     AutoPhase.COMPLETE,
                     f"Seed grade {review.grade_result.grade.value} ready; skip-run requested",
@@ -2827,6 +2831,7 @@ class AutoPipeline:
 
         for attempt in range(1, max_attempts + 1):
             clear_seed_qa_verdict(state)  # a stale verdict must not outlive its attempt
+            self._save(state)  # ...including across an interruption mid-attempt
             timeout = self._deadline_capped_timeout(
                 state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
             )
@@ -2955,19 +2960,16 @@ class AutoPipeline:
             state.mark_blocked(review_blocker, tool_name="grade_gate")
             self._save(state)
             return stop(review_blocker)
-        if await publish_advisory_or_block(
+        if self._enforce_deadline(state):
+            return stop(state.last_error)
+        await publish_advisory(
             state=state,
             seed=seed,
             reason=reason,
             attempts=attempts,
             score=score,
             emit=self._emit_runtime_event,
-            enforce_deadline=self._enforce_deadline,
-            save=self._save,
-            append_budget_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
-            deadline_tool_name=PIPELINE_DEADLINE_TOOL_NAME,
-        ):
-            return stop(state.last_error)
+        )
         state.mark_progress(seed_qa_advisory_progress(reason, detail), tool_name="seed_qa")
         self._save(state)
         return None, seed, review
