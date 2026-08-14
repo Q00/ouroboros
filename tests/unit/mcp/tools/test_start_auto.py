@@ -2886,3 +2886,59 @@ class TestAutoHandlerLeaseRelease:
 
         assert result.is_ok
         assert not lease_path.exists()
+
+
+class TestAutoRunSuccessorWiring:
+    """Auto-created run handlers must be able to enqueue the chain they delegate to.
+
+    #2120 turned the successor chain back on for default Auto, but Auto builds
+    its own ``StartExecuteSeedHandler``. Without the successor stack that
+    delegation silently degrades to
+    ``evaluation_status="enqueue_failed"`` — the run finishes and nothing
+    grades it, which is the exact failure the delegation was meant to remove.
+    """
+
+    def test_mcp_execution_start_handler_can_enqueue_successors(self) -> None:
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+
+        handler = _execution_start_handler(
+            None,
+            llm_backend=None,
+            agent_runtime_backend="claude",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        start_evaluate = handler.start_evaluate_handler
+        assert start_evaluate is not None
+        # ...and the link below it, or a rejected verdict cannot start Ralph.
+        assert start_evaluate.start_ralph_handler is not None
+
+    def test_rebuild_preserves_an_injected_successor_stack(self) -> None:
+        """Rebuilding for another runtime must not drop the server's wiring."""
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+        from ouroboros.mcp.tools.run_successors import build_run_successor_handler
+
+        injected = build_run_successor_handler(agent_runtime_backend="claude")
+        original = StartExecuteSeedHandler(
+            execute_handler=ExecuteSeedHandler(agent_runtime_backend="claude"),
+            agent_runtime_backend="claude",
+            start_evaluate_handler=injected,
+        )
+
+        rebuilt = _execution_start_handler(
+            original,
+            llm_backend=None,
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        assert rebuilt is not original
+        assert rebuilt.start_evaluate_handler is injected

@@ -97,6 +97,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_subagent_payload,
@@ -2361,12 +2362,16 @@ def _execution_start_handler(
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
     )
+    # Without the successor stack the run cannot enqueue the evaluation it
+    # delegates to and finishes with ``evaluation_status="enqueue_failed"``.
     return StartExecuteSeedHandler(
         execute_handler=execute_seed,
         event_store=event_store,
         job_manager=job_manager,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
+        start_evaluate_handler=resolve_run_successor_handler(handler, execute_seed, job_manager),
+        seed_handoff_registry=getattr(handler, "seed_handoff_registry", None),
     )
 
 

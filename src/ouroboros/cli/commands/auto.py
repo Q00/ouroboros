@@ -78,6 +78,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import build_run_successor_handler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.package_profiles import (
@@ -578,6 +579,12 @@ async def _run_auto(
         execute_handler=execute_seed,
         agent_runtime_backend=runtime_plan.execute.runtime_backend,
         opencode_mode=execute_opencode_mode,
+        # Without the successor stack a finished run reports
+        # ``evaluation_status="enqueue_failed"`` and nothing grades it.
+        start_evaluate_handler=build_run_successor_handler(
+            agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
+            opencode_mode=runtime_plan.evaluate.opencode_mode,
+        ),
     )
     seed_qa = QAHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,

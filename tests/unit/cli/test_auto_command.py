@@ -1174,3 +1174,57 @@ def test_print_result_attached_completion_remains_product_complete() -> None:
     assert "Status: complete" in output
     assert "Status: run_handoff_started" not in output
     assert "Product status: not verified complete" not in output
+
+
+def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
+    """CLI Auto delegates run successors, so it must build a handler that can enqueue them.
+
+    Without ``start_evaluate_handler`` the delegation degrades to
+    ``evaluation_status="enqueue_failed"``: the run finishes and nothing grades
+    it. The Ralph link below it must be present for the same reason.
+    """
+    import asyncio
+
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.skip_run = True
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("auto interview reached max rounds with unresolved gaps: actors")
+    store = AutoStore(tmp_path)
+    store.save(state)
+    session_id = state.auto_session_id
+
+    captured: dict[str, object] = {}
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        captured["run_starter"] = self.run_starter
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+            )
+        )
+
+    start_evaluate = captured["run_starter"].handler.start_evaluate_handler
+    assert start_evaluate is not None
+    assert start_evaluate.start_ralph_handler is not None
