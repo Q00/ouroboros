@@ -19,6 +19,7 @@ import yaml
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
+from ouroboros.auto.artifact_state import artifact_state_for_result as _artifact_state_for_result
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
@@ -4640,41 +4641,6 @@ class AutoPipeline:
         except Exception:
             # Observers must never break the pipeline. Swallow callback errors.
             pass
-
-
-def _artifact_state_for_result(
-    *,
-    status: str,
-    phase: AutoPhase,
-    seed_path: str | None,
-    execution_id: str | None,
-    job_id: str | None,
-    run_session_id: str | None,
-    partial_product: bool,
-    run_handoff_status: str | None = None,
-    product_verified: bool = False,
-) -> str:
-    """Classify the generated-artifact outcome separately from orchestration.
-
-    ``status`` remains the authoritative orchestration state. This companion
-    value prevents final renderers from implying completion when a BLOCKED or
-    FAILED run still left useful generated files behind.
-    """
-
-    has_generated_artifact = bool(seed_path or execution_id or job_id or run_session_id)
-    if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
-        return "partial_artifact_generated" if has_generated_artifact else status
-    if status == AutoPhase.COMPLETE.value:
-        if partial_product:
-            return "complete_unverified"
-        if product_verified:
-            return "complete_verified"
-        if run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
-            return "complete_unverified"
-        return "complete_verified"
-    if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-        return "partial_artifact_generated" if has_generated_artifact else phase.value
-    return "artifact_in_progress" if has_generated_artifact else "not_generated"
 
 
 def _has_verified_product_completion(state: AutoPipelineState) -> bool:
