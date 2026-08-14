@@ -57,9 +57,8 @@ from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
 from ouroboros.auto.seed_qa_advisory import (
-    SEED_QA_ADVISORY_EVENT,
     clear_seed_qa_verdict,
-    seed_qa_advisory_payload,
+    publish_advisory_or_block,
     seed_qa_advisory_progress,
 )
 from ouroboros.auto.seed_repairer import SeedRepairer
@@ -2945,11 +2944,7 @@ class AutoPipeline:
         attempts: int,
         score: float | None,
     ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
-        """Downgrade an unresolved Seed QA verdict to advisory and keep going.
-
-        See :mod:`ouroboros.auto.seed_qa_advisory` for why this gate must never
-        dead-end the pipeline.
-        """
+        """Advisory continuation — see :mod:`ouroboros.auto.seed_qa_advisory`."""
 
         def stop(blocker: str | None) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
             return self._result(state, ledger, review=review, blocker=blocker), seed, review
@@ -2960,15 +2955,18 @@ class AutoPipeline:
             state.mark_blocked(review_blocker, tool_name="grade_gate")
             self._save(state)
             return stop(review_blocker)
-        if self._enforce_deadline(state):
-            return stop(state.last_error)
-        await self._emit_runtime_event(
-            SEED_QA_ADVISORY_EVENT,
-            state.auto_session_id,
-            seed_qa_advisory_payload(state, seed, reason=reason, attempts=attempts, score=score),
-        )
-        # The append is awaited and its wait is not charged against the deadline.
-        if self._enforce_deadline(state):
+        if await publish_advisory_or_block(
+            state=state,
+            seed=seed,
+            reason=reason,
+            attempts=attempts,
+            score=score,
+            emit=self._emit_runtime_event,
+            enforce_deadline=self._enforce_deadline,
+            save=self._save,
+            append_budget_seconds=_INTERVIEW_OBSERVER_DRAIN_TIMEOUT_SECONDS,
+            deadline_tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+        ):
             return stop(state.last_error)
         state.mark_progress(seed_qa_advisory_progress(reason, detail), tool_name="seed_qa")
         self._save(state)

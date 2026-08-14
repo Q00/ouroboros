@@ -1827,12 +1827,13 @@ async def test_advisory_event_is_not_emitted_when_the_grade_gate_then_blocks(tmp
 
 
 @pytest.mark.asyncio
-async def test_deadline_spent_during_the_advisory_append_still_blocks_skip_run(tmp_path) -> None:
-    """The advisory path must not turn an expired deadline into a completion.
+async def test_deadline_spent_during_the_advisory_append_self_corrects(tmp_path) -> None:
+    """A stop after the event was published must not leave an "active" claim.
 
-    The event append is awaited under the observer-drain timeout, which is not
-    charged against ``deadline_at``, and the skip-run COMPLETE transition
-    performs no deadline check of its own.
+    The append is awaited, so the deadline can only be re-checked afterwards.
+    If it trips there, the already-persisted advisory event would otherwise keep
+    telling the conductor the engine is still driving a Seed that never ran, so
+    the stream self-corrects with the ownership-closed event type.
     """
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
@@ -1867,6 +1868,50 @@ async def test_deadline_spent_during_the_advisory_append_still_blocks_skip_run(t
     assert result.status == "blocked"
     assert state.last_tool_name == "pipeline_deadline"
     assert "auto.seed_qa.advisory_override" in pipeline.emitted
+    # ...and the record is corrected to ownership-closed rather than left active.
+    assert "auto.seed_qa.blocked" in pipeline.emitted
+    closure = next(
+        p for p in pipeline.payloads if p["reason"] == "pipeline_deadline_after_advisory"
+    )
+    assert closure["auto_session_id"] == state.auto_session_id
+
+
+@pytest.mark.asyncio
+async def test_a_budget_too_small_for_the_append_blocks_without_publishing(tmp_path) -> None:
+    """Publishing "still going" and then stopping inside that append is the defect.
+
+    The append has a bound of its own, so charging it up front removes the
+    window entirely: a budget that cannot cover a worst-case append blocks
+    before any durable continuation claim exists.
+    """
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(passed=False, score=0.58, verdict="revise")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 1
+    state.skip_run = True
+    # Not expired, but too little left to cover the observer-drain bound (1.5s).
+    state.deadline_at = time.monotonic() + 0.5
+    state.deadline_at_epoch = time.time() + 0.5
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    pipeline = _advisory_pipeline(
+        AutoInterviewDriver(_seed_qa_interview_backend(), store=AutoStore(tmp_path), max_rounds=1),
+        generate_seed,
+        tmp_path,
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == "pipeline_deadline"
+    assert "auto.seed_qa.advisory_override" not in pipeline.emitted
 
 
 @pytest.mark.asyncio
