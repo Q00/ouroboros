@@ -46,6 +46,12 @@
   <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
+
 <p align="center"><sub><b>Four separate runs, four hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
 
 <table align="center">
