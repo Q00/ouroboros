@@ -1575,6 +1575,41 @@ class TestBackgroundJobPath:
         assert kwargs["evaluator"] is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("complete_product", [False, True])
+    async def test_run_starter_owns_successors_only_in_complete_product_mode(
+        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch, complete_product: bool
+    ) -> None:
+        """Exactly one owner for the post-run evaluation.
+
+        Complete-product Auto drives RALPH_HANDOFF → EVALUATE itself, so the run
+        job's own chain is suppressed. Default Auto has no such path — it stops
+        at COMPLETE once the run has a handle — so the run job keeps its
+        run → evaluate → ralph chain instead of finishing unevaluated.
+        """
+
+        captured: dict[str, object] = {}
+
+        class FakeAutoPipeline:
+            def __init__(self, *_args, **kwargs):
+                captured["pipeline_kwargs"] = kwargs
+
+            async def run(self, state):
+                return AutoPipelineResult(
+                    status="blocked",
+                    auto_session_id=state.auto_session_id,
+                    phase=str(state.phase.value),
+                )
+
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+
+        h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
+
+        await h._run({"goal": "build a CLI", "complete_product": complete_product})
+
+        kwargs = captured["pipeline_kwargs"]
+        assert kwargs["run_starter"].owns_successors is complete_product
+
+    @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

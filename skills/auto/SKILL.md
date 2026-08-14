@@ -101,7 +101,8 @@ ask or send either argument; Auto restores the persisted contract.
 3. Generates a Seed.
 4. Reviews and repairs until A-grade or blocked.
 5. Starts execution only after A-grade.
-6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+6. When `complete_product=false` (the default), auto reaches `COMPLETE` as soon as the run has a durable handle — the run itself keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself in this mode; the chained evaluate job does.
+7. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
 
 ## Background monitoring UX
 

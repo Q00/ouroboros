@@ -641,6 +641,7 @@ class AutoHandler:
                 efficiency_mode=state.efficiency_mode,
                 frugality_assurance=state.frugality_assurance,
                 frugality_assurance_explicit=state.frugality_assurance_explicit,
+                owns_successors=complete_product,
             ),
             store=store,
             repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
