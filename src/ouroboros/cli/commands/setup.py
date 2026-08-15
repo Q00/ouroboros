@@ -2872,7 +2872,7 @@ def _setup_codex(
     return True
 
 
-def _install_hermes_artifacts() -> None:
+def _install_hermes_artifacts() -> bool:
     """Install packaged Ouroboros skills into ~/.hermes/."""
     from ouroboros.hermes.artifacts import install_hermes_skills
 
@@ -2881,11 +2881,13 @@ def _install_hermes_artifacts() -> None:
     try:
         skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
         print_success(f"Installed Hermes skills → {skill_path}")
-    except FileNotFoundError:
+    except OSError:
         print_error("Could not locate packaged skills for Hermes.")
+        return False
+    return True
 
 
-def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> None:
+def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> bool:
     """Install a setup-owned runtime instruction artifact when supported."""
     from ouroboros.runtime_instruction_artifacts import (
         install_copilot_instruction_artifact,
@@ -2904,13 +2906,14 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     }
     installer = installers.get(backend)
     if installer is None:
-        return
+        return False
     try:
         artifact = installer(**kwargs)
     except OSError as exc:
         print_warning(f"Could not install {backend} instruction artifact: {exc}")
-        return
+        return False
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
+    return True
 
 
 def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
@@ -5014,50 +5017,56 @@ def refresh_artifacts() -> None:
 
     hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
     if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
-        try:
-            _install_hermes_artifacts()
-        except OSError as exc:
-            print_warning(f"Could not refresh Hermes artifacts: {exc}")
+        if not _install_hermes_artifacts():
             failed.append("hermes")
         else:
             refreshed.append("hermes")
 
     opencode_dir = opencode_config_dir()
-    opencode_touched = False
+    opencode_expected = False
+    opencode_succeeded = True
     if _opencode_bridge_dest().exists():
-        opencode_touched = _install_opencode_bridge_plugin()
+        opencode_expected = True
+        opencode_succeeded = _install_opencode_bridge_plugin() and opencode_succeeded
     if has_managed_section(opencode_instruction_path(opencode_dir)):
-        _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
-        opencode_touched = True
-    if opencode_touched:
-        refreshed.append("opencode")
+        opencode_expected = True
+        opencode_succeeded = (
+            _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
+            and opencode_succeeded
+        )
+    if opencode_expected:
+        (refreshed if opencode_succeeded else failed).append("opencode")
 
     if has_managed_section(gemini_instruction_path()):
-        _install_runtime_instruction_artifact("gemini")
-        refreshed.append("gemini")
+        target = refreshed if _install_runtime_instruction_artifact("gemini") else failed
+        target.append("gemini")
 
     if kiro_instruction_path().exists():
-        _install_runtime_instruction_artifact("kiro")
-        refreshed.append("kiro")
+        target = refreshed if _install_runtime_instruction_artifact("kiro") else failed
+        target.append("kiro")
 
     if copilot_instruction_path().exists():
-        _install_runtime_instruction_artifact("copilot")
-        refreshed.append("copilot")
+        target = refreshed if _install_runtime_instruction_artifact("copilot") else failed
+        target.append("copilot")
 
     pi_bridge = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
     if pi_bridge.exists():
         if _install_pi_ooo_bridge():
             refreshed.append("pi")
+        else:
+            failed.append("pi")
 
-    gjc_touched = False
+    gjc_expected = False
+    gjc_succeeded = True
     gjc_bridge = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
     if gjc_bridge.exists():
-        gjc_touched = _install_gjc_ooo_bridge()
+        gjc_expected = True
+        gjc_succeeded = _install_gjc_ooo_bridge() and gjc_succeeded
     if gjc_instruction_path().exists():
-        _install_runtime_instruction_artifact("gjc")
-        gjc_touched = True
-    if gjc_touched:
-        refreshed.append("gjc")
+        gjc_expected = True
+        gjc_succeeded = _install_runtime_instruction_artifact("gjc") and gjc_succeeded
+    if gjc_expected:
+        (refreshed if gjc_succeeded else failed).append("gjc")
 
     if refreshed:
         print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")

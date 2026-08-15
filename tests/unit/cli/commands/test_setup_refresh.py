@@ -160,6 +160,44 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert "Runtime artifact refresh incomplete: codex" in result.output
         assert not (real_home / "rules").exists()
 
+    def test_existing_opencode_bridge_false_return_is_partial_failure(self, tmp_path: Path) -> None:
+        bridge = (
+            tmp_path
+            / ".config"
+            / "opencode"
+            / "plugins"
+            / "ouroboros-bridge"
+            / "ouroboros-bridge.ts"
+        )
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("// stale\n", encoding="utf-8")
+
+        with patch(
+            "ouroboros.cli.commands.setup._install_opencode_bridge_plugin",
+            return_value=False,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert "Runtime artifact refresh incomplete: opencode" in result.output
+        assert "Refreshed runtime artifacts: opencode" not in result.output
+
+    def test_instruction_write_error_is_partial_failure(self, tmp_path: Path) -> None:
+        gemini_md = tmp_path / ".gemini" / "GEMINI.md"
+        gemini_md.parent.mkdir(parents=True)
+        gemini_md.write_text(_managed_section_text(), encoding="utf-8")
+
+        with patch(
+            "ouroboros.runtime_instruction_artifacts.install_gemini_instruction_artifact",
+            side_effect=OSError("read-only filesystem"),
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert "Could not install gemini instruction artifact" in result.output
+        assert "Runtime artifact refresh incomplete: gemini" in result.output
+        assert "Refreshed runtime artifacts: gemini" not in result.output
+
 
 class TestSetupRefreshDoesNotTouchConfig:
     def test_never_writes_config_or_mcp_files(self, tmp_path: Path) -> None:
