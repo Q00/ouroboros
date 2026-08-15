@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from uuid import uuid4
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.skills.artifacts import (
@@ -22,6 +23,8 @@ HERMES_SKILL_NAME = "ouroboros"
 HERMES_SKILL_CAPABILITY_GUIDE_FILENAME = "SKILL_CAPABILITY_GUIDE.md"
 _SKILL_ENTRYPOINT = "SKILL.md"
 _LEGACY_PACKAGE_ARTIFACTS = ("__init__.py", "artifacts.py", "__pycache__")
+_SWAP_MARKER = ".ouroboros-managed-swap"
+_SWAP_MARKER_CONTENT = "ouroboros-hermes-swap-v1\n"
 
 
 def _contains_skill_bundles(skills_dir: Path) -> bool:
@@ -116,15 +119,22 @@ def install_hermes_skills(
     )
 
     target_dir = resolved_hermes_dir / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
-    backup_dir = target_dir.with_name(f".{target_dir.name}.old")
+    backup_prefix = f".{target_dir.name}.old."
 
     if target_dir.is_symlink():
         msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
         raise OSError(msg)
     if target_dir.exists() and not target_dir.is_dir():
         _remove_target_path(target_dir)
-    if backup_dir.exists() and not target_dir.exists():
-        os.replace(backup_dir, target_dir)
+    managed_backups = [
+        candidate
+        for candidate in target_dir.parent.glob(f"{backup_prefix}*")
+        if candidate.is_dir()
+        and candidate.joinpath(_SWAP_MARKER).is_file()
+        and candidate.joinpath(_SWAP_MARKER).read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
+    ]
+    if managed_backups and not target_dir.exists():
+        os.replace(sorted(managed_backups)[-1], target_dir)
 
     with _packaged_skills_dir() as source_root:
         _prepare_hermes_install_root(target_dir)
@@ -148,6 +158,7 @@ def install_hermes_skills(
 
             for artifact_name in _LEGACY_PACKAGE_ARTIFACTS:
                 _remove_target_path(staging_dir / artifact_name)
+            _remove_target_path(staging_dir / _SWAP_MARKER)
 
             for source_skill_dir in source_skill_dirs:
                 destination_skill_dir = staging_dir / source_skill_dir.name
@@ -164,8 +175,9 @@ def install_hermes_skills(
                     ):
                         _remove_target_path(existing_path)
 
-            _remove_target_path(backup_dir)
+            backup_dir = target_dir.with_name(f"{backup_prefix}{uuid4().hex}")
             if target_dir.exists() or target_dir.is_symlink():
+                target_dir.joinpath(_SWAP_MARKER).write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
                 os.replace(target_dir, backup_dir)
             try:
                 os.replace(staging_dir, target_dir)

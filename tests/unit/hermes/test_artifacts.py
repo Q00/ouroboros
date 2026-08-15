@@ -232,6 +232,29 @@ class TestInstallHermesSkills:
         assert live_note.read_text(encoding="utf-8") == "keep across crash"
         assert target_dir.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "new skill\n"
 
+    @pytest.mark.parametrize("target_exists", (False, True))
+    def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(
+        self, tmp_path: Path, monkeypatch, target_exists: bool
+    ) -> None:
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="new skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        if target_exists:
+            target_dir.mkdir(parents=True)
+        foreign_backup = target_dir.with_name(".ouroboros.old")
+        foreign_backup.mkdir(parents=True)
+        foreign_note = foreign_backup / "operator-note.txt"
+        foreign_note.write_text("foreign content", encoding="utf-8")
+
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert foreign_note.read_text(encoding="utf-8") == "foreign content"
+        assert target_dir.joinpath("run", "SKILL.md").is_file()
+
     def test_replaces_symlinked_capability_guide_without_following_it(
         self, tmp_path: Path, monkeypatch
     ) -> None:
