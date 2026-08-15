@@ -64,7 +64,9 @@ def test_cli_docs_cover_detached_auto_wait_and_retrieve() -> None:
     ):
         state = _status_guidance(compact, status, next_status)
         assert "ouroboros job result JOB_ID" in state
-        if status != "completed":
+        if status == "completed":
+            assert "stable completed `auto` result" in state
+        else:
             assert "terminal and still observable" in state
             assert "Next steps" in state
     assert "Job handle not found" in compact and "invalid" in compact
@@ -86,6 +88,7 @@ def test_mcp_docs_cover_detached_auto_jobs() -> None:
     assert "running" in compact and "non-terminal" in compact
     completed = _status_guidance(compact, "completed", "failed")
     assert 'ouroboros_job_result(job_id="JOB_ID")' in completed
+    assert "stable completed `auto` result" in completed
     for status, next_status in (("failed", "cancelled"), ("cancelled", None)):
         state = _status_guidance(compact, status, next_status)
         assert 'ouroboros_job_result(job_id="JOB_ID")' in state

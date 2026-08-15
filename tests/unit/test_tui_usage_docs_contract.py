@@ -95,6 +95,21 @@ def _slt_screens_table_rows(text: str) -> list[tuple[str, str, str]]:
     return re.findall(r"\| `(\d)` \|(?: `(\w)`)? \| \*\*(\w+)\*\* \|", section)
 
 
+def _textual_screens_table_rows(text: str) -> list[tuple[str, str, str]]:
+    """Parse the marked Textual table into (key, shortcut, screen) rows."""
+    section = _contract_section(text, "<!-- tui-contract:textual-screens -->")
+    rows: list[tuple[str, str, str]] = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 4 or not cells[2].startswith("**"):
+            continue
+        key = cells[0].strip("`")
+        shortcut = cells[1].strip("`")
+        screen = cells[2].strip("*")
+        rows.append((key, shortcut, screen))
+    return rows
+
+
 def _markdown_table(section: str) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     for line in section.splitlines():
@@ -151,6 +166,32 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
         "3": "show_logs",
         "4": "show_debug",
     }
+    en_screen_rows = _textual_screens_table_rows(_read(EN_GUIDE))
+    ko_screen_rows = _textual_screens_table_rows(_read(KO_GUIDE))
+    screen_name_by_action = {
+        "show_dashboard": "Dashboard",
+        "show_execution": "Execution",
+        "show_logs": "Logs",
+        "show_debug": "Debug",
+        "show_selector": "Session Selector",
+        "show_lineages": "Lineage",
+    }
+    documented_screen_by_key = {
+        binding: screen
+        for key, shortcut, screen in en_screen_rows
+        for binding in (key, shortcut)
+        if binding
+    }
+    assert documented_screen_by_key == {
+        key: screen_name_by_action[action]
+        for key, action in app_actions.items()
+        if action in screen_name_by_action
+    }
+    # Localized screen labels differ, but every key and shortcut must retain
+    # its row position and source-derived mapping.
+    assert [(key, shortcut) for key, shortcut, _screen in ko_screen_rows] == [
+        (key, shortcut) for key, shortcut, _screen in en_screen_rows
+    ]
     assert (
         _binding_actions("src/ouroboros/tui/screens/dashboard_v3.py", "DashboardScreenV3")["r"]
         == "resume"
