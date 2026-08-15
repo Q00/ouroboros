@@ -257,13 +257,23 @@ def _add_launcher_surface(
 def _is_claude_isolated_uvx_launcher(command: str | None, args: list[str] | None) -> bool:
     if command != "uvx" or args is None:
         return False
-    if len(args) != 8:
+    if len(args) != 12:
         return False
     if args[0] != "--isolated":
         return False
-    if args[1] != "--python" or not args[2] or args[2].startswith("-"):
+    if args[1:3] != ["--python", ">=3.12"]:
         return False
-    return args[3:] == ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+    return args[3:] == [
+        "--from",
+        "ouroboros-ai[mcp]",
+        "ouroboros",
+        "mcp",
+        "serve",
+        "--runtime",
+        "claude-cli",
+        "--llm-backend",
+        "claude_code",
+    ]
 
 
 def _resolve_install_codex_home(home: Path | None) -> Path:

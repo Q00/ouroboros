@@ -52,6 +52,10 @@ def _write_current_install(home: Path, *, version: str = "1.2.3") -> None:
                         "ouroboros",
                         "mcp",
                         "serve",
+                        "--runtime",
+                        "claude-cli",
+                        "--llm-backend",
+                        "claude_code",
                     ],
                 }
             }
@@ -158,6 +162,31 @@ def test_install_doctor_warns_for_non_isolated_claude_launcher(monkeypatch, tmp_
             }
         },
     )
+
+    surfaces = doctor.collect_install_surfaces(home=tmp_path)
+    launcher = next(surface for surface in surfaces if surface.name == "claude_plugin_launcher")
+
+    assert launcher.status == "warn"
+    assert "isolated uvx" in launcher.message
+
+
+def test_claude_launcher_rejects_unsupported_python_constraint(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(doctor, "__version__", "1.2.3")
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    _write_current_install(tmp_path, version="1.2.3")
+    launcher_path = (
+        tmp_path
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "ouroboros"
+        / "ouroboros"
+        / "1.2.3"
+        / ".mcp.json"
+    )
+    payload = json.loads(launcher_path.read_text(encoding="utf-8"))
+    payload["mcpServers"]["ouroboros"]["args"][2] = "2.7"
+    _write_json(launcher_path, payload)
 
     surfaces = doctor.collect_install_surfaces(home=tmp_path)
     launcher = next(surface for surface in surfaces if surface.name == "claude_plugin_launcher")
