@@ -212,9 +212,7 @@ class TestGetLatestVersion:
             with (
                 patch.object(version_check, "_CACHE_FILE", cache_file),
                 patch.object(version_check, "_CACHE_DIR", tmp_path),
-                patch.object(
-                    version_check, "_get_latest_from_pypi", return_value="2.0.0"
-                ),
+                patch.object(version_check, "_get_latest_from_pypi", return_value="2.0.0"),
             ):
                 assert version_check.get_latest_version() == "2.0.0"
 

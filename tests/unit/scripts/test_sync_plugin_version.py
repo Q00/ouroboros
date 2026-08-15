@@ -274,9 +274,7 @@ def test_write_fails_before_mutation_on_ambiguous_mcp_requirement(
     assert json.loads(mcp_json.read_text()) == descriptor
 
 
-def test_write_fails_before_mutation_on_unrelated_second_from(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_write_fails_before_mutation_on_unrelated_second_from(monkeypatch, tmp_path: Path) -> None:
     """Every additional --from makes the shipped launcher ambiguous."""
     _seed_sync_fixture(tmp_path, monkeypatch)
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
