@@ -524,6 +524,12 @@ class AutoPipeline:
         # A2 trace export: expose the live ledger to the outermost ``run()``
         # wrapper so the finalize projection uses the freshest decisions.
         self._active_ledger = ledger
+        # Compatibility migration owns retired phases before any production
+        # gate can rewrite their explanation. In particular, a fired watchdog
+        # must not turn an obsolete persisted phase into an unrelated timeout.
+        if mark_retired_phase(state):
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
         # L2-2 / #1172: wall-clock watchdog check.
         # Runs once per ``run()`` entry — both fresh sessions whose
         # ``created_at`` is too long ago (resume after budget elapsed)
@@ -580,9 +586,6 @@ class AutoPipeline:
         # BLOCKED state via ``_enforce_deadline``. Same exception applies
         # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
         # recovery branch below.
-        if mark_retired_phase(state):  # before the generic deadline gate
-            self._save(state)
-            return self._result(state, ledger, blocker=state.last_error)
         if (
             state.deadline_at is not None
             and not state.is_terminal()
