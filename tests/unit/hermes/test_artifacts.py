@@ -198,6 +198,32 @@ class TestInstallHermesSkills:
 
         assert live_skill.read_bytes() == b"working skill\n"
 
+    def test_failed_fresh_install_leaves_no_refresh_eligible_target(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failed first activation must not look like an installed runtime."""
+        source_skills_dir = tmp_path / "source-skills"
+        source_skill_dir = self._write_skill(source_skills_dir, "run", body="new skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        real_copytree = shutil.copytree
+
+        def fail_new_generation(src, dst, *args, **kwargs):
+            if Path(src) == source_skill_dir:
+                raise OSError("simulated fresh copy failure")
+            return real_copytree(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.copytree", fail_new_generation)
+
+        with pytest.raises(OSError, match="fresh copy failure"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert not target_dir.exists()
+        assert not target_dir.is_symlink()
+
     def test_interrupted_swap_recovers_previous_generation_on_retry(
         self, tmp_path: Path, monkeypatch
     ) -> None:

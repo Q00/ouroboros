@@ -146,7 +146,9 @@ def install_hermes_skills(
             _remove_target_path(managed_backup)
 
     with _packaged_skills_dir() as source_root:
-        _prepare_hermes_install_root(target_dir)
+        # Prepare only the parent. A fresh install must not materialize the
+        # live target until the complete staged generation is publishable.
+        _prepare_hermes_install_root(target_dir.parent)
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
 
