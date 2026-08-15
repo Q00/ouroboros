@@ -131,7 +131,11 @@ ouroboros_lateral_think persona="all"
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `OUROBOROS_CHILD_TIMEOUT_MS` | `1200000` (20 min) | Per-child wall clock |
-| `OUROBOROS_SUB_RETRIES` | `2` | Retry count on spawn failure |
+
+> `OUROBOROS_CHILD_TIMEOUT_MS` is the only environment knob the bridge reads
+> (`opencode/plugin/ouroboros-bridge.ts:38`). Retry counts are compile-time
+> constants there — `PATCH_RETRIES = 3` and `RESOLVE_RETRIES = 5` (`:40-41`) —
+> and neither is overridable.
 
 See the full plugin guide: **[OpenCode Subagent Bridge](../guides/opencode-subagent-bridge.md)**.
 
@@ -217,7 +221,7 @@ After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is 
 | `ooo welcome` | Yes | *(MCP only)* |
 | `ooo update` | Yes | `pip install --upgrade ouroboros-ai` |
 | `ooo help` | Yes | `ouroboros --help` |
-| `ooo qa` | Yes | *(MCP only)* |
+| `ooo qa` | Yes | `ouroboros qa` |
 | `ooo setup` | Yes | `ouroboros setup --runtime opencode` |
 | `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
@@ -241,6 +245,22 @@ message assembly, and MCP invocation local. See
 opencode --version
 ouroboros --help
 ```
+
+### First command
+
+Configure the OpenCode integration once before opening the first workflow:
+
+```bash
+ouroboros setup --runtime opencode
+```
+
+Then start a new OpenCode session and run:
+
+```
+ooo interview "Build a task management CLI"
+```
+
+The `ooo` command is available after setup registers the Ouroboros MCP server.
 
 ## OpenCode-Specific Strengths
 

@@ -18,15 +18,28 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+from rich.text import Text
 import structlog
 import typer
 
+from ouroboros import telemetry as usage_telemetry
+from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
+from ouroboros.config import get_agent_runtime_backend
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
     process_start_time,
+)
+from ouroboros.package_profiles import (
+    SDK_RUNTIME_IN_MCP_SERVER_MESSAGE,
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+    public_runtime_backend,
+)
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
 )
 
 # Per-instance PID registry for stale-instance accounting. Many servers run
@@ -58,24 +71,6 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
 log = structlog.get_logger(__name__)
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for MCP commands."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    KIRO = "kiro"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -154,9 +149,9 @@ def _parse_pid_record(text: str) -> tuple[int, float | None] | None:
 def _record_is_stale(pid: int, start_time: float | None) -> bool:
     """True when a record's process identity is provably not running.
 
-    Windows cannot probe liveness via signal 0 (``os.kill(pid, 0)`` raises
-    ``OSError`` WinError 87) — treat as stale, preserving the degradation the
-    legacy single-slot check used.
+    The shared liveness probe uses Win32 process handles on Windows and
+    preserves a lease when the OS cannot decide. The fallback still preserves
+    the legacy behavior for unexpected errors escaping other platform probes.
     """
     try:
         return not is_process_identity_alive(pid, start_time)
@@ -360,7 +355,8 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
 
 
 # Process-tree wrappers that sit between the real MCP client and this server.
-# The shipped install path (`uvx --from ouroboros-ai ... ouroboros mcp serve`)
+# The shipped install path
+# (`uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] ouroboros mcp serve`)
 # interposes a uv wrapper that blocks on waitpid() and survives the client's
 # death, so the *direct* parent is not the process whose lifetime matters.
 _WRAPPER_BASENAMES = frozenset(
@@ -509,6 +505,35 @@ app = typer.Typer(
 register_doctor_command(app)
 
 
+def _effective_mcp_server_runtime(runtime: AgentRuntimeBackend | None) -> str:
+    """Resolve the runtime the MCP 2 composition root would actually select."""
+    requested = runtime.value if runtime is not None else get_agent_runtime_backend()
+    normalized = public_runtime_backend(requested)
+    if normalized is None:  # Defensive: the configured/default resolver always returns text.
+        normalized = "claude"
+    return resolve_runtime_backend_name(normalized)
+
+
+def _require_mcp_dependency() -> None:
+    """Fail before MCP server composition when the MCP v2 API is unavailable.
+
+    ``create_ouroboros_server()`` can build its internal tool catalogue without
+    importing the MCP SDK v2 server surface. Deferring that import until
+    ``server.serve()`` makes a missing or incompatible dependency appear as a
+    successful stdio startup followed by a disconnected server. Validate the
+    exact API consumed by the adapter at the command boundary instead.
+    """
+    try:
+        from mcp.server import MCPServer as _sdk_mcp_server
+
+        if _sdk_mcp_server is None:  # pragma: no cover - defensive import contract.
+            raise ImportError
+    except ImportError as exc:
+        raise ImportError(
+            "MCP SDK v2 server API unavailable. Install with: pip install 'ouroboros-ai[mcp]'"
+        ) from exc
+
+
 async def _run_mcp_server(
     host: str,
     port: int,
@@ -516,6 +541,11 @@ async def _run_mcp_server(
     db_path: str | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    *,
+    auth_token: str = "",
+    allowed_hosts: tuple[str, ...] = (),
+    allowed_origins: tuple[str, ...] = (),
+    workspace_roots: tuple[str, ...] = (),
 ) -> None:
     """Run the MCP server.
 
@@ -526,15 +556,14 @@ async def _run_mcp_server(
         db_path: Optional path to EventStore database.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
+        auth_token: Shared secret network clients must present. Empty leaves
+            the server credential-free, which serving only permits on loopback.
+        allowed_hosts: ``Host`` header allowlist for network transports.
+        allowed_origins: ``Origin`` header allowlist for network transports.
+        workspace_roots: Directories seed execution is confined to. Empty
+            leaves execution unrestricted, the historical local behaviour.
     """
-    # Ensure login-shell environment is available (critical for gateway-spawned processes)
-    _ensure_shell_env()
-
-    from ouroboros.config.models import resolve_event_store_path
-    from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
-    from ouroboros.orchestrator.session import SessionRepository
-    from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+    from ouroboros.mcp.server.adapter import validate_transport
 
     # Validate transport early, before any expensive startup work
     try:
@@ -545,6 +574,17 @@ async def _run_mcp_server(
             f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
+
+    _require_mcp_dependency()
+
+    # Ensure login-shell environment is available (critical for gateway-spawned processes)
+    _ensure_shell_env()
+
+    from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.brownfield import BrownfieldStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
@@ -628,8 +668,28 @@ async def _run_mcp_server(
         # Create server with all tools pre-registered via dependency injection.
         # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
         # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
+        # Install before any tool can run: the policy is what keeps a caller
+        # from naming an arbitrary directory as an agent's working tree.
+        if workspace_roots:
+            from ouroboros.mcp.server.workspace import WorkspacePolicy, set_workspace_policy
+
+            set_workspace_policy(WorkspacePolicy.from_paths(workspace_roots))
+
+        # A token turns on the SDK's bearer-auth middleware; without one the
+        # server stays credential-free, which serve() only allows on loopback.
+        auth_config = None
+        if auth_token:
+            from ouroboros.mcp.server.security import AuthConfig, AuthMethod
+
+            auth_config = AuthConfig(
+                method=AuthMethod.API_KEY,
+                api_keys=frozenset({auth_token}),
+                required=True,
+            )
+
         server = create_ouroboros_server(
             name="ouroboros-mcp",
+            auth_config=auth_config,
             event_store=event_store,
             brownfield_store=brownfield_store,
             runtime_backend=runtime_backend,
@@ -638,6 +698,12 @@ async def _run_mcp_server(
         )
 
         tool_count = len(server.info.tools)
+
+        # One event per host session attach (Claude/Codex spawn `mcp serve`
+        # per session) — the denominator for agent-side usage ratios.
+        usage_telemetry.capture(
+            "mcp_serve_started", {"transport": transport, "tool_count": tool_count}
+        )
 
         # Detect Codex seatbelt sandbox and warn about network restrictions.
         _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
@@ -656,6 +722,21 @@ async def _run_mcp_server(
                 print_info(f"Listening on http://{host}:{port}/mcp")
             else:
                 print_info(f"Listening on {host}:{port}")
+
+            # State the posture plainly: these two lines are what an operator
+            # needs to see to know whether this port is safe where it sits.
+            if auth_token:
+                print_info("Auth: bearer token required")
+            else:
+                print_info("Auth: none — reachable only from this machine")
+            if workspace_roots:
+                print_info(f"Seed execution confined to: {', '.join(workspace_roots)}")
+            else:
+                _console_out.print(
+                    "[yellow]Seed execution is not confined: a caller may name any "
+                    "existing directory on this machine as an agent working tree. "
+                    "Pass --workspace-root to restrict it.[/yellow]"
+                )
             print_info("Press Ctrl+C to stop")
 
         if _sandbox_network_disabled:
@@ -773,7 +854,13 @@ async def _run_mcp_server(
                     await event_store.checkpoint_wal()
 
         serve_task = asyncio.create_task(
-            server.serve(transport=transport, host=host, port=port),
+            server.serve(
+                transport=transport,
+                host=host,
+                port=port,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+            ),
             name="ouroboros-mcp-serve",
         )
         stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
@@ -889,6 +976,83 @@ async def _run_mcp_server(
         raise serve_exc
 
 
+def _resolve_network_security(
+    *,
+    transport: str,
+    host: str,
+    port: int,
+    auth_token: str,
+    allow_remote: bool,
+    allowed_hosts: tuple[str, ...],
+) -> str:
+    """Validate the requested exposure and return the token to enforce.
+
+    ``MCPServerAdapter.serve`` holds the same boundary for embedders. This runs
+    first so an operator gets an actionable message rather than a traceback,
+    and so the reason a bind was refused names the flag that would allow it.
+
+    Args:
+        transport: The already-validated transport name.
+        host: The requested bind address.
+        port: The requested bind port, quoted back in the guidance.
+        auth_token: The shared secret, from the flag or the environment.
+        allow_remote: Whether the operator acknowledged remote exposure.
+        allowed_hosts: The ``Host`` header allowlist.
+
+    Returns:
+        The token to enforce, or "" when the bind requires no credential.
+
+    Raises:
+        typer.Exit: If the requested bind would expose seed execution.
+    """
+    from ouroboros.mcp.server.auth import (
+        NETWORK_TRANSPORTS,
+        is_loopback_host,
+        is_wildcard_host,
+    )
+
+    if transport not in NETWORK_TRANSPORTS:
+        if auth_token:
+            _stderr_console.print(
+                "[yellow]Ignoring --auth-token: stdio has no request headers to "
+                "carry it, and the client already owns this process.[/yellow]"
+            )
+        return ""
+
+    if is_loopback_host(host):
+        return auth_token
+
+    problems: list[str] = []
+    if not auth_token:
+        problems.append(
+            "  --auth-token <secret>   (or set OUROBOROS_MCP_AUTH_TOKEN)\n"
+            "      Without it, anyone who can reach this port can execute seeds\n"
+            "      through your local agent runtime."
+        )
+    if not allow_remote:
+        problems.append(
+            "  --allow-remote\n      Confirms you intend to expose this server beyond this machine."
+        )
+    if is_wildcard_host(host) and not allowed_hosts:
+        problems.append(
+            f"  --allowed-host <name:{port}>\n"
+            f"      A {host} bind is reached under a name this process cannot see,\n"
+            "      so the Host allowlist that blocks DNS rebinding must be given."
+        )
+
+    if not problems:
+        return auth_token
+
+    _stderr_console.print(
+        f"[red]Refusing to serve {transport} on non-loopback host {host!r}.[/red]\n"
+        "[red]Missing:[/red]\n" + "\n".join(problems)
+    )
+    _stderr_console.print(
+        "\n[blue]To serve locally instead, drop --host (it defaults to localhost).[/blue]"
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(
     host: Annotated[
@@ -915,6 +1079,62 @@ def serve(
             help="Transport type: stdio, sse, or streamable-http.",
         ),
     ] = "stdio",
+    auth_token: Annotated[
+        str,
+        typer.Option(
+            "--auth-token",
+            envvar="OUROBOROS_MCP_AUTH_TOKEN",
+            help=(
+                "Shared secret clients must present as 'Authorization: Bearer <token>'. "
+                "Required for network transports on a non-loopback host. Prefer the "
+                "OUROBOROS_MCP_AUTH_TOKEN environment variable: a token on the command "
+                "line is visible to every process on this machine via 'ps'."
+            ),
+        ),
+    ] = "",
+    allow_remote: Annotated[
+        bool,
+        typer.Option(
+            "--allow-remote",
+            help=(
+                "Acknowledge that a non-loopback bind exposes seed execution to "
+                "everyone who can reach the port. Required alongside --auth-token "
+                "to serve on a routable address."
+            ),
+        ),
+    ] = False,
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-host",
+            help=(
+                "Host header value clients will use, e.g. 'ouroboros.internal:8080'. "
+                "Repeatable. Required for wildcard binds (--host 0.0.0.0), whose "
+                "reachable name cannot be inferred. A ':*' suffix allows any port."
+            ),
+        ),
+    ] = None,
+    allowed_origin: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-origin",
+            help=(
+                "Origin header value to permit. Repeatable. Empty by default, which "
+                "rejects every browser-originated request."
+            ),
+        ),
+    ] = None,
+    workspace_root: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--workspace-root",
+            help=(
+                "Restrict seed execution to directories under this path. Repeatable. "
+                "Strongly recommended for network binds; unset means any existing "
+                "directory on this machine may be used as a working directory."
+            ),
+        ),
+    ] = None,
     db: Annotated[
         str,
         typer.Option(
@@ -930,7 +1150,8 @@ def serve(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -963,13 +1184,13 @@ def serve(
     Examples:
 
         # Start with stdio transport (for Claude Desktop)
-        ouroboros mcp serve
+        ouroboros mcp serve --runtime claude-cli
 
         # Start with SSE transport on custom port
-        ouroboros mcp serve --transport sse --port 9000
+        ouroboros mcp serve --runtime claude-cli --transport sse --port 9000
 
         # Start with streamable HTTP transport for Codex CLI --url clients
-        ouroboros mcp serve --transport streamable-http --port 9000
+        ouroboros mcp serve --runtime claude-cli --transport streamable-http --port 9000
 
         # Start with OpenCode runtime
         ouroboros mcp serve --runtime opencode
@@ -978,6 +1199,23 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # Resolve the exact backend the composition root would use before touching
+    # nested-process state, shell state, persistence, or runtime adapters. A
+    # missing option inherits config and ultimately defaults to the SDK-backed
+    # ``claude`` runtime, which is not executable inside this MCP 2 process.
+    selected_runtime = _effective_mcp_server_runtime(runtime)
+    # Two different failures used to share one string. An environment that mixes
+    # MCP 2 with the Claude SDK really is a package-profile problem and the user
+    # must reinstall. Inheriting the ``claude`` default is a runtime-selection
+    # failure, and the fix is ``--runtime``. Telling that user to reinstall sent
+    # them to change extras that were never relevant to the selected backend.
+    if has_unsupported_claude_sdk_mcp_mix():
+        _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
+        raise typer.Exit(1)
+    if selected_runtime == "claude":
+        _stderr_console.print(Text(SDK_RUNTIME_IN_MCP_SERVER_MESSAGE, style="red"))
+        raise typer.Exit(1)
+
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
     # inherits this env var. If that runtime's MCP config tries to spawn another
@@ -988,28 +1226,61 @@ def serve(
         raise typer.Exit(0)
     os.environ["_OUROBOROS_NESTED"] = "1"
 
+    # Transport is re-validated inside _run_mcp_server; normalize here first so
+    # the exposure check below classifies 'SSE' the same way serving will.
+    from ouroboros.mcp.server.adapter import validate_transport
+
+    try:
+        normalized_transport = validate_transport(transport)
+    except ValueError:
+        _stderr_console.print(
+            "[red]Invalid transport "
+            f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
+        )
+        raise typer.Exit(code=1) from None
+
+    allowed_hosts = tuple(allowed_host or ())
+    allowed_origins = tuple(allowed_origin or ())
+    workspace_roots = tuple(workspace_root or ())
+    enforced_token = _resolve_network_security(
+        transport=normalized_transport,
+        host=host,
+        port=port,
+        auth_token=auth_token,
+        allow_remote=allow_remote,
+        allowed_hosts=allowed_hosts,
+    )
+
     try:
         db_path = db if db else None
         asyncio.run(
             _run_mcp_server(
                 host,
                 port,
-                transport,
+                normalized_transport,
                 db_path,
-                runtime.value if runtime else None,
+                selected_runtime,
                 llm_backend.value if llm_backend else None,
+                auth_token=enforced_token,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+                workspace_roots=workspace_roots,
             )
         )
     except KeyboardInterrupt:
         _stderr_console.print("[blue]MCP Server stopped[/blue]")
     except ImportError as e:
-        _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
+        _stderr_console.print(Text(f"MCP dependencies not installed: {e}", style="red"))
         _stderr_console.print(
             "[blue]Run MCP 2 in an isolated profile:\n"
-            "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "  uvx --isolated --python '>=3.12' --from 'ouroboros-ai\\[mcp]' "
+            "ouroboros mcp serve "
+            "--runtime claude-cli\n"
             "or:\n"
-            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
-            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
+            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve "
+            "--runtime claude-cli\n"
+            "Do not combine it with the MCP 1.x-based \\[claude] or "
+            "\\[claude-sdk] extras; use \\[claude-cli] for the CLI path.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1038,7 +1309,8 @@ def info(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -1064,7 +1336,7 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        runtime_backend=runtime.value if runtime else None,
+        runtime_backend=public_runtime_backend(runtime.value if runtime else None),
         llm_backend=llm_backend.value if llm_backend else None,
     )
 

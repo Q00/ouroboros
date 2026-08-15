@@ -20,6 +20,7 @@ import yaml
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
+from ouroboros.auto.artifact_state import artifact_state_for_result as _artifact_state_for_result
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
@@ -57,6 +58,11 @@ from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
 from ouroboros.auto.seed_preflight import run_seed_preflight
+from ouroboros.auto.seed_qa_advisory import (
+    clear_seed_qa_verdict,
+    publish_advisory,
+    seed_qa_advisory_progress,
+)
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -1364,6 +1370,10 @@ class AutoPipeline:
                 return seed_qa
 
             if self.skip_run or state.skip_run:
+                # The only COMPLETE transition with no deadline check of its
+                # own; RUN enforces it at ``_run_execution_phase`` entry.
+                if self._enforce_deadline(state):
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
                 state.transition(
                     AutoPhase.COMPLETE,
                     f"Seed grade {review.grade_result.grade.value} ready; skip-run requested",
@@ -2897,9 +2907,31 @@ class AutoPipeline:
         current_seed = seed
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
+
+        async def advisory(
+            reason: str,
+            detail: str,
+            *,
+            score: float | None = None,
+            attempts: int | None = None,
+        ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+            # Reads the loop-carried Seed / review / attempt at call time.
+            return await self._seed_qa_advisory_continue(
+                state,
+                ledger,
+                current_seed,
+                current_review,
+                reason=reason,
+                detail=detail,
+                attempts=attempt if attempts is None else attempts,
+                score=score,
+            )
+
         for attempt in range(1, max_attempts + 1):
+            clear_seed_qa_verdict(state)  # a stale verdict must not outlive its attempt
+            self._save(state)  # ...including across an interruption mid-attempt
             qa_result = None
-            transient_failure: str | None = None
+            transient_reason: tuple[str, str] | None = None
             for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
                 if transient_attempt:
                     backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
@@ -2922,46 +2954,37 @@ class AutoPipeline:
                             current_seed,
                             current_review,
                         )
-                    transient_failure = f"Seed QA timed out after {timeout:.0f}s"
+                    transient_reason = (
+                        "evaluator_timeout",
+                        f"Seed QA timed out after {timeout:.0f}s",
+                    )
                     continue
                 except Exception as exc:
-                    transient_failure = f"Seed QA raised {type(exc).__name__}"
+                    transient_reason = (
+                        "evaluator_error",
+                        f"Seed QA raised {type(exc).__name__}",
+                    )
                     continue
 
                 if candidate.error:
-                    transient_failure = "Seed QA reported a transient evaluator error"
+                    transient_reason = (
+                        "evaluator_transient_error",
+                        "Seed QA reported a transient evaluator error: "
+                        f"{_safe_seed_qa_error_detail(candidate.error)}",
+                    )
                     continue
-
                 qa_result = candidate
-                transient_failure = None
                 break
 
             if qa_result is None:
-                await self._emit_runtime_event(
-                    "auto.seed_qa.blocked",
-                    state.auto_session_id,
-                    {
-                        "schema_version": 1,
-                        "auto_session_id": state.auto_session_id,
-                        "seed_id": current_seed.metadata.seed_id,
-                        "attempts": _TRANSIENT_TOOL_ATTEMPTS,
-                        "verdict": state.last_qa_verdict or "fail",
-                        "score": float(state.last_qa_score or 0.0),
-                        "differences": list(state.last_qa_differences[:5]),
-                        "suggestions": list(state.last_qa_suggestions[:5]),
-                        "reason": "seed_qa_transient_exhausted",
-                    },
+                reason, detail = transient_reason or (
+                    "evaluator_error",
+                    "Seed QA failed after transient retries",
                 )
-                state.mark_blocked(
-                    transient_failure or "Seed QA failed after transient retries",
-                    tool_name="seed_qa",
-                    error_code="seed_qa_transient_exhausted",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
+                return await advisory(
+                    reason,
+                    detail,
+                    attempts=_TRANSIENT_TOOL_ATTEMPTS,
                 )
 
             state.last_qa_score = float(qa_result.score)
@@ -2994,33 +3017,14 @@ class AutoPipeline:
                         )
                     )
                 except SeedQaRepairMappingError as exc:
-                    await self._emit_runtime_event(
-                        "auto.seed_qa.blocked",
-                        state.auto_session_id,
-                        {
-                            "schema_version": 1,
-                            "auto_session_id": state.auto_session_id,
-                            "seed_id": current_seed.metadata.seed_id,
-                            "attempts": attempt,
-                            "verdict": state.last_qa_verdict,
-                            "score": float(qa_result.score),
-                            "differences": state.last_qa_differences[:5],
-                            "suggestions": state.last_qa_suggestions[:5],
-                            "reason": exc.code,
-                        },
-                    )
-                    state.mark_blocked(
-                        str(exc),
-                        tool_name="seed_qa",
-                        error_code=exc.code,
-                    )
-                    self._save(state)
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
+                    # The repair mapper only understands a bounded vocabulary of
+                    # QA findings. Unmapped feedback means "this pipeline cannot
+                    # mechanically repair the Seed", not "this Seed must never
+                    # run" — re-judging the *unchanged* Seed would only produce
+                    # the same unmapped feedback, so stop repairing and hand the
+                    # verdict to run → evaluate.
+                    return await advisory(
+                        "seed_qa_feedback_unmapped", str(exc), score=float(qa_result.score)
                     )
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
@@ -3052,36 +3056,52 @@ class AutoPipeline:
                 self._save(state)
                 continue
 
-            details = [
+            return await advisory(
+                "repair_budget_exhausted",
                 f"Seed QA did not pass after {attempt} attempt(s): "
-                f"{state.last_qa_verdict} (score {qa_result.score:.2f})"
-            ]
-            details.extend(state.last_qa_differences)
-            details.extend(state.last_qa_suggestions)
-            await self._emit_runtime_event(
-                "auto.seed_qa.blocked",
-                state.auto_session_id,
-                {
-                    "schema_version": 1,
-                    "auto_session_id": state.auto_session_id,
-                    "seed_id": current_seed.metadata.seed_id,
-                    "attempts": attempt,
-                    "verdict": state.last_qa_verdict,
-                    "score": float(qa_result.score),
-                    "differences": state.last_qa_differences[:5],
-                    "suggestions": state.last_qa_suggestions[:5],
-                    "reason": "repair_budget_exhausted",
-                },
-            )
-            state.mark_blocked("; ".join(details), tool_name="seed_qa")
-            self._save(state)
-            return (
-                self._result(state, ledger, review=current_review, blocker=state.last_error),
-                current_seed,
-                current_review,
+                f"{state.last_qa_verdict} (score {qa_result.score:.2f})",
+                score=float(qa_result.score),
             )
 
         return None, current_seed, current_review
+
+    async def _seed_qa_advisory_continue(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        review: SeedReview | None,
+        *,
+        reason: str,
+        detail: str,
+        attempts: int,
+        score: float | None,
+    ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+        """Advisory continuation — see :mod:`ouroboros.auto.seed_qa_advisory`."""
+
+        def stop(blocker: str | None) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+            return self._result(state, ledger, review=review, blocker=blocker), seed, review
+
+        # Gates first, event second — see the module docstring for why.
+        review_blocker = self._seed_review_gate_blocker(state, review)
+        if review_blocker is not None:
+            state.mark_blocked(review_blocker, tool_name="grade_gate")
+            self._save(state)
+            return stop(review_blocker)
+        if self._enforce_deadline(state):
+            return stop(state.last_error)
+        await publish_advisory(
+            state=state,
+            seed=seed,
+            reason=reason,
+            detail=detail,
+            attempts=attempts,
+            score=score,
+            emit=self._emit_runtime_event,
+        )
+        state.mark_progress(seed_qa_advisory_progress(reason, detail), tool_name="seed_qa")
+        self._save(state)
+        return None, seed, review
 
     async def _repair_seed_after_qa(
         self,
@@ -4768,41 +4788,6 @@ class AutoPipeline:
             pass
 
 
-def _artifact_state_for_result(
-    *,
-    status: str,
-    phase: AutoPhase,
-    seed_path: str | None,
-    execution_id: str | None,
-    job_id: str | None,
-    run_session_id: str | None,
-    partial_product: bool,
-    run_handoff_status: str | None = None,
-    product_verified: bool = False,
-) -> str:
-    """Classify the generated-artifact outcome separately from orchestration.
-
-    ``status`` remains the authoritative orchestration state. This companion
-    value prevents final renderers from implying completion when a BLOCKED or
-    FAILED run still left useful generated files behind.
-    """
-
-    has_generated_artifact = bool(seed_path or execution_id or job_id or run_session_id)
-    if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
-        return "partial_artifact_generated" if has_generated_artifact else status
-    if status == AutoPhase.COMPLETE.value:
-        if partial_product:
-            return "complete_unverified"
-        if product_verified:
-            return "complete_verified"
-        if run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
-            return "complete_unverified"
-        return "complete_verified"
-    if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-        return "partial_artifact_generated" if has_generated_artifact else phase.value
-    return "artifact_in_progress" if has_generated_artifact else "not_generated"
-
-
 def _has_verified_product_completion(state: AutoPipelineState) -> bool:
     """Return True when COMPLETE represents a verified product terminal.
 
@@ -5323,6 +5308,28 @@ def _safe_seed_qa_verdict(verdict: str) -> str:
     if normalized in {"fail", "pass", "revise"}:
         return normalized
     return "unknown"
+
+
+def _safe_seed_qa_error_detail(error: object) -> str:
+    """Classify an evaluator error without persisting provider output.
+
+    Provider errors can embed stderr, paths, credentials, and user content in
+    their message. Only these allowlisted categories cross the durable event
+    and progress-message boundary.
+    """
+    lowered = str(error).casefold()
+    categories = (
+        (("rate limit", "too many requests", "429"), "provider rate limit"),
+        (
+            ("unauthorized", "authentication", "api key", "credential"),
+            "provider authentication failure",
+        ),
+        (("connection", "network", "unavailable", "timed out"), "provider connectivity failure"),
+    )
+    for markers, summary in categories:
+        if any(marker in lowered for marker in markers):
+            return summary
+    return "provider evaluator failure"
 
 
 def _first_nonempty(*values: str | None) -> str | None:

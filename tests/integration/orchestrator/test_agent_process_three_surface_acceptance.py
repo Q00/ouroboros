@@ -51,6 +51,11 @@ class _FakeEventStore:
     async def append(self, event: Any) -> None:
         self.appended.append(event)
 
+    async def append_durable(self, event: Any, *, timeout: float) -> None:
+        async with asyncio.timeout(timeout):
+            await self.initialize()
+            await self.append(event)
+
 
 def _directives(store: _FakeEventStore) -> list[str]:
     return [
@@ -392,6 +397,10 @@ async def test_ralph_agent_process_pause_inspect_resume_preserves_event_tail(
 ) -> None:
     """Closeout audit: Ralph-scoped AgentProcess pause/resume keeps continuity."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    # Durable lifecycle deadlines begin at append admission.  Real
+    # EventStores initialize during service startup so cancellation-atomic
+    # schema creation is never misrepresented as a bounded transaction.
+    await event_store.initialize()
     checkpoint_store = CheckpointStore(base_path=tmp_path / "checkpoints")
     process_id = "ralph:lin_closeout:job_1448"
     captured_handle: asyncio.Future[AgentProcessHandle] = asyncio.get_running_loop().create_future()
@@ -436,7 +445,8 @@ async def test_ralph_agent_process_pause_inspect_resume_preserves_event_tail(
         paused_events = await event_store.replay("agent_process", process_id)
         assert _event_directives(paused_events) == ["continue", "wait"]
         assert _event_statuses(paused_events) == ["running", "paused"]
-        assert AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store) is True
+        with pytest.raises(RuntimeError, match="requires lifecycle replay"):
+            AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store)
         pause_checkpoint_key = f"agent_process_{hashlib.sha256(process_id.encode()).hexdigest()}"
         paused_checkpoint = checkpoint_store.load(pause_checkpoint_key)
         assert paused_checkpoint.is_ok
@@ -456,7 +466,10 @@ async def test_ralph_agent_process_pause_inspect_resume_preserves_event_tail(
         assert _event_statuses(post_resume_tail) == ["running", "completed"]
         assert result.meta["generations"] == ["generation-1", "generation-2"]
         assert observed_generations == ["generation-1", "generation-2"]
-        assert AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store) is False
+        resumed_checkpoint = checkpoint_store.load(pause_checkpoint_key)
+        assert resumed_checkpoint.is_ok
+        assert resumed_checkpoint.value.phase == "agent_process_running"
+        assert resumed_checkpoint.value.state["authority"] == "journal"
     finally:
         if not task.done():
             task.cancel()

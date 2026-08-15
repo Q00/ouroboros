@@ -25,16 +25,32 @@ class _FakeSeed:
 
 
 @pytest.mark.asyncio
-async def test_auto_run_starter_delegates_successor_policy_to_operator_config(tmp_path) -> None:
-    """Default-mode Auto completes at run handoff without its own evaluation
-    pass, so run->evaluate->evolve convergence must be delegated to the
-    server-side successor chain (#1916) instead of being force-disabled.
-    ``auto_evaluate``/``auto_evolve`` must be OMITTED entirely so
-    ``snapshot_run_successor_policy`` falls back to the operator's
-    ``execution.auto_evaluate`` / ``auto_evolve`` config (default: ON).
-    Contrast with ``HandlerSynchronousRunStarter``, which still opts out
-    below because the complete-product pipeline owns EVALUATE/RALPH_HANDOFF
-    itself.
+async def test_auto_run_starter_keeps_one_authoritative_evaluation_path(tmp_path) -> None:
+    """Complete-product Auto owns RALPH_HANDOFF → EVALUATE, so the run job must
+    not start a competing evaluation owner or Ralph lineage."""
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
+    )
+    starter = HandlerRunStarter(handler, cwd=str(tmp_path), owns_successors=True)
+
+    await starter(_FakeSeed())  # type: ignore[arg-type]
+
+    arguments = handler.handle.await_args.args[0]
+    assert arguments["auto_evaluate"] is False
+    assert arguments["auto_evolve"] is False
+
+
+@pytest.mark.asyncio
+async def test_auto_run_starter_delegates_successors_when_auto_does_not_own_them(tmp_path) -> None:
+    """Default Auto has no evaluation path of its own.
+
+    It stops at COMPLETE once the run has a durable handle and there is no
+    RUN → EVALUATE edge, so it must leave the run job's own
+    run → evaluate → ralph chain alone rather than suppressing it — otherwise a
+    finished run has no evaluation owner at all. Sending no override lets
+    ``execution.auto_evaluate`` / ``execution.auto_evolve`` govern, exactly as
+    for a direct ``ooo run``.
     """
     handler = AsyncMock()
     handler.handle = AsyncMock(

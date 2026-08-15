@@ -172,7 +172,15 @@ does **not** abort the rest of a fan-out batch.
 | Variable                         | Default   | Purpose |
 |----------------------------------|-----------|---------|
 | `OUROBOROS_CHILD_TIMEOUT_MS`     | 1 200 000 | Per-child overall timeout (ms) |
-| `OUROBOROS_SUB_RETRIES`          | 2         | Extra retries after first child attempt |
+
+`OUROBOROS_CHILD_TIMEOUT_MS` is the only variable the bridge reads
+(`process.env` appears once, at `opencode/plugin/ouroboros-bridge.ts:38`).
+
+Retries are **not** configurable. The bridge holds two compile-time constants
+at `:40-41`: `PATCH_RETRIES = 3`, applied when a PATCH hits a network or server
+blip (`:598`), and `RESOLVE_RETRIES = 5`, applied when resolving the assistant
+message that hosts a `callID` (`:613`, fails closed and returns `null` if no
+exact match is found). Neither responds to an environment variable.
 
 ## Installation
 

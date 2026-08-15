@@ -22,10 +22,15 @@ replayable execution contract on your choice of runtime backend.
 - [Hermes](./runtime-guides/hermes.md) - Hermes Agent runtime setup and `ooo` dispatch
 - [Zcode](./runtime-guides/zcode.md) - Z.ai desktop-agent runtime and measured CLI contract
 - [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
+- [Claude Code (한국어)](./runtime-guides/claude-code.ko.md) - 같은 문서의 한국어판
+- [Codex CLI (한국어)](./runtime-guides/codex.ko.md) - 같은 문서의 한국어판
+- [GitHub Copilot CLI (한국어)](./runtime-guides/copilot.ko.md) - 같은 문서의 한국어판
+- [Kiro CLI (한국어)](./runtime-guides/kiro.ko.md) - 같은 문서의 한국어판
 
 ### Architecture
 
 - [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
+- [Native-Windows Codex Desktop HTTP task persistence](./rfc/windows-codex-desktop-http-task.md) - Proposed explicit opt-in loopback HTTP MCP task for native Codex Desktop
 - [Routing B — Route Admission](./rfc/routing-b-route-admission.md) - Deterministic, provider-neutral route contract and Admission Kernel
 - [Routing C — Compatibility Projection](./rfc/routing-c-route-compat.md) - Bridge existing model/effort routing into the Admission Kernel
 - [Routing D — Bounded Escalation](./rfc/routing-d-bounded-escalation.md) - Route observations and finite next-route decisions
@@ -34,8 +39,7 @@ replayable execution contract on your choice of runtime backend.
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
 - [Agent OS Profile Taxonomy](./agentos/profile-taxonomy.md) - Locked 4-slot vocabulary (`runtime_backend`, `stage_runtime`, `llm_profile`, `provider_profile`) for the historically-overloaded "profile" concepts; tiebreaker for #573
-- [AgentOS Release Readiness](./agentos/release-readiness.md) - #961-aligned release gate, verification pack, and open issue triage
-- [AgentOS Issue Sequencing Graph](./agentos/issue-sequencing-graph.md) - Non-normative, dated #961/#1256 snapshot of track sequencing, merged-PR evidence, and recommended work order
+- [AgentOS Sequencing SSOT](https://github.com/Q00/ouroboros/issues/961) - Living authority for AgentOS ownership, approval gates, and bounded-slice sequencing
 
 ### API Reference
 
@@ -48,12 +52,15 @@ replayable execution contract on your choice of runtime backend.
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
 - [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
+- [Evaluation Pipeline Guide (简体中文)](./guides/evaluation-pipeline.zh-CN.md) - 同一份指南的中文版
 - [Execution vs. Evaluation Contract](./guides/execution-vs-evaluation.md) - Task completion, AC verdict, and drift terminology boundaries
 - [Hidden-Checklist Convergence](./hidden-checklist-convergence/architecture.md) - Run → evaluation → bounded Ralph chaining with hidden harness grading inputs
+- [Hidden-Checklist Convergence (简体中文)](./hidden-checklist-convergence/README.zh-CN.md) - 同一设计的中文说明
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
+- [TUI Usage Guide (한국어)](./guides/tui-usage.ko.md) - 같은 문서의 한국어판
 
 ### Contributing
 
@@ -66,6 +73,16 @@ replayable execution contract on your choice of runtime backend.
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
 - [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
+
+### Historical Planning Snapshots
+
+These documents preserve point-in-time evidence and work orders. They are
+immutable, non-normative history; use [#961](https://github.com/Q00/ouroboros/issues/961)
+for current AgentOS sequencing.
+
+- [AgentOS Release Readiness (2026-05-29)](./history/agentos/release-readiness.md) - Historical release triage and verification snapshot
+- [AgentOS Issue Sequencing Graph (2026-05-29)](./history/agentos/issue-sequencing-graph.md) - Historical issue-state and work-order snapshot
+- [Master Roadmap 2026-07](./history/master-roadmap-2026-07.md) - Superseded PR-A through PR-K execution plan with final dispositions
 
 
 ## Key Concepts
@@ -90,7 +107,7 @@ replayable execution contract on your choice of runtime backend.
 ### Core Principles
 
 - **Frugal by default, rigorous in verification** - Start with the simplest approach, escalate only when needed
-- **Ambiguity threshold** - Requirements must have ambiguity score <= 0.2 before execution begins
+- **Ambiguity threshold** - A requirement scoring above 0.2 does not proceed to Seed generation unless `force` is passed explicitly
 - **Lateral thinking** - When stuck, switch persona and think differently rather than retry harder
 
 ## Quick Links

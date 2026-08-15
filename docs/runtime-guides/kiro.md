@@ -1,5 +1,7 @@
 # Ouroboros Runtime Guide: Kiro CLI
 
+> 한국어: [kiro.ko.md](./kiro.ko.md)
+
 This guide covers how to use Ouroboros with the [Kiro CLI](https://kiro.dev/docs/cli/)
 as an execution runtime. Kiro is run in its **headless mode**
 (`kiro-cli chat --no-interactive`, documented at
@@ -50,7 +52,7 @@ This will:
      "mcpServers": {
        "ouroboros": {
          "command": "uvx",
-         "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+         "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
          "disabled": false,
          "env": {
            "OUROBOROS_RUNTIME": "kiro",
@@ -71,7 +73,7 @@ This will:
    ```
 
 Setup is idempotent — re-running preserves any peer MCP entries and
-custom `env` keys. The entry always uses `uvx` or `pipx run` so the
+custom `env` keys. The entry always uses `uvx --isolated` or `pipx run` so the
 server receives the MCP 2 dependency profile in an isolated package
 environment. Kiro may need a longer timeout on the first `uvx` launch;
 setup never substitutes a faster global binary with an unknown MCP major.

@@ -25,6 +25,15 @@ from ouroboros.orchestrator.session import (
 from ouroboros.persistence.event_store import sqlite_database_url
 
 
+@pytest.fixture(autouse=True)
+def _stub_mcp_dependency_preflight(monkeypatch):
+    """Keep lifecycle tests independent of the optional MCP SDK install."""
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp._require_mcp_dependency",
+        lambda: None,
+    )
+
+
 def _make_tracker(
     session_id: str = "orch_test123",
     execution_id: str = "exec_001",
@@ -312,6 +321,8 @@ class TestMCPStartupAutoCleanup:
             transport="streamable-http",
             host="127.0.0.1",
             port=9100,
+            allowed_hosts=(),
+            allowed_origins=(),
         )
 
     @pytest.mark.asyncio

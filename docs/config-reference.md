@@ -81,13 +81,13 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       gemini:
         model: gemini-2.5-pro
       opencode:
         model: openai/gpt-5.4
       litellm:
-        model: openrouter/anthropic/claude-opus-4-6
+        model: openrouter/anthropic/claude-opus-4.8
 
   frontier:
     max_turns: 8
@@ -165,11 +165,11 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
+  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3       # Maximum concurrent AC workers
-  cli_path: null                # Path to Claude CLI binary; null = use SDK default
+  cli_path: null                # Path to Claude CLI binary; null = resolve from PATH/runtime default
   codex_cli_path: null          # Path to Codex CLI binary; null = resolve from PATH
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   copilot_cli_path: null        # Path to Copilot CLI binary; null = resolve from PATH
@@ -180,11 +180,11 @@ orchestrator:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
-| `cli_path` | `string \| null` | `null` | Absolute path to the Claude CLI binary (`~` is expanded). When `null`, the SDK-bundled CLI is used. Overridable via `OUROBOROS_CLI_PATH`. |
+| `cli_path` | `string \| null` | `null` | Absolute path to the Claude CLI binary (`~` is expanded). When `null`, the active Claude runtime resolves its normal CLI default. Overridable via `OUROBOROS_CLI_PATH`. |
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
@@ -266,11 +266,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -280,7 +280,7 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -294,9 +294,9 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
-          model: claude-opus-4-6
+          model: claude-opus-4-8
       use_cases:
         - consensus
         - lateral_thinking
@@ -324,7 +324,7 @@ economics:
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier (e.g., `gpt-4o-mini`, `claude-opus-4-6`). |
+| `model` | `string` | Model identifier. Provider formats differ: Anthropic uses `claude-opus-4-8`, while OpenRouter uses `openrouter/anthropic/claude-opus-4.8`. |
 
 ---
 
@@ -337,7 +337,7 @@ clarification:
   ambiguity_threshold: 0.2    # Interview completes when ambiguity score <= this value
   max_interview_rounds: 10    # Hard ceiling on clarification rounds
   model_tier: standard        # "frugal" | "standard" | "frontier"
-  default_model: claude-opus-4-6
+  default_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -345,7 +345,7 @@ clarification:
 | `ambiguity_threshold` | `float [0.0, 1.0]` | `0.2` | Maximum ambiguity score to allow seed generation to proceed. Interview loops until the score falls at or below this value. |
 | `max_interview_rounds` | `int >= 1` | `10` | Maximum number of question-answer rounds regardless of ambiguity score. |
 | `model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"standard"` | PAL tier used for the clarification phase. |
-| `default_model` | `string` | `"claude-opus-4-6"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
+| `default_model` | `string` | `"claude-opus-4-8"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
 
 ---
 
@@ -374,6 +374,7 @@ execution:
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
+| `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
 
 ### Project Execution Guidance
 
@@ -409,8 +410,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier   # "frugal" | "standard" | "frontier"
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4-6
-  reflect_model: claude-opus-4-6
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -419,8 +420,8 @@ resilience:
 | `lateral_thinking_enabled` | `bool` | `true` | Whether lateral thinking persona rotation is active when stagnation is detected. |
 | `lateral_model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frontier"` | PAL tier used for lateral thinking calls. Frontier is the default because creative re-framing requires high model capability. |
 | `lateral_temperature` | `float [0.0, 2.0]` | `0.8` | LLM sampling temperature for lateral thinking prompts. Higher values produce more divergent outputs. |
-| `wonder_model` | `string` | `"claude-opus-4-6"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
-| `reflect_model` | `string` | `"claude-opus-4-6"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
+| `wonder_model` | `string` | `"claude-opus-4-8"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
+| `reflect_model` | `string` | `"claude-opus-4-8"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
 
 ---
 
@@ -430,24 +431,26 @@ Controls Phase 4 — the 3-stage evaluation pipeline.
 
 ```yaml
 evaluation:
-  stage1_enabled: true         # Mechanical checks (lint, build, tests)
-  stage2_enabled: true         # Semantic evaluation (AC compliance, drift)
-  stage3_enabled: true         # Multi-model consensus (when triggered)
-  satisfaction_threshold: 0.8  # Minimum semantic satisfaction score to pass
-  uncertainty_threshold: 0.3   # Uncertainty score above which consensus is triggered
-  semantic_model: claude-opus-4-6
+  stage1_enabled: true         # Currently inert in config.yaml; see below
+  stage2_enabled: true         # Currently inert in config.yaml; see below
+  stage3_enabled: true         # Currently inert in config.yaml; see below
+  satisfaction_threshold: 0.8  # Currently inert; the pipeline gate is hardcoded to 0.8
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml; see below
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `stage1_enabled` | `bool` | `true` | Enable mechanical checks (lint, build, test, static analysis). When `false`, skipped entirely — use only for debugging. |
-| `stage2_enabled` | `bool` | `true` | Enable semantic evaluation (AC compliance, goal alignment, drift scoring). |
-| `stage3_enabled` | `bool` | `true` | Enable multi-model consensus evaluation (triggered by the consensus trigger matrix). |
-| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | Minimum semantic satisfaction score required to pass Stage 2 without triggering Stage 3. |
-| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | Semantic uncertainty score above which Stage 3 consensus is triggered even if `satisfaction_threshold` is met. |
-| `semantic_model` | `string` | `"claude-opus-4-6"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
+| `stage1_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage2_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage3_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** The field is validated but the pipeline compares Stage 2 scores against a hardcoded `0.8`; changing this value does not change the gate. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
+| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert in `config.yaml`.** Runtime builders do not copy it into `TriggerConfig`. |
+| `semantic_model` | `string` | `"claude-opus-4-8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
 | `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
+
+> **Configuration boundary:** the top-level `evaluation.stage1_enabled`, `stage2_enabled`, `stage3_enabled`, and `uncertainty_threshold` keys are schema-validated placeholders, not runtime controls. The similarly named direct-Python `PipelineConfig.stage*_enabled` fields and `TriggerConfig.uncertainty_threshold` are separate and active when explicitly supplied to `EvaluationPipeline`; see [Disabling Stages](./guides/evaluation-pipeline.md#disabling-stages) and [Trigger Configuration](./guides/evaluation-pipeline.md#trigger-configuration).
 
 ---
 
@@ -455,30 +458,40 @@ evaluation:
 
 Controls Phase 5 — multi-model consensus voting and deliberation.
 
+> **Inert fields in `evaluation` and `consensus`.** Eight fields in these two
+> sections are schema-only: they validate, persist, and appear in `ouroboros config
+> show`, but no production code reads them. In `evaluation`: `stage1_enabled`,
+> `stage2_enabled`, `stage3_enabled`, `satisfaction_threshold`, and
+> `uncertainty_threshold`. In `consensus`: `min_models`, `threshold`, and
+> `diversity_required`. Each is marked in its field table below with what actually
+> controls the behaviour instead. The model fields in both sections **are** wired.
+
 ```yaml
 consensus:
-  min_models: 3
-  threshold: 0.67           # Fraction of models that must agree (2/3 majority)
-  diversity_required: true  # Require models from different providers
+  min_models: 3             # Inert — runtime requires 2 successful post-filter votes
+  threshold: 0.67           # Inert — runtime ratio threshold defaults to 0.66
+  diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-4-6
+    - openrouter/anthropic/claude-opus-4.8
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-4-6
+  advocate_model: openrouter/anthropic/claude-opus-4.8
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `min_models` | `int >= 2` | `3` | Minimum number of models required for a consensus vote. |
-| `threshold` | `float [0.0, 1.0]` | `0.67` | Fraction of models that must agree for consensus to pass (e.g., `0.67` = 2/3 majority). |
-| `diversity_required` | `bool` | `true` | When `true`, consensus requires models from at least two different providers. |
+| `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
+| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
+| `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4-6"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4.8"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
+> **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two successful post-filter votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
+>
 > **Backend note:** With `llm.backend: litellm`, consensus models typically go through OpenRouter/LiteLLM and require the corresponding provider credentials (commonly `OPENROUTER_API_KEY`). With `llm.backend: codex`, the configured model strings are sent through Codex CLI instead.
 
 ---
@@ -614,7 +627,7 @@ All environment variables have higher priority than the corresponding `config.ya
 
 | Variable | Overrides | Description |
 |----------|-----------|-------------|
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`, `copilot`, `pi`). |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime). |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
 | `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
@@ -832,13 +845,19 @@ orchestrator:
 
 llm:
   backend: copilot
-  default_model: claude-opus-4.6           # written by `ouroboros setup --runtime copilot`
 
 clarification:
-  default_model: claude-opus-4.6           # same value written by setup
+  default_model: claude-opus-4.6           # example live-discovered Copilot ID
 ```
 
-The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time and writes the chosen default into the config above. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required. Hyphenated Anthropic IDs (for example `claude-opus-4-6`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing per-role overrides keep working when you switch backends. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
+The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time. There is no `llm.default_model` contract: setup removes that key and writes the selected dotted Copilot ID into supported per-role fields that are absent or still carry shipped defaults, while preserving explicit user overrides. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required.
+
+Model-ID normalization is narrower than it looks, so check your explicit overrides before switching backends. `map_to_copilot_model()` (`copilot/model_discovery.py:247`) resolves in this order: a verbatim match against the discovered model list; a static name map that currently covers `claude-opus-4-6` and `openrouter/anthropic/claude-opus-4-6` (both to `claude-opus-4.6`); then a hyphen-to-dot fallback. Two consequences:
+
+- Any ID already containing a `.` short-circuits at the top and is passed through unchanged (`:276`).
+- The hyphen-to-dot fallback calls `replace("-", ".")`, which rewrites *every* hyphen. `claude-opus-4-8` becomes `claude.opus.4.8`, which is not a Copilot ID, so it also passes through unchanged.
+
+The current direct-provider default `claude-opus-4-8` therefore has no Copilot mapping, unlike the previous default `claude-opus-4-6`. Leave role models unset to use the value setup discovered and wrote, or set a Copilot-valid ID explicitly. Mapping never changes the model generation. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
 ### Pi CLI Runtime
 
@@ -888,18 +907,18 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -910,16 +929,16 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
-          model: claude-opus-4-6
+          model: claude-opus-4-8
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-4-6
+  default_model: claude-opus-4-8
 
 execution:
   max_iterations_per_ac: 10
@@ -930,27 +949,27 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4-6
-  reflect_model: claude-opus-4-6
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 
 evaluation:
-  stage1_enabled: true
-  stage2_enabled: true
-  stage3_enabled: true
-  satisfaction_threshold: 0.8
-  uncertainty_threshold: 0.3
-  semantic_model: claude-opus-4-6
+  stage1_enabled: true         # Currently inert in config.yaml
+  stage2_enabled: true         # Currently inert in config.yaml
+  stage3_enabled: true         # Currently inert in config.yaml
+  satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 
 consensus:
-  min_models: 3
-  threshold: 0.67
-  diversity_required: true
+  min_models: 3               # Inert; runtime needs 2 successful post-filter votes
+  threshold: 0.67             # Inert; runtime ratio threshold defaults to 0.66
+  diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
-    - openrouter/anthropic/claude-opus-4-6
+    - openrouter/anthropic/claude-opus-4.8
     - openrouter/google/gemini-2.5-pro
-  advocate_model: openrouter/anthropic/claude-opus-4-6
+  advocate_model: openrouter/anthropic/claude-opus-4.8
   devil_model: openrouter/openai/gpt-4o
   judge_model: openrouter/google/gemini-2.5-pro
 

@@ -247,6 +247,7 @@ class HandlerRunStarter:
         efficiency_mode: str = "adaptive",
         frugality_assurance: str = "observe",
         frugality_assurance_explicit: bool = False,
+        owns_successors: bool = False,
     ) -> None:
         self.handler = handler
         self.cwd = cwd
@@ -254,6 +255,9 @@ class HandlerRunStarter:
         self.efficiency_mode = efficiency_mode
         self.frugality_assurance = frugality_assurance
         self.frugality_assurance_explicit = frugality_assurance_explicit
+        # True only for complete-product Auto, which drives RALPH_HANDOFF →
+        # EVALUATE itself. See :meth:`__call__`.
+        self.owns_successors = owns_successors
 
     async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
         seed_yaml = yaml.dump(
@@ -264,16 +268,19 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
-            # Default-mode Auto completes at run handoff without running its
-            # own evaluation pass, so run->evaluate->evolve convergence is
-            # delegated to the server-side successor chain (#1916) under the
-            # operator's execution.auto_evaluate / auto_evolve config. Omit
-            # both keys entirely so snapshot_run_successor_policy falls back
-            # to that config instead of being forced off. Contrast with
-            # HandlerSynchronousRunStarter below, which still opts out
-            # because the complete-product pipeline owns EVALUATE and
-            # RALPH_HANDOFF itself.
         }
+        if self.owns_successors:
+            # Complete-product Auto owns its own RALPH_HANDOFF and
+            # final-evaluation path. Keep the run handoff from adding a second
+            # evaluation owner or a competing run-session Ralph lineage.
+            arguments["auto_evaluate"] = False
+            arguments["auto_evolve"] = False
+        # Otherwise send no override at all: Auto stops at COMPLETE as soon as
+        # the run has a durable handle and has no EVALUATE edge out of RUN, so
+        # suppressing the run job's own successors would leave the finished run
+        # with no evaluation owner at all. Letting ``execution.auto_evaluate`` /
+        # ``execution.auto_evolve`` govern makes an Auto-started run chain
+        # run → evaluate → ralph exactly like a direct ``ooo run``.
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
         if idempotency_key:

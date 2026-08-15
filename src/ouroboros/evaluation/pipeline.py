@@ -19,10 +19,12 @@ from ouroboros.evaluation.mechanical import (
 )
 from ouroboros.evaluation.models import (
     REWARD_HACKING_VETO_THRESHOLD,
+    SEMANTIC_APPROVAL_SCORE,
     CheckType,
     EvaluationContext,
     EvaluationResult,
     MechanicalResult,
+    build_failure_reason,
 )
 from ouroboros.evaluation.semantic import SemanticConfig, SemanticEvaluator
 from ouroboros.evaluation.trigger import (
@@ -245,7 +247,9 @@ class EvaluationPipeline:
         # here — this branch only decides the Stage 2 pass conditions.
         final_approved = True
         if stage2_result:
-            final_approved = stage2_result.ac_compliance and stage2_result.score >= 0.8
+            final_approved = (
+                stage2_result.ac_compliance and stage2_result.score >= SEMANTIC_APPROVAL_SCORE
+            )
 
         return self._build_result(
             context.execution_id,
@@ -299,34 +303,15 @@ class EvaluationPipeline:
         if stage3_result is not None:
             highest_stage = 3
 
-        # Calculate failure reason before creating immutable result.
-        # Stage 3 is checked before Stage 2 because when Stage 3 ran,
-        # it is the authoritative verdict (Stage 2 may have been bypassed
-        # via trigger_consensus).
-        failure_reason: str | None = None
-        if not final_approved:
-            if stage1_result and not stage1_result.passed:
-                failed = stage1_result.failed_checks
-                failure_reason = f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
-            elif stage3_result and not stage3_result.approved:
-                failure_reason = (
-                    f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
-                )
-            elif stage2_result and not stage2_result.ac_compliance:
-                failure_reason = (
-                    f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
-                )
-            elif (
-                stage2_result and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
-            ):
-                failure_reason = (
-                    "Stage 2 veto: reward-hacking risk "
-                    f"{stage2_result.reward_hacking_risk:.2f} >= "
-                    f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game "
-                    "the evaluator rather than solve the real task"
-                )
-            else:
-                failure_reason = "Unknown failure"
+        # Calculate failure reason before creating immutable result.  Shared
+        # with ``EvaluationResult.failure_reason`` so the two surfaces cannot
+        # drift: this one is built before the result exists, that one after.
+        failure_reason = build_failure_reason(
+            final_approved=final_approved,
+            stage1_result=stage1_result,
+            stage2_result=stage2_result,
+            stage3_result=stage3_result,
+        )
 
         # Create completion event
         completion_event = create_pipeline_completed_event(

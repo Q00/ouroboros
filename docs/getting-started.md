@@ -11,7 +11,19 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. Run the install commands in your terminal, then run setup and auto inside Claude Code to go from idea to execution:
+You do not install Ouroboros with pip or install a global Python on this path.
+The host needs **uv**: its `uvx` command launches the plugin's MCP server
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and its `uv` command
+is the skills' final Python >= 3.12 fallback. Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
+
+The welcome, setup, and seed skills prefer a compatible `python3`, then a
+compatible `python`, and otherwise run with
+`uv run --no-project --quiet --python '>=3.12' python`. Older global
+interpreters are rejected instead of entering the first-run flow.
+
+Then run the install commands in your terminal. Start Claude Code and follow
+the two commands below in order:
 
 **1. Install the plugin** (in your terminal):
 ```bash
@@ -19,13 +31,26 @@ claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 ```
 
-**2. Set up and build** (inside a Claude Code session -- start one with `claude`):
+**2. First command** (inside a Claude Code session -- start one with `claude`):
 ```
 ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is a one-time runtime configuration. `ooo interview` is the first
+useful command: it starts the Socratic interview and returns a session that can
+be continued into Seed generation and execution.
+
+For a one-command pipeline after setup, use:
+
+```
 ooo auto "Build a task management CLI"
 ```
 
-That's it. `ooo auto` runs bounded Socratic interview rounds, generates an A-grade Seed, repairs B/C Seeds when possible, and starts execution only after the A-grade gate passes. It returns an `auto_session_id` so interrupted or blocked runs can be resumed.
+`ooo auto` runs bounded Socratic interview rounds, generates an A-grade Seed,
+repairs B/C Seeds when possible, and starts execution only after the A-grade
+gate passes. It returns an `auto_session_id` so interrupted or blocked runs can
+be resumed.
 
 Prefer the manual path when you want to answer every question yourself:
 
@@ -52,34 +77,50 @@ Use this path if you prefer a standalone terminal workflow, or are using a non-C
 # Install
 pip install ouroboros-ai
 
-# Set up
+# Set up the runtime once
 ouroboros setup
 
-# Run a seed spec
+# Start your first interview
+ouroboros init start "Build a task management CLI"
+```
+
+After the interview produces a Seed, run it with:
+
+```bash
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 ```
 
 ### Codex first use
 
-For the Codex plugin, add the marketplace and install Ouroboros:
+For the Codex plugin, add the marketplace and install Ouroboros. This needs
+`codex` on your `PATH` and `uvx` on the host — the plugin's MCP descriptor
+launches the server with it ([`.mcp.codex.json`](../.mcp.codex.json)). Install uv
+with `pipx install uv`, `pip install --user uv`, or `brew install uv`; you do not
+need to install Python yourself.
 
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session and enter `ooo`. If setup has not run yet, Ouroboros
-offers to prepare the runtime before it changes anything. Once prepared, it
-uses Codex's current default model automatically. Choose **Directly configure
-models** only when you want to choose or pin a model for a pipeline stage; in
-Codex this opens the local settings UI in your browser at a temporary
-`localhost` address.
+Start a new Codex session and run these commands in order:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is the one-time runtime preparation. Once prepared, Codex uses its
+current default model automatically. Choose **Directly configure models** only
+when you want to choose or pin a model for a pipeline stage; in Codex this
+opens the local settings UI in your browser at a temporary `localhost` address.
 
 For a standalone Codex CLI installation without the plugin, prepare the
 integration once:
 
 ```bash
 ouroboros setup --runtime codex
+ouroboros init start "Build a task management CLI"
 ```
 
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
@@ -118,6 +159,12 @@ Auto mode is hang-resistant by design: interview and repair loops are bounded, s
 
 ### Option 1: Claude Code Plugin (Recommended)
 
+Requires uv on the host. Its `uvx` command launches the plugin's MCP server
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and its `uv`
+command provides Python >= 3.12 to bundled skills when no compatible global
+interpreter is available. Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
+
 ```bash
 # Terminal
 claude plugin marketplace add Q00/ouroboros
@@ -130,29 +177,35 @@ ooo setup
 ooo help        # verify installation
 ```
 
-No Python, pip, or API key configuration needed -- Claude Code handles the runtime.
+No pip install of Ouroboros and no API key configuration is needed -- Claude
+Code handles the runtime. uv is the only host prerequisite: it provides `uvx`
+for the MCP server and can provision Python >= 3.12 for shipped skill snippets.
+A compatible global `python3` or `python` is only an optional fast path; when it
+is absent or too old, the skills use the uv-managed interpreter.
 
 ### Option 2: pip Install
 
 ```bash
 pip install ouroboros-ai              # Base package (core engine)
-pip install 'ouroboros-ai[claude]'      # + standalone Claude SDK profile (MCP 1.x based)
+pip install 'ouroboros-ai[claude]'      # + default Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude-cli]'  # + dependency-free Claude CLI worker
+pip install 'ouroboros-ai[claude-sdk]'  # + explicit alias for the SDK profile
 pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
 pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
-pip install 'ouroboros-ai[all]'         # Claude + LiteLLM + TUI; excludes MCP 2
+pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes the MCP 2 server
 
 ouroboros --version                   # verify CLI
 ```
 
-> **Which extra do I need?** Use `ouroboros-ai[claude]` for standalone Claude SDK workflows and `ouroboros-ai[mcp]` for the modern protocol server. Do not combine them: the current Claude Agent SDK embeds MCP 1.x, while the server uses MCP 2. Supported host setups launch the `[mcp]` profile through `uvx` or `pipx`; use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before host setup. A plain pip install is suitable only inside an environment you isolate and invoke yourself; setup will not register its interpreter as a host launcher.
+> **Which extra do I need?** Use `ouroboros-ai[claude]` for the default Agent SDK runtime on MCP 1.x. Use `ouroboros-ai[mcp]` for the modern protocol server in a separate environment; its Claude launcher selects the dependency-free `[claude-cli]` worker. `[claude-sdk]` is an explicit alias for `[claude]`. Never combine either SDK spelling or `[all]` with `[mcp]` in one interpreter. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=docs-getting-started bash
 ```
 
 ### Option 3: From Source (Contributors)
@@ -161,15 +214,15 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
 uv sync                              # base dependencies only
-uv sync --python 3.13 --all-extras    # include all optional extras, including LiteLLM
+uv sync --python 3.13 --extra all     # include the MCP 1.x app bundle and LiteLLM
 uv run ouroboros --version            # verify CLI
 ```
 
-Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
+Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--extra all`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum. Do not use `--all-extras`: that asks uv to select the intentionally conflicting MCP 1.x application and MCP 2 server profiles together.
 
 ```bash
 uv sync --python 3.13                  # base dependencies on the preferred current interpreter
-uv sync --python 3.13 --all-extras     # include optional backends/extras, including LiteLLM
+uv sync --python 3.13 --extra all      # include co-installable backends/extras, including LiteLLM
 uv run --python 3.13 ouroboros --version
 uv run --python 3.13 pytest tests/unit/ -q
 ```
@@ -215,7 +268,7 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | copilot | goose | kiro | pi
+  runtime_backend: claude   # default SDK runtime on MCP 1.x
 
 llm:
   backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi
@@ -290,7 +343,7 @@ The Socratic Interviewer asks clarifying questions:
 - "Mobile app or web-based?" (Desktop-only with web export)
 - "Data storage preference?" (SQLite, local file)
 
-Answer until the ambiguity score drops below 0.2. The interview then auto-generates a seed spec:
+Answer until the ambiguity score drops below 0.2, and the interview auto-generates a seed spec. If you would rather stop before that, the CLI offers to force generation at whatever score you are on:
 
 ```yaml
 # Auto-generated seed (example)
@@ -384,9 +437,9 @@ Ouroboros delegates code execution to a pluggable runtime backend. Three ship ou
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Multi-provider flexibility; open-source tooling |
-| **Install** | `pip install 'ouroboros-ai[claude]'` (standalone SDK; no MCP registration) | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
+| **Install** | `pip install 'ouroboros-ai[claude]'` (SDK/MCP 1.x); plugin MCP server uses isolated `[mcp]`/MCP 2 | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
 | **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime opencode` |
-| **Config value** | `claude` | `codex` | `opencode` |
+| **Config value** | `claude` (SDK default); `claude_mcp` only for explicit CLI worker | `codex` | `opencode` |
 
 All three backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI and OpenCode rely on `ouroboros setup --runtime <backend>` to configure the integration. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 
@@ -421,7 +474,7 @@ pip install --force-reinstall ouroboros-ai
 ouroboros --version
 ```
 
-For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. Use Python 3.13 for LiteLLM-bearing source environments such as `uv sync --python 3.13 --all-extras`, or Python 3.12 when validating the lower supported bound. Core and non-LiteLLM source environments still support Python 3.12-3.14.
+For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. Use Python 3.13 for LiteLLM-bearing source environments such as `uv sync --python 3.13 --extra all`, or Python 3.12 when validating the lower supported bound. Core and non-LiteLLM source environments still support Python 3.12-3.14.
 
 ### API key not found
 
@@ -434,7 +487,7 @@ env | grep -E 'ANTHROPIC|OPENAI'        # verify
 
 ```bash
 ouroboros mcp info
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 ```
 
 ### TUI not displaying

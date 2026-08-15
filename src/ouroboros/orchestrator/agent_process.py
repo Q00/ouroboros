@@ -63,10 +63,47 @@ logger = logging.getLogger(__name__)
 _TARGET_TYPE: Final[str] = "agent_process"
 _EMITTED_BY: Final[str] = "agent_process"
 _DIRECTIVE_EMIT_TIMEOUT_SECONDS: Final[float] = 1.0
+_DURABLE_DIRECTIVE_EMIT_TIMEOUT_SECONDS: Final[float] = 30.0
 _CANCELLED_PHASE: Final[str] = "agent_process_cancelled"
 _CANCEL_CONSUMED_PHASE: Final[str] = "agent_process_cancel_consumed"
 _CANCEL_CONTROL_SEED_PREFIX: Final[str] = "__ouroboros_agent_process_cancel__:"
 _CANCELLED_WORK_DRAIN_GRACE_SECONDS: Final[float] = 10.0
+
+
+async def _run_cancellation_atomic_handoff[T](awaitable: Awaitable[T]) -> T:
+    """Settle one bounded lifecycle handoff before surfacing cancellation.
+
+    Durable lifecycle transitions can have an inseparable live half after
+    their journal write: resume releases a waiter, while cancelled startup
+    terminalizes a possibly committed initial RUNNING row.  EventStore settles
+    the SQLite half before re-raising caller cancellation. Shield the complete
+    handoff and wait until it either fails before commit or finishes its live
+    release/reconciliation. The original cancellation is then re-raised, so
+    cancellation semantics survive without allowing a persisted/live split.
+
+    The durable append keeps its persistence-owned timeout, so a wedged write
+    still rolls back and settles within that deadline rather than making this
+    wrapper an unbounded database wait.
+    """
+    inner = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError as caller_cancellation:
+        while not inner.done():
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                # Repeated cancellation cannot abandon a half-applied handoff.
+                continue
+            except Exception:
+                # The pre-commit failure has settled; preserve cancellation below.
+                break
+        handoff_error: BaseException | None = None
+        if not inner.cancelled():
+            handoff_error = inner.exception()
+        if handoff_error is not None:
+            raise caller_cancellation from handoff_error
+        raise
 
 
 class AgentProcessStatus(StrEnum):
@@ -82,6 +119,19 @@ class AgentProcessStatus(StrEnum):
     CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class AgentProcessJournalMode(StrEnum):
+    """Durability contract for lifecycle directive publication.
+
+    ``BEST_EFFORT`` preserves the legacy liveness-first behavior for direct
+    ``AgentProcess`` users. ``DURABLE`` makes every lifecycle transition a
+    required write and is used by the production ``run_with_agent_process``
+    boundary, whose replay contract cannot tolerate missing history.
+    """
+
+    BEST_EFFORT = "best_effort"
+    DURABLE = "durable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +275,15 @@ class _AppendableEventStore(Protocol):
     def append(self, event: Any) -> Awaitable[None]:  # pragma: no cover — Protocol-style
         ...
 
+    def append_durable(
+        self,
+        event: Any,
+        *,
+        timeout: float,
+    ) -> Awaitable[None]:  # pragma: no cover — Protocol-style
+        """Append with a persistence-owned, cancellation-atomic deadline."""
+        ...
+
 
 class _ReplayableEventStore(Protocol):
     """Structural type for the replay-capable event store."""
@@ -263,14 +322,17 @@ class AgentProcessHandle:
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
     _failure: BaseException | None = None
+    _journal_failure: BaseException | None = None
     _complete_on_return_after_cancel: bool = False
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
+    _journal_mode: AgentProcessJournalMode = AgentProcessJournalMode.BEST_EFFORT
     _replay_store: _ReplayableEventStore | None = None
     _validate_replay_against_live_status: bool = False
     _pending_emit_statuses: set[AgentProcessStatus] = field(default_factory=set)
     _pending_emit_count: int = 0
     _expected_directive_count: int = 0
     _emit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _work_task: asyncio.Task[None] | None = None
     _checkpoint_store: CheckpointStore | None = field(default=None, repr=False)
     _cancel_key: str | None = field(default=None, repr=False)
@@ -329,34 +391,69 @@ class AgentProcessHandle:
         No-op when the process is not currently paused. Returns it to
         :attr:`AgentProcessStatus.RUNNING`.
 
-        Slice 2 (#518): overwrites the persisted pause checkpoint with a
-        ``running`` row so ``load_persisted_pause`` returns False after
-        resume. Persistence failures are raised before the loop is released
-        so durable state cannot remain paused while in-memory work resumes.
-        If *store* differs from the store captured by the acknowledged
-        pause, the captured store remains authoritative and *store* is
-        ignored.
+        In durable journal mode the committed ``CONTINUE`` row is the sole
+        resume authority.  The pause checkpoint is updated only after that
+        commit and is a restart cache/projection, never a competing release
+        boundary.  A failed append therefore leaves both the checkpoint and
+        work loop paused, and only a later explicit ``resume()`` call may
+        retry.  Direct ``AgentProcess`` users retain the legacy checkpoint-
+        first, best-effort journal behavior.
         """
-        if self._status in _TERMINAL_STATUSES or not self.should_pause():
-            return
+        del store  # the store captured by the acknowledged pause is authoritative
+        async with self._status_lock:
+            if self._status in _TERMINAL_STATUSES or not self.should_pause():
+                return
+            if self._status is not AgentProcessStatus.PAUSED:
+                return
 
-        # Overwrite any acknowledged paused checkpoint before releasing the
-        # work loop; otherwise a failed save could leave durable state paused
-        # while in-memory work has resumed.
-        self._save_lifecycle_checkpoint(
-            phase="agent_process_running",
-            status="running",
-            event_key="resumed_at",
-            log_key="resume",
-            store=self._pause_checkpoint_store,
-            strict=True,
-        )
-        self._pause_checkpoint_reason = None
-        self._pause_checkpoint_requested = False
+            if self._journal_mode is AgentProcessJournalMode.DURABLE:
 
-        self._paused_event.set()
-        if self._status is AgentProcessStatus.PAUSED:
-            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+                async def commit_and_release() -> None:
+                    # Commit replay authority before changing any checkpoint
+                    # or releasing the waiter.  Cancellation settles this
+                    # complete handoff before it reaches the caller.
+                    await self._emit_lifecycle_transition(
+                        Directive.CONTINUE,
+                        "resume requested",
+                        AgentProcessStatus.RUNNING,
+                    )
+                    self._save_lifecycle_checkpoint(
+                        phase="agent_process_running",
+                        status="running",
+                        event_key="resumed_at",
+                        log_key="resume_projection",
+                        store=self._pause_checkpoint_store,
+                        strict=False,
+                    )
+                    self._status = AgentProcessStatus.RUNNING
+                    self._pause_checkpoint_reason = None
+                    self._pause_checkpoint_requested = False
+                    self._paused_event.set()
+
+                await _run_cancellation_atomic_handoff(commit_and_release())
+                return
+            else:
+                # Preserve the direct-AgentProcess compatibility contract:
+                # checkpoint persistence is strict while journal emission is
+                # observational and happens after the waiter is released.
+                self._save_lifecycle_checkpoint(
+                    phase="agent_process_running",
+                    status="running",
+                    event_key="resumed_at",
+                    log_key="resume",
+                    store=self._pause_checkpoint_store,
+                    strict=True,
+                )
+                self._status = AgentProcessStatus.RUNNING
+                self._pause_checkpoint_reason = None
+                self._pause_checkpoint_requested = False
+                self._paused_event.set()
+                await self._emit_lifecycle_transition(
+                    Directive.CONTINUE,
+                    "resume requested",
+                    AgentProcessStatus.RUNNING,
+                )
+                return
 
     async def cancel(
         self,
@@ -450,12 +547,13 @@ class AgentProcessHandle:
         *,
         store: CheckpointStore | None = None,
     ) -> bool:
-        """Return True iff the latest persisted checkpoint marks this process as paused.
+        """Return whether a legacy checkpoint-authoritative process was paused.
 
-        This is the restart-recovery primitive for slice 2 (#518). A caller
-        restarting the process calls this to ask "was I paused before the
-        restart?" and, if True, calls :meth:`pause` again to restore the
-        in-memory flag.
+        This is the restart-recovery primitive for direct, best-effort
+        ``AgentProcess`` consumers.  Durable journal mode writes checkpoints
+        only as projections and must recover through :meth:`replay`; this
+        helper raises instead of letting a stale cache compete with committed
+        lifecycle history.
 
         Args:
             process_id: The process identifier to look up. UUID4 hex is
@@ -483,7 +581,14 @@ class AgentProcessHandle:
             )
             if result.is_err:
                 return False
+            if result.value.state.get("authority") == "journal":
+                raise RuntimeError(
+                    "Durable AgentProcess pause recovery requires lifecycle replay; "
+                    "the checkpoint is a non-authoritative journal projection."
+                )
             return result.value.phase == "agent_process_paused"
+        except RuntimeError:
+            raise
         except Exception:  # noqa: BLE001 — fault-tolerant; absence of checkpoint == not paused
             logger.warning(
                 "agent_process.load_persisted_pause_failed",
@@ -667,8 +772,9 @@ class AgentProcessHandle:
                     strict=True,
                 )
         await self._paused_event.wait()
-        if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
-            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+        # ``resume()`` owns the CONTINUE commit and status change.  A waiter
+        # must never turn a surfaced publication failure into an implicit
+        # retry and successful release.
 
     async def wait_until_complete(self, *, timeout: float | None = None) -> AgentProcessStatus:
         """Wait for a terminal status transition.
@@ -682,6 +788,44 @@ class AgentProcessHandle:
     # ------------------------------------------------------------------
     # Status transition machinery
     # ------------------------------------------------------------------
+
+    async def _emit_lifecycle_transition(
+        self,
+        directive: Directive,
+        reason: str,
+        status: AgentProcessStatus,
+    ) -> None:
+        """Publish one transition according to the configured journal contract."""
+        if self._emit_directive is None:
+            return
+        self._expected_directive_count += 1
+        self._pending_emit_count += 1
+        self._pending_emit_statuses.add(status)
+        try:
+            async with self._emit_lock:
+                await self._emit_directive(directive, reason, status)
+        except Exception as exc:
+            if self._journal_mode is AgentProcessJournalMode.DURABLE:
+                self._journal_failure = exc
+                # Failed durable attempts are not replay facts and cannot be
+                # counted as committed history.  A later explicit retry earns
+                # its own expected count after it actually appends.
+                self._expected_directive_count -= 1
+            logger.warning(
+                "agent_process.directive_emit_failed",
+                extra={
+                    "process_id": self.process_id,
+                    "directive": directive.value,
+                },
+                exc_info=True,
+            )
+            if self._journal_mode is AgentProcessJournalMode.DURABLE:
+                raise
+        else:
+            self._journal_failure = None
+        finally:
+            self._pending_emit_count -= 1
+            self._pending_emit_statuses.discard(status)
 
     async def _mark_completed(self, *, reason: str = "work loop returned") -> None:
         """Mark the process as completed and emit the lifecycle directive."""
@@ -716,27 +860,27 @@ class AgentProcessHandle:
                     extra={"process_id": self.process_id},
                 )
                 self._delete_lifecycle_checkpoint(store=self._pause_checkpoint_store)
+        if self._journal_mode is AgentProcessJournalMode.DURABLE:
+            try:
+                await self._emit_lifecycle_transition(
+                    Directive.CANCEL,
+                    reason,
+                    AgentProcessStatus.FAILED,
+                )
+            except BaseException as exc:
+                if self._failure is None:
+                    self._failure = exc
+                self._status = AgentProcessStatus.FAILED
+                self._completed_event.set()
+                raise
         self._status = AgentProcessStatus.FAILED
         self._completed_event.set()
-        if self._emit_directive is not None:
-            self._expected_directive_count += 1
-            self._pending_emit_count += 1
-            self._pending_emit_statuses.add(AgentProcessStatus.FAILED)
-            try:
-                async with self._emit_lock:
-                    await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
-            except Exception:  # noqa: BLE001 — failed work must still unblock waiters
-                logger.warning(
-                    "agent_process.directive_emit_failed",
-                    extra={
-                        "process_id": self.process_id,
-                        "directive": Directive.CANCEL.value,
-                    },
-                    exc_info=True,
-                )
-            finally:
-                self._pending_emit_count -= 1
-                self._pending_emit_statuses.discard(AgentProcessStatus.FAILED)
+        if self._journal_mode is AgentProcessJournalMode.BEST_EFFORT:
+            await self._emit_lifecycle_transition(
+                Directive.CANCEL,
+                reason,
+                AgentProcessStatus.FAILED,
+            )
 
     async def _mark_cancelled(self) -> None:
         """Mark the process as cancelled after the work task has exited."""
@@ -749,41 +893,65 @@ class AgentProcessHandle:
         """Mark the underlying work task as exited without changing lifecycle status."""
         self._completed_event.set()
 
+    def _fail_closed_after_journal_failure(self, exc: BaseException) -> None:
+        """Stop locally after a required write fails, without another append.
+
+        A terminal compensation event would consume a second deadline and
+        could itself commit after the caller has already observed failure.
+        The original persistence error is therefore the only failure
+        authority for this live process.
+        """
+        self._failure = exc
+        self._status = AgentProcessStatus.FAILED
+        self._completed_event.set()
+
+    def _is_or_caused_by_journal_failure(self, exc: BaseException) -> bool:
+        """Return whether *exc* preserves the current journal failure as its cause."""
+        journal_failure = self._journal_failure
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while journal_failure is not None and current is not None and id(current) not in seen:
+            if current is journal_failure:
+                return True
+            seen.add(id(current))
+            current = current.__cause__
+        return False
+
     async def _set_status(self, new_status: AgentProcessStatus, *, reason: str) -> None:
-        if new_status == self._status:
-            return
-        if new_status in _TERMINAL_STATUSES and self._pause_checkpoint_requested:
-            self._save_lifecycle_checkpoint(
-                phase=f"agent_process_{new_status.value}",
-                status=new_status.value,
-                event_key=f"{new_status.value}_at",
-                log_key="terminal",
-                store=self._pause_checkpoint_store,
-                strict=True,
-            )
-        self._status = new_status
-        if new_status in _TERMINAL_STATUSES:
-            self._completed_event.set()
-        directive = _TRANSITION_DIRECTIVE.get(new_status)
-        if directive is not None and self._emit_directive is not None:
-            self._expected_directive_count += 1
-            self._pending_emit_count += 1
-            self._pending_emit_statuses.add(new_status)
-            try:
-                async with self._emit_lock:
-                    await self._emit_directive(directive, reason, new_status)
-            except Exception:  # noqa: BLE001 — lifecycle completion must not hang on emit failure
-                logger.warning(
-                    "agent_process.directive_emit_failed",
-                    extra={
-                        "process_id": self.process_id,
-                        "directive": directive.value,
-                    },
-                    exc_info=True,
+        async with self._status_lock:
+            if new_status == self._status:
+                return
+            if new_status in _TERMINAL_STATUSES and self._pause_checkpoint_requested:
+                self._save_lifecycle_checkpoint(
+                    phase=f"agent_process_{new_status.value}",
+                    status=new_status.value,
+                    event_key=f"{new_status.value}_at",
+                    log_key="terminal",
+                    store=self._pause_checkpoint_store,
+                    strict=True,
                 )
-            finally:
-                self._pending_emit_count -= 1
-                self._pending_emit_statuses.discard(new_status)
+            directive = _TRANSITION_DIRECTIVE.get(new_status)
+            if directive is not None and self._journal_mode is AgentProcessJournalMode.DURABLE:
+
+                async def commit_and_apply_live_status() -> None:
+                    await self._emit_lifecycle_transition(directive, reason, new_status)
+                    self._status = new_status
+                    if new_status in _TERMINAL_STATUSES:
+                        self._completed_event.set()
+
+                # Every durable transition has one indivisible journal/live
+                # handoff. EventStore may finish a commit before surfacing
+                # caller cancellation; keep the corresponding live status
+                # (and terminal completion signal) in the same shielded task
+                # so replay can never advance past the live state. The helper
+                # re-raises cancellation only after both halves have settled.
+                await _run_cancellation_atomic_handoff(commit_and_apply_live_status())
+                return
+            self._status = new_status
+            if new_status in _TERMINAL_STATUSES:
+                self._completed_event.set()
+            if directive is not None and self._journal_mode is AgentProcessJournalMode.BEST_EFFORT:
+                await self._emit_lifecycle_transition(directive, reason, new_status)
 
     def _save_lifecycle_checkpoint(
         self,
@@ -803,6 +971,11 @@ class AgentProcessHandle:
             state: dict[str, str | None] = {
                 "status": status,
                 event_key: datetime.now(UTC).isoformat(),
+                "authority": (
+                    "journal"
+                    if self._journal_mode is AgentProcessJournalMode.DURABLE
+                    else "checkpoint"
+                ),
             }
             if reason is not None:
                 state["reason"] = reason
@@ -868,6 +1041,7 @@ class AgentProcess:
     event_store: _AppendableEventStore | None = None
     checkpoint_store: CheckpointStore | None = None
     cancel_key: str | None = None
+    journal_mode: AgentProcessJournalMode = AgentProcessJournalMode.BEST_EFFORT
 
     async def spawn(
         self,
@@ -908,6 +1082,7 @@ class AgentProcess:
         handle = AgentProcessHandle(
             process_id=pid,
             _emit_directive=emit,
+            _journal_mode=self.journal_mode,
             _replay_store=replay_store,
             _validate_replay_against_live_status=True,
             _checkpoint_store=self.checkpoint_store,
@@ -930,7 +1105,24 @@ class AgentProcess:
         # cooperative checkpoint.
         if emit is not None:
             handle._expected_directive_count += 1
-            await emit(Directive.CONTINUE, "spawned", AgentProcessStatus.RUNNING)
+            try:
+                await emit(Directive.CONTINUE, "spawned", AgentProcessStatus.RUNNING)
+            except asyncio.CancelledError as caller_cancellation:
+                if self.journal_mode is AgentProcessJournalMode.DURABLE:
+                    # EventStore settles a transaction before it re-raises
+                    # cancellation, so the initial RUNNING row may already be
+                    # committed even though no runner exists yet.  Reconcile
+                    # that possible row to one durable terminal state before
+                    # cancellation escapes.  Work is never created or started.
+                    handle._request_cancel("cancelled during initial durable handoff")
+                    try:
+                        await _run_cancellation_atomic_handoff(handle._mark_cancelled())
+                    except asyncio.CancelledError as settlement_cancellation:
+                        if settlement_cancellation.__cause__ is not None:
+                            raise caller_cancellation from settlement_cancellation.__cause__
+                    except BaseException as exc:
+                        raise caller_cancellation from exc
+                raise caller_cancellation
 
         async def _runner() -> None:
             try:
@@ -941,9 +1133,24 @@ class AgentProcess:
                 try:
                     await handle._mark_cancelled()
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
-                    await handle._mark_failed(
-                        reason=f"cancel finalization failed {type(exc).__name__}: {exc!s}"
-                    )
+                    if (
+                        isinstance(exc, asyncio.CancelledError)
+                        and handle.status() is AgentProcessStatus.CANCELLED
+                    ):
+                        # The durable terminal handoff committed and applied
+                        # its live state before preserving task cancellation.
+                        # It is authoritative, not a new terminal failure.
+                        raise
+                    if handle._is_or_caused_by_journal_failure(exc):
+                        handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
+                    else:
+                        handle._failure = exc
+                        try:
+                            await handle._mark_failed(
+                                reason=f"cancel finalization failed {type(exc).__name__}: {exc!s}"
+                            )
+                        except BaseException:  # noqa: BLE001 — failure is stored on the handle
+                            pass
                     logger.exception(
                         "agent_process.cancel_finalization_failed",
                         extra={"process_id": pid},
@@ -951,12 +1158,20 @@ class AgentProcess:
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 handle._failure = exc
-                if handle.status() in _TERMINAL_STATUSES:
-                    await handle._mark_failed(
-                        reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
-                    )
+                if handle._is_or_caused_by_journal_failure(exc):
+                    handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
                 else:
-                    await handle._mark_failed(reason=f"work raised {type(exc).__name__}: {exc!s}")
+                    try:
+                        if handle.status() in _TERMINAL_STATUSES:
+                            await handle._mark_failed(
+                                reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
+                            )
+                        else:
+                            await handle._mark_failed(
+                                reason=f"work raised {type(exc).__name__}: {exc!s}"
+                            )
+                    except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
+                        pass
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
@@ -979,9 +1194,24 @@ class AgentProcess:
                     else:
                         await handle._mark_completed(reason="work returned")
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
-                    await handle._mark_failed(
-                        reason=f"terminal transition failed {type(exc).__name__}: {exc!s}"
-                    )
+                    if isinstance(exc, asyncio.CancelledError) and handle.status() in {
+                        AgentProcessStatus.CANCELLED,
+                        AgentProcessStatus.COMPLETED,
+                    }:
+                        # Cancellation after a terminal commit remains caller
+                        # cancellation; the committed terminal state must not
+                        # be reclassified through a synthetic FAILED append.
+                        raise
+                    if handle._is_or_caused_by_journal_failure(exc):
+                        handle._fail_closed_after_journal_failure(handle._journal_failure or exc)
+                    else:
+                        handle._failure = exc
+                        try:
+                            await handle._mark_failed(
+                                reason=f"terminal transition failed {type(exc).__name__}: {exc!s}"
+                            )
+                        except BaseException:  # noqa: BLE001 — failure is stored and completion signalled
+                            pass
                     logger.exception(
                         "agent_process.terminal_transition_failed",
                         extra={"process_id": pid},
@@ -1003,16 +1233,30 @@ class AgentProcess:
         async def emit(
             directive: Directive, reason: str, lifecycle_status: AgentProcessStatus
         ) -> None:
+            event = create_control_directive_emitted_event(
+                target_type=_TARGET_TYPE,
+                target_id=process_id,
+                emitted_by=_EMITTED_BY,
+                directive=directive,
+                reason=f"{intent}: {reason}" if reason else intent,
+                extra={"intent": intent, "lifecycle_status": lifecycle_status.value},
+            )
+
+            if self.journal_mode is AgentProcessJournalMode.DURABLE:
+                append_durable = getattr(store, "append_durable", None)
+                if not callable(append_durable):
+                    raise TypeError(
+                        "Durable AgentProcess journaling requires event_store.append_durable() "
+                        "so the persistence layer, not caller cancellation, owns the deadline."
+                    )
+                await append_durable(
+                    event,
+                    timeout=_DURABLE_DIRECTIVE_EMIT_TIMEOUT_SECONDS,
+                )
+                return
+
             async def append_event() -> None:
                 await _ensure_event_store_initialized(store)
-                event = create_control_directive_emitted_event(
-                    target_type=_TARGET_TYPE,
-                    target_id=process_id,
-                    emitted_by=_EMITTED_BY,
-                    directive=directive,
-                    reason=f"{intent}: {reason}" if reason else intent,
-                    extra={"intent": intent, "lifecycle_status": lifecycle_status.value},
-                )
                 await store.append(event)
 
             try:
@@ -1043,13 +1287,16 @@ def _new_process_id() -> str:
 async def _wait_for_lifecycle_emit_drain(
     handle: AgentProcessHandle, *, timeout: float = 1.0
 ) -> None:
-    """Best-effort wait for AgentProcess lifecycle journal writes to drain."""
-    if handle._pending_emit_count <= 0:
+    """Best-effort wait for terminal publication and owned runner cleanup."""
+    work_task = handle._work_task
+    if handle._pending_emit_count <= 0 and (work_task is None or work_task.done()):
         return
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while handle._pending_emit_count > 0 and loop.time() < deadline:
+    while (
+        handle._pending_emit_count > 0 or (work_task is not None and not work_task.done())
+    ) and loop.time() < deadline:
         await asyncio.sleep(0.01)
 
 
@@ -1111,7 +1358,14 @@ async def run_with_agent_process[T](
             durable_store = None
 
     process = AgentProcess(
-        event_store=event_store, checkpoint_store=durable_store, cancel_key=durable_cancel_key
+        event_store=event_store,
+        checkpoint_store=durable_store,
+        cancel_key=durable_cancel_key,
+        journal_mode=(
+            AgentProcessJournalMode.DURABLE
+            if event_store is not None
+            else AgentProcessJournalMode.BEST_EFFORT
+        ),
     )
     handle = await process.spawn(intent=intent, work_fn=_work, process_id=process_id)
 
@@ -1182,6 +1436,11 @@ async def run_with_agent_process[T](
             return result_box[0]
         raise asyncio.CancelledError(f"{intent} cancelled")
     if final_status is AgentProcessStatus.FAILED:
+        failure = handle.failure()
+        if failure is not None:
+            if isinstance(failure, Exception):
+                raise failure
+            raise RuntimeError(f"{intent} failed") from failure
         if result_box:
             return result_box[0]
         if error_box:

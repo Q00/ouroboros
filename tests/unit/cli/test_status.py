@@ -1310,3 +1310,56 @@ def test_health_errors_for_unsupported_llm_backend(monkeypatch, tmp_path: Path) 
     assert "Credentials" in result.output
     assert "Unsupported backend" in result.output
     assert "uses local CLI authentication" not in result.output
+
+
+def _count_fixture_events(count: int) -> tuple[BaseEvent, ...]:
+    now = datetime.now(UTC)
+    return tuple(
+        BaseEvent(
+            type="execution.started",
+            timestamp=now - timedelta(seconds=count - index),
+            aggregate_type="execution",
+            aggregate_id=f"exec_count_{index}",
+            data={"status": "running"},
+        )
+        for index in range(count)
+    )
+
+
+@pytest.mark.parametrize("event_count", [0, 1, 3])
+def test_health_reports_persisted_event_count(
+    monkeypatch, tmp_path: Path, event_count: int
+) -> None:
+    """#1813: health binds its database check to the persisted event count."""
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _clear_auth_env(monkeypatch)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    _write_execution_events(db_path, _count_fixture_events(event_count))
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert f"{event_count} events persisted" in result.output
+
+
+def test_health_missing_store_is_not_created_or_counted(monkeypatch, tmp_path: Path) -> None:
+    """#1813: the count probe must not create or migrate a missing store."""
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _clear_auth_env(monkeypatch)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert "missing" in result.output
+    assert "events persisted" not in result.output
+    assert not db_path.exists()

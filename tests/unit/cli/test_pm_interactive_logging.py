@@ -36,6 +36,9 @@ def _build_state(*, pending_question: str | None = None) -> SimpleNamespace:
 
     return SimpleNamespace(
         is_complete=False,
+        # Real ``InterviewState`` always carries this; the resume path reads it
+        # to refuse brownfield sessions (RFC #1937 decision 9a).
+        is_brownfield=False,
         rounds=rounds,
         current_round_number=1,
         interview_id="interview_123",
@@ -67,7 +70,9 @@ def test_pm_command_enables_debug_logging_when_requested() -> None:
 
     with (
         patch("ouroboros.cli.commands.pm.asyncio.run", side_effect=fake_run),
-        patch("ouroboros.cli.commands.pm.configure_logging") as mock_configure,
+        # pm now routes through the shared bridge (#1955), so patch the
+        # structlog call inside it and keep asserting the effective level.
+        patch("ouroboros.cli.logging_setup.configure_logging") as mock_configure,
         patch("ouroboros.cli.commands.pm.print_info") as mock_print_info,
     ):
         pm_command(_build_ctx(), model="test-model", debug=True)
@@ -115,7 +120,6 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
         patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
-        patch("ouroboros.cli.commands.pm._select_repos", return_value=[]),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
             "ouroboros.cli.commands.pm.multiline_prompt_async",
@@ -224,7 +228,6 @@ async def test_run_pm_interview_preserves_pending_question_across_interrupt_and_
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
         patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
-        patch("ouroboros.cli.commands.pm._select_repos", return_value=[]),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
             "ouroboros.cli.commands.pm.multiline_prompt_async",

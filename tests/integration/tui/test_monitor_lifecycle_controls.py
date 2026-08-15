@@ -20,12 +20,14 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.tui import app as tui_app
+from ouroboros.core.lineage import OntologyLineage
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.events import create_workflow_progress_event
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 from ouroboros.tui.app import OuroborosTUI
 from ouroboros.tui.events import PauseRequested
+from ouroboros.tui.screens.lineage_detail import LineageDetailScreen
 
 runner = CliRunner()
 
@@ -123,6 +125,54 @@ class TestProductionMonitorOwnsNoExecution:
 
             assert "p" in tui.screen.active_bindings
             assert "r" in tui.screen.active_bindings
+
+    async def test_runtime_resolves_r_per_screen_without_app_fallback(
+        self, event_store: EventStore
+    ) -> None:
+        """Resolve the live binding map, including EventStore-only screens."""
+        resume_requests: list[str] = []
+        tui = OuroborosTUI(event_store)
+        tui.set_pause_callback(MagicMock())
+        tui.set_resume_callback(resume_requests.append)
+        tui.set_execution("exec-selector-probe", "sess-selector-probe")
+        tui.state.status = "paused"
+        tui.state.is_paused = True
+
+        def active_r_action() -> str | None:
+            active = tui.screen.active_bindings.get("r")
+            return None if active is None else active.binding.action
+
+        async with tui.run_test() as pilot:
+            await pilot.pause()
+            assert active_r_action() == "resume"  # Session Selector
+
+            tui.switch_screen("dashboard")
+            await pilot.pause()
+            assert active_r_action() == "resume"
+
+            for screen, expected in (
+                ("execution", "refresh"),
+                ("debug", "refresh"),
+                ("logs", None),
+                ("lineage_selector", "refresh"),
+            ):
+                tui.push_screen(screen)
+                await pilot.pause()
+                assert active_r_action() == expected
+                tui.pop_screen()
+                await pilot.pause()
+
+            tui.push_screen(LineageDetailScreen(OntologyLineage(goal="binding probe")))
+            await pilot.pause()
+            assert active_r_action() == "rewind"
+            tui.pop_screen()
+            await pilot.pause()
+
+            tui.push_screen("session_selector")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            assert resume_requests == ["exec-selector-probe"]
 
     async def test_pressing_p_without_an_owner_does_not_pause(self) -> None:
         """End-to-end: the key must not fake a lifecycle transition."""

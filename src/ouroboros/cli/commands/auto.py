@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import replace
-from enum import Enum
 import os
 from pathlib import Path
 import time
@@ -80,8 +79,15 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import build_run_successor_handler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
@@ -112,23 +118,6 @@ def _build_configured_ralph_handler(
         msg = "MCP composition root returned non-Ralph handler for ouroboros_ralph"
         raise TypeError(msg)
     return handler
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported runtime backends for auto execution handoff."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 app = typer.Typer(
@@ -337,7 +326,7 @@ def auto_command(
             _run_auto(
                 goal=goal,
                 resume=resume,
-                runtime=runtime.value if runtime else None,
+                runtime=public_runtime_backend(runtime.value if runtime else None),
                 max_interview_rounds=max_interview_rounds,
                 max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
@@ -599,6 +588,12 @@ async def _run_auto(
         execute_handler=execute_seed,
         agent_runtime_backend=runtime_plan.execute.runtime_backend,
         opencode_mode=execute_opencode_mode,
+        # Without the successor stack a finished run reports
+        # ``evaluation_status="enqueue_failed"`` and nothing grades it.
+        start_evaluate_handler=build_run_successor_handler(
+            agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
+            opencode_mode=runtime_plan.evaluate.opencode_mode,
+        ),  # composition-root wiring; a hand-built stack dies on its first generation
     )
     seed_qa = QAHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,

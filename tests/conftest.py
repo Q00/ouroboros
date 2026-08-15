@@ -25,6 +25,12 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 # exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
 os.environ["OUROBOROS_DASHBOARD"] = "0"
 
+# Anonymous usage telemetry ships with an embedded PostHog key, so without this
+# kill switch any test that reaches a CLI callback or MCP call_tool would send
+# real events. Tests that exercise telemetry itself delete this var and inject
+# a fake key + transport (see tests/unit/test_telemetry.py).
+os.environ["OUROBOROS_TELEMETRY"] = "0"
+
 
 # ── Hermetic home isolation (before collection) ──────────────────────────────
 # Ouroboros resolves its state root two ways: ``Path.home()`` AND
@@ -102,6 +108,47 @@ def isolate_heartbeat_locks_per_test_worker(tmp_path_factory):
             heartbeat.release(session_id)
         heartbeat.LOCK_DIR = previous_lock_dir
         heartbeat.CANCELLATION_DIR = previous_cancellation_dir
+
+
+@pytest.fixture(scope="session", autouse=True)
+def render_logged_exceptions_with_plain_tracebacks():
+    """Keep structlog's DEV renderer from paying rich+pygments per exception.
+
+    ``ConsoleRenderer(colors=True)`` defaults to rich's traceback formatter,
+    which syntax-highlights the source context of every frame. Failure-path
+    tests that log a real exception (event-store append failures, adapter
+    errors, ...) each paid multiple seconds of pygments tokenization for
+    output nobody reads under pytest. Render with the stdlib formatter
+    instead — same information, plain text. Production DEV output is
+    untouched; this only rewrites the renderer inside the test session.
+    """
+    import structlog
+
+    from ouroboros.observability import logging as obs_logging
+
+    def _plain_renderer() -> structlog.dev.ConsoleRenderer:
+        return structlog.dev.ConsoleRenderer(
+            colors=True, exception_formatter=structlog.dev.plain_traceback
+        )
+
+    def _swap_in_place(processors: list) -> list:
+        for index, processor in enumerate(processors):
+            if isinstance(processor, structlog.dev.ConsoleRenderer):
+                # In-place: capture_logs() shares this exact list object.
+                processors[index] = _plain_renderer()
+        return processors
+
+    original_get_console_processors = obs_logging._get_console_processors
+
+    def _plain_console_processors(mode):
+        return _swap_in_place(original_get_console_processors(mode))
+
+    _swap_in_place(obs_logging._live_generation.processors)
+    obs_logging._get_console_processors = _plain_console_processors
+    try:
+        yield
+    finally:
+        obs_logging._get_console_processors = original_get_console_processors
 
 
 @pytest.fixture(autouse=True)

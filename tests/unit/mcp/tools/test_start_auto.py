@@ -531,6 +531,66 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_fresh_start_applies_configured_default_policy(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        """#1733: a configured quality_first default reaches a fresh Auto
+        start when the host omits both preference arguments."""
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_fresh_start_explicit_argument_beats_configured_default(
+        self, event_store, fake_inner_auto, tmp_path
+    ) -> None:
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_policy2"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.default_execution_efficiency_mode",
+            return_value="quality_first",
+        ):
+            result = await h.handle({"goal": "build a CLI", "efficiency_mode": "adaptive"})
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "adaptive"
+        assert result.value.meta["frugality_assurance"] == "observe"
+
+    @pytest.mark.asyncio
     async def test_now_binds_durable_job_scoped_cancel_key(
         self, event_store, fake_inner_auto, tmp_path, monkeypatch
     ) -> None:
@@ -1513,6 +1573,41 @@ class TestBackgroundJobPath:
         assert kwargs["seed_qa_evaluator"] is not None
         assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
         assert kwargs["evaluator"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("complete_product", [False, True])
+    async def test_run_starter_owns_successors_only_in_complete_product_mode(
+        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch, complete_product: bool
+    ) -> None:
+        """Exactly one owner for the post-run evaluation.
+
+        Complete-product Auto drives RALPH_HANDOFF → EVALUATE itself, so the run
+        job's own chain is suppressed. Default Auto has no such path — it stops
+        at COMPLETE once the run has a handle — so the run job keeps its
+        run → evaluate → ralph chain instead of finishing unevaluated.
+        """
+
+        captured: dict[str, object] = {}
+
+        class FakeAutoPipeline:
+            def __init__(self, *_args, **kwargs):
+                captured["pipeline_kwargs"] = kwargs
+
+            async def run(self, state):
+                return AutoPipelineResult(
+                    status="blocked",
+                    auto_session_id=state.auto_session_id,
+                    phase=str(state.phase.value),
+                )
+
+        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+
+        h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
+
+        await h._run({"goal": "build a CLI", "complete_product": complete_product})
+
+        kwargs = captured["pipeline_kwargs"]
+        assert kwargs["run_starter"].owns_successors is complete_product
 
     @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(
@@ -2791,3 +2886,64 @@ class TestAutoHandlerLeaseRelease:
 
         assert result.is_ok
         assert not lease_path.exists()
+
+
+class TestAutoRunSuccessorWiring:
+    """Auto-created run handlers must be able to enqueue the chain they delegate to.
+
+    #2120 turned the successor chain back on for default Auto, but Auto builds
+    its own ``StartExecuteSeedHandler``. Without the successor stack that
+    delegation silently degrades to
+    ``evaluation_status="enqueue_failed"`` — the run finishes and nothing
+    grades it, which is the exact failure the delegation was meant to remove.
+    """
+
+    def test_mcp_execution_start_handler_can_enqueue_successors(self) -> None:
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+
+        handler = _execution_start_handler(
+            None,
+            llm_backend=None,
+            agent_runtime_backend="claude",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        start_evaluate = handler.start_evaluate_handler
+        assert start_evaluate is not None
+        # ...and the link below it, or a rejected verdict cannot start Ralph.
+        start_ralph = start_evaluate.start_ralph_handler
+        assert start_ralph is not None
+        # A Ralph handler assembled by hand enqueues a job that then dies on its
+        # first generation with "EvolutionaryLoop not configured", so a non-null
+        # handler is not evidence the chain completes.
+        assert start_ralph._evolve_handler.evolutionary_loop is not None
+
+    def test_rebuild_preserves_an_injected_successor_stack(self) -> None:
+        """Rebuilding for another runtime must not drop the server's wiring."""
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+        from ouroboros.mcp.tools.run_successors import build_run_successor_handler
+
+        injected = build_run_successor_handler(agent_runtime_backend="claude")
+        original = StartExecuteSeedHandler(
+            execute_handler=ExecuteSeedHandler(agent_runtime_backend="claude"),
+            agent_runtime_backend="claude",
+            start_evaluate_handler=injected,
+        )
+
+        rebuilt = _execution_start_handler(
+            original,
+            llm_backend=None,
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        assert rebuilt is not original
+        assert rebuilt.start_evaluate_handler is injected

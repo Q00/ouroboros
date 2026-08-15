@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -157,6 +157,30 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert run_auto.called
     assert "Auto session:" in result.output
     assert "auto_test" in result.output
+
+
+@pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+def test_auto_public_claude_runtime_selects_sdk(runtime: str) -> None:
+    result_value = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_claude_cli",
+        phase="complete",
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        interview_session_id="interview_test",
+    )
+
+    with patch(
+        "ouroboros.cli.commands.auto._run_auto",
+        new=AsyncMock(return_value=result_value),
+    ) as run_auto:
+        result = runner.invoke(
+            app,
+            ["auto", "safe test goal", "--skip-run", "--runtime", runtime],
+        )
+
+    assert result.exit_code == 0
+    assert run_auto.await_args.kwargs["runtime"] == "claude"
 
 
 def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance() -> None:
@@ -1150,3 +1174,62 @@ def test_print_result_attached_completion_remains_product_complete() -> None:
     assert "Status: complete" in output
     assert "Status: run_handoff_started" not in output
     assert "Product status: not verified complete" not in output
+
+
+def test_run_auto_wires_the_run_successor_stack(tmp_path) -> None:
+    """CLI Auto delegates run successors, so it must build a handler that can enqueue them.
+
+    Without ``start_evaluate_handler`` the delegation degrades to
+    ``evaluation_status="enqueue_failed"``: the run finishes and nothing grades
+    it. The Ralph link below it must be present for the same reason.
+    """
+    import asyncio
+
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.skip_run = True
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("auto interview reached max rounds with unresolved gaps: actors")
+    store = AutoStore(tmp_path)
+    store.save(state)
+    session_id = state.auto_session_id
+
+    captured: dict[str, object] = {}
+
+    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
+        captured["run_starter"] = self.run_starter
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+
+        asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=False,
+            )
+        )
+
+    start_evaluate = captured["run_starter"].handler.start_evaluate_handler
+    assert start_evaluate is not None
+    start_ralph = start_evaluate.start_ralph_handler
+    assert start_ralph is not None
+    # A hand-built Ralph handler enqueues a job that dies on its first
+    # generation with "EvolutionaryLoop not configured", so a non-null handler
+    # is not evidence that the chain completes.
+    assert start_ralph._evolve_handler.evolutionary_loop is not None

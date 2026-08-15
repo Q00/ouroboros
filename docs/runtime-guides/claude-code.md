@@ -5,6 +5,8 @@ doc_metadata:
 
 # Running Ouroboros with Claude Code
 
+> 한국어: [claude-code.ko.md](./claude-code.ko.md)
+
 Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude Code Pro or Max Plan** subscription to execute workflows without requiring a separate API key.
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
@@ -18,10 +20,23 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 ## Prerequisites
 
 - Claude Code CLI installed and authenticated (Pro or Max Plan)
-- Python >= 3.12
-- Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
+- **uv** if you use the marketplace plugin. The plugin's MCP manifest launches
+  the server with the bundled `uvx` command
+  ([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)), so a host with
+  only Claude Code cannot start it. Install uv with `pipx install uv`,
+  `pip install --user uv`, or `brew install uv`.
+- No global Python is required for the marketplace plugin. Its shipped skills
+  resolve Python >= 3.12 in this order: compatible `python3`, compatible
+  `python`, then `uv run --no-project --quiet --python '>=3.12' python`. This
+  rejects older host interpreters and lets the same uv prerequisite cover the
+  first-run welcome, setup, and seed snippets.
+- Python >= 3.12 specifically, **for the standalone CLI**.
+- Ouroboros installed, for the standalone CLI (see [Getting Started](../getting-started.md) for install options)
 
-> Install `ouroboros-ai[claude]` for standalone Claude SDK workflows. The current Claude Agent SDK embeds MCP 1.x while Ouroboros MCP uses MCP 2, so do not install both extras into one environment. Claude setup deliberately skips MCP registration: an isolated `[mcp]` process cannot load the configured standalone Claude backend. Use a supported CLI-backed runtime and LLM adapter before registering the modern protocol server with a host.
+> Install `ouroboros-ai[claude]` for the default in-process SDK runtime on MCP
+> 1.x. The marketplace plugin launches the MCP 2 server from an isolated
+> `ouroboros-ai[mcp]` environment and selects the `[claude-cli]` worker. Never
+> combine `[mcp]` with `[claude]`, `[claude-sdk]`, or `[all]` in one interpreter.
 
 ## Configuration
 
@@ -29,7 +44,7 @@ To select Claude Code as the runtime backend, set the following in your Ouroboro
 
 ```yaml
 orchestrator:
-  runtime_backend: claude
+  runtime_backend: claude  # written by `ouroboros setup --runtime claude`
 ```
 
 When using the `--orchestrator` CLI flag, Claude Code is the default runtime backend.
@@ -54,7 +69,10 @@ When using the `--orchestrator` CLI flag, Claude Code is the default runtime bac
                         +------------------+
 ```
 
-The orchestrator uses `claude-agent-sdk` which connects directly to your authenticated Claude Code session. No API key required. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
+The default profile uses the Agent SDK and its bundled/authenticated Claude Code
+transport. The SDK remains on MCP 1.x. The plugin-owned MCP 2 server is a
+separate `uvx` process and uses `--runtime claude-cli`, so no interpreter loads
+both MCP majors. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

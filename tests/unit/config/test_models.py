@@ -1,6 +1,7 @@
 """Unit tests for ouroboros.config.models module."""
 
 from pathlib import Path
+from typing import get_args
 
 from pydantic import ValidationError
 import pytest
@@ -11,6 +12,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
 )
 from ouroboros.config.models import (
+    VALID_RUNTIME_BACKENDS,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -342,6 +344,18 @@ class TestExecutionConfig:
         assert (
             ExecutionConfig(auto_evolve_max_generations=raw).auto_evolve_max_generations == expected
         )
+
+    def test_default_policy_defaults_to_ask_and_validates(self) -> None:
+        """#1733: the persistent fresh-run policy defaults to ask, accepts the
+        two documented alternatives, and rejects everything else — strict can
+        never be configured as a default policy."""
+        assert ExecutionConfig().default_policy == "ask"
+        assert ExecutionConfig(default_policy="efficient").default_policy == "efficient"
+        assert ExecutionConfig(default_policy="quality_first").default_policy == "quality_first"
+        with pytest.raises(ValidationError):
+            ExecutionConfig(default_policy="strict")  # type: ignore[arg-type]
+        with pytest.raises(ValidationError):
+            ExecutionConfig(default_policy="adaptive")  # type: ignore[arg-type]
 
     def test_execution_config_migrates_legacy_preflight_to_bounce_only(self) -> None:
         """Stored preflight settings cannot re-enable pre-execution splitting."""
@@ -727,7 +741,7 @@ class TestOrchestratorConfig:
     """Test OrchestratorConfig runtime settings."""
 
     def test_orchestrator_config_defaults(self) -> None:
-        """Defaults to the Claude runtime."""
+        """Defaults to the isolated Claude SDK runtime."""
         config = OrchestratorConfig()
         assert config.runtime_backend == "claude"
         assert config.permission_mode == "acceptEdits"
@@ -960,6 +974,32 @@ class TestRuntimeProfileConfig:
         profile = RuntimeProfileConfig(default="gjc", stages={"execute": "gjc_cli"})
         assert profile.default == "gjc"
         assert profile.stages == {"execute": "gjc_cli"}
+
+    def test_runtime_profile_accepts_claude_mcp_backend(self) -> None:
+        profile = RuntimeProfileConfig(
+            default="claude_mcp",
+            stages={"execute": "claude_mcp"},
+        )
+        assert profile.default == "claude_mcp"
+        assert profile.stages == {"execute": "claude_mcp"}
+
+    def test_runtime_profile_allowlist_covers_every_persisted_backend(self) -> None:
+        persisted_backends = set(
+            get_args(OrchestratorConfig.model_fields["runtime_backend"].annotation)
+        )
+
+        assert persisted_backends <= VALID_RUNTIME_BACKENDS
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            {"default": "unknown-runtime"},
+            {"stages": {"execute": "unknown-runtime"}},
+        ],
+    )
+    def test_runtime_profile_rejects_unknown_backends(self, profile: dict[str, object]) -> None:
+        with pytest.raises(ValidationError, match="must be one of"):
+            RuntimeProfileConfig.model_validate(profile)
 
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")

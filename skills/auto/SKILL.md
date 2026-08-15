@@ -84,7 +84,11 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
 Before a fresh Auto start, if the user did not already choose an efficiency
-policy, ask in outcome language: **Efficient execution** maps to
+policy, first check the persistent default: when `execution.default_policy` in
+`~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask — omit
+both arguments and the server applies the configured default (the handoff still
+reports the resolved policy). Otherwise ask in outcome language:
+**Efficient execution** maps to
 `adaptive/observe`; **Quality-first execution** maps to `quality_first/off`.
 `strict` assurance is a separate explicit opt-in because it may spend extra
 work on proof. Never infer strict from the efficiency choice. On resume, do not
@@ -116,7 +120,8 @@ ask or send either argument; Auto restores the persisted contract.
      already answer — then apply the answers to the saved Seed and
      `--resume`. Never invent the missing facts.
 6. Starts execution only after A-grade.
-7. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+7. When `complete_product=false` (the default), auto reaches `COMPLETE` as soon as the run has a durable handle — the run itself keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself in this mode; the chained evaluate job does.
+8. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
 
 ## Background monitoring UX
 

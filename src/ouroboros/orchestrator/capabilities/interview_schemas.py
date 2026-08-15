@@ -809,9 +809,19 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     is
     the whole of what has to match (Q00/ouroboros#1754).
     """
+    # Both question namespaces, because this contract is reused unchanged by the
+    # PM interview (RFC #1937) and a pattern naming one tool would reject the
+    # other's identities outright -- a lane rejected for its host's prefix has
+    # nothing it could have submitted instead.
+    #
+    # Widening the shape does not widen the binding. Shape is not provenance:
+    # ``_provenance_violations`` compares this value against the identity the
+    # producer wrote into the fan-out record, so an answer still belongs to
+    # exactly one question. What the pattern rules out is a free-text field, and
+    # it goes on doing that.
     identity_property: dict[str, Any] = {
         "type": "string",
-        "pattern": r"^interview-question:[0-9a-f]{16}$",
+        "pattern": r"^(interview|pm)-question:[0-9a-f]{16}$",
         "description": "Matches the originating advisory request.",
     }
     no_op_state: dict[str, Any] = {
@@ -1266,6 +1276,36 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
     return {
         "contract_id": "interview_question_advisory_fanout.v1",
         "mcp_tool": "ouroboros_interview",
+        # What the fan-out builder used to hardcode for its only caller. These
+        # move here so one builder serves every tool without either one's
+        # emitted payloads or request changing by a byte.
+        "question_identity_prefix": "interview-question",
+        # This tool measures ambiguity, so its request always carries the score
+        # and milestone -- ``None`` included, because "not scored yet" is a
+        # state of a thing that exists. A tool with no such concept omits the
+        # keys rather than reporting them empty.
+        "scores_ambiguity": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "payload_title_prefix": "Interview advisory",
+        "allowed_capabilities": [
+            "inspect_code",
+            "web_research",
+            "run_lateral_review",
+            "read_data",
+        ],
+        "question_heading": "## Interview Question",
+        # Carried whole rather than composed from parts: this paragraph states
+        # what a child may do with a clear finding, which is the one thing the
+        # two tools genuinely disagree about, and assembling it from fragments
+        # would put that disagreement in the builder instead of the catalog.
+        "task_preamble": (
+            "You are an Ouroboros interview advisory subagent.\n"
+            "\n"
+            "The parent session has already shown the interview question to the "
+            "user. Your job\nis to help the user answer it; do not answer on "
+            "behalf of the user unless the\nanswer is a descriptive fact with "
+            "clear evidence."
+        ),
         "companion_tool": "ouroboros_lateral_think",
         "dispatch_timing": "after_question_is_visible_to_user",
         "parallel_preference": "parallel_when_runtime_supports_subagents",

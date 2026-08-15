@@ -1,6 +1,11 @@
-"""Tests for runtime skill capability guide coverage docs."""
+"""Tests for runtime skill capability guide coverage docs.
+
+These assert structural anchors only (coverage table rows, section headings,
+code identifiers) so that rewording the surrounding prose never breaks them.
+"""
 
 from pathlib import Path
+import re
 
 from ouroboros.backends.capabilities import runtime_backend_choices
 
@@ -16,33 +21,32 @@ def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> Non
         and not row.startswith("| ---")
         and "Generated artifact surface" not in row
     }
-    assert set(runtime_backend_choices()) <= documented_runtime_names
+    assert documented_runtime_names == set(runtime_backend_choices())
 
-    assert "Global `AGENTS.md`" in docs
-    assert "`~/.gemini/GEMINI.md`" in docs
-    assert "`~/.kiro/steering/ouroboros-skill-capability-guide.md`" in docs
-    assert "`~/.copilot/ouroboros-instructions/AGENTS.md`" in docs
-    assert "| Goose | No setup-owned capability artifact yet |" in docs
-    assert "| Pi | No setup-owned capability artifact yet |" in docs
     assert "render_backend_skill_capability_guide(<backend>)" in docs
     assert "## Capability graph contract" in docs
     assert "## Contributor checklist for capability changes" in docs
     assert "`src/ouroboros/backends/capabilities.py`" in docs
     assert "SkillExecutionCapability" in docs
-    compact = " ".join(docs.split())
-    assert "must not copy long adapter sections into individual `SKILL.md` files" in compact
 
 
 def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
 
-    assert (
-        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`"
-        in docs
+    # Scoped to the `-r, --runtime` option row itself (not the whole file) so
+    # a mutation that drops the shipped-runtime list from that row can't hide
+    # behind mentions of the same names elsewhere in the doc.
+    option_row = next(
+        line for line in docs.splitlines() if line.startswith("| `-r, --runtime TEXT`")
     )
-    assert (
-        "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC, Antigravity, Grok, and Zcode"
-        in docs
-    )
-    assert "ouroboros setup --runtime zcode" in docs
+    shipped_values = option_row.split("Shipped values:", 1)[1].split("Auto-detected", 1)[0]
+    documented_backends = set(re.findall(r"`([\w-]+)`", shipped_values))
+
+    # MCP worker variants (codex_mcp, claude_mcp) are internal leader-driven
+    # runtimes, not user-facing `ouroboros setup --runtime` choices.
+    user_facing_backends = {b for b in runtime_backend_choices() if not b.endswith("_mcp")}
+    user_facing_backends |= {"claude-sdk", "claude-cli"}
+    assert documented_backends == user_facing_backends
+
+    assert "ouroboros setup --runtime" in docs
     assert Path("docs/runtime-guides/zcode.md").is_file()

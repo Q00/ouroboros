@@ -1149,7 +1149,11 @@ class TestUpdateFlow:
 
         assert result.exit_code == 0
         output = _plain(result.output)
-        assert f"setup --runtime {configured_backend} --non-interactive" in output
+        expected_refresh = f"setup --runtime {configured_backend}"
+        if configured_backend == "codex":
+            expected_refresh += " --preserve-existing-llm"
+        expected_refresh += " --non-interactive"
+        assert expected_refresh in output
         expected_env_key = (
             "OUROBOROS_CLI_PATH"
             if configured_backend == "claude"

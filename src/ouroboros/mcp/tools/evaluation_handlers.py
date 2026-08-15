@@ -23,14 +23,19 @@ from ouroboros.config import (
     get_llm_backend_for_role,
     get_llm_model_for_role,
 )
-from ouroboros.core.errors import ValidationError
+from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
 from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
+    FetchArtifactHandler,
+    SubmitFanoutResultsHandler,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -38,7 +43,6 @@ from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
     dispatch_plugin_terminal,
     should_dispatch_via_plugin,
-    submit_fanout_results,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -63,6 +67,22 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+def _direct_evaluation_failure_reason(error: object) -> str | None:
+    """Map only trusted exception types to the telemetry reason vocabulary."""
+    if isinstance(error, (ConfigError,)):
+        return "config"
+    if isinstance(error, (ValidationError, PydanticValidationError)):
+        return "validation"
+    if isinstance(error, (MCPAuthError,)):
+        return "auth"
+    if isinstance(error, (MCPTimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(error, ProviderError):
+        return "model"
+    return None
+
 
 if TYPE_CHECKING:
     from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
@@ -502,11 +522,24 @@ class EvaluateHandler:
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        emit_terminal_telemetry: bool = True,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle an evaluation request.
 
         Args:
             arguments: Tool arguments including session_id, artifact, and optional seed_content.
+            emit_terminal_telemetry: Whether this call owns the direct-evaluation
+                telemetry boundary. True (default) for genuine top-level direct
+                calls — the MCP adapter dispatching ``ouroboros_evaluate``, or
+                ``ChecklistVerifyHandler`` delegating in multi-AC mode (neither
+                is observed by JobManager). False when the caller is itself
+                job-backed (``run_evaluation_job`` behind ``StartEvaluateHandler``),
+                since ``JobTelemetryBoundary`` already emits a deduplicated
+                (``$insert_id``-keyed) terminal outcome for that job — this
+                handler is a shared instance reused across both call shapes
+                (see ``definitions.py``), so the decision must be made by the
+                caller at each call, not baked into the instance.
 
         Returns:
             Result containing evaluation results or error.
@@ -765,6 +798,7 @@ class EvaluateHandler:
                     working_dir=working_dir,
                     executor_backend=executor_backend,
                     ac_spec_map=ac_spec_map,
+                    emit_terminal_telemetry=emit_terminal_telemetry,
                 )
 
             context = EvaluationContext(
@@ -795,6 +829,12 @@ class EvaluateHandler:
                     llm_backend=backend,
                     error=rendered_error,
                 )
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(result.error),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
@@ -835,6 +875,8 @@ class EvaluateHandler:
                 "code_changes_detected": code_changes,
             }
 
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(final_approved=eval_result.final_approved)
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
@@ -842,18 +884,47 @@ class EvaluateHandler:
                     meta=meta,
                 )
             )
-        except (ValueError, RuntimeError) as e:
+        except ConfigError as e:
             # Configuration/bootstrap errors (unsupported backend, missing
             # provider install) — actionable by the user, safe to surface.
             log.warning("mcp.tool.evaluate.config_error", error=str(e))
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code="config",
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
                 )
             )
-        except Exception:
+        except (ValueError, RuntimeError) as e:
+            # Preserve the historical setup-facing response for these factory
+            # failures, but do not infer ``config`` from a generic built-in
+            # exception. Only a typed ConfigError earns that telemetry reason.
+            log.warning("mcp.tool.evaluate.setup_error", error=str(e))
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(e),
+                )
+            return Result.err(
+                MCPToolError(
+                    f"Evaluation setup failed: {e}",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        except Exception as exc:
             log.exception("mcp.tool.evaluate.error")
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(exc),
+                )
             return Result.err(
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
@@ -880,6 +951,7 @@ class EvaluateHandler:
         working_dir: Path,
         executor_backend: str | None = None,
         ac_spec_map: dict[str, AcceptanceCriterionSpec] | None = None,
+        emit_terminal_telemetry: bool = True,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -929,6 +1001,12 @@ class EvaluateHandler:
         if first_result.is_err:
             err = first_result.error
             rendered = err.format_details() if hasattr(err, "format_details") else str(err)
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(err),
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation failed: {rendered}",
@@ -973,6 +1051,12 @@ class EvaluateHandler:
                     "mcp.tool.evaluate.multi_ac_exception",
                     session_id=session_id,
                 )
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(entry),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed during multi-AC run: {entry}",
@@ -987,6 +1071,12 @@ class EvaluateHandler:
                     session_id=session_id,
                     error=rendered,
                 )
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(err),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered}",
@@ -1043,6 +1133,8 @@ class EvaluateHandler:
             all_passed=checklist.all_passed,
         )
 
+        if emit_terminal_telemetry:
+            record_direct_evaluation_outcome(final_approved=checklist.all_passed)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
@@ -1372,6 +1464,11 @@ class ChecklistVerifyHandler:
             ac_count=len(acceptance_criteria),
         )
 
+        # ouroboros_checklist_verify is itself a genuine top-level direct MCP
+        # tool (no "Start" job-backed variant, no JobManager wraps it), so the
+        # nested EvaluateHandler call keeps emit_terminal_telemetry at its
+        # default True — nothing else will emit a workflow_outcome for this
+        # invocation.
         result = await evaluator.handle(evaluate_args)
 
         if result.is_err:
@@ -1925,128 +2022,6 @@ class LateralThinkHandler(BridgeAwareMixin):
                     tool_name="ouroboros_lateral_think",
                 )
             )
-
-
-@dataclass
-class SubmitFanoutResultsHandler:
-    """Handler for the ``ouroboros_submit_fanout_results`` re-entry tool.
-
-    After a host fans out a set of advisory/persona/investigation subagents
-    (declared by :func:`stamp_fanout_meta` with a stamped ``fanout_id``), it
-    submits the correlated child outputs back through this tool. The server
-    validates the expected keys against the persisted fan-out record and, when
-    complete, routes to the revived synthesizer for the record's kind, returning
-    the correlated synthesis for the host to continue with. Sequential hosts
-    submit after processing payloads one-by-one — same tool, same contract.
-    """
-
-    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        self._registry = self.fanout_registry or FanoutRegistry()
-
-    @property
-    def definition(self) -> MCPToolDefinition:
-        """Return the tool definition."""
-        return MCPToolDefinition(
-            name="ouroboros_submit_fanout_results",
-            description=(
-                "Submit correlated results from a subagent fan-out back to "
-                "Ouroboros. After spawning the advisory/persona/investigation "
-                "subagents declared by a prior tool's `meta` (which stamped a "
-                "`fanout_id` and a `result_correlation_key`), call this tool with "
-                "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A child you could not spawn "
-                "at all is exactly {key, undispatched: true}; never invent output. "
-                "Missing required keys return `status=partial`; retry with EVERY lane."
-            ),
-            parameters=(
-                MCPToolParameter(
-                    name="session_id",
-                    type=ToolInputType.STRING,
-                    description="Interview/lateral session id the fan-out belongs to.",
-                    required=False,
-                ),
-                MCPToolParameter(
-                    name="fanout_id",
-                    type=ToolInputType.STRING,
-                    description="The fanout_id stamped into the originating tool's meta.",
-                    required=True,
-                ),
-                MCPToolParameter(
-                    name="correlation_key",
-                    type=ToolInputType.STRING,
-                    description=(
-                        "The result_correlation_key from the originating meta "
-                        "(e.g. 'context.persona' or 'code_facts')."
-                    ),
-                    required=False,
-                ),
-                MCPToolParameter(
-                    name="results",
-                    type=ToolInputType.ARRAY,
-                    description=(
-                        "Correlated child outputs: objects with a 'key' (the "
-                        "correlation value) and a 'content' (the child result), "
-                        "or 'undispatched': true when the child never ran."
-                    ),
-                    required=True,
-                ),
-            ),
-        )
-
-    async def handle(
-        self,
-        arguments: dict[str, Any],
-    ) -> Result[MCPToolResult, MCPServerError]:
-        """Validate the submitted fan-out results and route them to synthesis."""
-        fanout_id = str(arguments.get("fanout_id") or "").strip()
-        if not fanout_id:
-            return Result.err(
-                MCPToolError(
-                    "fanout_id is required",
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-
-        raw_results = arguments.get("results")
-        if not isinstance(raw_results, (list, tuple)):
-            return Result.err(
-                MCPToolError(
-                    "results must be a list of {key, content} objects",
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-        results = list(raw_results)  # not filtered; the core reports bad entries
-
-        outcome = submit_fanout_results(
-            self._registry,
-            session_id=str(arguments.get("session_id") or ""),
-            correlation_key=str(arguments.get("correlation_key") or ""),
-            results=results,
-            fanout_id=fanout_id,
-        )
-
-        if outcome.get("status") == "unknown_fanout_id":
-            return Result.err(
-                MCPToolError(
-                    str(outcome.get("error") or "unknown fanout_id"),
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-
-        return Result.ok(
-            MCPToolResult(
-                content=(
-                    MCPContentItem(
-                        type=ContentType.TEXT,
-                        text=json.dumps(outcome, ensure_ascii=False, sort_keys=True),
-                    ),
-                ),
-                is_error=False,
-                meta=outcome,
-            )
-        )
 
 
 @dataclass

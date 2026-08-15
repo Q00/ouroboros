@@ -31,15 +31,20 @@ from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 
 
 def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
-    from ouroboros.cli.commands.auto import AgentRuntimeBackend
+    from ouroboros.backends.capabilities import runtime_backend_choices
+    from ouroboros.cli.commands import auto, init, mcp, run
+    from ouroboros.package_profiles import PublicAgentRuntimeBackend, public_runtime_backend
 
-    assert {item.value for item in AgentRuntimeBackend} == {
+    expected_public_backends = {
         "claude",
+        "claude-sdk",
+        "claude-cli",
         "codex",
         "opencode",
         "hermes",
         "gemini",
         "copilot",
+        "goose",
         "kiro",
         "pi",
         "gjc",
@@ -47,6 +52,18 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "grok",
         "zcode",
     }
+    frontdoor_enums = (
+        auto.AgentRuntimeBackend,
+        run.AgentRuntimeBackend,
+        mcp.AgentRuntimeBackend,
+        init.AgentRuntimeBackend,
+    )
+
+    assert all(runtime_enum is PublicAgentRuntimeBackend for runtime_enum in frontdoor_enums)
+    assert {item.value for item in PublicAgentRuntimeBackend} == expected_public_backends
+    assert {public_runtime_backend(item.value) for item in PublicAgentRuntimeBackend} <= set(
+        runtime_backend_choices()
+    )
 
 
 def test_cli_runtime_enums_accept_gjc_for_frontdoor_commands() -> None:
@@ -2749,3 +2766,48 @@ def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_resu
     assert "Status: blocked" in text
     assert "Artifact state: partial_artifact_generated" in text
     assert "Status: complete" not in text
+
+
+def test_auto_artifact_state_does_not_call_a_seed_that_never_ran_verified() -> None:
+    """A skip-run session completes with a Seed, not with a verified product.
+
+    Nothing executed, so there is no product whose verification could have
+    happened; reporting `complete_verified` is how a renderer ends up printing
+    "Product status: verified" for work that was never run.
+    """
+    from ouroboros.auto.artifact_state import artifact_state_for_result
+
+    assert (
+        artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            partial_product=False,
+            run_handoff_status=None,
+            product_verified=False,
+        )
+        == "complete_unverified"
+    )
+
+
+def test_auto_artifact_state_still_verifies_a_completed_run() -> None:
+    """The narrowing must not withhold verification from work that did run."""
+    from ouroboros.auto.artifact_state import artifact_state_for_result
+
+    assert (
+        artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec_123",
+            job_id="job_123",
+            run_session_id=None,
+            partial_product=False,
+            run_handoff_status="completed",
+            product_verified=True,
+        )
+        == "complete_verified"
+    )

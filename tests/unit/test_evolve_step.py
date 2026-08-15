@@ -350,12 +350,12 @@ async def test_start_evolve_links_generation_selected_after_interleaving(
         release_generation.set()
 
         job_id = started.value.meta["job_id"]
-        snapshot = await manager.get_snapshot(job_id)
+        snapshot = await asyncio.wait_for(manager.get_snapshot(job_id), timeout=5.0)
         for _ in range(100):
             if snapshot.is_terminal:
                 break
             await asyncio.sleep(0.01)
-            snapshot = await manager.get_snapshot(job_id)
+            snapshot = await asyncio.wait_for(manager.get_snapshot(job_id), timeout=5.0)
         assert snapshot.status == JobStatus.COMPLETED
         assert snapshot.links.execution_id == expected
         assert loop._run_generation.call_args.kwargs["generation_number"] == 2
@@ -709,7 +709,7 @@ async def test_start_evolve_postacceptance_cancellation_preserves_claim_owner(
         assert not runner_task.cancelled()
         assert not runner_task.done()
         assert not job_task.cancelled()
-        snapshot = await manager.get_snapshot(job_id)
+        snapshot = await asyncio.wait_for(manager.get_snapshot(job_id), timeout=5.0)
         assert snapshot.links.execution_id == expected_execution_id
 
         job_events, _ = await store.get_events_after("job", job_id, last_row_id=0)
@@ -718,7 +718,7 @@ async def test_start_evolve_postacceptance_cancellation_preserves_claim_owner(
 
         release_work.set()
         await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
-        completed = await manager.get_snapshot(job_id)
+        completed = await asyncio.wait_for(manager.get_snapshot(job_id), timeout=5.0)
         assert completed.status == JobStatus.COMPLETED
         assert completed.links.execution_id == expected_execution_id
         assert not claim_cancelled.is_set()

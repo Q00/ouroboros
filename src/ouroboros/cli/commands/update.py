@@ -498,6 +498,8 @@ def _refresh_runtime_config(
     command = [str(identity.console_path), "setup", "--runtime", runtime]
     if runtime in {"opencode", "opencode_cli"} and opencode_mode is not None:
         command.extend(["--opencode-mode", opencode_mode])
+    if runtime in {"codex", "codex_cli"}:
+        command.append("--preserve-existing-llm")
     command.append("--non-interactive")
     return _run_step(
         command,

@@ -1,5 +1,7 @@
 # Hidden-Checklist Convergence Architecture
 
+> 中文说明：[README.zh-CN.md](./README.zh-CN.md)
+
 > Generated: 2026-08-07
 > Approach: Pragmatic reuse of existing evaluation and Ralph owners
 

@@ -694,7 +694,7 @@ class TestBackgroundJobPath:
         work_started = asyncio.Event()
         release_work = asyncio.Event()
 
-        async def finish_after_release(_arguments):
+        async def finish_after_release(_arguments, **_kwargs):
             work_started.set()
             await release_work.wait()
             return Result.ok(
@@ -1089,7 +1089,7 @@ class TestBackgroundJobPath:
         release_work = asyncio.Event()
         original_start_job = manager.start_job
 
-        async def finish_after_release(_arguments):
+        async def finish_after_release(_arguments, **_kwargs):
             work_started.set()
             await release_work.wait()
             return Result.ok(
@@ -1157,7 +1157,7 @@ class TestBackgroundJobPath:
         release_evaluation = asyncio.Event()
         evaluation_calls = 0
 
-        async def reject_after_release(_arguments):
+        async def reject_after_release(_arguments, **_kwargs):
             nonlocal evaluation_calls
             evaluation_calls += 1
             evaluation_started.set()

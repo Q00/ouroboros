@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.mcp.detached_jobs import (
     DetachedJobRequest,
     cleanup_worker_artifacts,
@@ -281,12 +282,34 @@ async def run_worker(request_path: Path) -> int:
             cleanup_worker_artifacts(request_path)
 
 
+def _flush_telemetry_before_exit() -> None:
+    """Deliver the queued terminal `workflow_outcome` event before this
+    worker process exits.
+
+    run_worker only returns once the owned job has a durable terminal event,
+    which is exactly when JobManager queues the one `workflow_outcome` event
+    PostHog's published counting rule reads (see TELEMETRY.md). That event
+    sits in telemetry's daemon-thread queue until something flushes it;
+    nothing else in this process ever will, and this worker is about to
+    exit. A detached job worker is a short-lived background process, not an
+    interactive command, so a bounded exit delay here does not violate
+    telemetry's "never blocks a command" contract -- there is no command
+    left to keep responsive by the time this runs.
+    """
+    usage_telemetry.flush(timeout=5.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print("usage: python -m ouroboros.mcp.detached_worker REQUEST.json", file=sys.stderr)
         return 2
-    return asyncio.run(run_worker(Path(args[0]).expanduser().resolve()))
+    try:
+        return asyncio.run(run_worker(Path(args[0]).expanduser().resolve()))
+    finally:
+        # Covers every run_worker exit path (success, failure, compensation)
+        # since it wraps the whole asyncio.run call.
+        _flush_telemetry_before_exit()
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through subprocess tests

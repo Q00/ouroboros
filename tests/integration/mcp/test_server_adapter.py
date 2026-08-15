@@ -694,10 +694,12 @@ class TestCreateOuroborosServer:
         "ouroboros_brownfield",
         "ouroboros_cancel_execution",
         "ouroboros_cancel_job",
+        "ouroboros_checklist_verify",
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -735,7 +737,50 @@ class TestCreateOuroborosServer:
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == __version__
         tool_names = {tool.name for tool in server.info.tools}
+        assert len(tool_names) == 36
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
+
+    def test_checklist_verify_reuses_the_registered_evaluator(self) -> None:
+        """Checklist verification must not create a parallel evaluation authority."""
+        from ouroboros.mcp.tools.evaluation_handlers import (
+            ChecklistVerifyHandler,
+            EvaluateHandler,
+        )
+
+        server = create_ouroboros_server()
+        evaluate = server._tool_handlers["ouroboros_evaluate"]
+        checklist = server._tool_handlers["ouroboros_checklist_verify"]
+
+        assert isinstance(evaluate, EvaluateHandler)
+        assert isinstance(checklist, ChecklistVerifyHandler)
+        assert checklist.evaluate_handler is evaluate
+
+    @pytest.mark.asyncio
+    async def test_public_client_initializes_lists_and_routes_checklist_verify(self) -> None:
+        """The shipped server exposes and invokes checklist verify across MCP v2."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        server = create_ouroboros_server(runtime_backend="claude_mcp")
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await server.serve(transport="stdio")
+
+        async with Client(server._mcp_server, mode="auto") as client:
+            tool_names = {tool.name for tool in (await client.list_tools()).tools}
+            result = await client.call_tool(
+                "ouroboros_checklist_verify",
+                {
+                    "session_id": "ses_issue_1978",
+                    "seed_content": "goal: missing acceptance criteria",
+                    "artifact": "candidate",
+                },
+            )
+
+            assert client.server_info.name == "ouroboros-mcp"
+
+        assert "ouroboros_checklist_verify" in tool_names
+        assert result.is_error is True
+        assert "Seed validation failed" in result.content[0].text
 
     @pytest.mark.asyncio
     async def test_synapse_control_and_execution_paths_use_durable_relay(self) -> None:

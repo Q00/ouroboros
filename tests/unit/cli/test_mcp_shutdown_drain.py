@@ -19,6 +19,12 @@ from ouroboros.cli.commands import mcp as mcp_module
 
 
 @pytest.fixture(autouse=True)
+def _stub_mcp_dependency_preflight(monkeypatch):
+    """Keep lifecycle tests independent of the optional MCP SDK install."""
+    monkeypatch.setattr(mcp_module, "_require_mcp_dependency", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _stub_brownfield_store():
     """Keep ``_run_mcp_server`` off the real ~/.ouroboros database."""
     mock_brownfield = AsyncMock()

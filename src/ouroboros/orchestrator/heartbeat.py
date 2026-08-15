@@ -15,6 +15,8 @@ Any runtime can participate — just call acquire/release.
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 import hashlib
 import json
@@ -403,18 +405,72 @@ def process_start_time(pid: int) -> float | None:
     return _get_process_start_time(pid)
 
 
+def _is_windows_process_alive(pid: int) -> bool:
+    """Return whether Windows can confirm that ``pid`` is running.
+
+    This observer is deliberately fail-closed for cleanup: only an invalid PID
+    or a signaled process handle proves that an owner is dead. Win32 boundary
+    failures preserve the lease instead of letting cleanup race a live owner.
+    """
+    process_query_limited_information = 0x1000
+    synchronize = 0x00100000
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    wait_object_0 = 0
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_process(process_query_limited_information | synchronize, False, pid)
+    except OSError:
+        # A broken or unavailable Win32 boundary is not proof that the process
+        # is gone. Preserve its authority until a later probe can decide.
+        return True
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == error_invalid_parameter:
+            return False
+        if error == error_access_denied:
+            return True
+        return True
+
+    try:
+        try:
+            wait_result = wait_for_single_object(handle, 0)
+        except OSError:
+            return True
+        # Only a signaled process handle proves termination. Timeouts and
+        # unknown/failed wait results preserve the live lease conservatively.
+        return wait_result != wait_object_0
+    finally:
+        close_handle(handle)
+
+
 def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool:
     """Return True when ``pid`` is alive and still has ``start_time``.
 
     ``start_time`` is optional for legacy callers, but when present it guards
     against treating a recycled PID as the original owner.
     """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        pass
+    if os.name == "nt":
+        if not _is_windows_process_alive(pid):
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
 
     if start_time is not None:
         current_start = _get_process_start_time(pid)

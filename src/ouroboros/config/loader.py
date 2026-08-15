@@ -625,10 +625,10 @@ def get_cli_path() -> str | None:
     Priority:
         1. OUROBOROS_CLI_PATH environment variable
         2. config.yaml orchestrator.cli_path
-        3. None (use SDK default)
+        3. None (let the active Claude runtime resolve its default)
 
     Returns:
-        Path to CLI binary or None to use SDK default.
+        Path to CLI binary or None to use the active runtime default.
     """
     # 1. Check environment variable (highest priority)
     env_path = os.environ.get("OUROBOROS_CLI_PATH", "").strip()
@@ -644,7 +644,7 @@ def get_cli_path() -> str | None:
         # Config doesn't exist or is invalid - fall back to default
         pass
 
-    # 3. Default: None (SDK uses bundled CLI)
+    # 3. Default: None (the selected Claude runtime resolves its own CLI)
     return None
 
 
@@ -655,7 +655,7 @@ def get_agent_runtime_backend() -> str:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. OUROBOROS_RUNTIME environment variable
         3. config.yaml orchestrator.runtime_backend
-        4. "claude"
+        4. "claude" (Claude Agent SDK runtime)
 
     Returns:
         Normalized runtime backend name.
@@ -1103,6 +1103,28 @@ def get_auto_evolve_enabled() -> bool:
         return True
 
 
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
 def get_auto_evolve_max_generations() -> int:
     """Return the bounded generation budget for automatic Ralph chaining."""
 
@@ -1438,6 +1460,43 @@ def get_opencode_mode() -> str | None:
         return None
 
 
+def get_telemetry_enabled() -> bool:
+    """Whether anonymous usage telemetry may send events.
+
+    Every control that can disable telemetry is resolved first; any one of
+    them wins unconditionally (TELEMETRY.md: "Any one of these disables
+    telemetry completely"):
+
+        1. DO_NOT_TRACK environment variable (any truthy value disables)
+        2. OUROBOROS_TELEMETRY=0/false/off/no
+        3. config.yaml telemetry.enabled: false
+        4. invalid or unreadable configuration (fails closed)
+
+    Only when no disabling source is present does telemetry run (default:
+    on, with first-run notice and TELEMETRY.md contract). An explicit
+    ``OUROBOROS_TELEMETRY=1`` is therefore never an override: it cannot
+    re-enable collection against a persisted opt-out or malformed
+    configuration. A privacy preference can be present in a file whose
+    unrelated field no longer validates; it is never safe to turn collection
+    back on merely because the full application config could not be
+    constructed.
+    """
+    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
+        return False
+    if _env_flag("OUROBOROS_TELEMETRY") is False:
+        return False
+    config_path = get_config_dir() / "config.yaml"
+    # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
+    # persisted configuration rather than the genuinely-absent default-on
+    # case; ``load_config`` below will reject the unreadable target.
+    if not config_path.exists() and not config_path.is_symlink():
+        return True
+    try:
+        return load_config(config_path).telemetry.enabled
+    except (ConfigError, OSError):
+        return False
+
+
 def get_gemini_cli_path() -> str | None:
     """Get Gemini CLI path from environment variable or config file.
 
@@ -1721,7 +1780,8 @@ def get_llm_backend_for_stage(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 
@@ -1793,7 +1853,8 @@ def get_llm_backend_for_role(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 
@@ -1991,34 +2052,23 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    resolved = _resolve_llm_backend_for_models(backend)
     # Recognize the current shipped default AND prior-release shipped defaults
     # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and for Claude-incapable backends it must normalize to the sentinel just
-    # like the current default would. Genuinely explicit, never-shipped ids are
-    # absent from this set and fall through to be preserved verbatim.
+    # and it must normalize exactly like the current default would. Genuinely
+    # explicit, never-shipped ids are absent from this set and are preserved
+    # verbatim.
     is_shipped_default = candidate in (
         *recognized_shipped_defaults(default_model),
         *extra_shipped_defaults,
     )
-    if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS and is_shipped_default:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS and is_shipped_default:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
-        return _ZCODE_DEFAULT_MODEL
+    if is_shipped_default:
+        # A recognized shipped default — current or prior-release — is a pin
+        # the user never chose, so every backend maps it to its own default:
+        # Claude-incapable backends keep their sentinel as before, and
+        # Claude-capable backends now take the current default pin instead of
+        # leaking a retired id to the API (#2069). Never-shipped ids are
+        # deliberate user pins and fall through verbatim.
+        return _default_model_for_backend(default_model, backend=backend)
 
     return candidate
 

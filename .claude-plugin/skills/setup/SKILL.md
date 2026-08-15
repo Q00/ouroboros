@@ -27,20 +27,54 @@ ooo setup
 /ouroboros:setup --uninstall
 ```
 
-> **Note**: Standalone Claude SDK setup does two things:
-> 1. **Runtime configuration** — selects the Claude SDK profile (MCP 1.x based)
+> **Note**: Claude setup does two things:
+> 1. **Runtime configuration** — selects the Claude Agent SDK profile on MCP 1.x
 > 2. **CLAUDE.md integration** (optional) — per-project, adds an Ouroboros command reference block
 >
-> It deliberately leaves `~/.claude/mcp.json` untouched. Ouroboros MCP uses MCP 2
-> and cannot load the standalone Claude SDK backend inside its isolated process.
-> Use `ouroboros setup --runtime <codex|opencode|kiro|copilot|hermes>` for a
-> supported MCP host profile.
+> It deliberately leaves `~/.claude/mcp.json` untouched because marketplace
+> plugin wiring owns that file. `[claude]` and its explicit `[claude-sdk]` alias
+> use MCP 1.x. The plugin launches `[mcp]` in a separate MCP 2 process with the
+> dependency-free `[claude-cli]` worker.
 
 ---
 
 ## Setup Wizard Flow
 
 When the user invokes this skill, guide them through an enhanced 6-step wizard with progressive disclosure and celebration checkpoints.
+
+### Python Runtime (Required)
+
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+Only the probe and child interpreter discard inherited CPython path-selection
+overrides; the caller shell keeps its environment unchanged.
+
+<!-- ouroboros-python-resolver:start -->
+```bash
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 "$@")
+    return
+  fi
+  if command -v python >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python "$@")
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command uv run --no-project --quiet --python '>=3.12' python "$@")
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
+```
+<!-- ouroboros-python-resolver:end -->
 
 ---
 
@@ -95,7 +129,7 @@ Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`
 Create `~/.ouroboros/` directory if it doesn't exist. Preserve any existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:
 
 ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -122,20 +156,20 @@ If `star_asked` is already `true`, skip this step silently.
 Check the user's environment with clear feedback:
 
 ```bash
-python3 --version
+ouroboros_python --version
 which uvx 2>/dev/null && uvx --version 2>/dev/null
 which claude 2>/dev/null
 ```
 
-**IMPORTANT: If system Python is < 3.12 but uvx is available, also check uv-managed Python:**
+For diagnostics, list uv-managed Python installations when uv is available:
 
 ```bash
 uv python list 2>/dev/null | grep "cpython-3.1[2-9]"
 ```
 
-If `uv python list` shows Python >= 3.12 available, CLI workflows are available
-through uv-managed Python even when system Python is older. This does not make
-the standalone Claude SDK and MCP 2 profiles import-compatible.
+The resolver already rejects system Python below 3.12 and provisions a
+compatible uv-managed Python when needed. This does not make the isolated
+`[claude-sdk]` and MCP 2 profiles import-compatible.
 
 **Report results with personality:**
 
@@ -143,8 +177,8 @@ the standalone Claude SDK and MCP 2 profiles import-compatible.
 Environment Detected:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-System Python 3.11         [!] Below 3.12
-uv Python 3.12+            [✓] Available (uvx will use this)
+Skill Python 3.12+         [✓] Resolver-selected
+uv Python 3.12+            [✓] Available
 uvx package runner         [✓] Available
 Runtime backend            [✓] Detected
 
@@ -155,7 +189,7 @@ Runtime backend            [✓] Detected
 
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
-| Python >= 3.12 + Claude CLI | **Ready** | Configure the standalone `[claude]` profile and skills; do not register MCP |
+| Python >= 3.12 + Claude CLI | **Ready** | Configure `[claude]` SDK/MCP 1 and skills |
 | uvx + Python >= 3.12 | **MCP-capable elsewhere** | Use a supported CLI-backed runtime setup for isolated `ouroboros-ai[mcp]` |
 | Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
 | No package runner or Ouroboros package | **Install needed** | Install uv first, then proceed |
@@ -172,12 +206,13 @@ Or install uv (recommended — handles deps automatically). Any one of:
 Then re-run: ooo setup
 ```
 
-**IMPORTANT**: Never install `[mcp,claude]` together and never write a direct
+**IMPORTANT**: Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]`
+together and never write a direct
 `ouroboros` or `python -m ouroboros` MCP fallback. MCP 2 launchers must use an
-isolated `uvx --from 'ouroboros-ai[mcp]' ...` or
-`pipx run --spec 'ouroboros-ai[mcp]' ...` process. This Claude SDK setup does
-not have a compatible Claude backend inside that process, so do not write any
-Ouroboros entry to `~/.claude/mcp.json`.
+isolated `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` or
+`pipx run --spec 'ouroboros-ai[mcp]' ...` process. Only `[mcp,claude-cli]` is
+supported because the CLI worker is out of process. Do not write
+an Ouroboros entry to `~/.claude/mcp.json`; the plugin owns that registration.
 
 **If prerequisites are missing, show:**
 ```
@@ -209,7 +244,8 @@ Great news! You're ready for the full Ouroboros experience.
   Verifying Runtime Boundary...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The standalone Claude SDK profile remains separate from MCP 2.
+The default Claude SDK profile stays on MCP 1.x. The plugin-owned MCP server
+runs MCP 2 separately and selects the `[claude-cli]` worker.
 This setup enables:
 
   Visual TUI Dashboard    [Watch execution in real-time]
@@ -220,14 +256,14 @@ This setup enables:
 
 **Do not create, update, or remove `~/.claude/mcp.json`.** Existing entries may
 be user-managed or belong to another compatible runtime. Explain that advanced
-MCP workflows require a supported CLI-backed runtime setup, which will register
-its own isolated MCP 2 launcher.
+MCP workflows require a host-managed isolated `[mcp]` launcher. The Claude
+marketplace plugin or another supported host setup owns that registration.
 
 **Celebration Checkpoint 2:**
 ```
 Runtime boundary verified! You can now:
 - Use Claude-native ooo interview, seed, evaluate, and unstuck workflows
-- Configure a supported CLI-backed runtime separately for MCP tools
+- Use the Claude SDK on MCP 1.x with isolated MCP 2 tools
 - Keep the Claude SDK and MCP 2 dependency graphs conflict-free
 ```
 
@@ -260,7 +296,7 @@ A backup will be created: CLAUDE.md.bak
 **If "Preview first", show:**
 ````markdown
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.50.8 -->
+<!-- ooo:VERSION:0.51.5 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.
@@ -340,8 +376,10 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Confirm the saved Ouroboros config selects the standalone Claude runtime while
-`~/.claude/mcp.json` was not mutated by this setup.
+Confirm the saved Ouroboros config selects the default Claude Agent SDK runtime
+on MCP 1.x while `~/.claude/mcp.json` was not mutated by this setup. The
+dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`
+selection for the isolated MCP 2 process.
 
 ---
 
@@ -354,10 +392,10 @@ Display with celebration:
   Ouroboros Setup Complete!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Mode:                     Standalone Claude SDK
+Mode:                     Claude Agent SDK (MCP 1.x)
 Skills Registered:        15 workflow skills
 Agents Available:         9 specialized agents
-MCP Server:               Not registered (MCP 1.x / 2 boundary)
+MCP Server:               Host-owned (config not mutated)
 CLAUDE.md:                ✓ Integrated
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -611,14 +649,12 @@ If Yes:
 
 ## Setup Troubleshooting
 
-### "python3: command not found"
+### "No compatible Python found"
 ```
-Plugin mode still works! You can use:
-- ooo interview
-- ooo seed
-- ooo unstuck
+Plugin mode works without a global Python when uv is on PATH. The skill
+resolver uses a compatible python3, then python, then uv-managed Python >= 3.12.
 
-For Full Mode, install Python >= 3.12:
+If neither a compatible interpreter nor uv is available, install one:
   macOS: brew install python@3.12
   Ubuntu: sudo apt install python3.12
   Windows: python.org/downloads
@@ -628,11 +664,12 @@ For Full Mode, install Python >= 3.12:
 ```
 uvx is recommended but not required. Alternative:
 
-For standalone Claude SDK workflows:
+For the default Claude SDK runtime:
   pip install 'ouroboros-ai[claude]'
 
-For MCP 2, install uv or pipx and configure a supported CLI-backed runtime.
-Do not combine the extras or add a direct Python fallback to mcp.json.
+`[claude-sdk]` is an explicit alias. Use `[claude-cli]` only for the isolated
+MCP 2 server worker. Do not combine `[claude]`, `[claude-sdk]`, or `[all]` with
+`[mcp]`, and do not add a direct Python fallback to mcp.json.
 ```
 
 ### "~/.claude/mcp.json conflicts"

@@ -5,7 +5,7 @@ mod views;
 
 use std::path::PathBuf;
 
-use slt::{Border, Color, Context, KeyModifiers, RunConfig, Theme};
+use slt::{Border, Color, Context, KeyCode, KeyModifiers, RunConfig, Theme};
 
 use crate::state::*;
 
@@ -204,7 +204,10 @@ fn main() -> std::io::Result<()> {
             ..Default::default()
         },
         |ui: &mut Context| {
-            handle_global_keys(ui, &mut state);
+            let key_effects = handle_global_keys(ui, &mut state);
+            if key_effects.quit_requested {
+                return;
+            }
 
             if let Some(cmd_idx) = ui.command_palette(&mut state.command_palette) {
                 // Dispatch by label: the Pause/Resume entries are removed in
@@ -240,7 +243,14 @@ fn main() -> std::io::Result<()> {
 
                 ui.container().grow(1).p(1).col(|ui| match state.screen {
                     Screen::Dashboard => views::dashboard::render(ui, &mut state),
-                    Screen::Execution => views::execution::render(ui, &mut state),
+                    Screen::Execution => {
+                        let show_log_panel = state.show_log_panel;
+                        if key_effects.suppress_log_panel_input {
+                            state.show_log_panel = false;
+                        }
+                        views::execution::render(ui, &mut state);
+                        state.show_log_panel = show_log_panel;
+                    }
                     Screen::Lineage => views::lineage::render(ui, &mut state),
                     Screen::SessionSelector => {
                         if let Some(idx) = views::session_selector::render(ui, &mut state) {
@@ -285,6 +295,11 @@ fn main() -> std::io::Result<()> {
                 render_footer(ui, &state);
             });
 
+            // Run open-panel shortcuts after widgets have had the opportunity
+            // to consume text input. This prevents the `l` that opens the log
+            // panel from also becoming the first filter character.
+            handle_post_render_keys(ui, &mut state, key_effects);
+
             poll_counter += 1;
             if let Some(ref mut conn) = ouro_db {
                 if poll_counter % 30 == 0 {
@@ -309,23 +324,45 @@ fn main() -> std::io::Result<()> {
     )
 }
 
-fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
-    let on_execution = state.screen == Screen::Execution;
-    // Log panel has text input, so avoid consuming keys when it's active
-    let log_input_active = on_execution && state.show_log_panel;
+#[derive(Clone, Copy, Default)]
+struct GlobalKeyEffects {
+    quit_requested: bool,
+    open_palette_requested: bool,
+    suppress_log_panel_input: bool,
+}
 
-    if ui.key('q') {
-        ui.quit();
+fn handle_global_keys(ui: &mut Context, state: &mut AppState) -> GlobalKeyEffects {
+    let on_execution = state.screen == Screen::Execution;
+    // The log panel has text input. Lifecycle and letter shortcuts below are
+    // gated while it is active; q, 1-4, and Ctrl+P remain global.
+    let log_input_active = on_execution && state.show_log_panel;
+    let open_palette_requested =
+        !state.command_palette.open && ui.key_mod('p', KeyModifiers::CONTROL);
+
+    // Keep character input available to the log filter. `l` opens the panel,
+    // while Escape is the unambiguous close path once its input owns focus.
+    // Palette activation dominates the whole drained event batch: neither a
+    // coalesced Escape nor the Escape that dismisses an established palette
+    // may mutate the underlying panel.
+    if log_input_active
+        && !state.command_palette.open
+        && !open_palette_requested
+        && ui.key_code(KeyCode::Esc)
+    {
+        state.show_log_panel = false;
     }
-    if ui.key_mod('p', KeyModifiers::CONTROL) {
-        state.command_palette.open = !state.command_palette.open;
+
+    let quit_requested = ui.key('q');
+    let numbered_screen_keys = [ui.key('1'), ui.key('2'), ui.key('3'), ui.key('4')];
+    if quit_requested {
+        ui.quit();
     }
     // Only the mock simulation is owned by this process. Attached to a real
     // database the TUI is an observer, and flipping local state would report a
     // pause/resume the execution never made (Q00/ouroboros#1833).
     let lifecycle_key_active =
         state.lifecycle_controls_enabled && !state.command_palette.open && !log_input_active;
-    if ui.key('p') && lifecycle_key_active {
+    if ui.key('p') && lifecycle_key_active && !open_palette_requested {
         state.is_paused = true;
         state.status = ExecutionStatus::Paused;
         state.add_log(LogLevel::Info, "tui", "Execution paused by user");
@@ -336,16 +373,16 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
         state.add_log(LogLevel::Info, "tui", "Execution resumed");
     }
     // Tab navigation: 1=Dashboard, 2=Execution, 3=Lineage, s=Sessions
-    if ui.key('1') {
+    if numbered_screen_keys[0] {
         state.tabs.selected = 0;
     }
-    if ui.key('2') {
+    if numbered_screen_keys[1] {
         state.tabs.selected = 1;
     }
-    if ui.key('3') {
+    if numbered_screen_keys[2] {
         state.tabs.selected = 2;
     }
-    if ui.key('4') {
+    if numbered_screen_keys[3] {
         state.tabs.selected = 3;
     }
     if ui.key('e') && !log_input_active {
@@ -354,11 +391,27 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key('s') && !state.command_palette.open && !log_input_active {
         state.tabs.selected = 3; // Sessions
     }
-    // Execution-specific toggles (only on Execution tab)
-    if on_execution && !log_input_active {
-        if ui.key('l') {
-            state.show_log_panel = !state.show_log_panel;
-        }
+    GlobalKeyEffects {
+        quit_requested,
+        open_palette_requested,
+        suppress_log_panel_input: state.show_log_panel
+            && (quit_requested
+                || open_palette_requested
+                || numbered_screen_keys.into_iter().any(|pressed| pressed)),
+    }
+}
+
+fn handle_post_render_keys(
+    ui: &mut Context,
+    state: &mut AppState,
+    effects: GlobalKeyEffects,
+) {
+    if effects.open_palette_requested {
+        state.command_palette.toggle();
+        return;
+    }
+    if state.screen == Screen::Execution && !state.show_log_panel && ui.key('l') {
+        state.show_log_panel = true;
     }
 }
 
@@ -487,12 +540,23 @@ fn render_footer(ui: &mut Context, state: &AppState) {
     let dim = ui.theme().text_dim;
     let accent = ui.theme().accent;
 
-    // Tab-specific hints
-    let extra_keys: &[(&str, &str)] = match state.screen {
-        Screen::Dashboard => &[("↑↓", "Navigate tree"), ("Enter", "Expand/Collapse")],
-        Screen::Execution => &[("l", "Log panel"), ("↑↓", "Scroll")],
-        Screen::Lineage => &[("↑↓", "Select lineage")],
-        Screen::SessionSelector => &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")],
+    // Modal hints take precedence over the underlying screen. In particular,
+    // Escape dismisses the command palette without closing an Execution log
+    // panel underneath it.
+    let extra_keys: &[(&str, &str)] = if state.command_palette.open {
+        &[("Esc", "Close palette"), ("↑↓", "Select"), ("Enter", "Run")]
+    } else {
+        match state.screen {
+            Screen::Dashboard => &[("↑↓", "Navigate tree"), ("Enter", "Expand/Collapse")],
+            Screen::Execution if state.show_log_panel => {
+                &[("Esc", "Close logs"), ("↑↓", "Scroll")]
+            }
+            Screen::Execution => &[("l", "Open logs"), ("↑↓", "Scroll")],
+            Screen::Lineage => &[("↑↓", "Select lineage")],
+            Screen::SessionSelector => {
+                &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")]
+            }
+        }
     };
 
     // Pause/Resume is advertised only when this process owns the execution
@@ -517,4 +581,249 @@ fn render_footer(ui: &mut Context, state: &AppState) {
             ui.text(format!(" {}  ", desc)).fg(dim);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slt::{EventBuilder, TestBackend};
+
+    fn render_test_frame(
+        events: EventBuilder,
+        focus_index: usize,
+        previous_focus_count: usize,
+        state: &mut AppState,
+    ) -> (GlobalKeyEffects, Option<usize>) {
+        let mut backend = TestBackend::new(80, 24);
+        let mut effects = GlobalKeyEffects::default();
+        let mut selected = None;
+        backend.render_with_events(
+            events.build(),
+            focus_index,
+            previous_focus_count,
+            |ui| {
+                effects = handle_global_keys(ui, state);
+                if effects.quit_requested {
+                    return;
+                }
+                selected = ui.command_palette(&mut state.command_palette);
+                render_tab_bar(ui, state);
+                if state.screen == Screen::Execution
+                    && state.show_log_panel
+                    && !effects.suppress_log_panel_input
+                {
+                    views::logs::render_log_panel(ui, state);
+                }
+                handle_post_render_keys(ui, state, effects);
+            },
+        );
+        (effects, selected)
+    }
+
+    fn render_log_frame(
+        events: EventBuilder,
+        focus_index: usize,
+        previous_focus_count: usize,
+        state: &mut AppState,
+    ) -> GlobalKeyEffects {
+        render_test_frame(events, focus_index, previous_focus_count, state).0
+    }
+
+    fn render_palette_frame(
+        events: EventBuilder,
+        state: &mut AppState,
+    ) -> Option<usize> {
+        render_test_frame(events, 0, 1, state).1
+    }
+
+    #[test]
+    fn execution_log_panel_opens_with_l_and_closes_with_escape() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+
+        assert!(!render_log_frame(
+            EventBuilder::new().key('l'),
+            0,
+            0,
+            &mut state,
+        )
+        .quit_requested);
+        assert!(state.show_log_panel);
+        assert!(state.log_filter.value.is_empty());
+
+        assert!(!render_log_frame(
+            EventBuilder::new().key_code(KeyCode::Esc),
+            0,
+            1,
+            &mut state,
+        )
+        .quit_requested);
+        assert!(!state.show_log_panel);
+    }
+
+    #[test]
+    fn open_log_panel_keeps_q_and_number_keys_global() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.show_log_panel = true;
+        state.tabs.selected = 1;
+
+        let effects = render_log_frame(EventBuilder::new().key('q'), 0, 1, &mut state);
+        assert!(effects.quit_requested);
+        assert!(effects.suppress_log_panel_input);
+        assert!(state.show_log_panel);
+        assert!(state.log_filter.value.is_empty());
+
+        for (key, selected, screen) in [
+            ('1', 0, Screen::Dashboard),
+            ('2', 1, Screen::Execution),
+            ('3', 2, Screen::Lineage),
+            ('4', 3, Screen::SessionSelector),
+        ] {
+            let effects = render_log_frame(EventBuilder::new().key(key), 0, 1, &mut state);
+            assert!(!effects.quit_requested);
+            assert!(effects.suppress_log_panel_input);
+            assert_eq!(state.tabs.selected, selected);
+            assert_eq!(state.screen, screen);
+            assert!(state.show_log_panel);
+            assert!(state.log_filter.value.is_empty());
+        }
+
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+        let effects = render_log_frame(
+            EventBuilder::new().key_with(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            0,
+            1,
+            &mut state,
+        );
+        assert!(effects.open_palette_requested);
+        assert!(effects.suppress_log_panel_input);
+        assert!(state.command_palette.open);
+        assert!(state.command_palette.input.is_empty());
+        assert!(state.log_filter.value.is_empty());
+    }
+
+    #[test]
+    fn open_log_panel_keeps_l_available_to_the_filter_input() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.show_log_panel = true;
+        state.tabs.selected = 1;
+        assert!(!render_log_frame(
+            EventBuilder::new().key('l'),
+            0,
+            1,
+            &mut state,
+        )
+        .quit_requested);
+
+        assert!(state.show_log_panel);
+        assert_eq!(state.log_filter.value, "l");
+    }
+
+    #[test]
+    fn palette_reopens_reset_without_touching_execution_or_log_filter() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+        state.show_log_panel = true;
+        state.log_filter.value = "persisted logs".into();
+        state.status = ExecutionStatus::Running;
+        state.is_paused = false;
+
+        let control_p = || {
+            EventBuilder::new().key_with(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        };
+        let effects = render_log_frame(control_p(), 0, 1, &mut state);
+        assert!(effects.open_palette_requested);
+        assert!(state.command_palette.open);
+        assert!(state.command_palette.input.is_empty());
+        assert_eq!(state.command_palette.cursor, 0);
+
+        assert_eq!(
+            render_palette_frame(
+                EventBuilder::new()
+                    .key('e')
+                    .key_code(KeyCode::Down)
+                    .key_code(KeyCode::Down),
+                &mut state,
+            ),
+            None,
+        );
+        assert_eq!(state.command_palette.input, "e");
+        assert_eq!(state.command_palette.cursor, 1);
+
+        assert_eq!(
+            render_palette_frame(
+                EventBuilder::new().key_code(KeyCode::Esc),
+                &mut state,
+            ),
+            None,
+        );
+        assert!(!state.command_palette.open);
+        assert_eq!(state.log_filter.value, "persisted logs");
+        assert!(state.show_log_panel);
+
+        let effects = render_log_frame(control_p(), 0, 1, &mut state);
+        assert!(effects.open_palette_requested);
+        assert!(state.command_palette.open);
+        assert!(state.command_palette.input.is_empty());
+        assert_eq!(state.command_palette.cursor, 0);
+        assert_eq!(state.status, ExecutionStatus::Running);
+        assert!(!state.is_paused);
+        assert_eq!(state.log_filter.value, "persisted logs");
+        assert!(state.show_log_panel);
+
+        assert_eq!(
+            render_palette_frame(
+                EventBuilder::new().key_code(KeyCode::Enter),
+                &mut state,
+            ),
+            Some(0),
+        );
+    }
+
+    #[test]
+    fn palette_opening_batch_does_not_close_the_underlying_log_panel() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+        state.show_log_panel = true;
+        state.log_filter.value = "persisted logs".into();
+
+        let effects = render_log_frame(
+            EventBuilder::new()
+                .key_with(KeyCode::Char('p'), KeyModifiers::CONTROL)
+                .key_code(KeyCode::Esc),
+            0,
+            1,
+            &mut state,
+        );
+
+        assert!(effects.open_palette_requested);
+        assert!(state.command_palette.open);
+        assert!(state.show_log_panel);
+        assert_eq!(state.log_filter.value, "persisted logs");
+    }
+
+    #[test]
+    fn footer_advertises_palette_escape_over_underlying_log_close() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+        state.show_log_panel = true;
+        state.command_palette.open = true;
+
+        let mut backend = TestBackend::new(120, 3);
+        backend.render(|ui| render_footer(ui, &state));
+        backend.assert_contains("Esc Close palette");
+        assert!(!backend.to_string_trimmed().contains("Esc Close logs"));
+
+        state.command_palette.open = false;
+        backend.render(|ui| render_footer(ui, &state));
+        backend.assert_contains("Esc Close logs");
+        assert!(!backend.to_string_trimmed().contains("Esc Close palette"));
+    }
 }

@@ -343,11 +343,19 @@ async def _execution_events(
     return [latest] if latest is not None else []
 
 
-async def _validate_event_store(db_path: Path) -> None:
+async def _persisted_event_count(db_path: Path) -> int:
+    """Validate the store read-only and return its persisted event count.
+
+    ``create_schema=False`` keeps this a pure probe: a missing or corrupt
+    store fails cleanly and nothing is ever created or migrated (#1813).
+    """
     store = EventStore(sqlite_database_url(db_path), read_only=True)
     await store.initialize(create_schema=False)
     try:
+        # The one-row query validates the full column shape (a bare COUNT
+        # would accept any table that happens to be named `events`).
         await store.query_events(limit=1)
+        return await store.count_events()
     finally:
         await store.close()
 
@@ -887,13 +895,19 @@ def health() -> None:
                     checks.append(_health_row("Database", "error", f"not readable: {exc}"))
                 else:
                     try:
-                        asyncio.run(_validate_event_store(db_path))
+                        event_count = asyncio.run(_persisted_event_count(db_path))
                     except Exception as exc:
                         checks.append(
                             _health_row("Database", "error", f"invalid event store: {exc}")
                         )
                     else:
-                        checks.append(_health_row("Database", "ok", db_detail))
+                        checks.append(
+                            _health_row(
+                                "Database",
+                                "ok",
+                                f"{db_detail} ({event_count} events persisted)",
+                            )
+                        )
         except Exception as exc:
             checks.append(_health_row("Database", "error", str(exc)))
 

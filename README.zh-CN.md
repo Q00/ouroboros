@@ -6,7 +6,7 @@
   <br/>
   ◯ ─────────── ◯
   <br/><br/>
-  <img src="./docs/images/ouroboros.png" width="520" alt="Ouroboros">
+  <img src="./docs/images/ouroboros.png" width="420" alt="Ouroboros">
   <br/><br/>
   <strong>O U R O B O R O S</strong>
   <br/><br/>
@@ -16,12 +16,15 @@
 
 
 <p align="center">
-  <strong>别再堆提示词，先把规约写清楚。</strong>
+  <strong>让 Agent 自己变聪明，边界由我们来划定。</strong>
   <br/>
-  <sub>面向 AI 编码工作流的 Agent OS —— 可重放、规约优先</sub>
+  <sub>不用手写 prompt，它跑起来、失败、一代比一代聪明。评分命令和期望结果不会进入我们交给它的成功契约。</sub>
+  <br/>
+  <sub>面向可重放 AI 编码工作流的 <strong>Agent OS</strong></sub>
 </p>
 
 <p align="center">
+  <a href="https://github.com/Q00/ouroboros"><img src="https://img.shields.io/github/stars/Q00/ouroboros?color=yellow&logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
   <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
@@ -34,12 +37,61 @@
   <a href="#你能得到什么">效果</a> ·
   <a href="#循环">运作原理</a> ·
   <a href="#命令">命令</a> ·
-  <a href="#从-wonder-到本体论">理念</a>
+  <a href="#从-wonder-到本体论">理念</a> ·
+  <a href="https://ouroboros.page/learn/zh/">指南</a>
 </p>
 
-**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes 变成一份经过验证、可运行的代码库。**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero-zh bash
+```
+
+<p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
+
+<p align="center"><sub><b>四次各自独立的运行，四个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
+
+<table align="center">
+<tr>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
+</tr>
+</table>
+
+**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、Zcode、Goose、GJC、Antigravity 和 Grok，变成一份经过验证、可运行的代码库。**
 
 Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把非确定性的 agent 工作转换成一份可重放、可观测、受策略约束的执行契约。它用一套结构化的、规约优先的工作流取代东拼西凑的 prompt：访谈、定型、执行、评估、演化。
+
+---
+
+## Ouroboros Agent OS 技术栈
+
+和任何操作系统一样，Ouroboros 分成三层：一层稳定的、提供原语的 **OS 层**，一层承载领域工作流的**应用层**，还有一个人真正坐在前面的 **shell**。三个仓库，一个技术栈：
+
+| 层级 | 仓库 | 职责 | 你得到什么 |
+| :--- | :--- | :--- | :--- |
+| **Shell**（终端客户端） | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | 原生终端 UI，在一个会话里跨 Claude / Codex / Gemini CLI 运行 `ooo` 工作流 | TUI、wonderTool 决策选择器、MCP 面板状态、命令发现 |
+| **Apps**（领域工作流） | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel 插件契约 —— 把核心原语组合成可安装的领域程序（PR 操作、Jira 同步、故障处理、发布） | 插件清单、按范围授权、审计与溯源、参考插件 |
+| **OS**（本仓库） | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS 内核 —— Seed、Ledger、Runtime、MCP、安全边界 | `ooo` 命令、规约优先的工作流引擎、多运行时适配 |
+
+**它们怎么连起来：**
+
+```
+  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
+   shell             user-level apps                        kernel
+```
+
+- **内核**（`ouroboros`）持有契约：不管最终由哪个 LLM 执行，每一个动作都会变成一个绑定 seed、记入 ledger、可回放的事件。
+- **插件**（`ouroboros-plugins`）针对这份契约声明自己需要的能力范围，所以领域工作流（review 一个 PR、分诊一张 Linear 工单、跑一次发布）始终是可审计、受策略约束的，而不是一次性的 prompt。
+- **Ourocode** 是终端 shell：它把 MCP 状态、访谈问题、wonderTool 决策都做成一等公民的 TUI 元素，让你不用离开键盘、也不用在多个 CLI 之间来回切换就能驱动这套 OS。
+
+你可以只用 `ouroboros` 配任意受支持的 CLI；需要领域工作流时叠加插件；想要一个统一的终端驾驶舱时再装 `ourocode`。
+
+> **免责声明。** Ouroboros 项目及其社区**与任何加密货币、代币、meme 币或交易社群均无关联** —— 包括但不限于 pump.fun 及其他发射平台上任何名为 "ouroboros" 的代币。这是一个开源开发者工具。我们不发行、不背书、也不持有任何代币。任何声称与本项目有关联的代币都是未经授权的。
+
+> **命名说明。** 还有一个同名为 "Ouroboros" 的独立开源项目，与本项目无关 —— 是 Anton Razzhigaev 开发的自我修改型、持久记忆 agent（`github.com/razzant/ouroboros`）。两者不共享代码，也没有任何关联。本项目在执行前锁定规约，不会重写自己的架构 —— 如果你要找的是会改写自身代码的 agent，那是另一个项目。
 
 ---
 
@@ -60,21 +112,102 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 **安装** —— 一条命令，环境自动识别：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-zh bash
 ```
 
-**开始** —— 打开你的 AI 编码 agent，直接上：
+**第一条命令** —— 打开你的 AI 编码 agent，按顺序运行：
 
 ```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
 
-> 支持 Claude Code、Codex CLI、OpenCode、Hermes。安装脚本会为 Claude Code 配置独立的 `[claude]` 运行环境，并为 Codex CLI 和 Hermes CLI 注册隔离的 MCP 2 server。OpenCode 用户在安装后运行 `ouroboros setup --runtime opencode` 即可。
+`ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
+启动第一个工作流的命令。
+
+也可以不经过 agent 宿主，直接在终端里跑：
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
+<p align="center">
+  <sub>本页顶部的录屏就是这条命令。放在最前面，是为了让你在安装之前先看到它。</sub>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ooo-setup-refresh.gif" width="760" alt="终端录制：ouroboros setup refresh 安装 Codex 规则与技能、Hermes 技能、OpenCode 插件与说明文件、Pi 和 GJC 的 bridge，最后输出 Refreshed runtime artifacts: codex, hermes, opencode, pi, gjc">
+</p>
+
+<p align="center">
+  <sub>在一台机器上跑 <code>ouroboros setup refresh</code>。它只装进这台机器真正有的宿主，各按各自的形态：Codex 装规则和技能，Hermes 装技能，OpenCode 装插件和 <code>AGENTS.md</code>，Pi 和 GJC 装 bridge。你的机器上会出现 13 个里你装了的那些。</sub>
+</p>
+
+> 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型。
+
+<details>
+<summary><strong>Codex 插件快速开始</strong></summary>
+
+需要 `codex` 在 `PATH` 中，并且主机上有 `uvx`（插件的 MCP 描述符用它启动
+server）。可用 `pipx install uv`、`pip install --user uv` 或 `brew install uv`
+安装。
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+打开一个新的 Codex 会话，按顺序运行：
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` 只需运行一次，用来准备运行环境。准备就绪后，它会沿用 Codex
+当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
+
+</details>
+
+<details>
+<summary><strong>Kiro CLI 快速开始</strong></summary>
+
+```bash
+pipx install 'ouroboros-ai[mcp]'       # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime kiro         # 检测 Kiro CLI、注册 MCP server，并把
+                                        # OUROBOROS_RUNTIME=kiro 写入
+                                        # ~/.kiro/settings/mcp.json（受信任的、由
+                                        # setup 管理的位置——项目内的 .env 属于不受信任
+                                        # 输入，这个键在那里会被忽略）
+```
+
+之后就可以在 Kiro CLI 会话中使用 `ooo` 命令。
+
+</details>
+
+<details>
+<summary><strong>GitHub Copilot CLI 快速开始</strong></summary>
+
+```bash
+gh auth login                                # 一次性 GitHub 认证（用于实时获取模型列表）
+pipx install 'ouroboros-ai[mcp]'             # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # 实时获取模型列表并选择默认模型，
+                                             # 在 ~/.copilot/mcp-config.json 中注册 MCP server
+```
+
+重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。**模型 ID 映射的覆盖范围比看上去要窄**：静态映射表只覆盖 `claude-opus-4-6` 和 `claude-sonnet-4-5`；已经包含 `.` 的 ID 会原样通过；连字符转点号的兜底逻辑会替换**每一个**连字符，因此当前默认值 `claude-opus-4-8` 会变成 `claude.opus.4.8` 而匹配失败。请让各角色模型保持未设置，由 setup 写入发现到的 ID；或显式设置一个 Copilot 可用的点号格式 ID。参见 [#1995](https://github.com/Q00/ouroboros/issues/1995) 与 [Copilot 运行时指南](./docs/runtime-guides/copilot.md)。
+
+完整说明见 [GitHub Copilot CLI 运行时指南](./docs/runtime-guides/copilot.md)。
+
+</details>
 
 <details>
 <summary><strong>其他安装方式</strong></summary>
 
-**仅安装 Claude Code 插件**（不装系统包）：
+**仅安装 Claude Code 插件**（无需安装 Python 包或全局 Python；主机唯一的
+前置条件是 uv。uv 提供启动 MCP server 的 `uvx`，并可为插件技能配置
+Python >= 3.12。兼容的全局 `python3` 或 `python` 只是可选的快速路径；
+缺失或版本过旧时，技能会使用 uv 管理的解释器）：
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
@@ -91,13 +224,21 @@ pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI + dashboard�
 ouroboros setup                         # 配置运行时
 ```
 
-`[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
+`[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
 
 基础包和非 LiteLLM 安装支持 Python 3.12-3.14。包含 LiteLLM 的安装（`[litellm]`、`[all]`、source `--all-extras`）支持 Python 3.12-3.13；当前示例优先使用 Python 3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix)。
 
 历史兼容：在 extras 迁移期间，`ouroboros-ai[dashboard]` 仍然作为兼容别名保留。
 
-各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+**Homebrew（macOS/Linux）**：
+```bash
+brew tap q00/tap
+brew install ouroboros-ai
+ouroboros setup                         # 配置运行时
+```
+自托管 tap，尚未进入 homebrew-core。安装的是与 PyPI 相同的包。
+
+各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -113,6 +254,14 @@ ouroboros uninstall
 </details>
 
 > **需要 Python >= 3.12**。包含 LiteLLM 的 profile 支持 Python 3.12-3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix) 和 [pyproject.toml](./pyproject.toml)。
+>
+> **作为 MCP 服务器安装时请用 0.51.1 或更新的版本。** 更早的版本在已有环境遮蔽 `[mcp]` profile 时会启动失败，报 `Failed to reconnect to plugin:ouroboros:ouroboros: -32000`（[#2012](https://github.com/Q00/ouroboros/issues/2012)）。如果你不是从 PyPI 而是从发行版软件包安装，尤其要注意——那边的版本可能落后。
+
+
+<p align="center">
+  <sub>大多数人是在审到第三个文件的时候，才发现自己当初没说清楚。<br/>
+  如果这种感觉很熟悉，请给 <a href="https://github.com/Q00/ouroboros"><strong>GitHub 上的 Q00/ouroboros</strong></a> 点个 Star，让下一个遇到同样问题的人更容易找到它。</sub>
+</p>
 
 ---
 
@@ -151,7 +300,7 @@ AI 编码工具本身很强 —— 但当输入不清晰时，它们解的是**�
 |                | 普通 AI 编码                     | Ouroboros                                                                       |
 | :------------- | :------------------------------- | :------------------------------------------------------------------------------ |
 | **模糊提示词** | AI 自己猜意图，基于假设往下做    | 苏格拉底式访谈在写代码*之前*强制澄清                                            |
-| **规约校验**   | 没有规约 —— 写到一半架构开始飘   | 不可变的 seed 规约锁住意图；模糊度门槛（≤ 0.2）会拦下提前进入 code 的尝试       |
+| **规约校验**   | 没有规约 —— 写到一半架构开始飘   | 不可变的 seed 规约锁住意图；没有显式 force 时，模糊度门槛（≤ 0.2）会拦下提前进入 code 的尝试       |
 | **评估**       | "看起来还行" / 人肉 QA           | 三阶段自动关卡：Mechanical → Semantic → Multi-Model Consensus                   |
 | **返工率**     | 高 —— 错误假设到后期才暴露       | 低 —— 假设在访谈阶段就暴露，而不是等到 PR review                                |
 
@@ -287,7 +436,10 @@ src/ouroboros/
 - **Agent OS runtime** —— 跨能力发现、策略、指令、事件日志、agent 进程的可重放执行契约
 - **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes；同一份工作流规约，跑在不同执行引擎上
 
-完整设计文档见 [Architecture](./docs/architecture.md)。
+完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文文档：
+
+- [评估流水线指南（Evaluation Pipeline）](./docs/guides/evaluation-pipeline.zh-CN.md) —— 三阶段关卡的完整参考：每个阶段验什么、阈值和配置项、失败模式与排查、以及事件审计轨迹
+- [隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 隐藏、且没有配置项能把它打开
 
 </details>
 
@@ -348,7 +500,7 @@ Ambiguity = 1 - Σ(clarity_i * weight_i)
 | **成功标准** —— *结果是可衡量的吗？*        |    30%     |    25%     |
 | **上下文清晰度** —— *现有代码库摸清了吗？*  |     —      |    15%     |
 
-**阈值：Ambiguity ≤ 0.2** —— 只有低于这个值，才能生成 Seed。
+**阈值：Ambiguity ≤ 0.2。** 高于这个值会挡住 Seed 生成。绕过它的办法是显式传入 `force`，CLI 会把这个选项和继续、取消并排放在屏幕上。这道门槛是一个可以被反驳的默认值，不是锁。
 
 ```
 示例（Greenfield）：
@@ -428,14 +580,16 @@ Ouroboros 采用 MIT 许可证，完全开源开发。如果它为你减少了�
 
 ---
 
-## Star 历史
+## 活跃度
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+这里的数字基于 GitHub 数据生成并自动更新；缓存可能会导致更新延迟。
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 

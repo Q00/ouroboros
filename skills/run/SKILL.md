@@ -76,7 +76,11 @@ fallback instead of retrying the failing call.
    - If neither: Check conversation history for a recently generated seed
 
    Before a fresh start, when the user has not already chosen an efficiency
-   policy, ask in outcome language:
+   policy, first check the persistent default: when `execution.default_policy`
+   in `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
+   omit both arguments and the server applies the configured default (the start
+   handoff still reports the resolved policy). When it is `ask` or unset, ask
+   in outcome language:
 
    - **Efficient execution** — start parallel/decomposed work economically and
      strengthen the route only when recovery requires it. Send

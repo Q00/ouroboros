@@ -142,6 +142,37 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # MCP transport targets unless this is "1"; an untrusted .env must not
         # be able to re-enable connections to internal addresses.
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
+        # Telemetry is an operator-owned privacy boundary. A project `.env`
+        # must not be able to re-enable collection, replace the public ingest
+        # key, or redirect the stable anonymous identifier to an arbitrary
+        # endpoint. These remain available from the real process environment
+        # and the trusted ~/.ouroboros/.env file. DO_NOT_TRACK belongs to the
+        # same boundary from the opposite direction: the loader applies the
+        # untrusted project `.env` before the trusted `~/.ouroboros/.env` and
+        # never overrides an already-set value, so an unset DO_NOT_TRACK here
+        # would let a cloned repo's `.env` (e.g. `DO_NOT_TRACK=0`) win the
+        # race and silently suppress a user's persisted opt-out before the
+        # trusted file ever gets a chance to set it. CI/GITHUB_ACTIONS are
+        # the same boundary again: telemetry.py stamps `ci=true` on events
+        # from these two vars, and the published counting rule excludes
+        # `ci=true` from the weekly-active metric -- an untrusted project
+        # `.env` shipping `CI=1` could silently deregister genuine local
+        # workflow_outcome events from that metric. Real CI runners set
+        # these in the actual process environment, which the loader never
+        # overrides regardless of this denylist, so denying project-`.env`
+        # input here does not affect real CI detection -- only a cloned
+        # repository's own `.env` file loses the ability to set them. The
+        # trusted `~/.ouroboros/.env` is unaffected either way: this
+        # denylist only gates the untrusted project file.
+        "OUROBOROS_TELEMETRY",
+        "OUROBOROS_POSTHOG_API_KEY",
+        "OUROBOROS_POSTHOG_HOST",
+        # Onboarding attribution is an analytics boundary. A cloned repo must
+        # not rewrite the surface label used to compare activation cohorts.
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
+        "DO_NOT_TRACK",
+        "CI",
+        "GITHUB_ACTIONS",
         # Runtime/backend selectors — choose which adapter is spawned.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",

@@ -256,6 +256,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        default_policy: Persistent default execution policy for FRESH runs
+            (#1733). ``ask`` (the default) preserves the host's interactive
+            prompt exactly; ``efficient`` resolves to adaptive/observe and
+            ``quality_first`` to quality_first/off without asking. Explicit
+            invocation arguments always win, resumed sessions keep their
+            persisted immutable contract, and strict frugality assurance
+            never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -273,6 +280,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod
@@ -467,6 +475,7 @@ VALID_RUNTIME_BACKENDS = frozenset(
     {
         "claude",
         "claude_code",
+        "claude_mcp",
         "codex",
         "codex_cli",
         "opencode",
@@ -647,6 +656,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
 
     runtime_backend: Literal[
         "claude",
+        "claude_mcp",
         "codex",
         "opencode",
         "hermes",
@@ -742,6 +752,18 @@ class OrchestratorConfig(BaseModel, frozen=True):
         return str(Path(v).expanduser())
 
 
+class TelemetryConfig(BaseModel, frozen=True):
+    """Anonymous usage telemetry configuration.
+
+    Attributes:
+        enabled: Whether anonymous usage events may be sent. Environment
+            overrides (DO_NOT_TRACK, OUROBOROS_TELEMETRY) always win over
+            this flag — see config.loader.get_telemetry_enabled().
+    """
+
+    enabled: bool = True
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -778,6 +800,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
 
 
 def get_default_config() -> OuroborosConfig:

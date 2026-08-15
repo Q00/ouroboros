@@ -154,6 +154,16 @@ class FanoutRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedFanoutSynthesis:
+    """Validated terminal inputs whose synthesis may run behind a boundary."""
+
+    record: FanoutRecord
+    fanout_id: str
+    provided: dict[str, Any]
+    completion_report: dict[str, Any]
+
+
 class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 
@@ -397,6 +407,25 @@ def register_code_investigation_fanout(
     )
 
 
+def _advisory_synthesizer_input(
+    expected_keys: list[str],
+    *,
+    tool_name: str | None,
+    roster_repo_ids: list[str] | None,
+) -> dict[str, Any]:
+    """Return the request-side state one advisory fan-out persists.
+
+    Additive by omission: a key absent means "the default", which keeps an
+    interview record identical to what it was before a second tool existed.
+    """
+    data: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    if tool_name and tool_name != "ouroboros_interview":
+        data["tool_name"] = tool_name
+    if roster_repo_ids is not None:
+        data["roster_repo_ids"] = list(roster_repo_ids)
+    return data
+
+
 def register_question_advisory_fanout(
     registry: FanoutRegistry,
     *,
@@ -404,8 +433,20 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
+    tool_name: str | None = None,
+    roster_repo_ids: list[str] | None = None,
 ) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
+
+    ``tool_name`` names the issuing MCP tool when it is not the interview, and
+    re-entry reads the answer contracts from that tool's catalog: a lane id
+    alone does not say whose catalog, and both tools declare a ``data_context``.
+    It is written only when it differs from the default so an interview record
+    is byte-identical to what earlier versions wrote.
+
+    ``roster_repo_ids`` bounds which repositories a lane may cite. It is
+    per-session data the producer knew and re-entry cannot re-derive, so unlike
+    the contracts it is persisted; a record without one is simply not bounded.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
     persona is absent on the ``code_context`` / ``web_context`` lanes), so the
@@ -462,7 +503,9 @@ def register_question_advisory_fanout(
         correlation_key=correlation_key,
         expected_keys=expected_keys,
         question_identity=question_identity,
-        synthesizer_input={"lane_ids": list(expected_keys)},
+        synthesizer_input=_advisory_synthesizer_input(
+            expected_keys, tool_name=tool_name, roster_repo_ids=roster_repo_ids
+        ),
         fanout_id=fanout_id,
         required_keys=required_keys,
     )
@@ -474,6 +517,8 @@ def stamp_question_advisory_fanout(
     *,
     session_id: str,
     payloads: list[SubagentPayload],
+    tool_name: str | None = None,
+    roster_repo_ids: list[str] | None = None,
 ) -> None:
     """Register the advisory fan-out and stamp its id, if there is one to stamp.
 
@@ -486,7 +531,11 @@ def stamp_question_advisory_fanout(
     if registry is None:
         return
     fanout_id = register_question_advisory_fanout(
-        registry, session_id=session_id, payloads=payloads
+        registry,
+        session_id=session_id,
+        payloads=payloads,
+        tool_name=tool_name,
+        roster_repo_ids=roster_repo_ids,
     )
     if fanout_id is not None:
         meta["question_advisory_fanout_id"] = fanout_id
@@ -507,11 +556,18 @@ def stamp_lateral_persona_fanout(
         dispatch_record["fanout_id"] = fanout_id
 
 
-def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
+def _canonical_lane_contracts(
+    tool_name: str = "ouroboros_interview",
+) -> dict[str, Mapping[str, Any]]:
     """Return the ``lane_id -> answer_contract`` map this build advertises.
 
     Which lanes are contracted is a property of the code, and it is read from
     the code every time rather than from the record.
+
+    The map is per tool. A lane id alone does not identify a contract once a
+    second tool exists: both declare a ``data_context``, and PM's code lane is
+    not the interview's. The issuing tool is recorded with the fan-out, and its
+    catalog is the only thing that says what its lanes promised.
 
     An earlier revision of this PR persisted a copy of each contract with the
     record, so that a submission arriving after a restart or an upgrade would be
@@ -529,12 +585,19 @@ def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
     question being asked. So the copy prevented a rare, benign ``partial``, and
     in exchange made the set of lanes that must be validated into mutable data.
     """
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        _interview_question_advisory_fanout_metadata,
-    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    try:
+        advisory = ouroboros_tool_capability_metadata(tool_name)["orchestration"][
+            "question_advisory_fanout"
+        ]
+    except (KeyError, TypeError):
+        # A tool that declares no advisory catalog contracts nothing. This is
+        # not "nothing to check" being guessed at: there is no contracted lane.
+        return {}
 
     contracts: dict[str, Mapping[str, Any]] = {}
-    for lane in _interview_question_advisory_fanout_metadata()["lanes"]:
+    for lane in advisory["lanes"]:
         if "answer_contract" not in lane:
             continue
         contract = lane["answer_contract"]
@@ -641,15 +704,15 @@ def _branch_distance(branch_errors: list[Any]) -> tuple[int, int]:
     return len(branch_errors), refusals
 
 
-def submit_fanout_results(
+def prepare_fanout_results(
     registry: FanoutRegistry,
     *,
     session_id: str,
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
-) -> dict[str, Any]:
-    """Validate + route a batch of correlated fan-out results back to synthesis.
+) -> dict[str, Any] | PreparedFanoutSynthesis:
+    """Validate a batch and return either a reply or terminal synthesis inputs.
 
     Contract:
 
@@ -850,6 +913,32 @@ def submit_fanout_results(
         "contract_violations": contract_violations,
     }
 
+    if record.kind not in {
+        FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        FANOUT_KIND_CODE_INVESTIGATION,
+        FANOUT_KIND_QUESTION_ADVISORY,
+    }:
+        return {
+            "status": "unknown_kind",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+        }
+    return PreparedFanoutSynthesis(
+        record=record,
+        fanout_id=fanout_id,
+        provided=provided,
+        completion_report=completion_report,
+    )
+
+
+def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, Any]:
+    """Run terminal synthesis for an already validated fan-out submission."""
+
+    record = prepared.record
+    fanout_id = prepared.fanout_id
+    provided = prepared.provided
+    completion_report = prepared.completion_report
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         from ouroboros.mcp.tools.subagent import (
             continue_interview_after_lateral_persona_synthesis,
@@ -909,12 +998,29 @@ def submit_fanout_results(
             **completion_report,
         }
 
-    return {
-        "status": "unknown_kind",
-        "fanout_id": fanout_id,
-        "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
-    }
+    raise RuntimeError(f"prepared fan-out kind has no synthesizer: {record.kind!r}")
+
+
+def submit_fanout_results(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    correlation_key: str,
+    results: list[Mapping[str, Any]],
+    fanout_id: str,
+) -> dict[str, Any]:
+    """Validate and synchronously synthesize a complete fan-out submission."""
+
+    prepared = prepare_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        results=results,
+        fanout_id=fanout_id,
+    )
+    if isinstance(prepared, dict):
+        return prepared
+    return synthesize_fanout_results(prepared)
 
 
 def _contract_violations(
@@ -936,13 +1042,16 @@ def _contract_violations(
     """
     if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
         return {}
-    contracts = _canonical_lane_contracts()
+    contracts = _canonical_lane_contracts(
+        str(record.synthesizer_input.get("tool_name") or "ouroboros_interview")
+    )
     violations: dict[str, list[str]] = {}
     for lane_id, output in provided.items():
         if lane_id not in contracts:
             continue
         errors = _validate_against_contract(output, contracts[lane_id])
         errors.extend(_provenance_violations(record, output))
+        errors.extend(_roster_violations(record, output))
         errors.extend(_aggregate_violations(output))
         if errors:
             violations[lane_id] = errors
@@ -988,6 +1097,59 @@ def _aggregate_violations(output: Any) -> list[str]:
     return problems
 
 
+def _roster_violations(record: FanoutRecord, output: Any) -> list[str]:
+    """Return violations for an ``examined`` entry outside or repeating the roster.
+
+    The schema can only check that a ``repo_id`` is *shaped* like one, and shape
+    is not membership. This is what makes the roster a boundary rather than a
+    suggestion: where a lane may look stays open, what it may hand back as
+    evidence is closed, and the decision is made from the value alone.
+
+    There is one list to judge rather than two. Scope and claim used to be
+    ``examined_repository_ids`` and ``evidence[]``, checked separately against
+    the roster and never against each other, so an answer could declare one
+    repository examined while citing another's code and pass. They are folded
+    into per-repository entries now, which makes that contradiction unspellable;
+    what is left for this function is membership, and it is the same check it
+    always was.
+
+    Uniqueness is checked here for the reason ``_aggregate_violations`` above
+    gives: Draft 2020-12 has ``uniqueItems`` for whole items and nothing for
+    uniqueness by property, so two entries for one repository -- one carrying a
+    claim, one saying it was read and clean -- would otherwise reintroduce the
+    disagreement the fold removed, one level down.
+
+    A record with no persisted roster is not checked -- an interview fan-out, or
+    one whose producer bounded nothing. Inventing a boundary at re-entry would
+    reject evidence its child was never told to avoid.
+    """
+    if not isinstance(output, Mapping):
+        return []
+    roster = record.synthesizer_input.get("roster_repo_ids")
+    if not isinstance(roster, (list, tuple)):
+        return []
+    examined = output.get("examined")
+    if not isinstance(examined, (list, tuple)):
+        return []
+    allowed = {str(item) for item in roster}
+    problems: list[str] = []
+    seen: set[str] = set()
+    for entry in examined:
+        if not isinstance(entry, Mapping):
+            continue
+        # An absent or empty identifier is the schema's to reject; saying it
+        # twice would report one defect as two.
+        repo_id = str(entry.get("repo_id") or "")
+        if not repo_id:
+            continue
+        if repo_id not in allowed:
+            problems.append(f"examined: {repo_id!r} is not in this session's roster")
+        elif repo_id in seen:
+            problems.append(f"examined: {repo_id!r} has more than one entry")
+        seen.add(repo_id)
+    return problems
+
+
 def _provenance_violations(record: FanoutRecord, output: Any) -> list[str]:
     """Return violations for an answer that claims a different question.
 
@@ -1026,10 +1188,13 @@ __all__ = [
     "FANOUT_KIND_QUESTION_ADVISORY",
     "FanoutRecord",
     "FanoutRegistry",
+    "PreparedFanoutSynthesis",
+    "prepare_fanout_results",
     "register_code_investigation_fanout",
     "register_lateral_persona_fanout",
     "register_question_advisory_fanout",
     "stamp_lateral_persona_fanout",
     "stamp_question_advisory_fanout",
     "submit_fanout_results",
+    "synthesize_fanout_results",
 ]

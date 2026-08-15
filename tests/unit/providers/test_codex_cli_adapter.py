@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import signal
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -525,11 +525,18 @@ class TestCodexCliLLMAdapter:
         (codex_home / "custom.config.toml").write_text(
             '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
         )
+        # Shrink the probe budget (and the CLI's stall) rather than waiting out
+        # the production 5s grace period; the contract under test is that any
+        # overrun is uncertainty, not the length of the overrun.
+        monkeypatch.setattr(
+            "ouroboros.codex.runtime_profile.HELP_PROBE_TIMEOUT_SECONDS",
+            0.2,
+        )
         cli = self._write_profile_help_cli(
             tmp_path / "codex-slow-unified",
             "  -p, --profile <CONFIG_PROFILE_V2>\n"
             "          Layer $CODEX_HOME/<name>.config.toml on top of the base user config",
-            delay_seconds=5.25,
+            delay_seconds=1.0,
         )
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
@@ -776,12 +783,17 @@ class TestCodexCliLLMAdapter:
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
 
-        command = adapter._build_command(
-            output_last_message_path="/tmp/out.txt",
-            output_schema_path=None,
-            model=None,
-            profile="custom",
-        )
+        # Pin the legacy contract instead of probing whichever ``codex`` happens
+        # to be installed on the machine running the tests.
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=False
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
 
         assert command[-2:] == ["--profile", "custom"]
         assert "mcp_servers.ouroboros.enabled=false" in command
@@ -1455,9 +1467,17 @@ class TestCodexCliLLMAdapter:
                 returncode=1,
             )
 
-        with patch(
-            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
-            side_effect=fake_create_subprocess_exec,
+        with (
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            # 502 is retryable, so the adapter walks its full backoff ladder —
+            # skip the real waiting, keep the retries.
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.sleep",
+                new=AsyncMock(),
+            ),
         ):
             result = await adapter.complete(
                 [Message(role=MessageRole.USER, content="Reflect on the run.")],

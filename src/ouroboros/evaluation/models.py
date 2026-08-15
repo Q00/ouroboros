@@ -31,6 +31,11 @@ from ouroboros.events.base import BaseEvent
 # without a models<->pipeline import cycle.  pipeline.py imports this.
 REWARD_HACKING_VETO_THRESHOLD = 0.7
 
+# Minimum Stage 2 score for approval when no consensus ran.  Shared with
+# ``pipeline.py`` so the gate and the failure reason that has to name it
+# cannot drift apart.
+SEMANTIC_APPROVAL_SCORE = 0.8
+
 
 class VoterRole(StrEnum):
     """Roles in deliberative consensus.
@@ -384,31 +389,81 @@ class EvaluationResult:
 
     @property
     def failure_reason(self) -> str | None:
-        """Return the reason for failure, if any.
+        """Return the reason for failure, if any."""
+        return build_failure_reason(
+            final_approved=self.final_approved,
+            stage1_result=self.stage1_result,
+            stage2_result=self.stage2_result,
+            stage3_result=self.stage3_result,
+        )
 
-        Stage 3 is checked before Stage 2 because when Stage 3 ran,
-        it is the authoritative verdict (Stage 2 may have been bypassed
-        via trigger_consensus).
-        """
-        if self.final_approved:
-            return None
-        if self.stage1_result and not self.stage1_result.passed:
-            failed = self.stage1_result.failed_checks
-            return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
-        if self.stage3_result and not self.stage3_result.approved:
-            return (
-                f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
-            )
-        if self.stage2_result and not self.stage2_result.ac_compliance:
-            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
-        if (
-            self.stage2_result
-            and self.stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
-        ):
-            return (
-                "Stage 2 veto: reward-hacking risk "
-                f"{self.stage2_result.reward_hacking_risk:.2f} >= "
-                f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game the "
-                "evaluator rather than solve the real task"
-            )
-        return "Unknown failure"
+
+def build_failure_reason(
+    *,
+    final_approved: bool,
+    stage1_result: MechanicalResult | None,
+    stage2_result: SemanticResult | None,
+    stage3_result: ConsensusResult | None,
+) -> str | None:
+    """Return why an evaluation was rejected, or ``None`` when it passed.
+
+    Branches are ordered by which gate actually decided, not by stage number.
+
+    The reward-hacking veto is applied last in the pipeline and only ever
+    flips approve to reject, so it is the deciding gate exactly when the
+    result would otherwise have been approved.  That has to be reconstructed
+    here because this function sees ``final_approved`` after the veto has
+    already been applied.  Without it, a run that Stage 3 approved and the
+    veto then rejected reports Stage 2 non-compliance, naming a gate that
+    did not decide anything.
+
+    Stage 3 is checked before Stage 2 because when Stage 3 ran, it is the
+    authoritative verdict (Stage 2 may have been bypassed via
+    ``trigger_consensus``).
+
+    The Stage 2 branches name their predicate.  ``ac_compliance`` is a
+    boolean and the semantic score is a separate gate, so a run can be
+    rejected by either while the other reads fine.
+    """
+    if final_approved:
+        return None
+    if stage1_result and not stage1_result.passed:
+        failed = stage1_result.failed_checks
+        return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
+
+    # What approval would have been, had the veto not run.
+    if stage3_result is not None:
+        approved_before_veto = stage3_result.approved
+    elif stage2_result is not None:
+        approved_before_veto = (
+            stage2_result.ac_compliance and stage2_result.score >= SEMANTIC_APPROVAL_SCORE
+        )
+    else:
+        approved_before_veto = True
+
+    if (
+        stage2_result
+        and approved_before_veto
+        and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
+    ):
+        return (
+            "Stage 2 veto: reward-hacking risk "
+            f"{stage2_result.reward_hacking_risk:.2f} >= "
+            f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game the "
+            "evaluator rather than solve the real task"
+        )
+    if stage3_result and not stage3_result.approved:
+        return f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+    if stage2_result and not stage2_result.ac_compliance:
+        return (
+            "Stage 2 failed: AC non-compliance "
+            f"(ac_compliance=false; semantic score {stage2_result.score:.2f} "
+            "did not gate this)"
+        )
+    if stage2_result and stage2_result.score < SEMANTIC_APPROVAL_SCORE:
+        return (
+            "Stage 2 failed: semantic score "
+            f"{stage2_result.score:.2f} < {SEMANTIC_APPROVAL_SCORE:.2f} "
+            "(ac_compliance=true; the score gate decided this)"
+        )
+    return "Unknown failure"

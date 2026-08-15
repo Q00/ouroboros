@@ -17,6 +17,7 @@ from ouroboros.config.loader import (
     config_exists,
     create_default_config,
     credentials_file_secure,
+    default_execution_efficiency_mode,
     ensure_config_dir,
     get_agent_permission_mode,
     get_agent_runtime_backend,
@@ -382,6 +383,66 @@ class TestLoadConfig:
         assert config.execution.auto_evolve is True
         assert config.execution.auto_evolve_max_generations == 3
 
+    @pytest.mark.parametrize("surface", ["top_level", "default", "stage"])
+    def test_load_config_accepts_claude_mcp_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        surface: str,
+    ) -> None:
+        orchestrator: dict[str, object]
+        if surface == "top_level":
+            orchestrator = {"runtime_backend": "claude_mcp"}
+        elif surface == "default":
+            orchestrator = {"runtime_profile": {"default": "claude_mcp"}}
+        else:
+            orchestrator = {
+                "runtime_profile": {"stages": {"execute": "claude_mcp"}},
+            }
+        config_path = tmp_path / f"{surface}.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        if surface == "top_level":
+            assert config.orchestrator.runtime_backend == "claude_mcp"
+        else:
+            assert config.orchestrator.runtime_profile is not None
+            if surface == "default":
+                assert config.orchestrator.runtime_profile.default == "claude_mcp"
+            else:
+                assert config.orchestrator.runtime_profile.stages == {"execute": "claude_mcp"}
+
+    @pytest.mark.parametrize(
+        ("orchestrator", "expected_surface"),
+        [
+            ({"runtime_backend": "unknown-runtime"}, "runtime_backend"),
+            ({"runtime_profile": {"default": "unknown-runtime"}}, "runtime_profile.default"),
+            (
+                {"runtime_profile": {"stages": {"execute": "unknown-runtime"}}},
+                "runtime_profile.stages",
+            ),
+        ],
+    )
+    def test_load_config_rejects_unknown_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        orchestrator: dict[str, object],
+        expected_surface: str,
+    ) -> None:
+        config_path = tmp_path / "invalid-runtime.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(config_path)
+
+        assert expected_surface in str(exc_info.value)
+
     def test_load_config_execution_tui_autolaunch(self, tmp_path: Path) -> None:
         """load_config accepts the execution TUI auto-launch toggle."""
         config_path = tmp_path / "config.yaml"
@@ -522,6 +583,17 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_agent_runtime_backend() == "codex"
+
+    def test_get_agent_runtime_backend_defaults_to_sdk_profile(self) -> None:
+        """A missing config preserves the default Claude SDK runtime."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert get_agent_runtime_backend() == "claude"
 
     def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for Codex CLI path."""
@@ -1472,6 +1544,24 @@ class TestLLMHelperLookups:
             assert get_llm_backend_for_role("reflect") == "codex"
             assert get_llm_backend_for_role("context_compression") == "codex"
 
+    def test_missing_config_does_not_use_cli_runtime_as_llm_backend(self) -> None:
+        """The default Claude CLI worker is runtime-only, not a provider name."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert (
+                get_llm_backend_for_role("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
+            assert (
+                get_llm_backend_for_stage("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
+
     def test_get_llm_backend_for_role_preserves_explicit_override(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             assert get_llm_backend_for_role("qa", explicit_backend="opencode") == "opencode"
@@ -1855,6 +1945,53 @@ class TestLLMHelperLookups:
             assert get_reflect_model(backend=backend) == "default"
             assert get_semantic_model(backend=backend) == "default"
             assert get_assertion_extraction_model(backend=backend) == "default"
+
+    @pytest.mark.parametrize("backend", ["claude", None])
+    def test_legacy_shipped_defaults_normalize_on_claude_backends(
+        self, backend: str | None
+    ) -> None:
+        """Regression for #2069: the #1324 normalization only fired for
+        Claude-incapable backends, so a persisted legacy shipped default
+        (``claude-sonnet-4-20250514``) reached the Claude API verbatim and
+        was rejected as retired. Claude-capable backends must normalize
+        recognized legacy shipped defaults to the current default pin.
+        """
+        legacy_config = OuroborosConfig(
+            llm=LLMConfig(
+                qa_model="claude-sonnet-4-20250514",
+                dependency_analysis_model="claude-opus-4-6",
+                ontology_analysis_model="claude-sonnet-4-20250514",
+            ),
+            evaluation=EvaluationConfig(
+                assertion_extraction_model="claude-sonnet-4-20250514",
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_qa_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # dependency_analysis recognizes the retired Opus family as
+            # shipped defaults and its current pin is the Sonnet default.
+            assert get_dependency_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_ontology_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_assertion_extraction_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # The explicit legacy per-role field takes precedence over stage
+            # models (#2069) and resolves through the same getter, so the
+            # precedence path can no longer leak the retired id either.
+            assert get_llm_model_for_role("qa", backend=backend) == DEFAULT_SONNET_MODEL
+
+    def test_never_shipped_ids_survive_claude_normalization(self) -> None:
+        """A never-shipped id is a deliberate user pin and stays verbatim
+        on Claude-capable backends (#2069)."""
+        custom_config = OuroborosConfig(
+            llm=LLMConfig(qa_model="my-proxy/claude-custom-build"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=custom_config),
+        ):
+            assert get_qa_model(backend="claude") == "my-proxy/claude-custom-build"
 
     def test_consensus_advocate_legacy_shipped_default_normalizes_to_sentinel(self) -> None:
         """A persisted legacy consensus advocate slug normalizes for Codex (#1324)."""
@@ -2440,3 +2577,28 @@ class TestConfigEncodingLocaleIndependence:
 
         with pytest.raises(ValueError, match="invalid EventStore configuration"):
             resolve_event_store_path(config_path)
+
+
+class TestDefaultExecutionEfficiencyMode:
+    """#1733: persistent default execution policy for fresh starts."""
+
+    @pytest.mark.parametrize(
+        ("policy", "expected"),
+        [("ask", None), ("efficient", "adaptive"), ("quality_first", "quality_first")],
+    )
+    def test_policy_maps_to_fresh_start_efficiency_mode(
+        self, policy: str, expected: str | None
+    ) -> None:
+        config = OuroborosConfig(execution=ExecutionConfig(default_policy=policy))
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert default_execution_efficiency_mode() == expected
+
+    def test_unreadable_config_preserves_the_ask_contract(self) -> None:
+        with patch(
+            "ouroboros.config.loader.load_config",
+            side_effect=ConfigError("unreadable"),
+        ):
+            assert default_execution_efficiency_mode() is None

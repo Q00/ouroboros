@@ -805,11 +805,23 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         interrupt=_OUROBOROS_DEFAULT_INTERRUPT_METADATA,
     ),
     "ouroboros_submit_fanout_results": _OuroborosToolCapabilitySpec(
-        # Re-entry synthesis is a read-only routing step: it reads persisted
-        # fan-out state and returns the correlated synthesis. The fan-out state
-        # write happens on the producer side, not here.
+        # Terminal re-entry publishes a project-local artifact and appends its
+        # reference to the EventStore. Policy must therefore authorize both
+        # writes before dispatching the tool.
+        execution_mode="blocking",
+        companions=(
+            "ouroboros_interview",
+            "ouroboros_lateral_think",
+            "ouroboros_fetch_artifact",
+        ),
+        side_effects=("workspace_write", "event_store_write"),
+        retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
+        interrupt=_OUROBOROS_BLOCKING_INTERRUPT_METADATA,
+        mutation_class=CapabilityMutationClass.WORKSPACE_WRITE,
+    ),
+    "ouroboros_fetch_artifact": _OuroborosToolCapabilitySpec(
         execution_mode="status",
-        companions=("ouroboros_interview", "ouroboros_lateral_think"),
+        companions=("ouroboros_submit_fanout_results",),
         side_effects=_OUROBOROS_SIDE_EFFECT_FREE_METADATA,
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
         interrupt=_OUROBOROS_READ_ONLY_INTERRUPT_METADATA,
@@ -995,6 +1007,7 @@ _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
     "ouroboros_start_execute_seed": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_ralph": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_submit_fanout_results": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
+    "ouroboros_fetch_artifact": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
 }
 
 _OUROBOROS_BACKGROUND_BLOCKING_COMPANIONS: Mapping[str, str] = {

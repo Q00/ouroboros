@@ -24,6 +24,7 @@ from ouroboros.verification.models import (
     SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
+    VerificationOutcome,
     VerificationTier,
 )
 
@@ -722,10 +723,14 @@ class SpecVerifier:
     """Verifies spec assertions against actual project files.
 
     Reads source files and applies regex patterns to check whether
-    the expected values/structures actually exist in the codebase.
+    the expected values/structures actually exist in the codebase. Strict mode
+    is the safe default: unavailable and skipped evidence block an approval
+    override. Exploratory callers may set ``strict=False`` to observe those
+    outcomes without requesting an override; they still never become VERIFIED.
     """
 
     project_dir: str
+    strict: bool = True
 
     def verify_all(
         self,
@@ -742,7 +747,7 @@ class SpecVerifier:
             SpecVerificationSummary with all results.
         """
         if not assertions:
-            return SpecVerificationSummary(project_dir=self.project_dir)
+            return SpecVerificationSummary(project_dir=self.project_dir, strict=self.strict)
 
         agent_results = agent_results or {}
 
@@ -760,8 +765,9 @@ class SpecVerifier:
             results: list[SpecVerificationResult] = []
             for assertion in ac_assertions:
                 result = self._verify_one(assertion)
-                if result is not None:
-                    results.append(result)
+                if agent_pass is False:
+                    result = self._demoted_from_overturning(result)
+                results.append(result)
 
             reports.append(
                 ACVerificationReport(
@@ -775,6 +781,7 @@ class SpecVerifier:
         return SpecVerificationSummary.from_reports(
             tuple(reports),
             project_dir=self.project_dir,
+            strict=self.strict,
         )
 
     def _compile_or_none(self, pattern: str, flags: int = 0) -> re.Pattern | None:
@@ -830,23 +837,72 @@ class SpecVerifier:
             return None
         return compiled
 
-    def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult | None:
-        """Verify a single assertion. Returns None for skipped tiers."""
+    def _demoted_from_overturning(self, result: SpecVerificationResult) -> SpecVerificationResult:
+        """Refuse a VERIFIED as grounds to overturn an agent-reported FAIL.
+
+        This scanner exists to check whether an agent's *claimed PASS* survives
+        contact with the source. Overturning a FAIL is the opposite direction,
+        and it is the direction with no safe stopping point: what a regex match
+        proves about a criterion depends on whether the pattern is really about
+        that criterion, and nothing available here can settle that. A rule that
+        reads the criterion's wording admits `class\\s+\\w+` for "a
+        CameraProvider class" through the shared word `class`; tightening it to
+        read named targets from their spelling admits `MUST` through ordinary
+        requirement prose. Each repair moves the hole rather than closing it,
+        because the question — does this text name this criterion's subject —
+        is not one a finite reading of prose answers.
+
+        So the authority is withdrawn rather than qualified. An agent that
+        reported FAIL keeps its FAIL, whatever the pattern matched. No property
+        of the pattern can restore the override, which is what makes this
+        closed rather than merely narrower: there is nothing left to bypass.
+
+        Only this direction. A VERIFIED that agrees with the agent's own PASS
+        claims no authority the agent had not already claimed, and is passed
+        through untouched — the false-PASS check that is this scanner's actual
+        job.
+
+        The demotion is to UNVERIFIABLE, not DISCREPANCY: the evidence is not
+        usable *here*, which is different from evidence that the criterion is
+        unmet.
+        """
+        if result.outcome is not VerificationOutcome.VERIFIED:
+            return result
+        logger.warning(
+            "Refusing regex evidence as grounds to overturn an agent FAIL: %r",
+            result.assertion.pattern,
+        )
+        return SpecVerificationResult(
+            assertion=result.assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            file_path=result.file_path,
+            detail=(
+                "Pattern matched, but source-scan evidence cannot overturn an agent-reported FAIL"
+            ),
+        )
+
+    def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult:
+        """Verify one assertion, including tiers this scanner deliberately skips."""
         if assertion.tier == VerificationTier.T1_CONSTANT:
             return self._verify_constant(assertion)
-        elif assertion.tier == VerificationTier.T2_STRUCTURAL:
+        if assertion.tier == VerificationTier.T2_STRUCTURAL:
             return self._verify_structural(assertion)
+        if assertion.tier == VerificationTier.T3_BEHAVIORAL:
+            detail = "Behavioral assertion requires test execution or semantic analysis"
         else:
-            # T3/T4: skip verification
-            return None
+            detail = "Subjective assertion is not independently verifiable by source scanning"
+        return SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.SKIPPED,
+            detail=detail,
+        )
 
     def _verify_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify a T1 constant/config assertion by searching source files."""
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=False,
-                discrepancy=True,
+                outcome=VerificationOutcome.UNVERIFIABLE,
                 detail="No pattern to verify",
             )
 
@@ -854,8 +910,7 @@ class SpecVerifier:
         if not files:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=False,
-                discrepancy=True,
+                outcome=VerificationOutcome.UNVERIFIABLE,
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
 
@@ -865,15 +920,16 @@ class SpecVerifier:
         if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=False,
-                discrepancy=True,
+                outcome=VerificationOutcome.UNVERIFIABLE,
                 detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
             )
 
+        readable_files = 0
         for file_path in files:
             content = self._read_file(file_path)
             if content is None:
                 continue
+            readable_files += 1
 
             match = pattern.search(content)
             if match:
@@ -883,10 +939,13 @@ class SpecVerifier:
                     verified = assertion.expected_value.strip() == actual.strip()
                     return SpecVerificationResult(
                         assertion=assertion,
-                        verified=verified,
+                        outcome=(
+                            VerificationOutcome.VERIFIED
+                            if verified
+                            else VerificationOutcome.DISCREPANCY
+                        ),
                         actual_value=actual,
                         file_path=file_path,
-                        discrepancy=not verified,
                         detail=(
                             f"Expected '{assertion.expected_value}', "
                             f"found '{actual}' in {os.path.basename(file_path)}"
@@ -896,17 +955,23 @@ class SpecVerifier:
                     # Pattern found, no expected value to check
                     return SpecVerificationResult(
                         assertion=assertion,
-                        verified=True,
+                        outcome=VerificationOutcome.VERIFIED,
                         actual_value=actual,
                         file_path=file_path,
                         detail=f"Pattern found in {os.path.basename(file_path)}",
                     )
 
-        # Pattern not found in any file
+        if readable_files == 0:
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=f"Could not read any of {len(files)} matched files",
+            )
+
+        # A usable pattern did not match any readable candidate: a real discrepancy.
         return SpecVerificationResult(
             assertion=assertion,
-            verified=False,
-            discrepancy=True,
+            outcome=VerificationOutcome.DISCREPANCY,
             detail=f"Pattern '{assertion.pattern}' not found in {len(files)} files",
         )
 
@@ -915,12 +980,17 @@ class SpecVerifier:
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=False,
-                discrepancy=True,
+                outcome=VerificationOutcome.UNVERIFIABLE,
                 detail="No pattern to verify",
             )
 
         files = self._find_files(assertion.file_hint)
+        if not files:
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=f"No files matched hint: {assertion.file_hint}",
+            )
 
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
@@ -931,7 +1001,7 @@ class SpecVerifier:
                 if name_pattern.search(basename):
                     return SpecVerificationResult(
                         assertion=assertion,
-                        verified=True,
+                        outcome=VerificationOutcome.VERIFIED,
                         file_path=file_path,
                         detail=f"Found file: {basename}",
                     )
@@ -943,27 +1013,34 @@ class SpecVerifier:
         if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=False,
-                discrepancy=True,
+                outcome=VerificationOutcome.UNVERIFIABLE,
                 detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
             )
 
+        readable_files = 0
         for file_path in files:
             content = self._read_file(file_path)
             if content is None:
                 continue
+            readable_files += 1
             if content_pattern.search(content):
                 return SpecVerificationResult(
                     assertion=assertion,
-                    verified=True,
+                    outcome=VerificationOutcome.VERIFIED,
                     file_path=file_path,
                     detail=f"Pattern found in {os.path.basename(file_path)}",
                 )
 
+        if files and readable_files == 0:
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=f"Could not read any of {len(files)} matched files",
+            )
+
         return SpecVerificationResult(
             assertion=assertion,
-            verified=False,
-            discrepancy=True,
+            outcome=VerificationOutcome.DISCREPANCY,
             detail=f"Structure '{assertion.pattern}' not found in {len(files)} files",
         )
 

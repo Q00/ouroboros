@@ -101,7 +101,7 @@ class _StaticEvaluateHandler:
     def __init__(self, result: MCPToolResult) -> None:
         self.result = result
 
-    async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+    async def handle(self, _: dict[str, Any], **_kwargs: Any) -> Result[MCPToolResult, Any]:
         return Result.ok(self.result)
 
 
@@ -471,6 +471,26 @@ def test_runtime_factory_reuses_configured_parent_owned_convergence_graph(
     assert start_execute._event_store is start_evaluate._event_store
     assert execute.seed_handoff_registry is start_execute.seed_handoff_registry
     assert execute.seed_handoff_registry is start_evaluate.seed_handoff_registry
+
+
+@pytest.mark.parametrize(
+    ("runtime_backend", "opencode_mode"),
+    [("opencode", "plugin"), ("codex", None), ("hermes", None)],
+)
+def test_runtime_factory_reuses_server_owned_checklist_handler(
+    runtime_backend: str,
+    opencode_mode: str | None,
+) -> None:
+    """Builtin interception must retain the server's configured handler identity."""
+    runtime = _builtin_runtime(runtime_backend, opencode_mode)
+    handlers = runtime._get_builtin_mcp_handlers()
+    composition = runtime._builtin_mcp_tool_composition
+
+    assert composition is not None
+    assert (
+        handlers["ouroboros_checklist_verify"]
+        is composition.server_owner._tool_handlers["ouroboros_checklist_verify"]
+    )
 
 
 @pytest.mark.parametrize(

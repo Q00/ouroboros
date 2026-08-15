@@ -13,9 +13,14 @@ what the orchestrator runtime adds on top.
 from __future__ import annotations
 
 from dataclasses import replace
+import os
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
+from ouroboros.copilot.model_discovery import CopilotModel
 from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.copilot_cli_runtime import (
     _MAX_OUROBOROS_DEPTH,
@@ -24,8 +29,12 @@ from ouroboros.orchestrator.copilot_cli_runtime import (
 from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
 
 
+def _test_cli_path() -> str:
+    return str(Path(os.environ["OUROBOROS_TEST_CLI_DIR"]) / "copilot")
+
+
 def _make_runtime(model: str | None = None, cwd: str = "/work") -> CopilotCliRuntime:
-    return CopilotCliRuntime(cli_path="/usr/bin/copilot", model=model, cwd=cwd)
+    return CopilotCliRuntime(cli_path=_test_cli_path(), model=model, cwd=cwd)
 
 
 def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
@@ -64,7 +73,7 @@ def test_resolve_agent_runtime_backend_rejection_lists_copilot() -> None:
 
 def test_build_command_emits_copilot_flags_in_documented_order(tmp_path) -> None:
     cwd = str(tmp_path)
-    runtime = CopilotCliRuntime(cli_path="/usr/bin/copilot", cwd=cwd)
+    runtime = CopilotCliRuntime(cli_path=_test_cli_path(), cwd=cwd)
     command = runtime._build_command(
         output_last_message_path="/tmp/ignored",
         prompt="hello world",
@@ -95,6 +104,23 @@ def test_build_command_maps_anthropic_hyphen_id_to_dotted_form() -> None:
     assert command[idx + 1] == "claude-opus-4.6"
 
 
+def test_build_command_maps_current_default_from_catalog() -> None:
+    runtime = _make_runtime(model=DEFAULT_OPUS_MODEL)
+    catalog = [CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+
+    with patch(
+        "ouroboros.copilot.model_discovery.list_copilot_models",
+        return_value=catalog,
+    ):
+        command = runtime._build_command(
+            output_last_message_path="/tmp/ignored",
+            prompt="task",
+        )
+
+    idx = command.index("--model")
+    assert command[idx + 1] == "claude-opus-4.8"
+
+
 def test_build_command_passes_dotted_model_through_unchanged() -> None:
     runtime = _make_runtime(model="claude-sonnet-4.5")
     command = runtime._build_command(
@@ -119,7 +145,7 @@ def test_build_command_ignores_resume_session_id() -> None:
 
 def test_constructor_runtime_profile_emits_copilot_agent_flag() -> None:
     runtime = CopilotCliRuntime(
-        cli_path="/usr/bin/copilot",
+        cli_path=_test_cli_path(),
         cwd="/work",
         runtime_profile="worker",
     )

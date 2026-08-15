@@ -252,12 +252,19 @@ async def run_evaluation_job(
         {**arguments, "_force_in_process": True} if force_in_process else arguments
     )
     try:
+        # This runner is always reached behind a JobManager-backed background
+        # job (StartEvaluateHandler -> start_background_tool_job). That job's
+        # own terminal event already produces a deduplicated ($insert_id)
+        # workflow_outcome via JobTelemetryBoundary, so the direct-evaluation
+        # boundary inside EvaluateHandler.handle() must stay silent here to
+        # avoid emitting two outcomes for one evaluation.
         result = (
             await asyncio.wait_for(
-                evaluate_handler.handle(evaluation_arguments), timeout=deadline_seconds
+                evaluate_handler.handle(evaluation_arguments, emit_terminal_telemetry=False),
+                timeout=deadline_seconds,
             )
             if deadline_seconds > 0
-            else await evaluate_handler.handle(evaluation_arguments)
+            else await evaluate_handler.handle(evaluation_arguments, emit_terminal_telemetry=False)
         )
     except TimeoutError:
         retry = f"ooo evaluate {session_id}"

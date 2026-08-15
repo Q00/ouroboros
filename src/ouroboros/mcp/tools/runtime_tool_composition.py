@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 import inspect
+from pathlib import Path
 from typing import Any
 
 _COMPOSING_RUNTIME_TOOLS: ContextVar[bool] = ContextVar(
@@ -111,6 +112,7 @@ def configured_runtime_tools(
     include_auto: bool,
     mcp_bridge: Any | None,
     runtime_adapter: Any | None = None,
+    project_dir: str | Path | None = None,
 ) -> ConfiguredRuntimeTools | None:
     """Return the production handler graph, or ``None`` for lightweight fallback.
 
@@ -131,8 +133,10 @@ def configured_runtime_tools(
     if not executing_builtin_runtime or _COMPOSING_RUNTIME_TOOLS.get():
         return None
 
+    if project_dir is None and runtime_adapter is not None:
+        project_dir = runtime_adapter.working_directory
+
     from ouroboros.mcp.server.adapter import create_ouroboros_server
-    from ouroboros.mcp.tools.evaluation_handlers import ChecklistVerifyHandler
 
     compose_token = _COMPOSING_RUNTIME_TOOLS.set(True)
     try:
@@ -143,6 +147,7 @@ def configured_runtime_tools(
                 opencode_mode=opencode_mode,
                 mcp_bridge=mcp_bridge,
                 runtime_adapter=runtime_adapter,
+                project_dir=project_dir,
                 # Embedded interceptors own their event loop. Preserve this
                 # factory's historical in-process JobManager behavior.
                 durable_jobs=False,
@@ -157,10 +162,6 @@ def configured_runtime_tools(
         _COMPOSING_RUNTIME_TOOLS.reset(compose_token)
 
     configured = dict(server._tool_handlers)  # noqa: SLF001 - composition reuse
-    configured["ouroboros_checklist_verify"] = ChecklistVerifyHandler(
-        evaluate_handler=configured["ouroboros_evaluate"],
-        llm_backend=llm_backend,
-    )
     ordered_names = (
         "ouroboros_execute_seed",
         "ouroboros_start_execute_seed",
@@ -182,6 +183,7 @@ def configured_runtime_tools(
         "ouroboros_checklist_verify",
         "ouroboros_lateral_think",
         "ouroboros_submit_fanout_results",
+        "ouroboros_fetch_artifact",
         "ouroboros_evolve_step",
         "ouroboros_start_evolve_step",
         "ouroboros_ralph",

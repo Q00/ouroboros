@@ -19,6 +19,40 @@ Interactive onboarding for new Ouroboros users.
 
 When this skill is invoked, follow this flow:
 
+### Python Runtime (Required)
+
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+Only the probe and child interpreter discard inherited CPython path-selection
+overrides; the caller shell keeps its environment unchanged.
+
+<!-- ouroboros-python-resolver:start -->
+```bash
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 "$@")
+    return
+  fi
+  if command -v python >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python "$@")
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command uv run --no-project --quiet --python '>=3.12' python "$@")
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
+```
+<!-- ouroboros-python-resolver:end -->
+
 ---
 
 ### Pre-Check: Already Completed?
@@ -29,7 +63,7 @@ First, check `~/.ouroboros/prefs.json` for `welcomeCompleted`. For upgrades from
 PREFFILE="$HOME/.ouroboros/prefs.json"
 
 if [ -f "$PREFFILE" ]; then
-  WELCOME_COMPLETED=$(python3 - <<'PY'
+  WELCOME_COMPLETED=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -41,7 +75,7 @@ if not isinstance(prefs, dict):
 print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
 PY
 )
-  WELCOME_VERSION=$(python3 - <<'PY'
+  WELCOME_VERSION=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -65,10 +99,9 @@ previously completed welcome must never hide the setup gate from a user who
 chose **나중에** or whose setup was later removed:
 
 ```bash
-if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -77,7 +110,7 @@ try:
 except ModuleNotFoundError:
     yaml = None
 
-config_path, mcp_path = map(Path, sys.argv[1:])
+config_path = Path(sys.argv[1])
 
 def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
     """Read the top-level mapping scalars this readiness gate owns."""
@@ -118,31 +151,19 @@ def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
 
 try:
     config = yaml_mapping(config_path.read_text(encoding="utf-8"))
-    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
 except (OSError, ValueError):
     raise SystemExit(1)
 
 orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
 llm = config.get("llm") if isinstance(config, dict) else None
 # Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
-mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
-ouroboros_mcp = mcp_servers.get("ouroboros") if isinstance(mcp_servers, dict) else None
+# The marketplace plugin owns its MCP capability. Host-owned
+# ~/.claude/mcp.json is intentionally not part of SDK setup readiness.
 ready = (
     isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") == "claude"
+    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
     and isinstance(llm, dict)
     and llm.get("backend") == "claude"
-    and isinstance(ouroboros_mcp, dict)
-    and (
-        (
-            isinstance(ouroboros_mcp.get("command"), str)
-            and bool(ouroboros_mcp.get("command", "").strip())
-        )
-        or (
-            isinstance(ouroboros_mcp.get("url"), str)
-            and bool(ouroboros_mcp.get("url", "").strip())
-        )
-    )
 )
 raise SystemExit(0 if ready else 1)
 PY
@@ -176,7 +197,7 @@ completion prompt and continue to the Setup Gate below.
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -213,10 +234,9 @@ Before showing the welcome banner, check whether Ouroboros has been prepared
 on this machine:
 
 ```bash
-if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -225,7 +245,7 @@ try:
 except ModuleNotFoundError:
     yaml = None
 
-config_path, mcp_path = map(Path, sys.argv[1:])
+config_path = Path(sys.argv[1])
 
 def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
     """Read only the top-level mapping scalars owned by this readiness gate."""
@@ -266,31 +286,19 @@ def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
 
 try:
     config = yaml_mapping(config_path.read_text(encoding="utf-8"))
-    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
 except (OSError, ValueError):
     raise SystemExit(1)
 
 orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
 llm = config.get("llm") if isinstance(config, dict) else None
 # Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
-mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
-ouroboros_mcp = mcp_servers.get("ouroboros") if isinstance(mcp_servers, dict) else None
+# The marketplace plugin owns its MCP capability. Host-owned
+# ~/.claude/mcp.json is intentionally not part of SDK setup readiness.
 ready = (
     isinstance(orchestrator, dict)
-    and orchestrator.get("runtime_backend") == "claude"
+    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
     and isinstance(llm, dict)
     and llm.get("backend") == "claude"
-    and isinstance(ouroboros_mcp, dict)
-    and (
-        (
-            isinstance(ouroboros_mcp.get("command"), str)
-            and bool(ouroboros_mcp.get("command", "").strip())
-        )
-        or (
-            isinstance(ouroboros_mcp.get("url"), str)
-            and bool(ouroboros_mcp.get("url", "").strip())
-        )
-    )
 )
 raise SystemExit(0 if ready else 1)
 PY
@@ -332,8 +340,8 @@ Korean conversation, use:
 After successful setup, `../setup/SKILL.md` presents the model choice.
 Do not repeat it here; continue to Step 1 after the setup skill returns.
 
-Do not show this gate again once the Claude runtime, LLM backend, and MCP entry
-are ready. The normal settings UI remains available later through `ooo config`,
+Do not show this gate again once the Claude runtime and LLM backend are ready.
+The normal settings UI remains available later through `ooo config`,
 so a model choice made now is never permanent.
 
 ---
@@ -391,14 +399,16 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ### Step 3: Advanced Runtime Check
 
-Standalone Claude SDK setup intentionally does not register MCP 2. Do not
-inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x.
+It intentionally leaves host-owned `~/.claude/mcp.json` untouched; do not
+inspect or mutate that file as an onboarding health check. The dependency-free
+worker is the explicit `[claude-cli]` profile used by an isolated MCP 2 process.
 
 If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json
 {
   "questions": [{
-    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "question": "Advanced MCP workflows require a host-managed MCP 2 launcher. What would you like to do?",
     "header": "Runtime",
     "options": [
       { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
@@ -409,9 +419,9 @@ If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 }
 ```
 - **Continue native**: Continue to Step 4
-- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
-  supported CLI-backed runtime. Do not register MCP in the standalone Claude
-  SDK profile. Then continue to Step 4.
+- **Show MCP setup**: Explain that the Claude marketplace plugin or another
+  supported host setup owns the isolated `[mcp]` launcher. Never combine
+  `[claude-sdk]` with `[mcp]`. Then continue to Step 4.
 
 ---
 
@@ -487,7 +497,7 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
 - Both choices: merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys. Set `star_asked: true` after either star prompt choice so the star prompt is not repeated:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -514,7 +524,7 @@ PY
 **If `GH_MISSING` or `star_asked` is true:**
 Merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-python3 - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -556,7 +566,7 @@ Just include these naturally in your request:
 
 REAL-TIME MONITORING (TUI):
 When running ooo run or ooo evolve, open a separate terminal:
-  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor
+  uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor
 Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
 
 READY TO BUILD:

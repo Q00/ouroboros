@@ -105,3 +105,12 @@ def test_webhook_and_web_service_are_distinct_in_catalog() -> None:
     assert webhook.runtime_probe_kinds != web_service.runtime_probe_kinds
     assert "side_effect_probe" in webhook.runtime_probe_kinds
     assert "api_smoke" in web_service.runtime_probe_kinds
+
+
+def test_web_app_class_is_product_complete() -> None:
+    """#1813: browser UI goals get runtime acceptance, not just unit tests."""
+    profile = get_task_class_profile(TaskClass.WEB_APP)
+    assert profile.name == "web_app"
+    assert profile.default_completion_mode is CompletionMode.PRODUCT_COMPLETE
+    assert profile.default_ac_template
+    assert profile.runtime_probe_kinds == ("headless_run", "browser_smoke")

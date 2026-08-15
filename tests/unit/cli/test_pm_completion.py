@@ -19,6 +19,9 @@ def _resume_state(*, pending_question: str = "Current question?") -> SimpleNames
         interview_id="sess-123",
         rounds=[InterviewRound(round_number=1, question=pending_question, user_response=None)],
         is_complete=False,
+        # Real ``InterviewState`` always carries this; the resume path reads it
+        # to refuse brownfield sessions (RFC #1937 decision 9a).
+        is_brownfield=False,
         ambiguity_score=None,
         clear_stored_ambiguity=MagicMock(),
         mark_updated=MagicMock(),

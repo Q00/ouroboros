@@ -189,7 +189,9 @@ async def test_seed_qa_gate_recovers_after_one_transient_raise(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_seed_qa_gate_blocks_after_exhausting_transient_raises(tmp_path) -> None:
+async def test_seed_qa_gate_reports_advisory_after_exhausting_transient_raises(
+    tmp_path,
+) -> None:
     calls = 0
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
@@ -198,7 +200,7 @@ async def test_seed_qa_gate_blocks_after_exhausting_transient_raises(tmp_path) -
         raise RuntimeError("upstream QA judge unavailable")
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
-        raise AssertionError("run must not start when Seed QA never succeeds")
+        return {"job_id": "job_seed_qa_advisory"}
 
     event_store = _RecordingEventStore()
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -215,17 +217,15 @@ async def test_seed_qa_gate_blocks_after_exhausting_transient_raises(tmp_path) -
 
     result = await pipeline.run(state)
 
-    assert result.status == "blocked"
+    assert result.status == "complete"
     assert calls == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
-    assert state.last_tool_name == "seed_qa"
-    assert state.last_error_code == "seed_qa_transient_exhausted"
 
-    blocked_events = [
-        event for event in event_store.appended if event.type == "auto.seed_qa.blocked"
+    advisory_events = [
+        event for event in event_store.appended if event.type == "auto.seed_qa.advisory_override"
     ]
-    assert len(blocked_events) == 1
-    assert blocked_events[0].data["reason"] == "seed_qa_transient_exhausted"
-    assert blocked_events[0].data["attempts"] == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
+    assert len(advisory_events) == 1
+    assert advisory_events[0].data["reason"] == "evaluator_error"
+    assert advisory_events[0].data["attempts"] == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
 
 
 @pytest.mark.asyncio

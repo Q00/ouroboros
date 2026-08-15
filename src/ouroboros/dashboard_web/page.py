@@ -17,7 +17,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
     --muted: #8b949e; --pending: #6e7681; --executing: #d29922;
-    --completed: #2ea043; --failed: #f85149;
+    --completed: #2ea043; --failed: #f85149; --paused: #58a6ff; --cancelled: #a371f7;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -50,6 +50,8 @@ _PAGE_TEMPLATE = """<!doctype html>
   .run-row.status-running { border-left-color:var(--executing); }
   .run-row.status-completed { border-left-color:var(--completed); }
   .run-row.status-failed { border-left-color:var(--failed); }
+  .run-row.status-paused { border-left-color:var(--paused); }
+  .run-row.status-cancelled { border-left-color:var(--cancelled); }
   .run-goal { font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
   .run-details { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:7px;
     color:var(--muted); font-size:11px; }
@@ -58,8 +60,16 @@ _PAGE_TEMPLATE = """<!doctype html>
   .run-status.running { color:var(--executing); }
   .run-status.completed { color:var(--completed); }
   .run-status.failed { color:var(--failed); }
+  .run-status.paused { color:var(--paused); }
+  .run-status.cancelled { color:var(--cancelled); }
   .list-empty { color:var(--muted); border:1px dashed var(--border); border-radius:7px;
     padding:28px 16px; text-align:center; font-size:12px; }
+  .list-unavailable { color:var(--failed); border:1px solid var(--failed); border-radius:7px;
+    padding:22px 16px; text-align:center; font-size:12px; }
+  .list-unavailable p { color:var(--muted); margin:7px 0 14px; }
+  .retry-picker { color:var(--text); background:var(--panel); border:1px solid var(--border);
+    border-radius:5px; padding:6px 11px; font:inherit; cursor:pointer; }
+  .retry-picker:hover { border-color:#58a6ff; }
   #detail-view[hidden], #run-list[hidden] { display:none; }
   .col { background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; min-height: 120px; display:flex; flex-direction:column; }
@@ -242,6 +252,28 @@ function renderRuns(runs) {
     : '<div class="list-empty">waiting for run… (ooo run / ooo auto)</div>');
 }
 
+function renderPickerUnavailable() {
+  const list = document.getElementById("run-list");
+  list.innerHTML = `<div class="list-head"><h2>Recent runs</h2></div>
+    <div class="list-unavailable" role="alert">
+      <strong>Run picker temporarily unavailable</strong>
+      <p>The dashboard remains read-only. Ask the active writer to retry dashboard index setup, then retry this view.</p>
+      <button class="retry-picker" type="button">Retry now</button>
+    </div>`;
+  list.querySelector(".retry-picker").addEventListener("click", refreshRunList);
+}
+
+function renderRunListError() {
+  const list = document.getElementById("run-list");
+  list.innerHTML = `<div class="list-head"><h2>Recent runs</h2></div>
+    <div class="list-unavailable" role="alert">
+      <strong>Run list request failed</strong>
+      <p>Check the dashboard connection, then retry this view.</p>
+      <button class="retry-picker" type="button">Retry now</button>
+    </div>`;
+  list.querySelector(".retry-picker").addEventListener("click", refreshRunList);
+}
+
 __BOOTSTRAP__
 </script>
 </body>
@@ -252,6 +284,7 @@ __BOOTSTRAP__
 # shared SQLite file is cheap to observe even when several runs are concurrent.
 _LIVE_BOOTSTRAP = """
 const WAIT_POLL_MS = 3000;
+let runListRequest = 0;
 function connect(runId) {
   setView(true, runId);
   if (window.dashboardSource) window.dashboardSource.close();
@@ -264,14 +297,27 @@ function connect(runId) {
 }
 async function fetchRuns() {
   try {
-    return (await (await fetch("/api/runs", {cache:"no-store"})).json()).runs || [];
+    const response = await fetch("/api/runs", {cache:"no-store"});
+    const payload = await response.json();
+    if (response.status === 503 && payload.error === "picker_index_contract_unavailable")
+      return {state:"picker-unavailable", runs:[]};
+    if (!response.ok) throw new Error("run picker request failed");
+    return {state:"ready", runs:Array.isArray(payload.runs) ? payload.runs : []};
   } catch (_) {}
-  return [];
+  return {state:"network-error", runs:[]};
+}
+async function refreshRunList() {
+  const request = ++runListRequest;
+  const result = await fetchRuns();
+  if (request !== runListRequest) return;
+  if (result.state === "picker-unavailable") renderPickerUnavailable();
+  else if (result.state === "ready") renderRuns(result.runs);
+  else renderRunListError();
 }
 async function startList() {
   setView(false);
   while (!new URLSearchParams(location.search).get("run")) {
-    renderRuns(await fetchRuns());
+    await refreshRunList();
     await new Promise(r => setTimeout(r, WAIT_POLL_MS));
   }
 }

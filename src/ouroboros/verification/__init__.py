@@ -5,6 +5,7 @@ from ouroboros.verification.models import (
     SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
+    VerificationOutcome,
     VerificationTier,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "SpecAssertion",
     "SpecVerificationResult",
     "SpecVerificationSummary",
+    "VerificationOutcome",
     "VerificationTier",
 ]

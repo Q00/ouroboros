@@ -74,7 +74,7 @@ from ouroboros.auto.worktree import (
     ensure_auto_worktree,
     release_auto_worktree,
 )
-from ouroboros.config import get_opencode_mode
+from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -97,6 +97,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_subagent_payload,
@@ -250,7 +251,9 @@ class AutoHandler:
                     (
                         "Execution efficiency policy: adaptive may use lower-cost child "
                         "tiers with recovery escalation; quality_first keeps child ACs "
-                        "at the parent starting tier. Default: adaptive."
+                        "at the parent starting tier. When omitted on a fresh start, a "
+                        "configured execution.default_policy supplies it; otherwise "
+                        "defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -468,7 +471,7 @@ class AutoHandler:
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
             preferences = resolve_execution_preferences(
-                requested_efficiency_mode,
+                requested_efficiency_mode or default_execution_efficiency_mode(),
                 requested_frugality_assurance,
             )
             state.efficiency_mode = preferences.efficiency_mode.value
@@ -648,6 +651,7 @@ class AutoHandler:
                 efficiency_mode=state.efficiency_mode,
                 frugality_assurance=state.frugality_assurance,
                 frugality_assurance_explicit=state.frugality_assurance_explicit,
+                owns_successors=complete_product,
             ),
             store=store,
             repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -1052,7 +1056,7 @@ class StartAutoHandler:
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
         preferences = resolve_execution_preferences(
-            _optional_text_arg(arguments, "efficiency_mode"),
+            _optional_text_arg(arguments, "efficiency_mode") or default_execution_efficiency_mode(),
             _optional_text_arg(arguments, "frugality_assurance"),
         )
         state.efficiency_mode = preferences.efficiency_mode.value
@@ -2367,12 +2371,16 @@ def _execution_start_handler(
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
     )
+    # Without the successor stack the run cannot enqueue the evaluation it
+    # delegates to and finishes with ``evaluation_status="enqueue_failed"``.
     return StartExecuteSeedHandler(
         execute_handler=execute_seed,
         event_store=event_store,
         job_manager=job_manager,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
+        start_evaluate_handler=resolve_run_successor_handler(handler, execute_seed, job_manager),
+        seed_handoff_registry=getattr(handler, "seed_handoff_registry", None),
     )
 
 

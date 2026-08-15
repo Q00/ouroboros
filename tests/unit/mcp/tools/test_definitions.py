@@ -1873,6 +1873,7 @@ class TestOuroborosTools:
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -1952,6 +1953,33 @@ class TestOuroborosTools:
         }
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
+
+    def test_get_ouroboros_tools_uses_explicit_runtime_project_for_artifacts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Disposable bodies belong to the runtime workspace, not launcher CWD."""
+        launcher = tmp_path / "launcher"
+        project = tmp_path / "runtime-project"
+        launcher.mkdir()
+        project.mkdir()
+        monkeypatch.chdir(launcher)
+
+        tools = get_ouroboros_tools(runtime_backend="codex", project_dir=project)
+        submit = next(
+            handler
+            for handler in tools
+            if handler.definition.name == "ouroboros_submit_fanout_results"
+        )
+
+        assert submit.disposable_memory is not None
+        assert submit.disposable_memory.artifact_store.root == (
+            project.resolve() / ".ouroboros" / "artifacts"
+        )
+        assert submit.disposable_memory.artifact_store.root != (
+            launcher.resolve() / ".ouroboros" / "artifacts"
+        )
 
     def test_get_ouroboros_tools_can_inject_llm_backend(self) -> None:
         """Tool factory propagates llm backend to LLM-only handlers."""

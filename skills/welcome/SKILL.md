@@ -19,24 +19,39 @@ Interactive onboarding for new Ouroboros users.
 
 When this skill is invoked, follow this flow:
 
-Before running any shell snippets below, choose a Python command without
-assuming a system `python3` binary. Marketplace installs require `uvx`, not a
-global Python executable:
+### Python Runtime (Required)
 
+Before running any shell snippet below, define this resolver in the same shell.
+It accepts only Python 3.12 or newer, prefers `python3` and then `python`, and
+uses uv as the final fallback. Call `ouroboros_python` directly and quote every
+argument passed to it; the function preserves arguments and heredoc/stdin input.
+Only the probe and child interpreter discard inherited CPython path-selection
+overrides; the caller shell keeps its environment unchanged.
+
+<!-- ouroboros-python-resolver:start -->
 ```bash
-if [ -z "${OUROBOROS_WELCOME_PYTHON:-}" ]; then
-  if command -v python3 >/dev/null 2>&1; then
-    OUROBOROS_WELCOME_PYTHON="python3"
-  elif command -v python >/dev/null 2>&1; then
-    OUROBOROS_WELCOME_PYTHON="python"
-  elif command -v uv >/dev/null 2>&1; then
-    OUROBOROS_WELCOME_PYTHON="uv run --no-project --quiet python"
-  else
-    echo "Ouroboros welcome requires python3, python, or uv to inspect local setup."
-    exit 1
+ouroboros_python() {
+  if command -v python3 >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python3 "$@")
+    return
   fi
-fi
+  if command -v python >/dev/null 2>&1 &&
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))') >/dev/null 2>&1
+  then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command python "$@")
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    (unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR PYTHONEXECUTABLE __PYVENV_LAUNCHER__; command uv run --no-project --quiet --python '>=3.12' python "$@")
+    return
+  fi
+  printf '%s\n' 'Ouroboros skills require Python >= 3.12 or uv on PATH.' >&2
+  return 127
+}
 ```
+<!-- ouroboros-python-resolver:end -->
 
 ---
 
@@ -48,7 +63,7 @@ First, check `~/.ouroboros/prefs.json` for `welcomeCompleted`. For upgrades from
 PREFFILE="$HOME/.ouroboros/prefs.json"
 
 if [ -f "$PREFFILE" ]; then
-  WELCOME_COMPLETED=$($OUROBOROS_WELCOME_PYTHON - <<'PY'
+  WELCOME_COMPLETED=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -60,7 +75,7 @@ if not isinstance(prefs, dict):
 print(prefs.get('welcomeCompleted') or ('legacy-welcomeShown' if prefs.get('welcomeShown') else ''))
 PY
 )
-  WELCOME_VERSION=$($OUROBOROS_WELCOME_PYTHON - <<'PY'
+  WELCOME_VERSION=$(ouroboros_python - <<'PY'
 import json, os
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -89,7 +104,7 @@ case "$CODEX_HOME_DIR" in
   "~") CODEX_HOME_DIR="$HOME" ;;
   "~/"*) CODEX_HOME_DIR="$HOME/${CODEX_HOME_DIR#"~/"}" ;;
 esac
-if $OUROBOROS_WELCOME_PYTHON - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
 from __future__ import annotations
 
 import re
@@ -260,7 +275,7 @@ possible user pin. Instead, when Codex is ready, detect that exact legacy
 shape once before honoring the welcome-completed marker:
 
 ```bash
-if $OUROBOROS_WELCOME_PYTHON - "$HOME/.ouroboros/config.yaml" "$HOME/.ouroboros/prefs.json" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$HOME/.ouroboros/prefs.json" <<'PY'
 from __future__ import annotations
 
 import json
@@ -346,7 +361,7 @@ Use **AskUserQuestion**:
   on the current host:
 
 ```bash
-$OUROBOROS_WELCOME_PYTHON - "$HOME/.ouroboros/config.yaml" <<'PY'
+ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
 from __future__ import annotations
 
 import os
@@ -413,7 +428,7 @@ For either completed choice, merge exactly one marker into
 `~/.ouroboros/prefs.json` without deleting existing keys:
 
 ```bash
-$OUROBOROS_WELCOME_PYTHON - "automatic-v1" <<'PY'
+ouroboros_python - "automatic-v1" <<'PY'
 import json, os, sys
 path = os.path.expanduser('~/.ouroboros/prefs.json')
 try:
@@ -459,7 +474,7 @@ completion prompt and continue to the Setup Gate below.
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-$OUROBOROS_WELCOME_PYTHON - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -502,7 +517,7 @@ case "$CODEX_HOME_DIR" in
   "~") CODEX_HOME_DIR="$HOME" ;;
   "~/"*) CODEX_HOME_DIR="$HOME/${CODEX_HOME_DIR#"~/"}" ;;
 esac
-if $OUROBOROS_WELCOME_PYTHON - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
 from __future__ import annotations
 
 import re
@@ -694,7 +709,8 @@ runtime. For a Korean conversation, use:
 - **설정하고 시작하기**: Run the setup command for the active host. In Codex
   App or Codex CLI, use `ouroboros setup --runtime codex` when the executable
   is installed. For a Marketplace-plugin-only install, use
-  `uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead.
+  `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex`
+  instead.
   In Claude Code, follow `../setup/SKILL.md`. Do not ask the user to copy a
   command when the current host can run it.
 - **나중에**: Continue with the welcome flow, but do not claim that MCP-only
@@ -793,14 +809,16 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ### Step 3: Advanced Runtime Check
 
-Standalone Claude SDK setup intentionally does not register MCP 2. Do not
-inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x.
+It intentionally leaves host-owned `~/.claude/mcp.json` untouched; do not
+inspect or mutate that file as an onboarding health check. The dependency-free
+worker is the explicit `[claude-cli]` profile used by an isolated MCP 2 process.
 
 If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json
 {
   "questions": [{
-    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "question": "Advanced MCP workflows require a host-managed MCP 2 launcher. What would you like to do?",
     "header": "Runtime",
     "options": [
       { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
@@ -811,9 +829,9 @@ If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 }
 ```
 - **Continue native**: Continue to Step 4
-- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
-  supported CLI-backed runtime. Do not register MCP in the standalone Claude
-  SDK profile. Then continue to Step 4.
+- **Show MCP setup**: Explain that the Claude marketplace plugin or another
+  supported host setup owns the isolated `[mcp]` launcher. Never combine
+  `[claude-sdk]` with `[mcp]`. Then continue to Step 4.
 
 ---
 
@@ -889,7 +907,7 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
 - Both choices: merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys. Set `star_asked: true` after either star prompt choice so the star prompt is not repeated:
   ```bash
-$OUROBOROS_WELCOME_PYTHON - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -916,7 +934,7 @@ PY
 **If `GH_MISSING` or `star_asked` is true:**
 Merge the welcome completion fields into `~/.ouroboros/prefs.json` without deleting existing keys:
   ```bash
-$OUROBOROS_WELCOME_PYTHON - <<'PY'
+ouroboros_python - <<'PY'
 import json, os
 from datetime import UTC, datetime
 path = os.path.expanduser('~/.ouroboros/prefs.json')
@@ -958,7 +976,7 @@ Just include these naturally in your request:
 
 REAL-TIME MONITORING (TUI):
 When running ooo run or ooo evolve, open a separate terminal:
-  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor
+  uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor
 Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
 
 READY TO BUILD:

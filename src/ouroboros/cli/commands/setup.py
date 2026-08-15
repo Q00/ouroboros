@@ -30,12 +30,22 @@ import sys
 import tomllib
 from typing import Annotated, Literal
 
+from rich.markup import escape
 from rich.prompt import Prompt
 from rich.table import Table
 import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude as _setup_claude,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_cli as _setup_claude_cli,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_sdk as _setup_claude_sdk,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -75,6 +85,11 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    UVX_PYTHON_FLOOR,
+    has_unsupported_claude_sdk_mcp_mix,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -91,7 +106,16 @@ class _SetupCodexCliLogger:
 
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     """Return the canonical uvx args for the requested Ouroboros package spec."""
-    return ["--from", package_spec, "ouroboros", "mcp", "serve"]
+    return [
+        "--isolated",
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        package_spec,
+        "ouroboros",
+        "mcp",
+        "serve",
+    ]
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -99,8 +123,10 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
 
     Direct ``ouroboros`` and ``python -m`` fallbacks are deliberately excluded:
     their environments may contain the Claude SDK's MCP 1.x dependency or no
-    MCP extra at all. ``uvx`` and ``pipx run`` both create a package-isolated
-    process whose ``[mcp]`` extra is known to contain MCP 2.
+    MCP extra at all. ``uvx --isolated`` and ``pipx run`` both create a
+    package-isolated process whose ``[mcp]`` extra is known to contain MCP 2.
+    ``uvx --from`` without ``--isolated`` is insufficient: uv may reuse an
+    already installed Ouroboros tool whose environment contains MCP 1.x.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
@@ -180,7 +206,7 @@ def _commit_runtime_activation(
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Fail closed for the standalone Claude SDK profile.
+    """Explain the process boundary for legacy callers.
 
     Kept as a compatibility shim for callers from older plugin artifacts. The
     current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
@@ -188,8 +214,10 @@ def _ensure_claude_mcp_entry() -> None:
     isolated process. Never mutate user-owned Claude MCP configuration here.
     """
     print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile. "
-        "Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+        escape(
+            "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
+            "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
+        )
     )
 
 
@@ -210,7 +238,10 @@ def _get_current_backend() -> str | None:
         return None
     try:
         data = yaml.safe_load(config_path.read_text()) or {}
-        return data.get("orchestrator", {}).get("runtime_backend")
+        backend = data.get("orchestrator", {}).get("runtime_backend")
+        if backend == "claude_mcp":
+            return "claude-cli"
+        return backend
     except Exception:
         return None
 
@@ -415,9 +446,19 @@ _CODEX_MCP_COMMENT_LINES = (
 
 CodexMcpMode = Literal["auto", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-_CODEX_UVX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+_CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
+    (
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        "ouroboros-ai[mcp]",
+        "ouroboros",
+        "mcp",
+        "serve",
+    ),
+    ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
     ("--from", "ouroboros-ai", "ouroboros", "mcp", "serve"),
     ("ouroboros", "mcp", "serve"),
 )
@@ -614,9 +655,9 @@ def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs keep the historical ``uvx --from ouroboros-ai[mcp]``
-    command so Codex can bootstrap the MCP extra even if the invoking Python
-    environment lacks it. Dev/git installs must instead point Codex at this
+    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
+    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
     """
@@ -2588,7 +2629,12 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
     return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
 
 
-def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
+def _setup_codex(
+    codex_path: str,
+    *,
+    mcp_mode: CodexMcpMode = "auto",
+    preserve_existing_llm: bool = False,
+) -> bool:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import ensure_config_dir, get_default_config
     from ouroboros.config.models import get_config_dir, get_default_credentials
@@ -2638,13 +2684,16 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
     try:
         previous_execute_backend = _config_execute_runtime_backend(config_dict)
-        # Set runtime and LLM backend to codex
+        # Runtime integration and authoring/evaluation provider selection are
+        # independent. Interactive setup keeps its historical behavior, while
+        # updater-driven refreshes preserve an explicitly split LLM backend.
         orchestrator_config = _ensure_mapping_section(config_dict, "orchestrator")
         orchestrator_config["runtime_backend"] = "codex"
         orchestrator_config["codex_cli_path"] = codex_path
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
-        llm_config["backend"] = "codex"
+        if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
+            llm_config["backend"] = "codex"
 
         if fresh_config:
             _neutralize_fresh_codex_model_defaults(config_dict)
@@ -3347,8 +3396,9 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
         return False
 
-    # Live-discover available Copilot models. Falls back silently to a
-    # bundled snapshot when the GitHub API is unreachable or unauthenticated.
+    # Live-discover available Copilot models. When the GitHub API is
+    # unreachable or unauthenticated, use a bundled snapshot and warn that it
+    # may be stale.
     models = list_copilot_models(refresh=True)
     if used_fallback():
         print_warning(
@@ -3854,47 +3904,6 @@ def _setup_goose(goose_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
-def _setup_claude(claude_path: str) -> None:
-    """Configure Ouroboros for the Claude Code runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
-
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    # Set runtime and LLM backend to claude
-    config_dict.setdefault("orchestrator", {})
-    config_dict["orchestrator"]["runtime_backend"] = "claude"
-    config_dict["orchestrator"]["cli_path"] = claude_path
-
-    config_dict.setdefault("llm", {})
-    config_dict["llm"]["backend"] = "claude"
-
-    with config_path.open("w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-
-    # Do not register the isolated MCP 2 server with this Claude SDK profile.
-    # The protocol server excludes ``claude-agent-sdk`` (it pins MCP 1.x), and
-    # the persisted *runtime* backend below still requires it — a registration
-    # here would boot and then fail lazily on execution tools. The *LLM* half of
-    # that dependency is gone as of Q00/ouroboros#1839 (``ClaudeCodeAdapter``
-    # falls back to the ``claude`` CLI), so lifting this skip now needs the same
-    # fallback on ``ClaudeAgentAdapter``, not a change here.
-    print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
-        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
-        "Use a supported CLI-backed runtime setup to register the MCP server."
-    )
-
-    print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
-    print_info(f"Config saved to: {config_path}")
-
-
 def _strip_jsonc(text: str) -> str:
     """Strip JSONC features (comments, trailing commas) to produce valid JSON.
 
@@ -4056,7 +4065,7 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
+        return {"command": ["uvx", *_build_uvx_mcp_args("ouroboros-ai[mcp]")]}
     if shutil.which("pipx"):
         return {
             "command": [
@@ -4628,7 +4637,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4652,6 +4661,14 @@ def setup(
             help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
         ),
     ] = "auto",
+    preserve_existing_llm: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-existing-llm",
+            help="Preserve an existing independent LLM backend during runtime refresh.",
+            hidden=True,
+        ),
+    ] = False,
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -4676,6 +4693,9 @@ def setup(
     """
     if ctx.invoked_subcommand is not None:
         return
+    if has_unsupported_claude_sdk_mcp_mix():
+        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
+        raise typer.Exit(1)
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
@@ -4688,6 +4708,10 @@ def setup(
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
+    # All Claude profiles share one executable. Expose an explicit alias only
+    # when already configured so no-argument setup preserves its transport.
+    if current_backend in {"claude-sdk", "claude-cli"} and "claude" in available:
+        available[current_backend] = available["claude"]
 
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
@@ -4761,7 +4785,22 @@ def setup(
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude(claude_path)
+        if not _setup_claude(claude_path):
+            raise typer.Exit(1)
+    elif selected in ("claude-cli", "claude_mcp"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        if not _setup_claude_cli(claude_path):
+            raise typer.Exit(1)
+    elif selected in ("claude-sdk", "claude_sdk"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        if not _setup_claude_sdk(claude_path):
+            raise typer.Exit(1)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:
@@ -4774,7 +4813,11 @@ def setup(
             else:
                 print_error("Codex CLI not found in PATH or Codex App bundle.")
             raise typer.Exit(1)
-        if not _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode)):
+        if not _setup_codex(
+            codex_path,
+            mcp_mode=_normalize_codex_mcp_mode(mcp_mode),
+            preserve_existing_llm=preserve_existing_llm,
+        ):
             raise typer.Exit(1)
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")

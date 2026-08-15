@@ -1,5 +1,7 @@
 # GitHub Copilot CLI Runtime
 
+> 한국어: [copilot.ko.md](./copilot.ko.md)
+
 Run Ouroboros workflows on top of the locally installed
 [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli).
 
@@ -84,8 +86,8 @@ at the start of the wizard. The flow:
 3. Parse `data[].id` and `capabilities.family` into a typed list.
 4. Cache the result in process for the rest of the setup run.
 5. If any of the above fails (no `gh`, network down, rate limited, parse
-   error), fall back silently to a bundled snapshot of well-known IDs so
-   setup still completes.
+   error), print a warning and fall back to a bundled snapshot of well-known
+   IDs so setup still completes.
 
 Setup prints the chosen default model and persists it through supported
 model fields in `~/.ouroboros/config.yaml` — for example
@@ -97,12 +99,28 @@ a new default after GitHub ships new models.
 
 ### Hyphen versus dotted model IDs
 
-Ouroboros' historical defaults use the hyphenated Anthropic SDK form
-(`claude-opus-4-6`, `claude-sonnet-4-5`). Copilot CLI expects the dotted
-form (`claude-opus-4.6`, `claude-sonnet-4.5`). The Copilot adapter
-auto-maps the well-known Anthropic IDs at runtime, so existing config files
-keep working when you switch the runtime to Copilot. You do not need to
-rewrite any per-role model overrides.
+Ouroboros' defaults use the hyphenated Anthropic SDK form
+(`claude-opus-4-8`, `claude-sonnet-4-6`). Copilot CLI expects the dotted form
+(`claude-opus-4.8`, `claude-sonnet-4.6`). The adapter resolves these forms
+against the discovered Copilot catalog rather than rewriting arbitrary model
+names.
+
+`map_to_copilot_model()` ([`copilot/model_discovery.py`](../../src/ouroboros/copilot/model_discovery.py))
+passes through an explicit dotted Copilot ID, then derives candidates by
+removing the known `openrouter/anthropic/` prefix, preserving exact legacy
+aliases, or changing only the trailing numeric version separator. For example,
+`claude-opus-4-8` becomes the candidate `claude-opus-4.8`; the hyphens in
+`claude-opus` are never touched. Every transformed candidate, including a
+prefix-stripped or statically mapped one, is returned only when that exact ID
+is in the discovered or bundled catalog.
+
+The current `DEFAULT_OPUS_MODEL` therefore resolves to the published
+`claude-opus-4.8`, as does `openrouter/anthropic/claude-opus-4-8`. Future
+Anthropic versions use the same catalog-gated trailing-version rule without
+another static-map entry. An unknown model, or any derived candidate that the
+active catalog does not publish, remains unchanged—including its OpenRouter
+prefix—so the existing Copilot unavailable-model error stays explicit rather
+than silently selecting a different model.
 
 If you set a model that Copilot does not recognise, the subprocess will
 fail with `Model "<id>" from --model flag is not available.` Pass a model
@@ -117,17 +135,22 @@ orchestrator:
   copilot_cli_path: C:\Users\you\AppData\Local\Programs\copilot\copilot.exe   # optional
 llm:
   backend: copilot
-  default_model: claude-opus-4.6                # written by setup
+  qa_model: claude-opus-4.6                     # written by setup
 clarification:
   default_model: claude-opus-4.6                # written by setup
 ```
+
+> `llm` has no `default_model` field (`config/models.py`, `LLMConfig`). Setup
+> writes the model it discovered into the fields that do exist — for example
+> `clarification.default_model`, `llm.qa_model`, and the evaluation/resilience
+> model fields.
 
 The same `copilot` value is accepted by every CLI surface that takes a
 backend name:
 
 - `ouroboros setup --runtime copilot`
 - `ouroboros config backend copilot`
-- `ouroboros mcp serve --llm-backend copilot`
+- `ouroboros mcp serve --runtime copilot --llm-backend copilot`
 - `ouroboros init --llm-backend copilot`
 
 ## Headless contract
@@ -153,6 +176,24 @@ copilot --no-color --log-level none \
 | `--agent`           | Custom agent profile; takes precedence over `--model`        |
 | `-p`                | One-shot prompt (no interactive REPL)                        |
 
+Before launching that command, the runtime applies the same executable
+version-attestation policy as Codex: initialization-time probe failure blocks
+the runtime because no positive baseline exists; a later timeout or execution
+failure blocks only the current attempt and is not reported as executable
+drift; only a version-output change requires two successful, different
+attestations.
+The runtime rejects non-executing path/content/device/inode/symlink evidence
+that differs from initialization before running `copilot --version`, and it
+post-samples every started probe so mutation takes precedence over a concurrent
+timeout or execution failure.
+If only a containing-directory generation changed, the evidence cannot
+distinguish unrelated sibling churn from an executable-entry swap-and-restore.
+That attempt fails closed as retryable, indeterminate authority without
+claiming confirmed executable drift.
+Path, content, symlink, device/inode, or probe-window generation drift can fail
+closed before a second successful version probe. This ensures that two missing
+`copilot --version` results never authorize a launch under load.
+
 ### MCP registration
 
 `ouroboros setup --runtime copilot` writes
@@ -164,7 +205,7 @@ install method the wizard detected:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
       "env": {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
         "OUROBOROS_LLM_BACKEND": "copilot"
@@ -211,7 +252,10 @@ updates setup-managed entries to the current isolated launcher.
 Old Ouroboros build that did not yet auto-map hyphen IDs to the dotted
 Copilot form. Upgrade to a release that includes the model-discovery
 module, or override your default to the dotted form
-(`OUROBOROS_DEFAULT_MODEL=claude-opus-4.6`).
+by rerunning `ouroboros setup --runtime copilot` and picking a
+dotted ID from the live catalog. There is no `OUROBOROS_DEFAULT_MODEL`
+environment variable; per-role overrides use their own variables, such as
+`OUROBOROS_CLARIFICATION_MODEL`.
 
 **`copilot CLI not found.`**
 Install Copilot CLI per the GitHub docs, then either let setup auto-detect

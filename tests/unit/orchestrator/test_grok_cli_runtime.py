@@ -10,6 +10,8 @@ Covers the ``grok`` headless contract that differs from the Codex base:
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -70,7 +72,11 @@ class _FakeProcess:
 
 
 def _make_runtime() -> GrokCliRuntime:
-    return GrokCliRuntime(cli_path="/usr/bin/grok")
+    return GrokCliRuntime(cli_path=_test_cli_path())
+
+
+def _test_cli_path() -> str:
+    return str(Path(os.environ["OUROBOROS_TEST_CLI_DIR"]) / "grok")
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +94,7 @@ def test_build_command_uses_single_prompt_and_streaming_json() -> None:
 
 
 def test_build_command_forwards_permission_mode() -> None:
-    runtime = GrokCliRuntime(cli_path="/usr/bin/grok", permission_mode="bypassPermissions")
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), permission_mode="bypassPermissions")
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert "--permission-mode" in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
@@ -101,13 +107,13 @@ def test_build_command_defaults_to_accept_edits() -> None:
 
 
 def test_build_command_omits_sentinel_model() -> None:
-    runtime = GrokCliRuntime(cli_path="/usr/bin/grok", model="default")
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), model="default")
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert "-m" not in cmd
 
 
 def test_build_command_forwards_explicit_model() -> None:
-    runtime = GrokCliRuntime(cli_path="/usr/bin/grok", model="grok-build")
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), model="grok-build")
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert "-m" in cmd
     assert cmd[cmd.index("-m") + 1] == "grok-build"
@@ -133,7 +139,7 @@ def test_default_permission_mode_is_coerced_with_audit_log() -> None:
     from structlog.testing import capture_logs
 
     with capture_logs() as cap_logs:
-        runtime = GrokCliRuntime(cli_path="/usr/bin/grok", permission_mode="default")
+        runtime = GrokCliRuntime(cli_path=_test_cli_path(), permission_mode="default")
 
     assert runtime.permission_mode == "acceptEdits"
     coerced = [e for e in cap_logs if e.get("event") == "grok_cli_runtime.permission_mode_coerced"]
@@ -143,7 +149,7 @@ def test_default_permission_mode_is_coerced_with_audit_log() -> None:
 
 def test_unknown_permission_mode_raises_value_error() -> None:
     with pytest.raises(ValueError, match="Unsupported Grok permission mode"):
-        GrokCliRuntime(cli_path="/usr/bin/grok", permission_mode="yolo")
+        GrokCliRuntime(cli_path=_test_cli_path(), permission_mode="yolo")
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +302,7 @@ async def test_execute_task_to_result_accumulates_streamed_text() -> None:
     Reproduces the reviewer's finding: without accumulation, only the last
     token (`" world"`) would survive into TaskResult.final_message.
     """
-    runtime = GrokCliRuntime(cli_path="/usr/bin/grok", cwd="/tmp")
+    runtime = GrokCliRuntime(cli_path=_test_cli_path(), cwd="/tmp")
 
     async def fake_exec(*command: str, **kwargs: object) -> _FakeProcess:
         del command, kwargs
