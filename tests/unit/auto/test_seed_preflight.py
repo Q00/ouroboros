@@ -286,6 +286,32 @@ def test_literal_or_escaped_dollar_is_not_an_environment_expansion(
     assert all(finding.code != "unbound_env_var" for finding in report.findings)
 
 
+@pytest.mark.parametrize(
+    ("command", "expected_blocking"),
+    (
+        ("printf '%s\\n' python missing.py", False),
+        ("env --split-string=python3 missing.py", True),
+        ("sh -c 'test -n \"$REQUIRED\"'", True),
+        ('printf -- REQUIRED=value; test -n "$REQUIRED"', True),
+    ),
+)
+def test_preflight_uses_command_position_and_nested_shell_semantics(
+    tmp_path: Path, command: str, expected_blocking: bool
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    if expected_blocking:
+        assert any(finding.blocking for finding in report.findings)
+    else:
+        assert not any(finding.blocking for finding in report.findings)
+
+
 def test_environment_assignment_after_use_does_not_bind_earlier_expansion(tmp_path: Path) -> None:
     seed = _seed(
         acceptance_criteria=(

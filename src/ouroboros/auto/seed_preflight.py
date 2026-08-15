@@ -87,7 +87,7 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
 
     events: list[tuple[int, str, str]] = []
     for match in _ENV_ASSIGN_RE.finditer(command):
-        if unquoted[match.start()]:
+        if unquoted[match.start()] and _is_shell_assignment_position(command, match.start()):
             events.append((match.start(), "bind", match.group(1)))
     for match in _FOR_VAR_RE.finditer(command):
         if unquoted[match.start()]:
@@ -99,6 +99,49 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             continue
         events.append((match.start(), "expand", match.group(1)))
     return tuple(sorted(events))
+
+
+def _is_shell_assignment_position(command: str, start: int) -> bool:
+    """Return whether ``NAME=`` starts a shell assignment word, not an argument."""
+    segment_start = max(command.rfind(token, 0, start) for token in (";", "&", "|", "\n")) + 1
+    prefix = command[segment_start:start].strip()
+    if not prefix:
+        return True
+    try:
+        words = shlex.split(prefix, posix=True)
+    except ValueError:
+        return False
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+    if all(assignment.fullmatch(word) for word in words):
+        return True
+    if words and Path(words[0]).name == "env":
+        return all(word.startswith("-") or assignment.fullmatch(word) for word in words[1:])
+    return False
+
+
+def _nested_shell_commands(command: str) -> tuple[str, ...]:
+    """Return command strings executed by command-position ``sh -c`` forms."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
+    except ValueError:
+        return ()
+    segments: list[list[str]] = [[]]
+    for part in parts:
+        if re.fullmatch(r"[;&|]+", part):
+            segments.append([])
+        else:
+            segments[-1].append(part)
+    nested: list[str] = []
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+    for segment in segments:
+        while segment and assignment.fullmatch(segment[0]):
+            segment = segment[1:]
+        if len(segment) >= 3 and Path(segment[0]).name in {"sh", "bash"} and segment[1] == "-c":
+            nested.append(segment[2])
+    return tuple(nested)
 
 
 # A standalone dependency entry that claims a workspace file. Requires a
@@ -268,35 +311,34 @@ def _check_verify_commands(
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
         command_bound: set[str] = set()
-        # The outer shell quotes an inner ``sh -c`` program; assignments inside
-        # that program are the binding authority for its later expansions.
-        if re.search(r"(?:^|[;&|]\s*)sh\s+-c\s", scannable):
-            command_bound.update(_ENV_ASSIGN_RE.findall(scannable))
-        for _, event, variable in _shell_variable_events(scannable):
-            if event == "bind":
-                command_bound.add(variable)
-                continue
-            if (
-                variable in _HOST_BOUND_ENV_VARS
-                or variable in command_bound
-                or variable in seen_vars
-            ):
-                continue
-            seen_vars.add(variable)
-            findings.append(
-                PreflightFinding(
-                    code="unbound_env_var",
-                    blocking=True,
-                    subject=f"${variable}",
-                    detail=(
-                        f"verify_command for {criterion.description[:80]!r} references "
-                        f"${variable}, but nothing in the Seed binds it to a value"
-                    ),
-                    question=(
-                        f"What concrete value must ${variable} hold when the verify command runs?"
-                    ),
+        nested_shell_commands = _nested_shell_commands(scannable)
+        shell_commands = nested_shell_commands or (scannable,)
+        for shell_command in shell_commands:
+            for _, event, variable in _shell_variable_events(shell_command):
+                if event == "bind":
+                    command_bound.add(variable)
+                    continue
+                if (
+                    variable in _HOST_BOUND_ENV_VARS
+                    or variable in command_bound
+                    or variable in seen_vars
+                ):
+                    continue
+                seen_vars.add(variable)
+                findings.append(
+                    PreflightFinding(
+                        code="unbound_env_var",
+                        blocking=True,
+                        subject=f"${variable}",
+                        detail=(
+                            f"verify_command for {criterion.description[:80]!r} references "
+                            f"${variable}, but nothing in the Seed binds it to a value"
+                        ),
+                        question=(
+                            f"What concrete value must ${variable} hold when the verify command runs?"
+                        ),
+                    )
                 )
-            )
         for token in _FILE_TOKEN_RE.findall(scannable):
             normalized = _normalize_workspace_path(token)
             if normalized in artifacts or normalized in claimed_files or normalized in seen_tokens:
@@ -360,13 +402,13 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     token = remaining[0]
                     if token in {"-S", "--split-string"} and len(remaining) >= 2:
                         try:
-                            scan(shell_tokens(remaining[1]))
+                            scan(shell_tokens(remaining[1]) + remaining[2:])
                         except ValueError:
                             pass
                         return []
                     if token.startswith("--split-string="):
                         try:
-                            scan(shell_tokens(token.partition("=")[2]))
+                            scan(shell_tokens(token.partition("=")[2]) + remaining[1:])
                         except ValueError:
                             pass
                         return []
@@ -426,32 +468,41 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             segment = unwrap_command(segment)
             if segment and "/" in segment[0] and not is_runner(segment[0]):
                 programs.add(_normalize_workspace_path(segment[0]))
-        for index, token in enumerate(parts):
-            if token in {"bash", "sh"} and index + 2 < len(parts) and parts[index + 1] == "-c":
-                try:
-                    scan(shell_tokens(parts[index + 2]))
-                except ValueError:
-                    continue
-            if not is_runner(token):
+        for segment in segments:
+            while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
+                segment = segment[1:]
+            segment = unwrap_command(segment)
+            if not segment:
                 continue
-            runner = Path(token).name
-            cursor = index + 1
-            while cursor < len(parts) and parts[cursor].startswith("-"):
-                if (runner == "node" and parts[cursor] in {"-e", "--eval", "-p", "--print"}) or (
-                    runner == "ruby" and parts[cursor] in {"-e", "--eval"}
+            executable = Path(segment[0]).name
+            if (
+                executable in {"bash", "sh"}
+                and len(segment) >= 3
+                and segment[1] in {"-c", "--command"}
+            ):
+                try:
+                    scan(shell_tokens(segment[2]))
+                except ValueError:
+                    pass
+                continue
+            if "/" in segment[0] and not is_runner(segment[0]):
+                programs.add(_normalize_workspace_path(segment[0]))
+            if not is_runner(segment[0]):
+                continue
+            runner = executable
+            cursor = 1
+            while cursor < len(segment) and segment[cursor].startswith("-"):
+                option = segment[cursor]
+                if (runner in {"node", "ruby"} and option in {"-e", "--eval", "-p", "--print"}) or (
+                    re.fullmatch(r"(?:python(?:\d+(?:\.\d+)*)?t?|pypy\d*)", runner)
+                    and option in {"-c", "--command"}
                 ):
-                    # The following token is source text, not a program path.
-                    cursor = len(parts)
+                    cursor = len(segment)
                     break
-                if parts[cursor] in {"-c", "--command"} and cursor + 1 < len(parts):
-                    try:
-                        scan(shell_tokens(parts[cursor + 1]))
-                    except ValueError:
-                        pass
+                if option in {"-m", "--module"}:
+                    cursor = len(segment)
                     break
-                if parts[cursor] in {"-m", "--module"}:
-                    break
-                if parts[cursor] in {
+                if option in {
                     "-X",
                     "-W",
                     "--check-hash-based-pycs",
@@ -460,8 +511,8 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     cursor += 2
                     continue
                 cursor += 1
-            if cursor < len(parts) and not parts[cursor].startswith("-"):
-                programs.add(_normalize_workspace_path(parts[cursor]))
+            if cursor < len(segment) and not segment[cursor].startswith("-"):
+                programs.add(_normalize_workspace_path(segment[cursor]))
 
     try:
         scan(shell_tokens(command))
