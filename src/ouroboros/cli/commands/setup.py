@@ -2275,12 +2275,7 @@ class _ConcurrentSetupMutationError(OSError):
     """A managed path no longer matches the generation setup read."""
 
 
-def _snapshot_path(
-    path: Path,
-    *,
-    _seen: frozenset[Path] = frozenset(),
-    snapshot_link_targets: bool = True,
-) -> _PathSnapshot:
+def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
         stat_result = path.lstat()
@@ -2291,8 +2286,6 @@ def _snapshot_path(
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISLNK(stat_result.st_mode):
         link_target = os.readlink(path)
-        if not snapshot_link_targets:
-            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
         target_path = Path(link_target)
         if not target_path.is_absolute():
             target_path = path.parent / target_path
@@ -2302,7 +2295,6 @@ def _snapshot_path(
         target_snapshot = _snapshot_path(
             target_path,
             _seen=_seen | {current_path},
-            snapshot_link_targets=snapshot_link_targets,
         )
         try:
             target_stat = target_path.lstat()
@@ -2336,16 +2328,7 @@ def _snapshot_path(
 
     children: list[tuple[str, _PathSnapshot]] = []
     for child in sorted(path.iterdir(), key=lambda item: item.name):
-        children.append(
-            (
-                child.name,
-                _snapshot_path(
-                    child,
-                    _seen=_seen | {current_path},
-                    snapshot_link_targets=snapshot_link_targets,
-                ),
-            )
-        )
+        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
 
 
@@ -3023,15 +3006,11 @@ def _setup_hermes(hermes_path: str) -> bool:
         Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
     )
     # Reject a linked live target before snapshotting so setup never traverses
-    # an arbitrary external tree.  Nested operator links are preserved as
-    # topology only and are never read through for this rollback snapshot.
+    # an arbitrary external tree.
     if hermes_skill_target.is_symlink():
         print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
         return False
-    hermes_skill_snapshot = _snapshot_path(
-        hermes_skill_target,
-        snapshot_link_targets=False,
-    )
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target)
 
     # Skills are a required Hermes activation artifact. Install them before
     # selecting Hermes or registering its MCP server so a failed installation
