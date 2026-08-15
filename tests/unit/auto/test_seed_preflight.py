@@ -312,6 +312,43 @@ def test_preflight_uses_command_position_and_nested_shell_semantics(
         assert not any(finding.blocking for finding in report.findings)
 
 
+def test_separate_nested_shells_do_not_share_variable_bindings(tmp_path: Path) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Independent shells",
+                    verify_command="sh -c 'FOO=x'; sh -c 'echo $FOO'",
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    assert [finding.subject for finding in report.blocking_findings] == ["$FOO"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "command -- ./missing-verify",
+        "nice -n5 ./missing-verify",
+        "nice --adjustment=5 ./missing-verify",
+    ),
+)
+def test_supported_wrapper_option_forms_preserve_program_position(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
 def test_environment_assignment_after_use_does_not_bind_earlier_expansion(tmp_path: Path) -> None:
     seed = _seed(
         acceptance_criteria=(

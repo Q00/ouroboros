@@ -310,10 +310,10 @@ def _check_verify_commands(
             continue
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
-        command_bound: set[str] = set()
         nested_shell_commands = _nested_shell_commands(scannable)
         shell_commands = nested_shell_commands or (scannable,)
         for shell_command in shell_commands:
+            command_bound: set[str] = set()
             for _, event, variable in _shell_variable_events(shell_command):
                 if event == "bind":
                     command_bound.add(variable)
@@ -438,12 +438,15 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 remaining = remaining[1:]
                 if remaining and remaining[0] in {"-n", "--adjustment"}:
                     remaining = remaining[2:]
-                elif remaining and re.fullmatch(r"-\d+", remaining[0]):
+                elif remaining and (
+                    re.fullmatch(r"-n?\d+", remaining[0])
+                    or remaining[0].startswith("--adjustment=")
+                ):
                     remaining = remaining[1:]
                 continue
             if command_name == "command":
                 remaining = remaining[1:]
-                while remaining and remaining[0] in {"-p", "-v", "-V"}:
+                while remaining and remaining[0] in {"--", "-p", "-v", "-V"}:
                     remaining = remaining[1:]
                 continue
             break
