@@ -116,12 +116,15 @@ def install_hermes_skills(
     )
 
     target_dir = resolved_hermes_dir / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+    backup_dir = target_dir.with_name(f".{target_dir.name}.old")
 
     if target_dir.is_symlink():
         msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
         raise OSError(msg)
     if target_dir.exists() and not target_dir.is_dir():
         _remove_target_path(target_dir)
+    if backup_dir.exists() and not target_dir.exists():
+        os.replace(backup_dir, target_dir)
 
     with _packaged_skills_dir() as source_root:
         _prepare_hermes_install_root(target_dir)
@@ -130,9 +133,7 @@ def install_hermes_skills(
 
         # Build the complete replacement beside the live generation.  A
         # mid-copy failure must never remove a previously working install.
-        staging_dir = Path(
-            tempfile.mkdtemp(prefix=".ouroboros-skills-", dir=target_dir.parent)
-        )
+        staging_dir = Path(tempfile.mkdtemp(prefix=".ouroboros-skills-", dir=target_dir.parent))
         cleanup_staging_dir: Path | None = staging_dir
         try:
             if target_dir.is_dir():
@@ -163,7 +164,6 @@ def install_hermes_skills(
                     ):
                         _remove_target_path(existing_path)
 
-            backup_dir = target_dir.with_name(f".{target_dir.name}.old")
             _remove_target_path(backup_dir)
             if target_dir.exists() or target_dir.is_symlink():
                 os.replace(target_dir, backup_dir)

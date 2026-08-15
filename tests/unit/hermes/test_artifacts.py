@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 
@@ -195,6 +196,41 @@ class TestInstallHermesSkills:
             install_hermes_skills(hermes_dir=tmp_path / ".hermes", prune=True)
 
         assert live_skill.read_bytes() == b"working skill\n"
+
+    def test_interrupted_swap_recovers_previous_generation_on_retry(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A crash after backup creation must be recoverable by the next refresh."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="new skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        live_note = target_dir / "operator-notes.txt"
+        live_note.parent.mkdir(parents=True)
+        live_note.write_text("keep across crash", encoding="utf-8")
+
+        real_replace = os.replace
+        calls = 0
+
+        def interrupt_after_backup(src, dst):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_backup)
+        with pytest.raises(KeyboardInterrupt):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert live_note.read_text(encoding="utf-8") == "keep across crash"
+        assert target_dir.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "new skill\n"
 
     def test_replaces_symlinked_capability_guide_without_following_it(
         self, tmp_path: Path, monkeypatch
