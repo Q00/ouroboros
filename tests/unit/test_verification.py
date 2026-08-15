@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
@@ -2006,6 +2007,234 @@ class TestSpecVerifier:
         summary = SpecVerifier(project_dir=project).verify_all((assertion,))
 
         assert summary.verified_count == 1
+
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files", "file_hint", "tier"),
+        [
+            (
+                "MUST define a CameraProvider interface",
+                r"[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"CameraProvider|[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r".+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+\w+",
+                {"unrelated.py": "class Unrelated:\n    pass\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST create a CameraProvider file",
+                "file",
+                {"profile.py": "x = 1\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "The implementation MUST define a CameraProvider class",
+                "MUST",
+                {"unrelated.py": "# MUST clean this up later\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "The implementation MUST define a CameraProvider class",
+                "MUST",
+                {"unrelated.py": "# MUST clean this up later\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+CameraProvider",
+                {"camera.py": "class CameraProvider:\n    pass\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "notes.txt MUST be left empty",
+                r"\A\Z",
+                {"notes.txt": ""},
+                "notes.txt",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+        ],
+        ids=[
+            "consume-everything-t2",
+            "consume-everything-t1",
+            "target-or-anything-t1",
+            "any-content-t2",
+            "structural-keyword-class",
+            "structural-keyword-file-via-filename-path",
+            "requirement-modality-in-a-comment-t2",
+            "requirement-modality-in-a-comment-t1",
+            "genuinely-criterion-bound",
+            "blank-subject-on-a-named-file",
+        ],
+    )
+    def test_no_regex_evidence_overturns_an_agent_fail(
+        self,
+        ac_text: str,
+        pattern: str,
+        files: dict[str, str],
+        file_hint: str,
+        tier: VerificationTier,
+    ) -> None:
+        r"""An agent that reported FAIL keeps its FAIL, whatever matched.
+
+        The first cases are patterns that match anything with content in it;
+        the next three share the criterion's own words — `class`, `file`, and
+        the `MUST` of ordinary requirement prose — while matching source that
+        has nothing to do with what was asked, the last of those from inside a
+        comment. Every rule that tried to sort these by reading the criterion
+        admitted one of them, because whether a text names a criterion's
+        subject is not a question a finite reading of prose answers.
+
+        So the last two matter most: `class\s+CameraProvider` against a real
+        `class CameraProvider`, and `\A\Z` against a genuinely empty named
+        file, are refused here too. There is no property of a pattern that
+        restores the override, which is what leaves nothing to bypass.
+
+        UNVERIFIABLE and not DISCREPANCY throughout: the evidence is unusable
+        in this direction, which is not evidence that the criterion is unmet.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value="",
+            file_hint=file_hint,
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is False
+        assert report.results[0].outcome is VerificationOutcome.UNVERIFIABLE
+        assert "cannot overturn" in report.results[0].detail
+
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files"),
+        [
+            (
+                "MUST define a CameraProvider interface",
+                r"class\s+CameraProvider",
+                {"camera.py": "class CameraProvider:\n    pass\n"},
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"def\s+\w+",
+                {"main.py": "def entrypoint(): pass\n"},
+            ),
+            (
+                "notes.txt MUST be left empty",
+                r"\A\Z",
+                {"notes.txt": ""},
+            ),
+        ],
+        ids=["bound", "unbound", "blank-subject"],
+    )
+    def test_agent_pass_confirmation_is_untouched(
+        self, ac_text: str, pattern: str, files: dict[str, str]
+    ) -> None:
+        """Only the overturn direction is withdrawn.
+
+        Checking a claimed PASS against the source is this scanner's actual
+        job — the false-PASS check #1835 says it exists for. A VERIFIED that
+        agrees with the agent claims no authority the agent had not already
+        claimed, so none of these is gated, however loose the pattern.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="notes.txt" if pattern == r"\A\Z" else "*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: True})
+            .reports[0]
+        )
+
+        assert report.results[0].outcome is VerificationOutcome.VERIFIED
+
+    def test_an_agent_fail_survives_all_the_way_to_the_formal_verdict(self) -> None:
+        """End to end, because the defect was only visible at the far end.
+
+        The verifier's demotion is only half the story: #1835 is about what
+        the formal adapter does with an all-VERIFIED report, which is to mint
+        `passed=True` and approve the run. This drives the whole path —
+        criterion, hostile pattern, matching-but-unrelated source, an agent
+        that honestly reported FAIL — and asserts the run is still rejected.
+        """
+        from ouroboros.mcp.server.spec_verification_adapter import (
+            evaluation_summary_from_spec_verification,
+        )
+
+        seed = SimpleNamespace(
+            acceptance_criteria=("The implementation MUST define a CameraProvider class",)
+        )
+        mechanical = SimpleNamespace(
+            ac_results=(
+                SimpleNamespace(
+                    ac_index=0,
+                    ac_content="The implementation MUST define a CameraProvider class",
+                    authoritative_pass=False,
+                ),
+            ),
+            task_results=(),
+            feedback_metadata=(),
+            execution_completion_status="completed",
+        )
+        project = self._create_project({"unrelated.py": "# MUST clean this up later\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="The implementation MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="MUST",
+            file_hint="*.py",
+        )
+
+        verification = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        summary = evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
 
 
 # -- Extractor Tests --

@@ -90,10 +90,10 @@ together, always.
 |---|---|---|
 | `install_started` | `install.sh` begins | source, os, arch, version, is_local, pre, ref |
 | `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version, ref |
-| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version, ci |
+| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, first_command_surface, app_version, os, python_version, ci |
 | `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
-| `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
-| `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os, ci — no python_version, no backend/provider context |
+| `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, failure_reason_code (failed/cancelled/interrupted outcomes only), recovery_action (failed/cancelled/interrupted outcomes only), `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
+| `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, first_command_surface, app_version, os, ci — no python_version, no backend/provider context |
 
 Notes:
 
@@ -103,6 +103,13 @@ Notes:
   the command was copied from; it is chosen by us, never derived from the
   machine, defaults to `direct`, and is discarded unless it matches
   `[A-Za-z0-9._-]{1,32}`.
+- `first_command_surface` is a fixed enum (`readme_quickstart`,
+  `getting_started`, `setup_complete`, or `unknown`) carried only on MCP
+  session/command events. README and Getting Started installers persist the
+  enum locally before setup; the hint remains preferred after setup so the
+  first-command cohort still represents the page that brought the user in.
+  A missing hint with an existing `~/.ouroboros/config.yaml` is attributed to
+  `setup_complete`. It contains no URL, prompt, path, or user identifier.
 
 - `source` separates the two entry surfaces cleanly: `cli` means the user typed
   the command in a terminal; `mcp` means it arrived from inside an AI agent
@@ -132,6 +139,14 @@ Notes:
   `extension_command` value.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
+- `failure_reason_code` and `recovery_action` are fixed enums emitted only for
+  non-success terminal outcomes. The classifier reads terminal status and
+  structured machine metadata only; it never reads exception messages, result
+  text, prompts, paths, or identifiers. Current reason codes are `config`,
+  `auth`, `timeout`, `model`, `tool`, `validation`, `cancelled`, and `unknown`.
+  Current recovery actions are `retry`, `setup`, `login`, `update`,
+  `inspect_logs`, and `none`. An unclassified failure is always `unknown` with
+  `inspect_logs`, so the failure denominator remains measurable.
 - Start-tool `command_run` events are submission receipts. They intentionally
   have `accepted`, not `ok`; queue acceptance is never a completed or verified
   run. `workflow_outcome` is the durable/direct terminal boundary described

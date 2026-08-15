@@ -140,14 +140,26 @@ class TestJobManager:
                     initial_message="queued",
                     runner=failed_execution(),
                 )
-                await _wait_for_job_status(manager, started.job_id, JobStatus.FAILED)
+                terminal = await _wait_for_job_status(manager, started.job_id, JobStatus.FAILED)
 
             capture.assert_called_once_with(
                 started.job_id,
                 "execute_seed",
                 terminal_status="failed",
-                result_meta=None,
+                result_meta={
+                    "failure_reason_code": "unknown",
+                    "recovery_action": "inspect_logs",
+                    "next_step": "Inspect the server logs before retrying the workflow.",
+                },
             )
+            assert terminal.result_meta["failure_reason_code"] == "unknown"
+            assert terminal.result_meta["recovery_action"] == "inspect_logs"
+            assert terminal.result_meta["next_step"] == (
+                "Inspect the server logs before retrying the workflow."
+            )
+            rendered, _ = await _render_job_snapshot_inner(terminal, store)
+            assert "### Recovery" in rendered
+            assert "**Recommended action**: inspect_logs" in rendered
         finally:
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -1330,6 +1342,9 @@ class TestJobManager:
 
             assert snapshot.status is JobStatus.FAILED
             assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+            assert snapshot.result_meta["failure_reason_code"] == "timeout"
+            assert snapshot.result_meta["recovery_action"] == "retry"
+            assert snapshot.result_meta["next_step"] == "Retry the workflow."
             assert "workflow progress accounting stalled" in (snapshot.error or "")
             events, _ = await store.get_events_after("job", "job_recover_failed", last_row_id=0)
             assert [event.type for event in events] == ["mcp.job.created", "mcp.job.failed"]
@@ -2290,6 +2305,9 @@ class TestJobManager:
 
             assert snapshot.status is JobStatus.FAILED
             assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+            assert snapshot.result_meta["failure_reason_code"] == "timeout"
+            assert snapshot.result_meta["recovery_action"] == "retry"
+            assert snapshot.result_meta["next_step"] == "Retry the workflow."
             assert "workflow progress accounting stalled" in (snapshot.error or "")
             events, _ = await read_only_store.get_events_after(
                 "job",
@@ -7030,6 +7048,9 @@ class TestZombieJobReconciliation:
 
             assert snapshot.status is JobStatus.INTERRUPTED
             assert snapshot.result_meta["interrupted_from_dead_owner"] is True
+            assert snapshot.result_meta["failure_reason_code"] == "cancelled"
+            assert snapshot.result_meta["recovery_action"] == "retry"
+            assert snapshot.result_meta["next_step"] == "Retry the workflow when you are ready."
             store._read_only = False
             events, _ = await store.get_events_after("job", "job_ro", last_row_id=0)
             # Projection only — nothing persisted on a read-only store.

@@ -72,7 +72,11 @@ fallback instead of retrying the failing call.
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
-   Before a fresh start, when no efficiency choice is already known, ask in
+   Before a fresh start, when no efficiency choice is already known, first
+   check the persistent default: when `execution.default_policy` in
+   `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
+   omit both arguments and the server applies the configured default (the
+   start handoff still reports the resolved policy). Otherwise ask in
    user-outcome language: **Efficient execution** maps to
    `efficiency_mode="adaptive"` plus `frugality_assurance="observe"`;
    **Quality-first execution** maps to `efficiency_mode="quality_first"` plus

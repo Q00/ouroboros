@@ -14,15 +14,11 @@ from rich.markup import escape as _rich_escape
 import typer
 
 from ouroboros.auto.adapters import (
-    EnvRuntimeProbeRunner,
     HandlerInterviewBackend,
     HandlerLateralThinker,
-    HandlerRalphPoller,
-    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
-    HandlerSynchronousRunStarter,
     build_answer_refiner,
     load_seed,
     save_seed,
@@ -55,7 +51,6 @@ from ouroboros.auto.state import (
     AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
-    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import (
     auto_worktree_cleanup_eligible,
@@ -78,6 +73,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import build_run_successor_handler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.package_profiles import (
@@ -255,9 +251,9 @@ def auto_command(
         typer.Option(
             "--complete-product",
             help=(
-                "Chain RUN → RALPH_HANDOFF after a successful run handoff so a "
-                "single ooo auto invocation iterates Ralph until QA passes, "
-                "convergence, or a budget bound trips. Default off."
+                "Deprecated and ignored. The run job now owns "
+                "run -> evaluate -> ralph; follow it with `ooo status` or the "
+                "job tools instead."
             ),
         ),
     ] = False,
@@ -297,6 +293,11 @@ def auto_command(
     in-process job manager dies with the process and would otherwise cancel the
     run on exit. Pass ``--no-wait`` to restore fire-and-forget behaviour.
     """
+    if complete_product:
+        print_warning(
+            "--complete-product is deprecated and ignored: the run job owns "
+            "run -> evaluate -> ralph. Follow it with `ooo status` or the job tools."
+        )
     if status:
         if not resume:
             print_error("--status requires --resume auto_<id>")
@@ -335,7 +336,6 @@ def auto_command(
                 reconcile_run=reconcile_run,
                 reconcile_source=reconcile_source,
                 pipeline_timeout_seconds=timeout,
-                complete_product=complete_product,
                 domain=domain,
                 commit_policy=commit_policy,
                 worktree_policy=worktree_policy,
@@ -391,7 +391,6 @@ async def _run_auto(
     reconcile_run: bool = False,
     reconcile_source: str | None = None,
     pipeline_timeout_seconds: float | None = None,
-    complete_product: bool = False,
     domain: str | None = None,
     commit_policy: str | None = None,
     worktree_policy: str | None = None,
@@ -409,11 +408,6 @@ async def _run_auto(
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
-    validate_complete_product_timeout(
-        complete_product=complete_product and not bool(resume),
-        pipeline_timeout_seconds=pipeline_timeout_seconds,
-        option_name="--timeout",
-    )
     if resume:
         if pipeline_timeout_seconds is not None:
             raise ValueError(
@@ -458,17 +452,6 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
-        # Q00/ouroboros#773 (review-3): ``--complete-product`` is durable
-        # session intent, not a per-invocation flag. Honor the persisted value
-        # on resume so a session originally started with ``--complete-product``
-        # keeps chaining RUN → RALPH_HANDOFF even when the operator forgets to
-        # re-pass the flag. Lowering on resume is rejected to mirror the
-        # ``--max-*-rounds`` policy: a bound that already shaped behavior must
-        # be raised explicitly, never silently tightened.
-        if state.complete_product and not complete_product:
-            complete_product = True
-        elif complete_product and not state.complete_product:
-            state.complete_product = True
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -482,7 +465,6 @@ async def _run_auto(
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
-        state.complete_product = complete_product
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
 
@@ -578,6 +560,12 @@ async def _run_auto(
         execute_handler=execute_seed,
         agent_runtime_backend=runtime_plan.execute.runtime_backend,
         opencode_mode=execute_opencode_mode,
+        # Without the successor stack a finished run reports
+        # ``evaluation_status="enqueue_failed"`` and nothing grades it.
+        start_evaluate_handler=build_run_successor_handler(
+            agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
+            opencode_mode=runtime_plan.evaluate.opencode_mode,
+        ),  # composition-root wiring; a hand-built stack dies on its first generation
     )
     seed_qa = QAHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,
@@ -614,37 +602,6 @@ async def _run_auto(
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
     )
-    ralph_handler = (
-        # Q00/ouroboros#782 review-7/8/10: pass the un-demoted
-        # ``ralph_opencode_mode`` so an OpenCode plugin session can take the
-        # plugin ``_subagent`` dispatch path. ``opencode_mode`` (demoted) is
-        # still correct for the authoring/run-handoff handlers above.
-        # Q00/ouroboros#1090: use the full MCP composition root rather than a
-        # bare RalphHandler so job-mode Ralph has an EvolutionaryLoop.
-        _build_configured_ralph_handler(
-            runtime=runtime_plan.execute.runtime_backend,
-            opencode_mode=(
-                state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
-                if runtime_plan.execute.runtime_backend == "opencode"
-                else None
-            ),
-        )
-        if complete_product
-        else None
-    )
-    ralph_starter = (
-        HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
-        if ralph_handler is not None
-        else None
-    )
-    # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the same
-    # ``RalphHandler`` so a session interrupted in ``RALPH_HANDOFF`` (e.g.
-    # client disconnects while the background Ralph job keeps running) can
-    # actually be reconciled to ``COMPLETE`` / ``BLOCKED`` / ``FAILED`` on
-    # ``--resume`` instead of being stranded in the non-terminal handoff
-    # state forever. Sharing the handler reuses the same ``JobManager``
-    # (and underlying ``EventStore``) so the poller sees the persisted job.
-    ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
     # Auto does not have an execution id until interview/Seed handoff finishes.
@@ -660,14 +617,10 @@ async def _run_auto(
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
-        run_starter=(
-            HandlerSynchronousRunStarter(execute_seed, cwd=state.cwd)
-            if complete_product
-            else HandlerRunStarter(
-                start_execute,
-                cwd=state.cwd,
-                use_worktree=auto_workspace is None,
-            )
+        run_starter=HandlerRunStarter(
+            start_execute,
+            cwd=state.cwd,
+            use_worktree=auto_workspace is None,
         ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -680,14 +633,10 @@ async def _run_auto(
         attach_source=attach_source,
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
-        ralph_starter=ralph_starter,
-        ralph_resumer=ralph_resumer,
-        complete_product=complete_product,
         seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
         lateral_thinker=lateral_thinker,
         progress_callback=progress_callback,
         watchdog=watchdog,
-        probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
     )
     result: AutoPipelineResult | None = None
     try:

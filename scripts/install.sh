@@ -844,6 +844,28 @@ fi
 INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
 [[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
 
+# Preserve a coarse onboarding hint for the first MCP session. This is not a
+# user identifier and is never sent as an install property; telemetry reads
+# only the fixed enum after install, until setup creates config.yaml. Existing
+# setup or an existing hint wins, so re-running the installer cannot
+# relabel a user's first documented install surface.
+_persist_first_command_surface_hint() {
+  local surface=""
+  case "$INSTALL_REF" in
+    readme|readme-*) surface="readme_quickstart" ;;
+    getting-started|getting_started|getting-started-*|docs-getting-started) surface="getting_started" ;;
+    *) return 0 ;;
+  esac
+  local dir="$HOME/.ouroboros" tmp="$HOME/.ouroboros/first_command_surface.$$"
+  [ -f "$dir/config.yaml" ] && return 0
+  [ -s "$dir/first_command_surface" ] && return 0
+  if mkdir -p "$dir" 2>/dev/null; then
+    (umask 077; printf '%s\n' "$surface" > "$tmp" && mv -f "$tmp" "$dir/first_command_surface") \
+      2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+_persist_first_command_surface_hint
+
 _banner
 
 _telemetry_notice

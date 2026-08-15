@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
+from ouroboros.mcp.failure_taxonomy import classify_failure
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 _TERMINAL_SUCCESS_ACTIONS = frozenset({"converged"})
@@ -123,6 +124,11 @@ class RalphLoopResult:
                 "generations": [iteration.generation for iteration in self.iterations],
             }
         )
+        resolution = classify_failure(self.status, meta)
+        if resolution is not None:
+            meta.setdefault("failure_reason_code", resolution.reason_code.value)
+            meta.setdefault("recovery_action", resolution.recovery_action.value)
+            meta.setdefault("next_step", resolution.next_step)
         return MCPToolResult(
             content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),),
             is_error=self.status == "failed" or self.final_result.is_error,

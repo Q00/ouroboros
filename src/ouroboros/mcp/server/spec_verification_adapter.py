@@ -77,6 +77,32 @@ def _report_identity_error(
     return None
 
 
+def _agent_claimed_pass(
+    report: Any,
+    expected_agent_results: dict[int, bool],
+    ac_index: int,
+) -> bool:
+    """Whether the agent itself claimed this AC passed.
+
+    Two records answer this and only one of them is authoritative. The
+    mechanical summary is the execution's own account of what the agent
+    reported; the report's ``agent_reported_pass`` is a copy the verifier was
+    handed, and a replayed, stale or externally built report carries whatever
+    copy it was constructed with — including a `True` that contradicts the
+    execution, or no field at all, which reads as `True` by default. Trusting
+    the copy alone lets either shape turn a mechanically failed AC into a
+    formal PASS.
+
+    So both are consulted and either one saying "not a pass" settles it.
+    Disagreement is not resolved in favour of the more permissive record: two
+    accounts of the same fact that do not match are not evidence that the
+    agent claimed a pass.
+    """
+    if not bool(getattr(report, "agent_reported_pass", True)):
+        return False
+    return bool(expected_agent_results.get(ac_index, True))
+
+
 def agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
     """Return legacy agent-reported AC outcomes for spec verification.
 
@@ -184,6 +210,26 @@ def evaluation_summary_from_spec_verification(
                 skipped_indices.append(ac_index)
             if not evidence:
                 evidence = "Spec verifier found a discrepancy without evidence details."
+        elif outcomes == {VerificationOutcome.VERIFIED} and not _agent_claimed_pass(
+            report, expected_agent_results, ac_index
+        ):
+            # Source-scan evidence may confirm a claimed PASS; it may not
+            # reverse a reported FAIL. `SpecVerifier.verify_all` already
+            # refuses to emit this combination, but this adapter is a public
+            # authority boundary that also accepts replayed, legacy and
+            # compatibility summaries built elsewhere. Enforcing the polarity
+            # only in the producer would let a rehydrated report encode the
+            # exact transition the producer forbids, so the boundary that
+            # mints the formal verdict checks it too.
+            unverifiable_indices.append(ac_index)
+            passed = False
+            verdict_state = "not_evaluated"
+            rendered_verdict = "NOT_EVALUATED"
+            evidence = (
+                "Spec verification reported all assertions verified against an "
+                "agent-reported FAIL; source-scan evidence cannot overturn a "
+                "reported FAIL, so the formal AC verdict is not evaluated."
+            )
         elif outcomes == {VerificationOutcome.VERIFIED}:
             passed = True
             verdict_state = "evaluated"

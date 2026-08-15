@@ -278,6 +278,19 @@ def _create_ourocode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     )
 
 
+def _create_dsh_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.config import get_dsh_cli_path, get_dsh_config_path
+    from ouroboros.providers.dsh_llm_adapter import DshLLMAdapter
+
+    return DshLLMAdapter(
+        cli_path=request.cli_path or get_dsh_cli_path(),
+        cwd=request.cwd,
+        config_path=get_dsh_config_path(),
+        timeout=request.timeout,
+        io_recorder=request.io_recorder,
+    )
+
+
 def _create_zcode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
 
@@ -354,6 +367,7 @@ _LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = 
     "_create_pi_adapter": _create_pi_adapter,
     "_create_gjc_adapter": _create_gjc_adapter,
     "_create_ourocode_adapter": _create_ourocode_adapter,
+    "_create_dsh_adapter": _create_dsh_adapter,
     "_create_kiro_adapter": _create_kiro_adapter,
     "_create_litellm_adapter": _create_litellm_adapter,
     "_create_zcode_adapter": _create_zcode_adapter,
@@ -409,11 +423,11 @@ def create_llm_adapter(
         permission_mode=permission_mode,
         use_case=use_case,
     )
-    if io_recorder is not None and resolved_backend not in ("litellm", "ourocode"):
+    if io_recorder is not None and resolved_backend not in ("litellm", "ourocode", "dsh"):
         log.warning(
             "create_llm_adapter.io_recorder_unsupported_backend",
             backend=resolved_backend,
-            hint="Only LiteLLM and ourocode accept adapter-level IOJournalRecorder wiring.",
+            hint="Only LiteLLM, ourocode, and dsh accept adapter-level IOJournalRecorder wiring.",
         )
     spec = get_backend_factory_spec(resolved_backend, kind="llm")
     if spec is None or spec.llm_adapter_factory is None:

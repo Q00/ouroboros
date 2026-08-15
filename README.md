@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.Q00/ouroboros -->
 <p align="right">
   <strong>English</strong> | <a href="./README.ko.md">한국어</a> | <a href="./README.zh-CN.md">简体中文</a>
 </p>
@@ -16,7 +17,9 @@
 
 
 <p align="center">
-  <strong>When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back.</strong>
+  <strong>It gets smarter on its own. We just hold the line.</strong>
+  <br/>
+  <sub>Skip the prompt engineering. The agent runs, fails, and gets smarter every generation. The grading command and expected result never make it into the success contract we hand it.</sub>
   <br/>
   <sub>The <strong>Agent OS</strong> for replayable AI coding workflows</sub>
 </p>
@@ -42,6 +45,12 @@
   <a href="#from-wonder-to-ontology">Philosophy</a> ·
   <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
 
 <p align="center"><sub><b>Four separate runs, four hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
 
@@ -132,23 +141,19 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
 
-**First use** — open your AI coding agent and type:
+**First command** — open your AI coding agent and run these in order:
 
 ```
-> ooo
-```
-
-If a one-time setup is needed, Ouroboros asks before it makes changes. After
-setup, Codex follows its currently selected model and Claude Code starts with
-its recommended model settings. Choose **Directly configure models** only when
-you want to pin a stage to a specific model; it opens the local settings screen
-in your browser. You can return to those settings any time with `ooo config`.
-
-**Build** — then go:
-
-```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup` is a one-time configuration step. `ooo interview` is the first
+workflow command and starts the Socratic interview. After setup, Codex follows
+its currently selected model and Claude Code starts with its recommended model
+settings. Choose **Directly configure models** only when you want to pin a
+stage to a specific model; it opens the local settings screen in your browser.
+You can return to those settings any time with `ooo config`.
 
 Or from a plain terminal, without an agent host:
 
@@ -170,6 +175,8 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
+> **DeepSeek support.** Ouroboros speaks DeepSeek two ways. Point the interview/Seed/QA pipeline at DeepSeek's own models with `--llm-backend dsh` (`ouroboros mcp serve --llm-backend dsh`, or `OUROBOROS_LLM_BACKEND=dsh`) — this drives [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)'s ACP server under the hood. Or go the other way: mount the Ouroboros MCP server straight into a DeepSeek Harness `cordis.yml` (`@deepseek-ai/dsh-mcp-client`) and type `ooo interview` / `ooo auto` directly in the DeepSeek Harness chat — the same `ouroboros_interview` / `ouroboros_auto` tools run natively inside it, Socratic questions and all.
+
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
 
@@ -182,10 +189,16 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session, then enter `ooo`. On first use, Ouroboros offers to
-prepare the runtime before it changes anything. Once ready, it follows Codex's
-current default model; choose **Directly configure models** only when you want
-to pin a specific model for a pipeline stage.
+Start a new Codex session, then run these commands in order:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is the one-time runtime preparation. Once ready, Ouroboros follows
+Codex's current default model; choose **Directly configure models** only when
+you want to pin a specific model for a pipeline stage.
 
 </details>
 

@@ -43,6 +43,27 @@ from ouroboros.providers.frugality_attestation import (
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
+_MINIMAX_MODEL_COST_OVERRIDES = {
+    "minimax/MiniMax-M2.7": {
+        "cache_creation_input_token_cost": 3.75e-7,
+        "cache_read_input_token_cost": 6e-8,
+        "input_cost_per_token": 3e-7,
+        "litellm_provider": "minimax",
+        "max_input_tokens": 204800,
+        "mode": "chat",
+        "output_cost_per_token": 1.2e-6,
+        "supports_function_calling": True,
+        "supports_prompt_caching": True,
+        "supports_reasoning": True,
+        "supports_system_messages": True,
+        "supports_tool_choice": True,
+    }
+}
+
+# Keep reviewed model metadata available while the optional dependency remains
+# exact-pinned for reproducible installs.
+litellm.register_model(_MINIMAX_MODEL_COST_OVERRIDES)
+
 if TYPE_CHECKING:
     from ouroboros.events.io_recorder import IOJournalRecorder
 

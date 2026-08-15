@@ -23,11 +23,11 @@ from ouroboros.config import (
     get_llm_backend_for_role,
     get_llm_model_for_role,
 )
-from ouroboros.core.errors import ValidationError
+from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
 from ouroboros.mcp.tools import background as background_jobs
@@ -67,6 +67,22 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+def _direct_evaluation_failure_reason(error: object) -> str | None:
+    """Map only trusted exception types to the telemetry reason vocabulary."""
+    if isinstance(error, (ConfigError,)):
+        return "config"
+    if isinstance(error, (ValidationError, PydanticValidationError)):
+        return "validation"
+    if isinstance(error, (MCPAuthError,)):
+        return "auth"
+    if isinstance(error, (MCPTimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(error, ProviderError):
+        return "model"
+    return None
+
 
 if TYPE_CHECKING:
     from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
@@ -814,7 +830,11 @@ class EvaluateHandler:
                     error=rendered_error,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(result.error),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
@@ -864,22 +884,47 @@ class EvaluateHandler:
                     meta=meta,
                 )
             )
-        except (ValueError, RuntimeError) as e:
+        except ConfigError as e:
             # Configuration/bootstrap errors (unsupported backend, missing
             # provider install) — actionable by the user, safe to surface.
             log.warning("mcp.tool.evaluate.config_error", error=str(e))
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code="config",
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
                 )
             )
-        except Exception:
+        except (ValueError, RuntimeError) as e:
+            # Preserve the historical setup-facing response for these factory
+            # failures, but do not infer ``config`` from a generic built-in
+            # exception. Only a typed ConfigError earns that telemetry reason.
+            log.warning("mcp.tool.evaluate.setup_error", error=str(e))
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(e),
+                )
+            return Result.err(
+                MCPToolError(
+                    f"Evaluation setup failed: {e}",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        except Exception as exc:
             log.exception("mcp.tool.evaluate.error")
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(exc),
+                )
             return Result.err(
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
@@ -957,7 +1002,11 @@ class EvaluateHandler:
             err = first_result.error
             rendered = err.format_details() if hasattr(err, "format_details") else str(err)
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(err),
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation failed: {rendered}",
@@ -1003,7 +1052,11 @@ class EvaluateHandler:
                     session_id=session_id,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(entry),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed during multi-AC run: {entry}",
@@ -1019,7 +1072,11 @@ class EvaluateHandler:
                     error=rendered,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(err),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered}",

@@ -64,6 +64,12 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
+        "OUROBOROS_DSH_CLI_PATH",
+        # Not an executable path, but it selects the Cordis composition the
+        # spawned Node process loads — plugin rows in that file execute
+        # arbitrary code inside `dsh-acp-demo`, so an untrusted repo .env must
+        # not be able to choose it.
+        "OUROBOROS_DSH_CONFIG_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -167,6 +173,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        # Onboarding attribution is an analytics boundary. A cloned repo must
+        # not rewrite the surface label used to compare activation cohorts.
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

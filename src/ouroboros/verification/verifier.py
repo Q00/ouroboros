@@ -764,7 +764,10 @@ class SpecVerifier:
 
             results: list[SpecVerificationResult] = []
             for assertion in ac_assertions:
-                results.append(self._verify_one(assertion))
+                result = self._verify_one(assertion)
+                if agent_pass is False:
+                    result = self._demoted_from_overturning(result)
+                results.append(result)
 
             reports.append(
                 ACVerificationReport(
@@ -833,6 +836,50 @@ class SpecVerifier:
             )
             return None
         return compiled
+
+    def _demoted_from_overturning(self, result: SpecVerificationResult) -> SpecVerificationResult:
+        """Refuse a VERIFIED as grounds to overturn an agent-reported FAIL.
+
+        This scanner exists to check whether an agent's *claimed PASS* survives
+        contact with the source. Overturning a FAIL is the opposite direction,
+        and it is the direction with no safe stopping point: what a regex match
+        proves about a criterion depends on whether the pattern is really about
+        that criterion, and nothing available here can settle that. A rule that
+        reads the criterion's wording admits `class\\s+\\w+` for "a
+        CameraProvider class" through the shared word `class`; tightening it to
+        read named targets from their spelling admits `MUST` through ordinary
+        requirement prose. Each repair moves the hole rather than closing it,
+        because the question — does this text name this criterion's subject —
+        is not one a finite reading of prose answers.
+
+        So the authority is withdrawn rather than qualified. An agent that
+        reported FAIL keeps its FAIL, whatever the pattern matched. No property
+        of the pattern can restore the override, which is what makes this
+        closed rather than merely narrower: there is nothing left to bypass.
+
+        Only this direction. A VERIFIED that agrees with the agent's own PASS
+        claims no authority the agent had not already claimed, and is passed
+        through untouched — the false-PASS check that is this scanner's actual
+        job.
+
+        The demotion is to UNVERIFIABLE, not DISCREPANCY: the evidence is not
+        usable *here*, which is different from evidence that the criterion is
+        unmet.
+        """
+        if result.outcome is not VerificationOutcome.VERIFIED:
+            return result
+        logger.warning(
+            "Refusing regex evidence as grounds to overturn an agent FAIL: %r",
+            result.assertion.pattern,
+        )
+        return SpecVerificationResult(
+            assertion=result.assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            file_path=result.file_path,
+            detail=(
+                "Pattern matched, but source-scan evidence cannot overturn an agent-reported FAIL"
+            ),
+        )
 
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify one assertion, including tiers this scanner deliberately skips."""

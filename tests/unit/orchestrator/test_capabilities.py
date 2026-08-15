@@ -219,7 +219,6 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "max_interview_rounds",
         "max_repair_rounds",
         "skip_run",
-        "complete_product",
         "pipeline_timeout_seconds",
         "efficiency_mode",
         "frugality_assurance",

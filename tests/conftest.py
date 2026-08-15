@@ -110,6 +110,47 @@ def isolate_heartbeat_locks_per_test_worker(tmp_path_factory):
         heartbeat.CANCELLATION_DIR = previous_cancellation_dir
 
 
+@pytest.fixture(scope="session", autouse=True)
+def render_logged_exceptions_with_plain_tracebacks():
+    """Keep structlog's DEV renderer from paying rich+pygments per exception.
+
+    ``ConsoleRenderer(colors=True)`` defaults to rich's traceback formatter,
+    which syntax-highlights the source context of every frame. Failure-path
+    tests that log a real exception (event-store append failures, adapter
+    errors, ...) each paid multiple seconds of pygments tokenization for
+    output nobody reads under pytest. Render with the stdlib formatter
+    instead — same information, plain text. Production DEV output is
+    untouched; this only rewrites the renderer inside the test session.
+    """
+    import structlog
+
+    from ouroboros.observability import logging as obs_logging
+
+    def _plain_renderer() -> structlog.dev.ConsoleRenderer:
+        return structlog.dev.ConsoleRenderer(
+            colors=True, exception_formatter=structlog.dev.plain_traceback
+        )
+
+    def _swap_in_place(processors: list) -> list:
+        for index, processor in enumerate(processors):
+            if isinstance(processor, structlog.dev.ConsoleRenderer):
+                # In-place: capture_logs() shares this exact list object.
+                processors[index] = _plain_renderer()
+        return processors
+
+    original_get_console_processors = obs_logging._get_console_processors
+
+    def _plain_console_processors(mode):
+        return _swap_in_place(original_get_console_processors(mode))
+
+    _swap_in_place(obs_logging._live_generation.processors)
+    obs_logging._get_console_processors = _plain_console_processors
+    try:
+        yield
+    finally:
+        obs_logging._get_console_processors = original_get_console_processors
+
+
 @pytest.fixture(autouse=True)
 def block_runner_real_llm_adapter(monkeypatch):
     """Block execute_seed's dependency analysis from spawning real agent CLIs.

@@ -174,6 +174,9 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
         backend="ourocode",
         models=("claude", "claude_api", "codex", "gemini"),
     )
+    # dsh's model choice lives in its Cordis composition file; the ACP wire
+    # has no per-session model parameter, so the catalog is custom-entry-only.
+    catalogs["dsh"] = BackendModelCatalog(backend="dsh", models=())
     return catalogs
 
 
@@ -259,6 +262,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     # Without this entry, ``detect_backend_cli("zcode")`` ignored the
     # configured path and Zcode was invisible to ``installed_backends()``.
     "zcode": "get_zcode_cli_path",
+    "dsh": "get_dsh_cli_path",
 }
 
 

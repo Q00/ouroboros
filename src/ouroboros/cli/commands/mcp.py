@@ -86,6 +86,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     KIRO = "kiro"
     PI = "pi"
     ZCODE = "zcode"
+    DSH = "dsh"
 
 
 def _write_pid_file() -> bool:
@@ -1170,7 +1171,7 @@ def serve(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools (claude_code, "
-                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),
@@ -1329,7 +1330,7 @@ def info(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools (claude_code, "
-                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),

@@ -363,7 +363,10 @@ async def test_pipeline_blocks_when_repair_phase_exceeds_timeout(tmp_path) -> No
         return _seed()
 
     timeout = 1  # whole seconds — phase_timeout_seconds rejects non-positive ints
-    sleepy = _SleepyReviewer(sleep_seconds=timeout * 2)
+    # Outlive the phase budget by a margin, not a multiple: the worker thread's
+    # sleep is uninterruptible, so every extra second is wall clock the test
+    # spends waiting for it to unwind.
+    sleepy = _SleepyReviewer(sleep_seconds=timeout + 0.25)
     repairer = SeedRepairer(reviewer=sleepy)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -457,7 +460,7 @@ async def test_resume_recovers_session_blocked_by_repair_timeout(tmp_path) -> No
 
     # First run: sleepy reviewer trips wait_for and blocks the session.
     timeout = 1
-    sleepy = _SleepyReviewer(sleep_seconds=timeout * 2)
+    sleepy = _SleepyReviewer(sleep_seconds=timeout + 0.25)
     blocking_repairer = SeedRepairer(reviewer=sleepy)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))

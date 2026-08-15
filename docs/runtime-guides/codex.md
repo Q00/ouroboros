@@ -216,6 +216,24 @@ codex --version
 > in the output, so do not grep for it. On the plugin path, and for anyone who
 > put `codex` on `PATH`, `codex --version` is the right check.
 
+### First command
+
+For the marketplace-plugin path, start a new Codex session and run the setup
+and first workflow command explicitly:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+For the standalone CLI path, run setup once from a terminal, then start the
+interview:
+
+```bash
+ouroboros setup --runtime codex
+ouroboros init start "Build a task management CLI"
+```
+
 ## How It Works
 
 ```

@@ -199,6 +199,59 @@ async def _codex_runtime_summary(runtime: CodexCliRuntime):  # noqa: ANN202
 
 
 @pytest.fixture(autouse=True)
+def _answer_fake_cli_version_probes_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve ``--version`` for the fake codex CLIs by parsing the script.
+
+    Every ``CodexCliRuntime`` attestation probe spawns ``<cli> --version``
+    (~45ms of subprocess wait each, dozens per fingerprint test). The fake
+    CLIs written by :func:`_write_fake_codex_cli` only echo a constant, so
+    answering from the script text preserves the probed identity — including
+    the version drift between fixtures — without the process spawns. Any
+    other invocation (real binaries, failure-shape fixtures) still executes.
+    """
+    import re
+    import subprocess
+
+    from ouroboros.orchestrator import cli_version_attestation
+
+    real_run = subprocess.run
+
+    def _run(args, **kwargs):  # noqa: ANN001, ANN202
+        if isinstance(args, list) and len(args) == 2 and args[1] == "--version":
+            try:
+                script = Path(args[0]).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                script = ""
+            match = re.search(r"echo 'codex ([^']+)'", script)
+            if match is not None:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=f"codex {match.group(1)}\n", stderr=""
+                )
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(cli_version_attestation.subprocess, "run", _run)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_project_identity_without_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the attestation's semantic-cwd resolution to a constant.
+
+    ``resolve_project_identity`` shells out to git several times per
+    ``CodexCliRuntime`` construction; the fingerprint tests here only need
+    the resolved ``workspace_path`` to be deterministic and identical across
+    variants. Tests that exercise cwd-relative identity re-patch this and
+    win (see the repository-relative cwd test below).
+    """
+    monkeypatch.setattr(
+        frugality_attestation_module,
+        "resolve_project_identity",
+        lambda _cwd: SimpleNamespace(workspace_path="."),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _register_test_completion_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         frugality_attestation_module,

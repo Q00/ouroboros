@@ -56,7 +56,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13', '3.14']
+        # PRs gate on the 3.12 floor only; pushes to main/develop run the full
+        # matrix (3.14 also exercises the litellm-free dependency profile), so
+        # version-specific regressions are caught at merge time, before release.
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13", "3.14"]') }}
 
     steps:
       - name: Checkout code
@@ -95,13 +98,20 @@ jobs:
           PY
           uv pip check
 
-      - name: Run pytest with coverage
+      - name: Run pytest
         env:
           PYTHONFAULTHANDLER: "1"
         run: |
-          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
+          # Coverage instrumentation costs a large constant factor per run, so
+          # PRs skip it; pushes to main/develop keep the full Codecov pipeline.
+          COV_ARGS=""
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            COV_ARGS="--cov=src/ouroboros --cov-report=xml --cov-report=term-missing"
+          fi
+          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 $COV_ARGS -v
 
       - name: Upload coverage artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.python-version }}
@@ -111,6 +121,7 @@ jobs:
 
   coverage:
     name: Upload coverage
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: test
@@ -135,6 +146,9 @@ jobs:
         with:
           files: ./coverage/coverage-3.12/coverage.xml,./coverage/coverage-3.13/coverage.xml,./coverage/coverage-3.14/coverage.xml
           use_oidc: true
-          fail_ci_if_error: false
+          # This job now runs only on push (PRs skip coverage entirely), making
+          # it the sole coverage-publication path. A silent upload failure here
+          # would mean coverage stops updating with no signal, so surface it.
+          fail_ci_if_error: true
           flags: unittests
           name: codecov

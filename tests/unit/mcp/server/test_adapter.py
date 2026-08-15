@@ -717,6 +717,203 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        ("report_polarity", "mechanical_pass"),
+        [
+            (True, False),
+            (None, False),
+            (False, True),
+        ],
+        ids=[
+            "report-claims-pass-while-execution-says-fail",
+            "report-omits-polarity-while-execution-says-fail",
+            "report-says-fail-while-execution-says-pass",
+        ],
+    )
+    def test_report_polarity_cannot_outrank_the_execution_record(
+        self, report_polarity: bool | None, mechanical_pass: bool
+    ) -> None:
+        """The report's copy of the agent result is not the authoritative one.
+
+        `agent_reported_pass` on a report is a copy the verifier was handed.
+        A replayed, stale or externally built report carries whatever copy it
+        was constructed with — a `True` contradicting the execution, or no
+        field at all, which reads as `True`. The mechanical summary is the
+        execution's own account, so both are consulted and either one saying
+        "not a pass" settles it. Disagreement is not resolved in favour of the
+        more permissive record.
+        """
+        ac_text = "MUST define a CameraProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"[\s\S]+",
+        )
+        polarity_kwargs = (
+            {} if report_polarity is None else {"agent_reported_pass": report_polarity}
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                            detail="Pattern found in main.py",
+                        ),
+                    ),
+                    **polarity_kwargs,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=ac_text,
+                    passed=mechanical_pass,
+                    score=1.0 if mechanical_pass else 0.0,
+                    evidence="Agent execution record.",
+                ),
+            ),
+            execution_completion_status="completed",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(ac_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+
+    @pytest.mark.parametrize(
+        "rehydrate",
+        ["direct", "round_trip", "legacy_booleans"],
+    )
+    def test_a_verified_report_over_an_agent_fail_cannot_mint_a_formal_pass(
+        self, rehydrate: str
+    ) -> None:
+        """Source-scan evidence cannot reverse a reported FAIL at this boundary.
+
+        `SpecVerifier.verify_all` already refuses to emit an all-VERIFIED
+        report against an agent-reported FAIL, but this adapter is a public
+        authority boundary that also accepts summaries built elsewhere:
+        replayed rows, legacy payloads that carry only the old booleans, and
+        compatibility objects from integrations. Enforcing the polarity only
+        in the producer would let any of those encode the exact transition the
+        producer forbids, so all three shapes are driven through here.
+        """
+        ac_text = "MUST define a CameraProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"[\s\S]+",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                            detail="Pattern found in main.py",
+                        ),
+                    ),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        if rehydrate != "direct":
+            payload = json.loads(verification.model_dump_json())
+            if rehydrate == "legacy_booleans":
+                for report in payload["reports"]:
+                    for result in report["results"]:
+                        result.pop("outcome", None)
+            verification = SpecVerificationSummary.model_validate(payload)
+
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=ac_text,
+                    passed=False,
+                    score=0.0,
+                    evidence="Agent reported this criterion failed.",
+                ),
+            ),
+            execution_completion_status="completed",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(ac_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert "cannot overturn" in summary.ac_results[0].evidence
+
+    def test_a_verified_report_still_confirms_an_agent_pass(self) -> None:
+        """The confirmation direction is unaffected by the polarity gate."""
+        ac_text = "MUST define a CameraProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+CameraProvider",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=ac_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.VERIFIED,
+                            detail="Pattern found in camera.py",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=ac_text,
+                    passed=True,
+                    score=1.0,
+                    evidence="Agent reported this criterion passed.",
+                ),
+            ),
+            execution_completion_status="completed",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(ac_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is True
+        assert summary.ac_results[0].rendered_verdict == "PASS"
+
     def test_seed_coverage_survives_partial_production_extraction(self, tmp_path: Any) -> None:
         """Parser, extractor, verifier, and formal adapter fail closed together."""
         seed = SimpleNamespace(
@@ -1460,7 +1657,17 @@ Parallel Execution Verification Report
         assert summary.failure_reason == "1/1 ACs failed (AC 1)"
 
     def test_spec_verification_does_not_approve_failed_execution(self) -> None:
-        """Passing verifier results must not approve a run whose execution failed."""
+        """Passing verifier results must not approve a run whose execution failed.
+
+        The AC itself is now `NOT_EVALUATED` rather than a passing result
+        carried inside a rejected run. The worker reported this task
+        incomplete, so the execution record says the agent did not claim this
+        AC passed, and the report's own `agent_reported_pass=True` is the
+        contradicting copy rather than the authority. Source-scan evidence
+        cannot resolve that disagreement in favour of a pass — this is the
+        shape #1835 describes, a grep result standing in for work a worker
+        reported it never finished.
+        """
         mechanical = EvaluationSummary(
             final_approved=False,
             highest_stage_passed=2,
@@ -1505,12 +1712,15 @@ Parallel Execution Verification Report
         summary = _evaluation_summary_from_spec_verification(mechanical, verification)
 
         assert summary is not None
-        assert summary.ac_results[0].passed is True
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
         assert summary.execution_completion_status == "failed"
         assert summary.approval_status == "rejected"
         assert summary.final_approved is False
         assert summary.run_verdict == "FAIL"
-        assert summary.failure_reason == "execution_completion_status=failed"
+        assert summary.failure_reason == (
+            "unverifiable assertion evidence for AC 1 [execution_completion_status=failed]"
+        )
 
     def test_spec_verification_discrepancy_becomes_formal_ac_failure(self) -> None:
         """False-positive legacy PASS claims remain catchable by spec verification."""

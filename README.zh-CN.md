@@ -16,9 +16,11 @@
 
 
 <p align="center">
-  <strong>每条验收标准自己的验证命令和期望输出不会进 worker 的契约块，也没有开关能把它放回去。</strong>
+  <strong>让 Agent 自己变聪明，边界由我们来划定。</strong>
   <br/>
-  <sub>面向 AI 编码工作流的 Agent OS —— 可重放</sub>
+  <sub>不用手写 prompt，它跑起来、失败、一代比一代聪明。评分命令和期望结果不会进入我们交给它的成功契约。</sub>
+  <br/>
+  <sub>面向可重放 AI 编码工作流的 <strong>Agent OS</strong></sub>
 </p>
 
 <p align="center">
@@ -38,6 +40,12 @@
   <a href="#从-wonder-到本体论">理念</a> ·
   <a href="https://ouroboros.page/learn/zh/">指南</a>
 </p>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero-zh bash
+```
+
+<p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
 
 <p align="center"><sub><b>四次各自独立的运行，四个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
@@ -107,11 +115,15 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-zh bash
 ```
 
-**开始** —— 打开你的 AI 编码 agent，直接上：
+**第一条命令** —— 打开你的 AI 编码 agent，按顺序运行：
 
 ```
+> ooo setup
 > ooo interview "I want to build a task management CLI"
 ```
+
+`ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
+启动第一个工作流的命令。
 
 也可以不经过 agent 宿主，直接在终端里跑：
 
@@ -145,7 +157,15 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-打开一个新的 Codex 会话，输入 `ooo`。首次使用时，Ouroboros 会在改动任何内容之前，先询问是否准备运行环境。准备就绪后，它会沿用 Codex 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
+打开一个新的 Codex 会话，按顺序运行：
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` 只需运行一次，用来准备运行环境。准备就绪后，它会沿用 Codex
+当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
 
 </details>
 

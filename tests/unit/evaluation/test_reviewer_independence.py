@@ -19,6 +19,10 @@ class TestVendorMapping:
 
     def test_unknown_backend(self) -> None:
         assert ri.backend_vendor("nonesuch") is None
+        # dsh's effective provider is composition-owned; DeepSeek, OpenAI,
+        # and any other composition must all remain unknown until the provider
+        # is transported as verified runtime metadata.
+        assert ri.backend_vendor("dsh") is None
         assert ri.backend_vendor(None) is None
 
     def test_model_vendor_markers(self) -> None:
