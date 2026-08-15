@@ -18,8 +18,10 @@ delay or fail server startup.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from importlib import metadata
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -64,6 +66,35 @@ def _channel_key(installed_is_prerelease: bool) -> str:
 
 
 _CHANNEL_KEYS = ("latest_version", "latest_version_pre")
+
+
+@contextmanager
+def _cache_write_lock():
+    """Serialize the shared cache read/merge/replace transaction."""
+    lock_path = _CACHE_FILE.with_name(f"{_CACHE_FILE.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if handle.seek(0, 2) == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _channel_is_fresh(payload: dict, channel_key: str) -> bool:
@@ -136,11 +167,11 @@ def _fetch_latest_from_pypi(*, include_prerelease: bool) -> str | None:
 def _refresh_cache_now() -> None:
     """Refresh the shared cache once; every failure is swallowed.
 
-    Runs on a daemon thread off the startup hot path. Writes the same
-    keys as scripts/version-check.py — the channel value plus the shared
-    timestamp — preserving any other keys, with the writer's atomic
-    tempfile-then-replace so a concurrent hook-side refresh cannot be
-    torn.
+    Runs on a daemon thread off the startup hot path. Writes the selected
+    channel value and freshness stamp while preserving all other keys. The
+    complete read/merge/replace transaction shares a cross-process lock with
+    scripts/version-check.py, so independent channel writers cannot lose one
+    another's update.
     """
     try:
         installed = metadata.version("ouroboros-ai")
@@ -150,23 +181,24 @@ def _refresh_cache_now() -> None:
         latest = _fetch_latest_from_pypi(include_prerelease=include_prerelease)
         if latest is None:
             return
-        payload = _load_cache_payload() or {}
         channel_key = _channel_key(include_prerelease)
-        payload[channel_key] = latest
-        # Freshness is attested per channel (#2066 R3): only the refreshed
-        # channel gets a new stamp, and the shared legacy timestamp is left
-        # alone so this write can never make the OTHER channel's older
-        # value look current to any reader.
-        payload[f"{channel_key}_checked_at"] = time.time()
         _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=_CACHE_FILE.parent, suffix=".tmp")
-        try:
-            with open(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload))
-            Path(tmp_path).replace(_CACHE_FILE)
-        except BaseException:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+        with _cache_write_lock():
+            payload = _load_cache_payload() or {}
+            payload[channel_key] = latest
+            # Freshness is attested per channel (#2066 R3): only the refreshed
+            # channel gets a new stamp, and the shared legacy timestamp is left
+            # alone so this write can never make the OTHER channel's older
+            # value look current to any reader.
+            payload[f"{channel_key}_checked_at"] = time.time()
+            fd, tmp_path = tempfile.mkstemp(dir=_CACHE_FILE.parent, suffix=".tmp")
+            try:
+                with open(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload))
+                Path(tmp_path).replace(_CACHE_FILE)
+            except BaseException:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
     except Exception:
         return
 

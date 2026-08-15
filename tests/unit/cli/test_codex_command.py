@@ -1293,6 +1293,28 @@ class TestCodexDoctor:
 
         assert failures == []
 
+    def test_doctor_rejects_release_pin_that_does_not_match_manifest(self) -> None:
+        args = [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            "ouroboros-ai[mcp]==99.99.99",
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface("uvx", args, {}, failures)
+
+        assert any("manifest-matching" in failure for failure in failures)
+        assert any("is not canonical" in failure for failure in failures)
+
     @pytest.mark.parametrize(
         "requirement",
         [

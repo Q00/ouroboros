@@ -5,8 +5,11 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import threading
 import time
 from unittest.mock import MagicMock, patch
+
+from ouroboros.mcp import update_notice
 
 # Load the script as a module
 _SCRIPT_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "version-check.py"
@@ -160,6 +163,46 @@ class TestGetLatestVersion:
             result = version_check.get_latest_version()
 
         assert result == "2.0.0"
+
+    def test_hook_and_mcp_concurrent_channel_writers_preserve_both_updates(
+        self, tmp_path: Path
+    ) -> None:
+        """The shared lock covers read/merge/replace, not only replacement."""
+        cache_file = tmp_path / "version-check-cache.json"
+        fetch_barrier = threading.Barrier(2)
+
+        def _hook_fetch(*, include_prerelease: bool = False) -> str:
+            assert include_prerelease is False
+            fetch_barrier.wait()
+            return "2.0.0"
+
+        def _mcp_fetch(*, include_prerelease: bool) -> str:
+            assert include_prerelease is True
+            fetch_barrier.wait()
+            return "2.1.0b2"
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch.object(version_check, "_get_latest_from_pypi", _hook_fetch),
+            patch.object(update_notice, "_CACHE_FILE", cache_file),
+            patch.object(update_notice.metadata, "version", return_value="2.1.0b1"),
+            patch.object(update_notice, "_fetch_latest_from_pypi", _mcp_fetch),
+        ):
+            hook = threading.Thread(target=version_check.get_latest_version)
+            mcp = threading.Thread(target=update_notice._refresh_cache_now)
+            hook.start()
+            mcp.start()
+            hook.join(timeout=5)
+            mcp.join(timeout=5)
+
+        assert not hook.is_alive()
+        assert not mcp.is_alive()
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert payload["latest_version"] == "2.0.0"
+        assert payload["latest_version_pre"] == "2.1.0b2"
+        assert "latest_version_checked_at" in payload
+        assert "latest_version_pre_checked_at" in payload
 
 
 class TestCheckUpdate:
