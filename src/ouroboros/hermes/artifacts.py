@@ -134,7 +134,16 @@ def install_hermes_skills(
         and candidate.joinpath(_SWAP_MARKER).read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
     ]
     if managed_backups and not target_dir.exists():
-        os.replace(sorted(managed_backups)[-1], target_dir)
+        if len(managed_backups) != 1:
+            msg = "Refusing ambiguous Hermes skill recovery with multiple managed backups"
+            raise OSError(msg)
+        os.replace(managed_backups[0], target_dir)
+    elif managed_backups:
+        # A previous publish may have succeeded before its old-generation
+        # cleanup failed.  Remove every stale managed backup before moving the
+        # current live generation so recovery can never choose by random UUID.
+        for managed_backup in managed_backups:
+            _remove_target_path(managed_backup)
 
     with _packaged_skills_dir() as source_root:
         _prepare_hermes_install_root(target_dir)

@@ -11,6 +11,7 @@ import pytest
 from ouroboros.hermes.artifacts import (
     HERMES_SKILL_CAPABILITY_GUIDE_FILENAME,
     HERMES_SKILL_CATEGORY,
+    _remove_target_path,
     install_hermes_skills,
 )
 
@@ -231,6 +232,60 @@ class TestInstallHermesSkills:
 
         assert live_note.read_text(encoding="utf-8") == "keep across crash"
         assert target_dir.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "new skill\n"
+
+    def test_cleanup_failure_then_interruption_recovers_newest_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A stale backup cannot displace a newer live generation during recovery."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="first refresh\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        operator_note = target_dir / "operator-notes.txt"
+        operator_note.parent.mkdir(parents=True)
+        operator_note.write_text("newest operator state", encoding="utf-8")
+
+        real_remove = _remove_target_path
+        failed_cleanup = False
+
+        def fail_first_backup_cleanup(path: Path) -> None:
+            nonlocal failed_cleanup
+            if path.name.startswith(".ouroboros.old.") and not failed_cleanup:
+                failed_cleanup = True
+                raise OSError("simulated backup cleanup failure")
+            real_remove(path)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_target_path", fail_first_backup_cleanup
+        )
+        with pytest.raises(OSError, match="backup cleanup failure"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        real_replace = os.replace
+        live_backup_seen = False
+
+        def interrupt_after_newest_backup(src, dst):
+            nonlocal live_backup_seen
+            result = real_replace(src, dst)
+            if Path(src) == target_dir:
+                live_backup_seen = True
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_newest_backup)
+        with pytest.raises(KeyboardInterrupt):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert live_backup_seen
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert operator_note.read_text(encoding="utf-8") == "newest operator state"
+        assert not tuple(target_dir.parent.glob(".ouroboros.old.*"))
 
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(
