@@ -1,6 +1,6 @@
 # Native-Windows Codex Desktop HTTP task persistence
 
-Status: **Proposed**  
+Status: **Proposed**
 Related: #2024, #2056, #2026
 
 ## Summary
@@ -173,7 +173,7 @@ holding the transaction lock.
 | `T0 + C0` | Absent. `auto` performs no mutation and points to explicit `http-task`; explicit `http-task` may install. |
 | `T0 + CU` | User-managed configuration. Preserve its bytes in every automatic mode; explicit `http-task` refuses to overwrite it. |
 | `TM + CM` | The only managed installation. `auto` may report already opted in only after proving both artifacts; explicit `http-task` may reconcile it. |
-| `TM + C0` | Incomplete managed task only. Fail closed and preserve; do not synthesize or adopt TOML. |
+| `TM + C0` | Recoverable exact managed task-only state. `auto` and `preserve` fail closed and preserve it. Explicit `http-task` may complete it to exact `TM + CM` through the normal reconciliation transaction; uninstall may remove the exactly proven task to `T0 + C0` without creating or restoring TOML. No other operation may mutate it. |
 | `T0 + CM` | Stale managed TOML only. Fail closed and preserve; do not synthesize or adopt a task. |
 | `TX + CM` | Foreign/edited same-name task plus managed TOML. Fail closed and preserve both. |
 | `TM + CU` or `TM + CX` | Managed task plus foreign, user-managed, or edited TOML. Fail closed and preserve both. |
@@ -190,10 +190,13 @@ self-reported MCP identity.
 `auto` and `preserve` never repair a compound state. `preserve` validates an
 existing usable command/URL entry and performs no task/configuration lifecycle
 mutation; absence or unusable input retains existing error behavior. Explicit
-`http-task` is the only consent path and may mutate only `T0 + C0` or exact
-`TM + CM`. Explicit `stdio` refuses before mutation, warns that native Codex
-Desktop stdio is the crash-triggering topology from #2024, and directs users to
-explicit `http-task` or WSL.
+`http-task` is the only setup consent path and may mutate only `T0 + C0`,
+exact `TM + C0`, or exact `TM + CM`. For `TM + C0`, the explicit operation
+selects the terminal state without inferring whether setup, uninstall, or a
+manual TOML removal produced it: `http-task` completes installation, while
+explicit uninstall removes it. Explicit `stdio` refuses before mutation, warns
+that native Codex Desktop stdio is the crash-triggering topology from #2024,
+and directs users to explicit `http-task` or WSL.
 
 Existing user-managed entries, including stdio, remain byte-for-byte unchanged.
 A fresh native `auto` setup MUST NOT silently write stdio or install
@@ -248,7 +251,7 @@ malware are non-goals.
 
 ## Transaction serialization
 
-Setup, reconciliation, rollback, migration, uninstall, and compound-state
+Setup, reconciliation, rollback, uninstall, and compound-state
 classification use the exact SID-scoped named Windows mutex above, restricted
 to the current SID and `SYSTEM`. Acquire it before the first task, endpoint, or
 TOML read and hold it through success or complete rollback; nested rollback
@@ -256,18 +259,29 @@ reuses it. Creation, ACL verification, or bounded-acquisition failure stops
 before mutation. After an abandoned mutex, reclassify all durable state.
 Immediate re-proof remains mandatory against non-cooperating external edits.
 
+Every receipt in this RFC is an in-memory, process-local transaction record
+discarded when the command exits. V1 MUST NOT add a durable receipt, journal,
+registry, generation store, recovery command, service, supervisor, PID record,
+or migration artifact. `RegistrationInfo.Source` remains only the task-local
+ABA write identity defined above. After an abandoned mutex, a new explicit
+operation may classify exact `TM + C0` and snapshot its current exact
+projection, Source, running InstanceGuids, and `C0` as that operation's prior
+state; automatic modes still preserve it without mutation.
+
 ## Setup and rollback transaction
 
 Setup proceeds in this order:
 
-1. Acquire the lock, classify state, and continue only from `T0 + C0` or exact
-   `TM + CM`. Record prior task XML/projection/Source/running InstanceGuids and
-   the existing Codex `_PathSnapshot` for TOML, including absence or exact
-   whole-file bytes; generate `forward_write_id`.
-2. For `TM + CM`, re-prove and `End` every running prior instance. Prove all
-   ceased, task not Running, and port vacant. `T0 + C0` also requires vacancy.
-   A pre-write failure restarts a receipt-authorized prior run only through
-   projection/Source, vacancy, new InstanceGuid, and readiness proof.
+1. Acquire the lock, classify state, and continue only from `T0 + C0`, exact
+   `TM + C0`, or exact `TM + CM`. Record prior task
+   XML/projection/Source/running InstanceGuids and the existing Codex
+   `_PathSnapshot` for TOML, including absence or exact whole-file bytes;
+   generate `forward_write_id`.
+2. For `TM + C0` or `TM + CM`, re-prove and `End` every running prior instance.
+   Prove all ceased, task not Running, and port vacant. `T0 + C0` also requires
+   vacancy. A pre-write failure restarts a receipt-authorized prior run only
+   through projection/Source, vacancy, new InstanceGuid, and readiness proof;
+   an inactive prior task remains inactive.
 3. Prove no running instance, re-prove prior ownership or absence, write the
    definition, then read back its exact projection and `forward_write_id`.
 4. Start through Task Scheduler COM and capture the unique new
@@ -276,7 +290,8 @@ Setup proceeds in this order:
    Zero, multiple, pre-existing, or unprovable instances fail.
 5. Before and after MCP identity readiness, re-prove the projection, Source,
    and exact Running `forward_run_id`. Preserve existing `TM + CM` TOML; for
-   fresh setup only, atomically write the marked entry after those proofs.
+   `T0 + C0` or `TM + C0`, atomically write the marked entry only after those
+   proofs.
 
 On post-mutation failure, rollback reports primary and rollback errors
 together; no PID handling is allowed. A read-back mismatch is a setup failure
@@ -310,29 +325,45 @@ and restart only when the receipt says it ran, through new InstanceGuid and MCP
 readiness proof. Any mismatch is preserved; definition equality alone never
 authorizes rollback. Failed readiness never authorizes TOML.
 
+When the prior compound state was `TM + C0`, rollback restores the exact prior
+task XML, Source, and running-or-inactive state while the existing TOML
+snapshot/CAS contract restores or retains exact `C0`; it MUST NOT synthesize a
+managed entry. Interruption of this recovery can leave only `TM + C0`,
+`TM + CM`, or `T0 + C0`, each of which a later explicit operation reclassifies
+under the state table rather than resuming a durable receipt.
+
 A foreign task is never overwritten, adopted, ended, or deleted. Replacement is
 allowed only after exact managed proof. `/F` is prohibited for new or unproven
 ownership.
 
-## Uninstall and migration
+## Uninstall
 
-Uninstall/migration holds the same lock, records the same task/TOML receipt,
-and proves stored ownership without resolving the current launcher. Uninstall
-accepts only exact `TM + CM`; migration accepts only its separately specified
-exact managed-stdio source state. Every incomplete, foreign, or mismatched
-state fails closed, including `TM + C0`.
+Uninstall holds the same lock, records the same process-local task/TOML
+receipt, and proves stored ownership without resolving the current launcher.
+It accepts only exact `TM + CM` or exact `TM + C0`. For `TM + C0`, the explicit
+invocation is fresh consent to finish removal of the exactly proven task; exact
+`C0` is recorded as prior state and remains a no-op throughout. Every other
+incomplete, foreign, or mismatched state fails closed.
 
 Uninstall re-proves projection/Source before `End`, proves every InstanceGuid
 ceased plus task non-Running and port release, then atomically removes and
-verifies only the exact managed TOML entry. It re-proves projection/Source
-before deleting the task. Delete alone never counts as process cessation.
+verifies only the exact managed TOML entry for `TM + CM`; for `TM + C0`, it
+instead re-proves that TOML remains exactly absent without writing it. It
+re-proves projection/Source before deleting the task. Delete alone never counts
+as process cessation.
 
-After a post-End failure, rollback restores TOML first when changed, then
-re-proves the stopped task and vacancy, restarts with a new InstanceGuid, and
-verifies MCP readiness. An ambiguous delete is re-queried: proven presence
-uses that path; proven absence restores task then TOML before the same restart
-gate. Ownership conflict preserves observed artifacts and reports
-primary-first.
+After a post-End failure while the task is still present, rollback restores
+TOML first when `TM + CM` changed it; `TM + C0` retains exact absence. It then
+re-proves the stopped task and vacancy and restarts with a new InstanceGuid
+plus MCP readiness only when the receipt recorded a prior running instance;
+an inactive prior task remains inactive. An ambiguous delete is re-queried:
+proven absence with exact `C0` is the intended `T0 + C0` terminal state, while
+proven presence uses the rollback path above. Ownership conflict preserves
+observed artifacts and reports primary-first.
+
+Interruption before proven deletion leaves exact `TM + CM` or `TM + C0`;
+interruption after proven deletion leaves `T0 + C0`. A later explicit
+operation reclassifies those states and repeats the same bounded path.
 
 If End, InstanceGuid cessation, or port-release proof fails, preserve task and
 configuration and report the failure. Native evidence proves End changes a
@@ -340,9 +371,9 @@ test task from Running to Ready/`267014` and terminates its action; real MCP
 End/port-release behavior remains required validation before implementation
 merge. If it fails, stop for RFC review rather than adding a PID framework.
 
-Exact managed stdio cleanup/migration is allowed only for exact ownership.
-Foreign TOML entries and tasks are preserved. No broad scan, implicit
-stdio-to-HTTP migration, or task-prefix cleanup is allowed.
+V1 does not migrate or clean up stdio installations. Existing stdio and other
+user-managed TOML entries remain byte-for-byte preserved. No broad scan,
+implicit stdio-to-HTTP migration, or task-prefix cleanup is allowed.
 
 ## Protocol readiness probe
 
@@ -362,7 +393,7 @@ a valid future protocol-version date.
 
 ## Diagnostics
 
-For every setup, readiness, rollback, uninstall, or migration failure, report
+For every setup, readiness, rollback, or uninstall failure, report
 in this normative order: (1) primary error; (2) bounded Task Scheduler API or
 `schtasks` error/return code, stdout, and stderr; (3) best-effort lock, task,
 InstanceGuid, endpoint, and TOML rollback state plus `LastTaskResult`; then (4)
@@ -397,6 +428,9 @@ A later implementation PR is acceptable only if it proves all of these:
 1. Every compound-state-table case, including task-only, TOML-only,
    foreign-task/managed-TOML, managed-task/foreign-TOML, edited/mismatched, and
    foreign-listener states, fails closed or proceeds exactly as specified.
+   Exact `TM + C0` alone is operation-selectable: `auto`/`preserve` make no
+   mutation, explicit `http-task` converges to `TM + CM`, and uninstall
+   converges to `T0 + C0`; no other state gains repair authority.
 2. Native `auto` creates no persistence/configuration and reports already
    opted in only for exact `TM + CM`; user entries remain byte-for-byte
    unchanged.
@@ -411,13 +445,14 @@ A later implementation PR is acceptable only if it proves all of these:
 6. Trigger behavior is registration repetition plus per-SID logon trigger, with
    no `RestartOnFailure` configuration or claim.
 7. The SID-scoped named mutex serializes setup, reconciliation, rollback,
-   migration, uninstall, and state classification across independent CLI
+   uninstall, and state classification across independent CLI
    processes, is held through rollback, and fails before mutation on lock
    errors/timeouts.
-8. Active reconciliation proves exact prior ownership, ends all prior
-   instances, proves port release, writes the new definition, and accepts
-   readiness only while the post-write `forward_run_id` is Running; an old
-   action cannot satisfy the gate despite `IgnoreNew`.
+8. Active reconciliation from exact `TM + CM` or recoverable `TM + C0` proves
+   exact prior ownership, ends all prior instances, proves port release, writes
+   the new definition, and accepts readiness only while the post-write
+   `forward_run_id` is Running; an old action cannot satisfy the gate despite
+   `IgnoreNew`.
 9. Fresh setup and inactive reconciliation fail closed for a foreign listener
    and identify another Windows user or process as a potential endpoint owner.
 10. TOML writes occur only after forward execution identity plus MCP readiness;
@@ -442,18 +477,25 @@ A later implementation PR is acceptable only if it proves all of these:
 15. The existing Codex snapshot/CAS transaction captures exact prior whole-TOML
     bytes/absence; same-directory atomic write/read-back and compare-before-
     restore pass injected concurrent and post-write failures.
-16. Rollback restores exact prior TOML before task rollback; TOML ownership
-    conflict preserves the serving task, and rollback diagnostics never mask
-    the primary error.
-17. Uninstall/migration stops before cleanup, proves Ready/not Running and port
-    release, atomically cleans only exact managed TOML, then re-proves and
-    deletes only the exact managed task. Only exact `TM + CM` authorizes
-    uninstall; every failure stage follows the specified restore, vacancy,
+16. Rollback restores exact prior TOML before task rollback; for prior
+    `TM + C0`, it instead restores or retains exact absence and never
+    synthesizes TOML. TOML ownership conflict preserves the serving task, and
+    rollback diagnostics never mask the primary error.
+17. Uninstall from exact `TM + CM` or exact `TM + C0` stops before cleanup,
+    proves Ready/not Running and port release, then re-proves and deletes only
+    the exact managed task. `TM + CM` atomically cleans only exact managed
+    TOML; `TM + C0` treats verified absence as an already-satisfied no-op.
+    Every failure stage follows the specified conditional restart, vacancy,
     InstanceGuid, readiness, and conflict-preserve rules, including
     fault-injected ambiguous delete.
-18. Diagnostics retain primary-error-first ordering even when rollback or
+18. Fault injection after every durable setup, `TM + C0` recovery, and
+    uninstall boundary, followed by abandoned-mutex reclassification, proves
+    repeated explicit `http-task` converges to `TM + CM` and repeated uninstall
+    converges to `T0 + C0`. Interruption produces no durable state outside
+    `T0 + C0`, `TM + C0`, and `TM + CM`, and requires no durable receipt.
+19. Diagnostics retain primary-error-first ordering even when rollback or
     diagnostics fail.
-19. Native projection round-trip, InstanceGuid capture, logoff/logon, reboot,
+20. Native projection round-trip, InstanceGuid capture, logoff/logon, reboot,
     concurrent-CLI serialization, and real-MCP End/port-release validation pass.
 
 ## Size guard, rollout, risks, and non-goals
@@ -462,9 +504,12 @@ Implementation plus uninstall helpers SHOULD remain roughly at or below 300
 product lines. Exceeding it MUST stop for RFC review; tests/fixtures do not
 justify hiding a lifecycle framework.
 
-Rollout is explicit opt-in and experimental: no automatic migration or silent
-`auto` enablement. Rollback is only the receipt procedure above or exact
-managed uninstall; it never alters foreign tasks, listeners, or entries.
+Rollout is explicit opt-in and experimental: v1 provides no migration or silent
+`auto` enablement. Rollback is only the process-local receipt procedure above
+or exact managed uninstall; it never alters foreign tasks, listeners, or
+entries. Explicit `http-task` may complete exact `TM + C0`, and explicit
+uninstall may remove it; both may stop a proven running task and may fail back
+to the exact prior partial state without automatic repair.
 
 Risks are fixed-port contention, one-minute launch delay, cooperative-trust
 loopback impersonation, non-cooperating external mutation, and unverified
