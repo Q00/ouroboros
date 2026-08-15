@@ -52,7 +52,8 @@ class DshAcpClient(OurocodeAcpClient):
 
     Args:
         cli_path: Path to the ``dsh-acp-demo`` executable. Defaults to
-            ``dsh-acp-demo`` on PATH (``npm install -g @deepseek-ai/dsh-acp-demo``).
+            ``dsh-acp-demo`` on PATH. Build the verified upstream source commit
+            named by the spawn-failure hint; the published npm path is broken.
         cwd: Working directory for the ACP session (``session/new`` requires an
             absolute path; resolved against the process cwd when relative).
         config_path: Trusted dsh Cordis composition file passed as
@@ -101,6 +102,7 @@ class DshAcpClient(OurocodeAcpClient):
             "OUROBOROS_AGENT_RUNTIME",
             "OUROBOROS_LLM_BACKEND",
             "OUROBOROS_RUNTIME",
+            "OUROCODE_MODEL",
         ):
             env.pop(key, None)
         return env

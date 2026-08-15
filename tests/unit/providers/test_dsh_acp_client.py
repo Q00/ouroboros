@@ -69,6 +69,7 @@ def test_build_env_strips_nested_ouroboros_selectors_without_ourocode_model(
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "claude")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "dsh")
     monkeypatch.setenv("OUROBOROS_RUNTIME", "claude")
+    monkeypatch.setenv("OUROCODE_MODEL", "codex")
     env = _client(tmp_path)._build_env()
     assert "OUROBOROS_AGENT_RUNTIME" not in env
     assert "OUROBOROS_LLM_BACKEND" not in env

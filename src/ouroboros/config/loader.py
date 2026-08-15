@@ -1471,10 +1471,10 @@ def get_dsh_config_path() -> str | None:
     Priority:
         1. OUROBOROS_DSH_CONFIG_PATH environment variable
         2. config.yaml orchestrator.dsh_config_path
-        3. None (``dsh-acp-demo`` resolves ``./cordis.yml`` against its cwd)
+        3. None (the dsh client fails closed before spawning)
 
     Returns:
-        Path to the composition YAML or None.
+        Path to the trusted composition YAML, or None when dsh is not configured.
     """
     env_path = os.environ.get("OUROBOROS_DSH_CONFIG_PATH", "").strip()
     if env_path:

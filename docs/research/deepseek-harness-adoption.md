@@ -118,7 +118,8 @@ Ranked, all compatible with each other:
   backend — factory spec, capabilities (`supports_runtime=False`, and
   deliberately **not** in any subagent-orchestration name map), model catalog
   (custom-entry-only), profiles, CLI config env map, reviewer-independence
-  vendor (`deepseek`), providers lazy export.
+  vendor left unknown because the Cordis composition owns the effective
+  provider, providers lazy export, and direct interview/Seed CLI selection.
 - Config: `orchestrator.dsh_cli_path` / `orchestrator.dsh_config_path` +
   `get_dsh_cli_path()` / `get_dsh_config_path()`
   (`OUROBOROS_DSH_CLI_PATH` / `OUROBOROS_DSH_CONFIG_PATH`), both added to the
