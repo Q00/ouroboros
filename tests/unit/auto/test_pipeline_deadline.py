@@ -497,4 +497,4 @@ async def test_retired_phase_resume_explains_itself_even_when_the_deadline_expir
     assert "was retired with --complete-product" in result.blocker
     assert "ouroboros_job_status" in result.blocker
     assert "pipeline_timeout" not in result.blocker
-    assert state.last_tool_name == "run_starter"
+    assert state.last_tool_name == "retired_phase_migration"

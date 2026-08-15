@@ -24,6 +24,13 @@ RETIRED_PHASE_BLOCKER = (
     "evaluate/ralph. Start a new session, or follow the run job's own chain with "
     "ouroboros_job_status."
 )
+RETIRED_COMPLETE_PRODUCT_RUN_BLOCKER = (
+    "auto phase RUN successor ownership was retired with --complete-product; "
+    "this legacy run job was dispatched without evaluate/ralph successors, so "
+    "the session cannot safely report product completion. Inspect the run with "
+    "ouroboros_job_status, then start a new session to run the current "
+    "run/evaluate/ralph chain."
+)
 RETIRED_PHASE_MIGRATION_TOOL = "retired_phase_migration"
 
 
@@ -43,6 +50,24 @@ def mark_retired_phase(state: AutoPipelineState) -> bool:
         # This dedicated marker is intentionally absent from the recoverable
         # tool map. It also lets a later resume recognize and preserve the
         # migration blocker before the watchdog or normal resume path runs.
+        tool_name=RETIRED_PHASE_MIGRATION_TOOL,
+    )
+    return True
+
+
+def mark_retired_complete_product_run(state: AutoPipelineState) -> bool:
+    """Block the pre-retirement ``RUN`` crash window without claiming success.
+
+    Older complete-product sessions dispatched their run jobs with successor
+    ownership disabled because Auto itself intended to continue into the now
+    retired phases. If such a process stopped before leaving ``RUN``, neither
+    the old job nor the current Auto pipeline can truthfully own evaluation and
+    Ralph. Preserve that durable intent as explicit migration guidance.
+    """
+    if state.phase != AutoPhase.RUN or not state.complete_product:
+        return False
+    state.mark_blocked(
+        RETIRED_COMPLETE_PRODUCT_RUN_BLOCKER,
         tool_name=RETIRED_PHASE_MIGRATION_TOOL,
     )
     return True

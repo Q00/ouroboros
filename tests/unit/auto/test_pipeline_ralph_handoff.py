@@ -369,3 +369,35 @@ def _terminal_success_run_starter(job_id: str = "job_run_existing") -> Any:
             raise AssertionError("resume must not start a duplicate run")
 
     return TerminalSuccessStarter()
+
+
+@pytest.mark.asyncio
+async def test_legacy_complete_product_run_resume_blocks_missing_successor_owner(tmp_path) -> None:
+    """The pre-retirement RUN crash window must not report false completion."""
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_existing"
+    state.execution_id = "execution_existing"
+    state.run_session_id = "session_existing"
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_terminal_success_run_starter(),
+        reviewer=_PassReviewer(),
+    )
+
+    first = await pipeline.run(state)
+
+    assert first.status == "blocked"
+    assert "legacy run job was dispatched without evaluate/ralph successors" in (
+        first.blocker or ""
+    )
+    assert state.last_tool_name == "retired_phase_migration"
+
+    second = await pipeline.run(state)
+
+    assert second.status == "blocked"
+    assert second.blocker == first.blocker
+    assert state.last_tool_name == "retired_phase_migration"

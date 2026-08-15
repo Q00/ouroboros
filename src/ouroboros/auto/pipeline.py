@@ -54,7 +54,10 @@ from ouroboros.auto.recovery_plan import (
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
-from ouroboros.auto.retired_phases import mark_retired_phase
+from ouroboros.auto.retired_phases import (
+    mark_retired_complete_product_run,
+    mark_retired_phase,
+)
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -1246,14 +1249,6 @@ class AutoPipeline:
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                 state.run_handoff_guidance = None
-                # Q00/ouroboros#773 (review-5 finding 2): honor the durable
-                # ``complete_product`` intent on RUN resume. Without this
-                # branch, a crash between run handoff and ``_handoff_to_ralph``
-                # would silently bypass Ralph on resume even though the
-                # operator explicitly opted into RUN → RALPH_HANDOFF — a
-                # regression of the persisted-session contract added in
-                # this PR.
-                # Non-complete-product RUN resume with a persisted run handle.
                 # A persisted handle proves the execute job was *dispatched*,
                 # not that it reached terminal success (Q00/ouroboros#1590):
                 # the owning process may have exited (deadline/Ctrl-C/kill)
@@ -1278,6 +1273,9 @@ class AutoPipeline:
                 )
                 blocked = self._block_resume_if_run_not_successful(state, run_verdict)
                 if blocked is not None:
+                    self._save(state)
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
+                if mark_retired_complete_product_run(state):
                     self._save(state)
                     return self._result(state, ledger, review=review, blocker=state.last_error)
                 state.transition(

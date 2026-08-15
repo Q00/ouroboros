@@ -509,12 +509,11 @@ class AutoPipelineState:
     ralph_last_event_at: float | None = None
     ralph_stop_reason: str | None = None
     ralph_current_generation: int | None = None
-    # Q00/ouroboros#773: persisted intent for ``--complete-product`` /
-    # ``complete_product=True``. The flag is durable session state — not a
-    # per-invocation argument — so a session originally started with
-    # ``--complete-product`` keeps chaining RUN → RALPH_HANDOFF on resume even
-    # when the operator forgets to re-pass the flag. Defaults to False so
-    # legacy state files load unchanged.
+    # Compatibility-only persisted intent for the retired
+    # ``--complete-product`` path. New sessions do not use this flag: the run
+    # job owns the run/evaluate/Ralph chain. It remains durable so legacy
+    # sessions parked in RUN or a retired successor phase can fail closed with
+    # explicit migration guidance instead of falsely reporting completion.
     complete_product: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
