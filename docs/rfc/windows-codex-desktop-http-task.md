@@ -137,16 +137,36 @@ The complete v1 projection is:
 | Other triggers | Absent, including boot, idle, time, calendar, event, session-state-change, and custom triggers |
 | Instance policy | `MultipleInstancesPolicy=IgnoreNew` |
 | Battery | `DisallowStartIfOnBatteries=false`, `StopIfGoingOnBatteries=false` |
-| Lifetime | `ExecutionTimeLimit=PT0S`, `DeleteExpiredTaskAfter` absent, `RestartOnFailure` absent |
+| Lifetime | `ExecutionTimeLimit=PT0S`, `DeleteExpiredTaskAfter` absent, `RestartOnFailure` absent (therefore its `Interval` and `Count` children are absent) |
 | Availability | `Enabled=true`, `AllowStartOnDemand=true`, `StartWhenAvailable=false`, `WakeToRun=false`, `Hidden=false` |
-| Other settings | `AllowHardTerminate=true`, `RunOnlyIfNetworkAvailable=false`, `IdleSettings.StopOnIdleEnd=true`, `IdleSettings.RestartOnIdle=false`, `UseUnifiedSchedulingEngine=true`, network/maintenance settings absent, `Volatile=false` |
+| Idle | `RunOnlyIfIdle=false`; exactly one `IdleSettings` with `StopOnIdleEnd=true`, `RestartOnIdle=false`, and `Duration`/`WaitTimeout` absent |
+| Network | `RunOnlyIfNetworkAvailable=false`; `NetworkProfileName` and `NetworkSettings` absent (therefore `NetworkSettings.Name`/`Id` absent) |
+| Scheduler compatibility | `UseUnifiedSchedulingEngine=true`; `DisallowStartOnRemoteAppSession=false`; `Compatibility` absent |
+| Priority | `Priority=7` (the Task Scheduler default priority) |
+| Maintenance | `MaintenanceSettings` absent (therefore `Period`, `Deadline`, and `Exclusive` absent) |
+| Other settings | `AllowHardTerminate=true`, `Volatile=false` |
+
+The rows above are the complete v1 treatment of the Task Scheduler
+`SettingsType` surface, not examples. In schema order, every setting is
+accounted for: `AllowStartOnDemand`, `RestartOnFailure`,
+`MultipleInstancesPolicy`, `DisallowStartIfOnBatteries`,
+`StopIfGoingOnBatteries`, `AllowHardTerminate`, `StartWhenAvailable`,
+`NetworkProfileName`, `RunOnlyIfNetworkAvailable`, `WakeToRun`, `Enabled`,
+`Hidden`, `DeleteExpiredTaskAfter`, `IdleSettings`, `NetworkSettings`,
+`ExecutionTimeLimit`, `Priority`, `RunOnlyIfIdle`, `Compatibility`,
+`UseUnifiedSchedulingEngine`, `DisallowStartOnRemoteAppSession`,
+`MaintenanceSettings`, and `Volatile`. A field introduced by a newer root
+schema version is unconsumed and therefore foreign until a later RFC assigns
+it canonical treatment.
 
 For this table only, absent is equivalent to the documented Task Scheduler
 default for `ProcessTokenSidType=Default`, `RunLevel=LeastPrivilege`, trigger `Enabled=true`,
 `StopAtDurationEnd=false`, settings `Enabled=true`, `AllowStartOnDemand=true`,
 `StartWhenAvailable=false`, `WakeToRun=false`, `Hidden=false`,
 `AllowHardTerminate=true`, `RunOnlyIfNetworkAvailable=false`, and
-`Volatile=false`. Explicit and absent values are not equivalent anywhere else;
+`Volatile=false`, `RunOnlyIfIdle=false`,
+`DisallowStartOnRemoteAppSession=false`, and `Priority=7`. Explicit and absent
+values are not equivalent anywhere else;
 in particular, `ExecutionTimeLimit` MUST semantically be `PT0S`.
 
 The root Task Scheduler namespace and an OS-supported root schema-version
@@ -499,10 +519,15 @@ A later implementation PR is acceptable only if it proves all of these:
     actions even when a launcher with a similar name resolves now.
 12. Canonical-projection tests cover every listed principal, action,
     working-directory, trigger, repetition, instance, battery, lifetime,
-    on-demand, hidden, start-when-available, wake, and other-setting field;
+    on-demand, hidden, start-when-available, wake, and every field in the
+    complete `SettingsType` inventory above. Table-driven mutations exercise
+    each accepted value, each required absence, and each explicitly allowed
+    absent/default pair (including `Priority=7`, `RunOnlyIfIdle=false`, and
+    `DisallowStartOnRemoteAppSession=false`);
     unknown fields, duplicates, and non-equivalent defaults are foreign while
-    only the closed normalization rules are equal; native create/query
-    round-trip and exact `CommandLineToArgvW` token tests pass.
+    only the closed normalization rules are equal. Native create/query
+    round-trip tests assert the entire projected settings record before any
+    lifecycle operation, and exact `CommandLineToArgvW` token tests pass.
     The accepted action projection includes the explicit
     `--runtime codex --llm-backend codex` selectors for every permitted
     executable prefix; omitting either selector is foreign and a fresh
