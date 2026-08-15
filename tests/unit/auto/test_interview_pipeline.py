@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from ouroboros.auto import interview_driver
+from ouroboros.auto import interview_recovery
 from ouroboros.auto.adapters import EvaluateResult, LateralResult, PartialInterviewStartError
 from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
@@ -5221,7 +5221,7 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
     persisted ``state.ledger`` is the *pre-answer* ledger (so resume
     cannot short-circuit close on stale evidence).
     """
-    monkeypatch.setattr(interview_driver, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     apply_calls = 0
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -5269,7 +5269,7 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
     # exhausting the bounded transient retry budget; the round never
     # completed.
     assert result.status == "blocked"
-    assert apply_calls == interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert apply_calls == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
     assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: ``state.ledger`` on disk is still the
     # pre-answer snapshot. The in-memory ``ledger`` parameter may have the
@@ -5312,7 +5312,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     genuinely blocks — a backend that only fails once would now be silently
     absorbed by the in-process retry and never reach ``blocked`` at all.
     """
-    monkeypatch.setattr(interview_driver, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     answer_attempts = 0
     answers_seen: list[str] = []
 
@@ -5334,7 +5334,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
         nonlocal answer_attempts
         answer_attempts += 1
         answers_seen.append(text)
-        if answer_attempts <= interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS:
+        if answer_attempts <= interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS:
             raise RuntimeError("transient backend failure")
         # First call past the exhausted retry budget (i.e. the replayed
         # resume attempt) acknowledges the round. Returning ambiguity ~0.40
@@ -5369,7 +5369,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     # ---------- First run: backend.answer raises on every retry attempt ----------
     first = await driver.run(state, ledger)
     assert first.status == "blocked"
-    assert answer_attempts == interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert answer_attempts == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
     assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: persisted ``state.ledger`` is the
     # pre-answer snapshot even though the in-memory ledger has the
@@ -5397,7 +5397,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     # completed the ledger) or ``blocked`` with a non-stale terminal —
     # the contract under test is the **replay** behavior, not which
     # terminal the ledger ends up in.
-    assert answer_attempts > interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS, (
+    assert answer_attempts > interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS, (
         "resume must replay backend.answer with the same payload"
     )
     # The replayed payload — the FIRST attempt of the resumed round 1 (index
@@ -5405,7 +5405,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     # budget) — must equal the original first-attempt payload (index 0). The
     # answerer is deterministic given the same pre-answer ledger + context,
     # regardless of how many further rounds it then takes to reach closure.
-    assert answers_seen[0] == answers_seen[interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS]
+    assert answers_seen[0] == answers_seen[interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS]
     # End-to-end transcript-sync correctness:
     #   - If closure happened, it must be ``ledger_only`` (no mutual
     #     agreement because backend keeps ambiguity at 0.40).
@@ -6266,7 +6266,7 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     ``_INTERVIEW_TRANSIENT_ATTEMPTS`` times with the SAME pre-allocated id
     before the driver falls through to the safe-default closure.
     """
-    monkeypatch.setattr(interview_driver, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     received_ids: list[str | None] = []
     persisted_ids: set[str] = set()
 
@@ -6300,7 +6300,7 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     assert state.interview_closure_mode == "safe_default_no_backend"
     assert (
         received_ids
-        == [state.interview_session_id] * interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS
+        == [state.interview_session_id] * interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
     ), (
         "backend.start must receive the pre-allocated interview_id on every "
         "retry attempt so the persisted interview file matches auto state"

@@ -557,6 +557,24 @@ async def emit_generation_started_once(
     )
 
 
+async def emit_execution_started_once(
+    event_store: EventStore,
+    lineage_id: str,
+    generation_number: int,
+    seed: Seed,
+    focus: EvolutionFocus,
+) -> None:
+    """Persist the final execution working set for a generation."""
+    await emit_generation_started_once(
+        event_store,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        phase=GenerationPhase.EXECUTING.value,
+        seed=seed,
+        focus=focus,
+    )
+
+
 def evolve_request_key(
     initial_seed: Seed | None,
     *,

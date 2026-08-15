@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.auto import interview_driver
+from ouroboros.auto import interview_recovery
 from ouroboros.auto.adapters import PartialInterviewStartError
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
@@ -55,7 +55,7 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
 @pytest.fixture(autouse=True)
 def _no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test in this module is a retry test — never sleep for real."""
-    monkeypatch.setattr(interview_driver, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
 
 
 async def _run_gap_closure_driver(tmp_path, answer_fn) -> tuple[object, object]:
@@ -263,7 +263,7 @@ async def test_answer_round_exhausts_retries_and_blocks(tmp_path) -> None:
     result = await driver.run(state, ledger)
 
     assert result.status == "blocked"
-    assert answer_calls == interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert answer_calls == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
     assert state.last_error_code == "interview_round_transient_exhausted"
     assert state.last_tool_name == "interview.answer"
     # The failed round never advanced the round counter.
@@ -362,7 +362,7 @@ async def test_backend_resume_persistent_allowlisted_failure_attempts_closure_fa
 
     result = await driver.run(state, ledger)
 
-    assert resume_calls == interview_driver._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert resume_calls == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
     assert len(fallback_calls) == 1, "closure fallback must be attempted on the RESUME branch"
     assert "provider unavailable" in str(fallback_calls[0])
     # The ledger was already complete, so the fallback closes cleanly

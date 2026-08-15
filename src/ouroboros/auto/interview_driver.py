@@ -28,6 +28,12 @@ from ouroboros.auto.answerer import (
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.intent_guard import IntentGuardStatus, guard_auto_answer
+from ouroboros.auto.interview_recovery import (
+    reconcile_persisted_session,
+    record_evidence_based_session_id,
+    with_timeout,
+    with_transient_retry,
+)
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
@@ -123,13 +129,6 @@ _EVENT_STORE_EMIT_TIMEOUT_SECONDS = 1.0
 
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
 BACKEND_READY_AMBIGUITY_THRESHOLD = 0.20
-
-# Bounded in-process retry for transient interview-backend failures.
-# One flaky round must not discard the remaining interview budget
-# (Vision #1157); --resume already re-enters these calls idempotently,
-# so an immediate bounded retry is strictly safer than blocking.
-_INTERVIEW_TRANSIENT_ATTEMPTS: int = 3
-_INTERVIEW_TRANSIENT_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 5.0)
 
 # Stagnation-driven lateral concretization (interview convergence).
 # The auto-answerer fills gaps with generic conservative answers, so the
@@ -478,12 +477,8 @@ class AutoInterviewDriver:
         while self._pending_emit_tasks:
             pending = list(self._pending_emit_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
-            # A task can be done while its ``call_soon``-scheduled ``discard``
-            # callback has not run yet — notably during event-loop shutdown,
-            # when scheduled callbacks are no longer serviced and awaiting the
-            # already-done gather future returns without yielding. Without
-            # this explicit removal the while-loop busy-spins forever on a
-            # set that can no longer shrink (uninterruptible 100%-CPU hang).
+            # During event-loop shutdown, a done task's discard callback may
+            # never run. Explicit removal prevents an uninterruptible busy-spin.
             self._pending_emit_tasks.difference_update(task for task in pending if task.done())
 
     def _emit(self, state: AutoPipelineState) -> None:
@@ -655,10 +650,11 @@ class AutoInterviewDriver:
                     interview_tool_name = "interview.resume"
                     resume_session_id = state.interview_session_id
                     turn = _validate_turn(
-                        await self._with_transient_retry(
+                        await with_transient_retry(
                             lambda: self.backend.resume(resume_session_id),
                             state,
                             tool_name=interview_tool_name,
+                            timeout_seconds=self.timeout_seconds,
                         )
                     )
                     state.pending_question = turn.question
@@ -666,30 +662,17 @@ class AutoInterviewDriver:
             else:
                 preassigned_id = _generate_interview_id()
 
-                async def reconcile_start(_exc: Exception) -> InterviewTurn | None:
-                    persisted_id = preassigned_id
-                    probe = getattr(self.backend, "is_session_persisted", None)
-                    if persisted_id and probe is not None:
-                        try:
-                            if not probe(persisted_id):
-                                persisted_id = None
-                        except Exception:
-                            persisted_id = None
-                    if not persisted_id:
-                        return None
-                    try:
-                        return await self.backend.resume(persisted_id)
-                    except Exception:
-                        return None
-
                 turn = _validate_turn(
-                    await self._with_transient_retry(
+                    await with_transient_retry(
                         lambda: self.backend.start(
                             state.goal, cwd=state.cwd, interview_id=preassigned_id
                         ),
                         state,
                         tool_name=interview_tool_name,
-                        reconcile=reconcile_start,
+                        timeout_seconds=self.timeout_seconds,
+                        reconcile=lambda _exc: reconcile_persisted_session(
+                            self.backend, preassigned_id
+                        ),
                     )
                 )
                 if turn.session_id != preassigned_id:
@@ -711,7 +694,7 @@ class AutoInterviewDriver:
                 round_number=state.current_round + 1 if not turn.completed else None,
             )
         except TimeoutError as exc:
-            self._record_evidence_based_session_id(state, exc, preassigned_id)
+            record_evidence_based_session_id(state, self.backend, exc, preassigned_id)
             fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
             if fallback is not None:
                 return fallback
@@ -727,7 +710,7 @@ class AutoInterviewDriver:
                 "blocked", state.interview_session_id, ledger, state.current_round, message
             )
         except Exception as exc:
-            self._record_evidence_based_session_id(state, exc, preassigned_id)
+            record_evidence_based_session_id(state, self.backend, exc, preassigned_id)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
             fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
             if fallback is not None:
@@ -892,7 +875,7 @@ class AutoInterviewDriver:
             if synthesis and state.interview_session_id:
                 try:
                     synthesis_turn = _validate_turn(
-                        await self._with_timeout(
+                        await with_timeout(
                             self.backend.answer(
                                 state.interview_session_id,
                                 synthesis,
@@ -903,6 +886,7 @@ class AutoInterviewDriver:
                             ),
                             state,
                             tool_name="interview.safe_default_synthesis",
+                            timeout_seconds=self.timeout_seconds,
                         )
                     )
                     synthesis_pushed = True
@@ -1311,7 +1295,7 @@ class AutoInterviewDriver:
 
         try:
             turn = _validate_turn(
-                await self._with_transient_retry(
+                await with_transient_retry(
                     lambda: self.backend.answer(
                         answer_session_id,
                         answer.prefixed_text,
@@ -1319,6 +1303,7 @@ class AutoInterviewDriver:
                     ),
                     state,
                     tool_name="interview.answer",
+                    timeout_seconds=self.timeout_seconds,
                     reconcile=reconcile_answer,
                 )
             )
@@ -1842,7 +1827,7 @@ class AutoInterviewDriver:
         decision = lateral_result.text.strip()
         try:
             new_turn = _validate_turn(
-                await self._with_timeout(
+                await with_timeout(
                     self.backend.answer(
                         state.interview_session_id,
                         f"{AUTO_ANSWER_PREFIX}[stagnation-concretization via "
@@ -1854,6 +1839,7 @@ class AutoInterviewDriver:
                     ),
                     state,
                     tool_name="interview.stagnation_concretization",
+                    timeout_seconds=self.timeout_seconds,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - transcript push best-effort
@@ -2147,7 +2133,7 @@ class AutoInterviewDriver:
         if synthesis and state.interview_session_id:
             try:
                 synthesis_turn = _validate_turn(
-                    await self._with_timeout(
+                    await with_timeout(
                         self.backend.answer(
                             state.interview_session_id,
                             synthesis,
@@ -2158,6 +2144,7 @@ class AutoInterviewDriver:
                         ),
                         state,
                         tool_name="interview.backend_ready_safe_default_synthesis",
+                        timeout_seconds=self.timeout_seconds,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - keep ledger/transcript in sync
@@ -2225,57 +2212,6 @@ class AutoInterviewDriver:
             "seed_ready", state.interview_session_id, ledger, state.current_round
         )
 
-    async def _with_timeout(
-        self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
-    ) -> InterviewTurn:
-        try:
-            return await asyncio.wait_for(awaitable, timeout=self.timeout_seconds)
-        except TimeoutError as exc:
-            msg = (
-                f"{tool_name} timed out after {self.timeout_seconds:.0f}s "
-                f"for {state.auto_session_id} "
-                f"(policy: state.timeout_seconds_by_phase[interview])"
-            )
-            raise TimeoutError(msg) from exc
-
-    async def _with_transient_retry(
-        self,
-        make_awaitable: Callable[[], Awaitable[InterviewTurn]],
-        state: AutoPipelineState,
-        *,
-        tool_name: str,
-        reconcile: Callable[[Exception], Awaitable[InterviewTurn | None]] | None = None,
-    ) -> InterviewTurn:
-        """Bounded in-process retry around a single interview-backend call.
-
-        ``make_awaitable`` is a zero-arg factory rather than an already-created
-        awaitable because a coroutine can only be awaited once; each retry
-        attempt needs a fresh one. Callers must not observe any state mutation
-        from a failed attempt — only the final success (or the exhausted
-        exception, re-raised with its original type so existing
-        ``TimeoutError`` vs. generic ``Exception`` handling at the call sites
-        is unaffected) leaves this method.
-        """
-        for attempt in range(1, _INTERVIEW_TRANSIENT_ATTEMPTS + 1):
-            try:
-                return await self._with_timeout(make_awaitable(), state, tool_name=tool_name)
-            except Exception as exc:
-                if reconcile is not None:
-                    try:
-                        recovered = await reconcile(exc)
-                    except Exception:
-                        recovered = None
-                    if recovered is not None:
-                        return recovered
-                if attempt == _INTERVIEW_TRANSIENT_ATTEMPTS:
-                    raise
-                backoff = _INTERVIEW_TRANSIENT_BACKOFF_SECONDS[
-                    min(attempt - 1, len(_INTERVIEW_TRANSIENT_BACKOFF_SECONDS) - 1)
-                ]
-                if backoff:
-                    await asyncio.sleep(backoff)
-        raise AssertionError("unreachable: loop always returns or raises on last attempt")
-
     def _ensure_interview_phase(self, state: AutoPipelineState) -> None:
         if state.phase == AutoPhase.CREATED:
             state.transition(AutoPhase.INTERVIEW, "starting auto interview")
@@ -2291,52 +2227,6 @@ class AutoInterviewDriver:
         # emit it here so observers see every interview-loop save without each
         # call site needing to remember to fire the callback.
         self._emit(state)
-
-    def _record_evidence_based_session_id(
-        self,
-        state: AutoPipelineState,
-        exc: BaseException,
-        preassigned_id: str | None,
-    ) -> None:
-        """Save an ``interview_session_id`` on auto state only with evidence.
-
-        Two evidence channels are accepted (Q00/ouroboros#687):
-
-        * ``PartialInterviewStartError`` carries a session id the handler
-          has explicitly confirmed as persisted.
-        * For ``asyncio.wait_for`` cancellations or other exceptions, the
-          driver may probe the backend via the optional
-          ``is_session_persisted`` method to see whether a file for the
-          pre-allocated id was written before the cancel.
-
-        Without one of these the auto state stays ``None`` so
-        ``ooo auto --resume`` cannot point at a nonexistent session.
-        """
-        if state.interview_session_id:
-            return
-        # Avoid coupling to the adapter module — local import keeps
-        # interview_driver importable on its own.
-        from ouroboros.auto.adapters import PartialInterviewStartError
-
-        if isinstance(exc, PartialInterviewStartError) and exc.session_id:
-            state.interview_session_id = exc.session_id
-            return
-        if not preassigned_id:
-            return
-        probe = getattr(self.backend, "is_session_persisted", None)
-        if probe is None:
-            return
-        try:
-            persisted = probe(preassigned_id)
-        except Exception as probe_exc:  # pragma: no cover - defensive
-            log.warning(
-                "auto.interview.persistence_probe_failed",
-                preassigned_id=preassigned_id,
-                error=str(probe_exc),
-            )
-            return
-        if persisted:
-            state.interview_session_id = preassigned_id
 
 
 class FunctionInterviewBackend:

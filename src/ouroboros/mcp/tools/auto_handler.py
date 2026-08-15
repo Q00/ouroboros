@@ -82,6 +82,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_runtime import initialized_runtime_event_store
 from ouroboros.mcp.tools.auto_start_lease_store import (
     CORRUPT_START_LEASE,
 )
@@ -549,14 +550,7 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
-        # Runtime EventStore shared by the driver's ``auto.*`` observability
-        # events and the watchdog below. Without this handle every
-        # ``_emit_runtime_event`` call in the pipeline (``auto.seed_qa.blocked``,
-        # ``auto.seed_preflight.blocked``, ``auto.session.blocked``) silently
-        # no-ops, so the attention relay never sees a blocked auto session —
-        # the "silent block" failure mode.
-        runtime_event_store = self.event_store or EventStore()
-        await runtime_event_store.initialize()
+        runtime_event_store = await initialized_runtime_event_store(self.event_store)
 
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
@@ -565,8 +559,6 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
             lateral_thinker=lateral_thinker,
-            # AI answer refiner: concrete goal-specific answers so interview
-            # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
             event_store=runtime_event_store,
         )
@@ -636,10 +628,9 @@ class AutoHandler:
                 opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
             )
             evaluator = HandlerEvaluator(evaluation_handler)
-        watchdog_event_store = runtime_event_store
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
-            event_appender=watchdog_event_store,
+            event_appender=runtime_event_store,
         )
         pipeline = AutoPipeline(
             driver,
@@ -683,7 +674,7 @@ class AutoHandler:
                 cleanup=auto_worktree_cleanup_eligible(result),
             )
             if self.event_store is None:
-                await watchdog_event_store.close()
+                await runtime_event_store.close()
 
 
 @dataclass

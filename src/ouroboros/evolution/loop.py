@@ -1730,15 +1730,12 @@ class EvolutionaryLoop:
 
         else:
             # Gen 1, or a Gen 2+ ontology-stable verification handoff.
-            await loop_support.emit_generation_started_once(
+            await loop_support.emit_execution_started_once(
                 self.event_store,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=GenerationPhase.EXECUTING.value,
-                seed=current_seed,
-                # Gen 1 (or checkpoint-restored) working set — typically the
-                # full AC graph until evaluation evidence narrows it.
-                focus=generation_focus,
+                lineage.lineage_id,
+                generation_number,
+                current_seed,
+                generation_focus,
             )
 
         if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
@@ -1753,15 +1750,12 @@ class EvolutionaryLoop:
             if checkpoint_focus is not None:
                 generation_focus = checkpoint_focus
             generation_focus.log_selection(generation_number)
-            await loop_support.emit_generation_started_once(
+            await loop_support.emit_execution_started_once(
                 self.event_store,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=GenerationPhase.EXECUTING.value,
-                seed=current_seed,
-                # Wonder can reopen a previously frozen AC, so observers must
-                # receive only this final execution working set.
-                focus=generation_focus,
+                lineage.lineage_id,
+                generation_number,
+                current_seed,
+                generation_focus,
             )
 
         # Check for graceful shutdown before executing.
