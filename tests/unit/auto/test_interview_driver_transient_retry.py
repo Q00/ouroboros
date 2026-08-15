@@ -98,13 +98,10 @@ async def _run_gap_closure_driver(tmp_path, answer_fn) -> tuple[object, object]:
 
 @pytest.mark.asyncio
 async def test_answer_round_raises_once_then_succeeds_not_blocked(tmp_path) -> None:
-    """A single transient ``backend.answer`` failure is absorbed by retry.
+    """An answer failure fails closed without an idempotency receipt.
 
-    The round must still complete (not ``blocked``), and the retried attempt
-    must NOT be double-counted against the round budget: the number of
-    interview ROUNDS consumed must match a failure-free baseline run exactly
-    — only the number of backend.answer ATTEMPTS differs (by the one extra
-    retry), never the round count.
+    Matching question text is not proof that a possibly committed answer is
+    safe to replay, so the driver blocks after the first attempt.
     """
 
     async def baseline_answer(
@@ -134,12 +131,9 @@ async def test_answer_round_raises_once_then_succeeds_not_blocked(tmp_path) -> N
 
     result, state = await _run_gap_closure_driver(tmp_path / "flaky", flaky_answer)
 
-    assert result.status != "blocked", result.blocker
-    # One extra backend.answer ATTEMPT (the failure + its retry) compared to
-    # the baseline, but the ROUND count is identical — the failed attempt
-    # was not double-counted against the interview round budget.
-    assert answer_calls == baseline_state.current_round + 1
-    assert state.current_round == baseline_state.current_round
+    assert result.status == "blocked"
+    assert answer_calls == 1
+    assert state.current_round == 0
 
 
 @pytest.mark.asyncio
@@ -232,7 +226,7 @@ async def test_partial_start_failure_resumes_persisted_session_without_restart(t
 
 @pytest.mark.asyncio
 async def test_answer_round_exhausts_retries_and_blocks(tmp_path) -> None:
-    """A persistently failing ``backend.answer`` blocks only after exhaustion."""
+    """A persistently failing ``backend.answer`` blocks without replay."""
     answer_calls = 0
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -269,7 +263,7 @@ async def test_answer_round_exhausts_retries_and_blocks(tmp_path) -> None:
     result = await driver.run(state, ledger)
 
     assert result.status == "blocked"
-    assert answer_calls == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert answer_calls == 1
     assert state.last_error_code == "interview_round_transient_exhausted"
     assert state.last_tool_name == "interview.answer"
     # The failed round never advanced the round counter.

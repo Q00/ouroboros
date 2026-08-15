@@ -1290,9 +1290,8 @@ class AutoInterviewDriver:
                 return ReconcileOutcome(value=recovered)
             if recovered.question.strip() != question_for_record.strip():
                 return ReconcileOutcome(value=recovered)
-            # The backend still exposes the same pending question, so the
-            # failed answer was not committed; a bounded retry is safe.
-            return ReconcileOutcome(retry_safe=True)
+            # Matching prose may recur after commit, so replay requires an idempotency receipt.
+            return ReconcileOutcome()
 
         try:
             turn = _validate_turn(

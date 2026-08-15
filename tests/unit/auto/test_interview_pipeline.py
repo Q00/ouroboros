@@ -5382,7 +5382,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     # ---------- First run: backend.answer raises on every retry attempt ----------
     first = await driver.run(state, ledger)
     assert first.status == "blocked"
-    assert answer_attempts == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
+    assert answer_attempts == 1
     assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: persisted ``state.ledger`` is the
     # pre-answer snapshot even though the in-memory ledger has the
@@ -5405,20 +5405,14 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     state.transition(AutoPhase.INTERVIEW, "resuming interview after backend.answer failure")
     second = await driver.run(state, resumed_ledger)
 
-    # The driver advanced past the previously-blocked round. Final status
-    # is either ``seed_ready`` (if the answerer's deterministic re-apply
-    # completed the ledger) or ``blocked`` with a non-stale terminal —
-    # the contract under test is the **replay** behavior, not which
-    # terminal the ledger ends up in.
-    assert answer_attempts > interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS, (
-        "resume must replay backend.answer with the same payload"
-    )
-    # The replayed payload — the FIRST attempt of the resumed round 1 (index
-    # ``_INTERVIEW_TRANSIENT_ATTEMPTS``, right after run 1's exhausted retry
-    # budget) — must equal the original first-attempt payload (index 0). The
+    # An operator-triggered resume is a new explicit attempt, but the driver
+    # still fails closed within that run rather than replaying transiently.
+    assert answer_attempts == 2
+    # The explicitly resumed payload must equal the original first-attempt
+    # payload (index 0). The
     # answerer is deterministic given the same pre-answer ledger + context,
     # regardless of how many further rounds it then takes to reach closure.
-    assert answers_seen[0] == answers_seen[interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS]
+    assert answers_seen[0] == answers_seen[1]
     # End-to-end transcript-sync correctness:
     #   - If closure happened, it must be ``ledger_only`` (no mutual
     #     agreement because backend keeps ambiguity at 0.40).

@@ -282,11 +282,13 @@ def _command_program_tokens(command: str) -> frozenset[str]:
     after ``python``/``bash``/``node`` or an explicit ``./program`` is a
     decidable fabrication; ordinary command arguments remain advisory.
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return frozenset()
     runners = frozenset({"bash", "sh", "node", "ruby"})
+    option_operands = {
+        "bash": frozenset({"-O", "-o"}),
+        "sh": frozenset({"-o"}),
+        "node": frozenset({"-r", "--require", "--loader", "--import"}),
+        "ruby": frozenset({"-I", "-r", "--require", "-C", "-E"}),
+    }
 
     def is_runner(token: str) -> bool:
         executable = Path(token).name
@@ -298,35 +300,59 @@ def _command_program_tokens(command: str) -> frozenset[str]:
 
     programs: set[str] = set()
 
+    def shell_tokens(value: str) -> list[str]:
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+
     def scan(parts: list[str]) -> None:
-        if parts and "/" in parts[0] and not is_runner(parts[0]):
-            programs.add(_normalize_workspace_path(parts[0]))
+        segments: list[list[str]] = [[]]
+        for part in parts:
+            if re.fullmatch(r"[;&|]+", part):
+                segments.append([])
+            else:
+                segments[-1].append(part)
+        for segment in segments:
+            while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
+                segment = segment[1:]
+            if segment and "/" in segment[0] and not is_runner(segment[0]):
+                programs.add(_normalize_workspace_path(segment[0]))
         for index, token in enumerate(parts):
             if token in {"bash", "sh"} and index + 2 < len(parts) and parts[index + 1] == "-c":
                 try:
-                    scan(shlex.split(parts[index + 2]))
+                    scan(shell_tokens(parts[index + 2]))
                 except ValueError:
                     continue
             if not is_runner(token):
                 continue
+            runner = Path(token).name
             cursor = index + 1
             while cursor < len(parts) and parts[cursor].startswith("-"):
                 if parts[cursor] in {"-c", "--command"} and cursor + 1 < len(parts):
                     try:
-                        scan(shlex.split(parts[cursor + 1]))
+                        scan(shell_tokens(parts[cursor + 1]))
                     except ValueError:
                         pass
                     break
                 if parts[cursor] in {"-m", "--module"}:
                     break
-                if parts[cursor] in {"-X", "-W", "--check-hash-based-pycs"}:
+                if parts[cursor] in {
+                    "-X",
+                    "-W",
+                    "--check-hash-based-pycs",
+                    *option_operands.get(runner, ()),
+                }:
                     cursor += 2
                     continue
                 cursor += 1
             if cursor < len(parts) and not parts[cursor].startswith("-"):
                 programs.add(_normalize_workspace_path(parts[cursor]))
 
-    scan(tokens)
+    try:
+        scan(shell_tokens(command))
+    except ValueError:
+        return frozenset()
     return frozenset(programs)
 
 

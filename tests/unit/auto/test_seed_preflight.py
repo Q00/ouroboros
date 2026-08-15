@@ -215,6 +215,10 @@ def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None
         ("python --check-hash-based-pycs always check.py", "check.py"),
         ('sh -c "python check.py"', "check.py"),
         ("bash -c ./verify", "verify"),
+        ("node --require preload.js missing.js", "missing.js"),
+        ("ruby -I lib missing.rb", "missing.rb"),
+        ("bash -O extglob ./missing-verify", "missing-verify"),
+        ("FOO=bar echo ok; ./missing-verify", "missing-verify"),
     ),
 )
 def test_missing_wrapped_verification_program_blocks(
