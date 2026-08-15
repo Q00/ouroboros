@@ -89,6 +89,12 @@ def _heading_levels(text: str) -> list[int]:
     return [len(match.group(1)) for match in re.finditer(r"^(#{1,6}) ", text, re.MULTILINE)]
 
 
+def _slt_screens_table_rows(text: str) -> list[tuple[str, str, str]]:
+    """Parse the marked SLT screens table into (key, alt_key, screen) rows."""
+    section = _contract_section(text, "<!-- tui-contract:slt-screens -->")
+    return re.findall(r"\| `(\d)` \|(?: `(\w)`)? \| \*\*(\w+)\*\* \|", section)
+
+
 def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
     assert _binding_actions("src/ouroboros/tui/app.py", "OuroborosTUI") == {
         "q": "quit",
@@ -146,7 +152,8 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         re.DOTALL,
     )
     assert mapping_match is not None
-    assert dict(re.findall(r"(\d) => Screen::(\w+)", mapping_match.group("body"))) == {
+    source_screen_by_tab = dict(re.findall(r"(\d) => Screen::(\w+)", mapping_match.group("body")))
+    assert source_screen_by_tab == {
         "0": "Dashboard",
         "1": "Execution",
         "2": "Lineage",
@@ -170,12 +177,30 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         re.DOTALL,
     )
 
+    # The documented key -> screen mapping must match the source's tab-index
+    # -> Screen mapping (tab index is the key minus one), not just contain the
+    # right tokens somewhere in the section -- otherwise swapping which key
+    # opens which screen in the docs would go undetected.
+    source_screen_by_key = {
+        str(int(tab_index) + 1): screen for tab_index, screen in source_screen_by_tab.items()
+    }
+    doc_screen_name_normalization = {"Sessions": "SessionSelector"}
+    en_rows = _slt_screens_table_rows(_read(EN_GUIDE))
+    en_screen_by_key = {
+        key: doc_screen_name_normalization.get(screen, screen) for key, _alt, screen in en_rows
+    }
+    assert en_screen_by_key == source_screen_by_key
+
+    # KO must document the identical key/alt-key structure as EN (screen
+    # names differ by locale, so compare structure, not translated text).
+    ko_rows = _slt_screens_table_rows(_read(KO_GUIDE))
+    assert [(key, alt) for key, alt, _screen in ko_rows] == [
+        (key, alt) for key, alt, _screen in en_rows
+    ]
+
     for guide in GUIDES:
         text = _read(guide)
-        screens = _contract_section(text, "<!-- tui-contract:slt-screens -->")
         lifecycle = _contract_section(text, "<!-- tui-contract:slt-lifecycle -->")
-        for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`", "`Esc`"):
-            assert key in screens
         assert "--mock" in lifecycle
         assert "`p`" in lifecycle and "`r`" in lifecycle
 

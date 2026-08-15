@@ -34,18 +34,39 @@ MCP_JOB_TOOLS = (
 
 def test_cli_docs_cover_detached_auto_wait_and_retrieve() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+    compact = " ".join(docs.split())
 
     assert "Detached `auto` wait and retrieve" in docs
     for cli_command in CLI_JOB_COMMANDS:
         assert cli_command in docs
 
+    # Short, durable phrase anchors for the lifecycle semantics an operator
+    # must not lose: a running job is non-terminal, failed/cancelled are
+    # terminal-but-observable, every terminal-failure path names its "Next
+    # steps", and an expired in-memory handle still resolves. These survive
+    # rewording of the surrounding prose but still fail if the underlying
+    # semantic content is deleted.
+    assert compact.count("non-terminal") >= 1
+    assert compact.count("terminal and still observable") == 2  # failed, cancelled
+    assert compact.count("Next steps") == 3  # failed, cancelled, invalid
+    assert "Job handle not found" in compact
+    assert "in-memory handle TTL" in compact
+
 
 def test_mcp_docs_cover_detached_auto_jobs() -> None:
     docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
+    compact = " ".join(docs.split())
 
     assert "Detached `auto` Jobs" in docs
     for mcp_tool in MCP_JOB_TOOLS:
         assert mcp_tool in docs
+
+    assert compact.count("non-terminal") >= 1
+    assert compact.count("terminal and still observable") == 2  # failed, cancelled
+    assert compact.count("Next steps") == 3  # failed, cancelled, invalid
+    assert '"job_handle_not_found"' in compact
+    assert "in-memory handle TTL" in compact
+    assert compact.count("is_error=true") == 2  # failed, cancelled
 
 
 def _job_created_event(

@@ -5,6 +5,7 @@ code identifiers) so that rewording the surrounding prose never breaks them.
 """
 
 from pathlib import Path
+import re
 
 from ouroboros.backends.capabilities import runtime_backend_choices
 
@@ -32,12 +33,18 @@ def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> Non
 def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
 
+    # Scoped to the `-r, --runtime` option row itself (not the whole file) so
+    # a mutation that drops the shipped-runtime list from that row can't hide
+    # behind mentions of the same names elsewhere in the doc.
+    option_row = next(
+        line for line in docs.splitlines() if line.startswith("| `-r, --runtime TEXT`")
+    )
+    documented_backends = set(re.findall(r"`([\w-]+)`", option_row)) - {"-r, --runtime TEXT"}
+
     # MCP worker variants (codex_mcp, claude_mcp) are internal leader-driven
     # runtimes, not user-facing `ouroboros setup --runtime` choices.
-    for backend in runtime_backend_choices():
-        if backend.endswith("_mcp"):
-            continue
-        assert f"`{backend}`" in docs, f"cli-reference.md does not mention runtime `{backend}`"
+    user_facing_backends = {b for b in runtime_backend_choices() if not b.endswith("_mcp")}
+    assert user_facing_backends <= documented_backends
 
     assert "ouroboros setup --runtime" in docs
     assert Path("docs/runtime-guides/zcode.md").is_file()
