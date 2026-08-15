@@ -54,11 +54,14 @@ from ouroboros.auto.recovery_plan import (
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
+from ouroboros.auto.resume_routing import (
+    recoverable_phase_for_tool as _recoverable_phase_for_tool,
+)
 from ouroboros.auto.retired_phases import (
     mark_retired_complete_product_run,
     mark_retired_phase,
 )
-from ouroboros.auto.seed_preflight import run_seed_preflight
+from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight
 from ouroboros.auto.seed_qa_advisory import (
     clear_seed_qa_verdict,
     publish_advisory,
@@ -77,6 +80,7 @@ from ouroboros.auto.state import (
     utc_now_iso,
 )
 from ouroboros.auto.task_class_application import apply_default_ac_template
+from ouroboros.auto.terminal_events import emit_blocked_session_event
 from ouroboros.auto.trace_export import best_effort_export_trace
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
@@ -504,20 +508,7 @@ class AutoPipeline:
                 ),
                 event_store=getattr(self.interview_driver, "event_store", None),
             )
-            if result.status in {"blocked", "failed"}:
-                await self._emit_runtime_event(
-                    "auto.session.blocked",
-                    state.auto_session_id,
-                    {
-                        "schema_version": 1,
-                        "auto_session_id": state.auto_session_id,
-                        "status": result.status,
-                        "stop_reason_code": state.last_error_code,
-                        "tool_name": state.last_tool_name,
-                        "blocker": (result.blocker or "")[:320],
-                        "resume_capability": result.resume_capability.value,
-                    },
-                )
+            await emit_blocked_session_event(self._emit_runtime_event, state, result)
         return result
 
     async def _run_pipeline(self, state: AutoPipelineState) -> AutoPipelineResult:
@@ -525,25 +516,17 @@ class AutoPipeline:
         self._last_emitted_phase = None
         self._last_emitted_grade = None
         self._last_emitted_repair = None
-        # L3-2 / #1176: clear any cached probe evidence from a prior
-        # run so a re-used ``AutoPipeline`` instance does not leak
-        # the previous session's evidence onto a new ``_result()``.
+        # Prevent a reused pipeline from leaking prior runtime-probe evidence.
         self._last_probe_evidence = _runtime_probe_evidence_from_state(state)
-        # Push the same progress callback down into the interview driver so
-        # the longest-running phase (auto interview rounds) emits live
-        # snapshots through the same observer contract instead of forcing
-        # consumers to scrape persisted state for per-round updates.
+        # Share the progress observer with the long-running interview driver.
         self.interview_driver.progress_callback = self.progress_callback
         ledger = (
             SeedDraftLedger.from_dict(state.ledger)
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
-        # A2 trace export: expose the live ledger to the outermost ``run()``
-        # wrapper so the finalize projection uses the freshest decisions.
         self._active_ledger = ledger
-        # Compatibility migration owns retired phases before any production
-        # gate can rewrite their explanation. In particular, a fired watchdog
+        # Compatibility migration runs before a fired watchdog can
         # must not turn an obsolete persisted phase into an unrelated timeout.
         if mark_retired_phase(state):
             self._save(state)
@@ -1223,11 +1206,11 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
-            preflight_result = await self._run_seed_preflight_gate(
-                state, ledger, seed, review=review
-            )
-            if preflight_result is not None:
-                return preflight_result
+            if preflight_blocker := await enforce_seed_preflight(
+                seed, state, self._emit_runtime_event
+            ):
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=preflight_blocker)
             seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
             if seed_qa is not None:
                 return seed_qa
@@ -1245,46 +1228,6 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review)
 
         return seed, review
-
-    async def _run_seed_preflight_gate(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        review: SeedReview | None,
-    ) -> AutoPipelineResult | None:
-        """Block unverifiable Seed claims before any execution dispatch."""
-        workspace_root: Path | None = None
-        if state.cwd:
-            candidate = Path(state.cwd).expanduser()
-            if candidate.is_dir():
-                workspace_root = candidate
-        report = run_seed_preflight(seed, workspace_root=workspace_root)
-        if report.passed:
-            return None
-        questions = list(report.open_questions)[:8]
-        await self._emit_runtime_event(
-            "auto.seed_preflight.blocked",
-            state.auto_session_id,
-            {
-                "schema_version": 1,
-                "auto_session_id": state.auto_session_id,
-                "seed_id": seed.metadata.seed_id,
-                "codes": [finding.code for finding in report.blocking_findings][:8],
-                "open_questions": questions,
-            },
-        )
-        blocker = (
-            f"Seed preflight found {len(report.blocking_findings)} unexecutable contract claim(s); "
-            "answer these open questions, revise the Seed, and resume: "
-            + " | ".join(questions)
-        )
-        state.mark_blocked(
-            blocker, tool_name="seed_preflight", error_code="seed_preflight_unexecutable"
-        )
-        self._save(state)
-        return self._result(state, ledger, review=review, blocker=blocker)
 
     async def _run_execution_phase(
         self,
@@ -2830,30 +2773,6 @@ def _is_seed_generation_blocker(exc: Exception) -> bool:
     """Classify recoverable authoring validation as blocked, not failed."""
     message = str(exc)
     return "Ambiguity score" in message and "exceeds threshold" in message
-
-
-def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
-    if tool_name in {
-        "interview.start",
-        "interview.resume",
-        "interview.answer",
-        "auto_answerer",
-        "domain_profile_registry",
-        "interview_driver",
-    }:
-        return AutoPhase.INTERVIEW
-    if tool_name == "seed_generator":
-        return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer", "seed_qa"}:
-        # ``seed_repairer`` joins this set so a repair-phase timeout (the
-        # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
-        # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
-        # restart is the REVIEW phase, which re-invokes the bounded repairer.
-        # Without this entry a transient timeout becomes a permanent dead end.
-        return AutoPhase.REVIEW
-    if tool_name == "run_starter":
-        return AutoPhase.RUN
-    return None
 
 
 def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:

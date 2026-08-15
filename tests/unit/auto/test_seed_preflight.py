@@ -192,9 +192,7 @@ def test_missing_root_python_program_blocks(tmp_path: Path) -> None:
 
     report = run_seed_preflight(seed, workspace_root=tmp_path)
 
-    assert [finding.code for finding in report.blocking_findings] == [
-        "verify_program_missing"
-    ]
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
     assert report.blocking_findings[0].subject == "check.py"
 
 
@@ -205,21 +203,15 @@ def test_missing_extensionless_executable_blocks_unless_declared_artifact(
         description="Custom verifier passes",
         verify_command="./verify",
     )
-    blocked = run_seed_preflight(
-        _seed(acceptance_criteria=(criterion,)), workspace_root=tmp_path
-    )
+    blocked = run_seed_preflight(_seed(acceptance_criteria=(criterion,)), workspace_root=tmp_path)
     declared = run_seed_preflight(
         _seed(
-            acceptance_criteria=(
-                criterion.model_copy(update={"expected_artifacts": ("verify",)}),
-            )
+            acceptance_criteria=(criterion.model_copy(update={"expected_artifacts": ("verify",)}),)
         ),
         workspace_root=tmp_path,
     )
 
-    assert [finding.code for finding in blocked.blocking_findings] == [
-        "verify_program_missing"
-    ]
+    assert [finding.code for finding in blocked.blocking_findings] == ["verify_program_missing"]
     assert declared.passed
 
 

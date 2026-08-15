@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 from typing import Annotated
 
+from rich.console import Console
 from rich.markup import escape as _rich_escape
 import typer
 
@@ -1364,7 +1365,12 @@ def _render_blocked_panel(
     console.print("────────────────────────────────────────────────")
 
 
-def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
+def _print_result(
+    result: AutoPipelineResult,
+    *,
+    show_ledger: bool,
+    state: AutoPipelineState | None = None,
+) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
     external_ralph_plugin = _is_external_ralph_plugin_completion(result)
