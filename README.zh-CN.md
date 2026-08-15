@@ -41,6 +41,12 @@
   <a href="https://ouroboros.page/learn/zh/">指南</a>
 </p>
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero-zh bash
+```
+
+<p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
+
 <p align="center"><sub><b>四次各自独立的运行，四个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
 <table align="center">

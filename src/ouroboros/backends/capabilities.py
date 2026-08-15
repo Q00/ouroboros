@@ -659,6 +659,22 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_tool_envelope=False,
     ),
     BackendCapability(
+        # dsh (DeepSeek Harness) is an LLM-completion backend only: it streams
+        # a single text turn through dsh's automation-only ACP server
+        # (`dsh-acp-demo`) with no tool use, so it backs completions
+        # (interview/seed/qa/evaluate) but NOT the agentic orchestrator
+        # runtime or interview driving.
+        name="dsh",
+        aliases=("deepseek_harness",),
+        supports_runtime=False,
+        supports_llm=True,
+        supports_interview_driver=False,
+        switchable_runtime=False,
+        cli_name="dsh-acp-demo",
+        cli_config_key="dsh_cli_path",
+        supports_tool_envelope=False,
+    ),
+    BackendCapability(
         name="litellm",
         aliases=("openai", "openrouter"),
         supports_llm=True,

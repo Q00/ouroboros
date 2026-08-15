@@ -1103,6 +1103,28 @@ def get_auto_evolve_enabled() -> bool:
         return True
 
 
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
 def get_auto_evolve_max_generations() -> int:
     """Return the bounded generation budget for automatic Ralph chaining."""
 
@@ -1412,6 +1434,56 @@ def get_ourocode_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.ourocode_cli_path:
             return config.orchestrator.ourocode_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_cli_path() -> str | None:
+    """Get the DeepSeek Harness ACP server path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CLI_PATH environment variable
+        2. config.yaml orchestrator.dsh_cli_path
+        3. None (resolve ``dsh-acp-demo`` from PATH at runtime)
+
+    Returns:
+        Path to the ``dsh-acp-demo`` executable or None.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_cli_path:
+            return config.orchestrator.dsh_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_config_path() -> str | None:
+    """Get the dsh Cordis composition file path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CONFIG_PATH environment variable
+        2. config.yaml orchestrator.dsh_config_path
+        3. None (the dsh client fails closed before spawning)
+
+    Returns:
+        Path to the trusted composition YAML, or None when dsh is not configured.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CONFIG_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_config_path:
+            return config.orchestrator.dsh_config_path
     except ConfigError:
         pass
 

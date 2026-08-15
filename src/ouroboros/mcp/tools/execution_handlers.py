@@ -19,6 +19,7 @@ import structlog
 import yaml
 
 from ouroboros.config.loader import (
+    default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
     get_auto_evolve_enabled,
     get_max_parallel_workers,
@@ -236,6 +237,12 @@ def _resolve_execution_preferences_request(
         raise ValueError("efficiency_mode must be adaptive or quality_first")
     if raw_assurance is not None and not isinstance(raw_assurance, str):
         raise ValueError("frugality_assurance must be off, observe, or strict")
+    if raw_efficiency is None and not is_resume:
+        # Persistent default policy fills the fresh-start gap (#1733):
+        # explicit arguments won above, resume keeps its persisted contract,
+        # and the coupled frugality default still derives from the mode, so
+        # strict can never appear implicitly.
+        raw_efficiency = default_execution_efficiency_mode()
     preferences = resolve_execution_preferences(raw_efficiency, raw_assurance)
     return (
         preferences,
@@ -1075,7 +1082,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     description=(
                         "Execution efficiency policy. adaptive may start decomposed ACs "
                         "on lower-cost tiers and escalate on recovery; quality_first keeps "
-                        "children at the parent starting tier. Default: adaptive."
+                        "children at the parent starting tier. When omitted on a fresh "
+                        "start, a configured execution.default_policy supplies it; "
+                        "otherwise defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),

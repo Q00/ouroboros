@@ -62,7 +62,11 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
-Before a fresh start with no user choice, ask in outcome language: **Efficient
+Before a fresh start with no user choice, first check the persistent default:
+when `execution.default_policy` in `~/.ouroboros/config.yaml` is `efficient` or
+`quality_first`, do not ask — omit both arguments and the server applies the
+configured default (the handoff still reports the resolved policy). Otherwise
+ask in outcome language: **Efficient
 execution** maps to `adaptive/observe`; **Quality-first execution** maps to
 `quality_first/off`. `strict` assurance is separate explicit consent because it
 may spend extra work on proof. Do not send these arguments on resume; the server

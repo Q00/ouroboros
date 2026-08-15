@@ -141,6 +141,7 @@ class LLMConfig(BaseModel, frozen=True):
         "goose",
         "pi",
         "ourocode",
+        "dsh",
         "gjc",
         "zcode",
     ] = "claude_code"
@@ -256,6 +257,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        default_policy: Persistent default execution policy for FRESH runs
+            (#1733). ``ask`` (the default) preserves the host's interactive
+            prompt exactly; ``efficient`` resolves to adaptive/observe and
+            ``quality_first`` to quality_first/off without asking. Explicit
+            invocation arguments always win, resumed sessions keep their
+            persisted immutable contract, and strict frugality assurance
+            never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -273,6 +281,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod
@@ -704,6 +713,11 @@ class OrchestratorConfig(BaseModel, frozen=True):
     grok_cli_path: str | None = None
     ourocode_cli_path: str | None = None
     zcode_cli_path: str | None = None
+    dsh_cli_path: str | None = None
+    # dsh Cordis composition file passed to `dsh-acp-demo --config`. Not an
+    # executable itself, but it names the plugins the Node process loads, so it
+    # is treated with the same untrusted-source caution as a CLI path.
+    dsh_config_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -729,6 +743,8 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "grok_cli_path",
         "ourocode_cli_path",
         "zcode_cli_path",
+        "dsh_cli_path",
+        "dsh_config_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

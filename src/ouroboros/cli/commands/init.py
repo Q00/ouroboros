@@ -81,6 +81,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     KIRO = "kiro"
     PI = "pi"
     ZCODE = "zcode"
+    DSH = "dsh"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -896,7 +897,7 @@ def start(
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
                 "(claude_code, litellm, codex, copilot, opencode, gemini, goose, "
-                "kiro, pi, or zcode)."
+                "kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),

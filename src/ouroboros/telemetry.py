@@ -123,7 +123,7 @@ _CLI_FUNNEL = {"init": "interview"}
 # way the actual `ooo` entrypoint does, and `.commands.keys()` is the
 # statically-registered set -- `_PluginAwareGroup`'s dynamic fallback only
 # triggers for names NOT in that dict, so this enumeration inherently
-# excludes plugin dispatch. 27 names: every `app.command(name=...)` /
+# excludes plugin dispatch. 28 names: every `app.command(name=...)` /
 # `app.add_typer(..., name=...)` registration plus two hidden top-level
 # aliases (`monitor`, `dispatch`).
 _CANONICAL_CLI_COMMANDS = frozenset(
@@ -135,6 +135,7 @@ _CANONICAL_CLI_COMMANDS = frozenset(
         "codex",
         "config",
         "detect",
+        "doctor",
         "dispatch",
         "harness",
         "init",

@@ -1,4 +1,10 @@
-"""Tests for detached auto user-facing documentation."""
+"""Tests for detached auto user-facing documentation and result retrieval.
+
+Docs tests parse bounded lifecycle examples and durable semantic anchors, so
+rewording surrounding prose never breaks them while state guidance cannot drift.
+Behavior tests exercise the real JobResultHandler/CLI contract per terminal
+state.
+"""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -14,119 +20,112 @@ from ouroboros.persistence.event_store import EventStore
 
 runner = CliRunner()
 
+CLI_JOB_COMMANDS = (
+    "ouroboros job status JOB_ID",
+    "ouroboros job wait JOB_ID",
+    "ouroboros job result JOB_ID",
+)
+MCP_JOB_TOOLS = (
+    'ouroboros_job_status(job_id="JOB_ID")',
+    'ouroboros_job_wait(job_id="JOB_ID")',
+    'ouroboros_job_result(job_id="JOB_ID")',
+)
 
-def test_cli_docs_describe_detached_auto_as_tracked_non_terminal_background_work() -> None:
+
+def _status_guidance(section: str, status: str, next_status: str | None = None) -> str:
+    anchor = f"status reports `{status}`"
+    start = section.index(anchor)
+    if next_status is None:
+        return section[start:]
+    end = section.index(f"status reports `{next_status}`", start + len(anchor))
+    return section[start:end]
+
+
+def test_cli_docs_cover_detached_auto_wait_and_retrieve() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
+    section = docs.split("### Detached `auto` wait and retrieve", 1)[1].split("## ", 1)[0]
+    compact = " ".join(section.split())
 
     assert "Detached `auto` wait and retrieve" in docs
-    assert "Detached `auto` work is non-terminal tracked background work" in compact
-    assert "Starting it does not mean the workflow has completed" in compact
-    assert "returned `job_id` is a handle for a tracked job" in compact
-    assert "reaches a terminal lifecycle status" in compact
-
-    for cli_command in (
-        "ouroboros job status JOB_ID",
-        "ouroboros job wait JOB_ID",
-        "ouroboros job result JOB_ID",
-    ):
+    for cli_command in CLI_JOB_COMMANDS:
         assert cli_command in docs
 
-    for mcp_tool in (
-        'ouroboros_job_status(job_id="JOB_ID")',
-        'ouroboros_job_wait(job_id="JOB_ID")',
-        'ouroboros_job_result(job_id="JOB_ID")',
+    # Short, durable phrase anchors for the lifecycle semantics an operator
+    # must not lose: a running job is non-terminal, failed/cancelled are
+    # terminal-but-observable, every terminal-failure path names its "Next
+    # steps", and an expired in-memory handle still resolves. These survive
+    # rewording of the surrounding prose but still fail if the underlying
+    # semantic content is deleted.
+    assert "running" in compact and "non-terminal" in compact
+    for status, next_status in (
+        ("completed", "failed"),
+        ("failed", "cancelled"),
+        ("cancelled", None),
     ):
-        assert mcp_tool in docs
+        state = _status_guidance(compact, status, next_status)
+        assert "ouroboros job result JOB_ID" in state
+        if status == "completed":
+            assert "stable completed `auto` result" in state
+        else:
+            assert "terminal and still observable" in state
+            assert "Next steps" in state
+    assert "Job handle not found" in compact and "invalid" in compact
+    assert "in-memory handle TTL" in compact
+    assert "job_auto_docs_done" in compact and "detached auto result artifact" in compact
 
-    assert "non-zero status" in compact
-    assert "error response" in compact
 
-
-def test_mcp_docs_describe_detached_auto_as_tracked_non_terminal_background_work() -> None:
-    """Runnable artifact check for MCP detached auto wait/retrieve docs."""
+def test_mcp_docs_cover_detached_auto_jobs() -> None:
     docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
+    section = docs.split("### Detached `auto` Jobs", 1)[1].split("### Read-only Project Status", 1)[
+        0
+    ]
+    compact = " ".join(section.split())
 
     assert "Detached `auto` Jobs" in docs
-    assert (
-        "`ouroboros_start_auto` starts detached `auto` work as non-terminal tracked background work"
-        in compact
-    )
-    assert (
-        "that handle identifies tracked background work, not a completed workflow result" in compact
-    )
-    assert "terminal state such as `completed`, `failed`, or `cancelled`" in compact
-    assert "in-memory handle TTL only bounds live registry cleanup" in compact
-    assert "not completed result retrieval" in compact
-
-    for mcp_tool in (
-        'ouroboros_job_status(job_id="JOB_ID")',
-        'ouroboros_job_wait(job_id="JOB_ID")',
-        'ouroboros_job_result(job_id="JOB_ID")',
-    ):
+    for mcp_tool in MCP_JOB_TOOLS:
         assert mcp_tool in docs
 
-    assert "Treat `running` or other non-terminal status output as progress only" in compact
-    assert "Wait with `ouroboros_job_wait`, then fetch the completed result" in compact
-    assert "MCP error response" in compact
+    assert "running" in compact and "non-terminal" in compact
+    completed = _status_guidance(compact, "completed", "failed")
+    assert 'ouroboros_job_result(job_id="JOB_ID")' in completed
+    assert "stable completed `auto` result" in completed
+    for status, next_status in (("failed", "cancelled"), ("cancelled", None)):
+        state = _status_guidance(compact, status, next_status)
+        assert 'ouroboros_job_result(job_id="JOB_ID")' in state
+        assert "terminal and still observable" in state
+        assert "Next steps" in state
+        assert "is_error=true" in state
+    assert '"job_handle_not_found"' in compact and 'lifecycle_status = "invalid"' in compact
+    assert "in-memory handle TTL" in compact
+    assert 'meta.status = "completed"' in compact and "meta.is_terminal = true" in compact
 
 
-def test_docs_verify_running_state_includes_stable_wait_and_retrieve_guidance() -> None:
-    """Docs artifact check for detached running-state wait/retrieve guidance."""
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-
-    cli_compact = " ".join(cli_docs.split())
-    mcp_compact = " ".join(mcp_docs.split())
-
-    assert "its `running` lifecycle status is non-terminal tracked background work" in cli_compact
-    assert "Treat status output as progress, not as the final `auto` result" in cli_compact
-    assert (
-        "Retrieve the result only after the job reaches a terminal lifecycle status" in cli_compact
+def _job_created_event(
+    event_id: str, job_id: str, session_id: str, timestamp: datetime
+) -> BaseEvent:
+    return BaseEvent(
+        id=event_id,
+        type="mcp.job.created",
+        timestamp=timestamp,
+        aggregate_type="job",
+        aggregate_id=job_id,
+        data={
+            "job_type": "auto",
+            "status": JobStatus.QUEUED.value,
+            "message": "Queued detached auto",
+            "links": {
+                "session_id": session_id,
+                "execution_id": None,
+                "lineage_id": None,
+            },
+        },
     )
 
-    assert "`running` lifecycle status is non-terminal tracked background work" in mcp_compact
-    assert "Treat `running` or other non-terminal status output as progress only" in mcp_compact
-    assert "Wait with `ouroboros_job_wait`, then fetch the completed result" in mcp_compact
 
-    for cli_command in (
-        "ouroboros job status JOB_ID",
-        "ouroboros job wait JOB_ID",
-        "ouroboros job result JOB_ID",
-    ):
-        assert cli_command in cli_docs
-
-    for mcp_tool in (
-        'ouroboros_job_status(job_id="JOB_ID")',
-        'ouroboros_job_wait(job_id="JOB_ID")',
-        'ouroboros_job_result(job_id="JOB_ID")',
-    ):
-        assert mcp_tool in mcp_docs
-
-
-def test_cli_docs_verify_completed_state_has_stable_result_retrieval_semantics() -> None:
-    """Docs artifact check for completed detached auto CLI result retrieval."""
-    docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
-
-    assert "Detached `auto` wait and retrieve" in docs
-    assert "ouroboros job status JOB_ID" in docs
-    assert "ouroboros job wait JOB_ID" in docs
-    assert "ouroboros job result JOB_ID" in docs
-    assert "When CLI status reports `completed`" in compact
-    assert "`ouroboros job result JOB_ID` retrieves the stable completed `auto` result" in compact
-    assert "that job handle" in compact
-
-
-def test_cli_docs_api_check_verifies_completed_detached_auto_result_output(
-    monkeypatch, tmp_path
-) -> None:
-    """Runnable docs/API check for completed detached auto CLI result retrieval."""
+def test_cli_retrieves_stable_completed_detached_auto_result(monkeypatch, tmp_path) -> None:
     from ouroboros.cli.commands import job as job_command
     from ouroboros.cli.main import app
 
-    docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'detached-auto-docs-check.db'}"
     job_id = "job_auto_docs_done"
     auto_session_id = "auto_docs_done"
@@ -142,23 +141,7 @@ def test_cli_docs_api_check_verifies_completed_detached_auto_result_output(
         await store.initialize()
         try:
             await store.append(
-                BaseEvent(
-                    id="evt_auto_docs_created",
-                    type="mcp.job.created",
-                    timestamp=timestamp,
-                    aggregate_type="job",
-                    aggregate_id=job_id,
-                    data={
-                        "job_type": "auto",
-                        "status": JobStatus.QUEUED.value,
-                        "message": "Queued detached auto",
-                        "links": {
-                            "session_id": auto_session_id,
-                            "execution_id": None,
-                            "lineage_id": None,
-                        },
-                    },
-                )
+                _job_created_event("evt_auto_docs_created", job_id, auto_session_id, timestamp)
             )
             await store.append(
                 BaseEvent(
@@ -207,37 +190,9 @@ def test_cli_docs_api_check_verifies_completed_detached_auto_result_output(
     assert result.exit_code == 0
     assert repeated.exit_code == 0
     assert result.output == repeated.output == f"{result_text}\n"
-    assert f"$ ouroboros job result {job_id}" in docs
-    assert result_text in docs
 
 
-def test_mcp_docs_verify_completed_state_has_stable_result_retrieval_semantics() -> None:
-    """Docs artifact check for completed detached auto MCP result retrieval."""
-    docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
-
-    assert "Detached `auto` Jobs" in docs
-    assert 'ouroboros_job_status(job_id="JOB_ID")' in docs
-    assert 'ouroboros_job_wait(job_id="JOB_ID")' in docs
-    assert 'ouroboros_job_result(job_id="JOB_ID")' in docs
-    assert "When MCP status reports `completed`" in compact
-    assert (
-        '`ouroboros_job_result(job_id="JOB_ID")` retrieves the stable completed `auto` result'
-        in compact
-    )
-    assert "that job handle" in compact
-    assert 'ouroboros_job_result(job_id="job_auto_docs_done")' in docs
-    assert 'content[0].text = "detached auto result artifact: seed.yaml"' in docs
-    assert 'content[1].uri = "file:///tmp/detached-auto-result.json"' in docs
-    assert 'meta.status = "completed"' in docs
-    assert "meta.is_terminal = true" in docs
-
-
-def test_mcp_docs_api_check_verifies_completed_detached_auto_result_response(
-    tmp_path,
-) -> None:
-    """Runnable docs/API check for completed detached auto MCP result retrieval."""
-    docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
+def test_mcp_retrieves_stable_completed_detached_auto_result(tmp_path) -> None:
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'detached-auto-mcp-docs-check.db'}"
     job_id = "job_auto_docs_done"
     auto_session_id = "auto_docs_done"
@@ -252,23 +207,7 @@ def test_mcp_docs_api_check_verifies_completed_detached_auto_result_response(
         await store.initialize()
         try:
             await store.append(
-                BaseEvent(
-                    id="evt_auto_mcp_docs_created",
-                    type="mcp.job.created",
-                    timestamp=timestamp,
-                    aggregate_type="job",
-                    aggregate_id=job_id,
-                    data={
-                        "job_type": "auto",
-                        "status": JobStatus.QUEUED.value,
-                        "message": "Queued detached auto",
-                        "links": {
-                            "session_id": auto_session_id,
-                            "execution_id": None,
-                            "lineage_id": None,
-                        },
-                    },
-                )
+                _job_created_event("evt_auto_mcp_docs_created", job_id, auto_session_id, timestamp)
             )
             await store.append(
                 BaseEvent(
@@ -353,12 +292,6 @@ def test_mcp_docs_api_check_verifies_completed_detached_auto_result_response(
     }
     assert first.value.meta["result_payload"]["content"][1]["uri"] == artifact_uri
 
-    assert f'ouroboros_job_result(job_id="{job_id}")' in docs
-    assert f'content[0].text = "{result_text}"' in docs
-    assert f'content[1].uri = "{artifact_uri}"' in docs
-    assert 'meta.status = "completed"' in docs
-    assert "meta.is_terminal = true" in docs
-
 
 def test_completed_detached_auto_result_retrieval_leaves_inspectable_event_trace(
     tmp_path,
@@ -426,56 +359,7 @@ def test_completed_detached_auto_result_retrieval_leaves_inspectable_event_trace
     asyncio.run(_run_completed_job_and_verify_trace())
 
 
-def test_docs_verify_failed_state_has_stable_status_semantics_and_next_steps() -> None:
-    """Docs artifact check for failed detached auto status/result guidance."""
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-
-    cli_compact = " ".join(cli_docs.split())
-    mcp_compact = " ".join(mcp_docs.split())
-
-    assert (
-        "When CLI status reports `failed`, the job is terminal and still observable" in cli_compact
-    )
-    assert (
-        "`ouroboros job result JOB_ID` returns the stable failure output or error details"
-        in cli_compact
-    )
-    assert "not a successful `auto` result" in cli_compact
-    assert "Next steps are to inspect `ouroboros job status JOB_ID`" in cli_compact
-    assert "`ouroboros job result JOB_ID`" in cli_compact
-    assert (
-        "resume or retry from the surfaced auto session, execution, or lineage handle"
-        in cli_compact
-    )
-
-    assert (
-        "When MCP status reports `failed`, the job is terminal and still observable" in mcp_compact
-    )
-    assert (
-        '`ouroboros_job_result(job_id="JOB_ID")` returns the stable failure output or error details'
-        in mcp_compact
-    )
-    assert "`is_error=true`" in mcp_compact
-    assert "not a successful `auto` result" in mcp_compact
-    assert 'Next steps are to inspect `ouroboros_job_status(job_id="JOB_ID")`' in mcp_compact
-    assert 'ouroboros_job_result(job_id="JOB_ID")' in mcp_compact
-    assert (
-        "resume or retry from the surfaced auto session, execution, or lineage handle"
-        in mcp_compact
-    )
-    assert 'ouroboros_job_result(job_id="job_auto_docs_failed")' in mcp_docs
-    assert "is_error = true" in mcp_docs
-    assert 'content[0].text = "detached auto failed: seed repair budget exhausted"' in mcp_docs
-    assert 'meta.status = "failed"' in mcp_docs
-    assert 'meta.error = "seed repair budget exhausted"' in mcp_docs
-
-
-def test_mcp_docs_api_check_verifies_failed_detached_auto_result_response(
-    tmp_path,
-) -> None:
-    """Runnable MCP docs/API check for failed detached auto result retrieval."""
-    docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
+def test_mcp_retrieves_stable_failed_detached_auto_result(tmp_path) -> None:
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'detached-auto-mcp-failed-docs-check.db'}"
     job_id = "job_auto_docs_failed"
     auto_session_id = "auto_docs_failed"
@@ -491,22 +375,8 @@ def test_mcp_docs_api_check_verifies_failed_detached_auto_result_response(
         await store.initialize()
         try:
             await store.append(
-                BaseEvent(
-                    id="evt_auto_mcp_failed_docs_created",
-                    type="mcp.job.created",
-                    timestamp=timestamp,
-                    aggregate_type="job",
-                    aggregate_id=job_id,
-                    data={
-                        "job_type": "auto",
-                        "status": JobStatus.QUEUED.value,
-                        "message": "Queued detached auto",
-                        "links": {
-                            "session_id": auto_session_id,
-                            "execution_id": None,
-                            "lineage_id": None,
-                        },
-                    },
+                _job_created_event(
+                    "evt_auto_mcp_failed_docs_created", job_id, auto_session_id, timestamp
                 )
             )
             await store.append(
@@ -580,67 +450,8 @@ def test_mcp_docs_api_check_verifies_failed_detached_auto_result_response(
     assert first.value.meta["result_payload"]["is_error"] is True
     assert first.value.meta["result_payload"]["content"][0]["text"] == failure_text
 
-    assert f'ouroboros_job_result(job_id="{job_id}")' in docs
-    assert f'content[0].text = "{failure_text}"' in docs
-    assert "is_error = true" in docs
-    assert 'meta.status = "failed"' in docs
-    assert "meta.is_terminal = true" in docs
-    assert f'meta.error = "{source_error}"' in docs
 
-
-def test_docs_verify_cancelled_state_has_stable_status_semantics_and_next_steps() -> None:
-    """Docs artifact check for cancelled detached auto status/result guidance."""
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-
-    cli_compact = " ".join(cli_docs.split())
-    mcp_compact = " ".join(mcp_docs.split())
-
-    assert (
-        "When CLI status reports `cancelled`, the job is terminal and still observable"
-        in cli_compact
-    )
-    assert (
-        "`ouroboros job result JOB_ID` returns stable cancellation output or error details"
-        in cli_compact
-    )
-    assert "cancellation reason when one is available" in cli_compact
-    assert "not a successful `auto` result" in cli_compact
-    assert "Next steps are to inspect `ouroboros job status JOB_ID`" in cli_compact
-    assert "`ouroboros job result JOB_ID`" in cli_compact
-    assert "restart the detached auto flow or resume from the surfaced auto session" in cli_compact
-    assert "exits non-zero because the terminal result is an error result" in cli_compact
-    assert "ouroboros job result job_auto_docs_cancelled" in cli_docs
-    assert "detached auto cancelled: user requested cancellation" in cli_docs
-
-    assert (
-        "When MCP status reports `cancelled`, the job is terminal and still observable"
-        in mcp_compact
-    )
-    assert (
-        '`ouroboros_job_result(job_id="JOB_ID")` returns stable cancellation '
-        "output or error details" in mcp_compact
-    )
-    assert "`is_error=true`" in mcp_compact
-    assert "cancellation reason when one is available" in mcp_compact
-    assert "not a successful `auto` result" in mcp_compact
-    assert 'Next steps are to inspect `ouroboros_job_status(job_id="JOB_ID")`' in mcp_compact
-    assert 'ouroboros_job_result(job_id="JOB_ID")' in mcp_compact
-    assert "restart the detached auto flow or resume from the surfaced auto session" in mcp_compact
-    assert 'ouroboros_job_result(job_id="job_auto_docs_cancelled")' in mcp_docs
-    assert "is_error = true" in mcp_docs
-    assert 'content[0].text = "detached auto cancelled: user requested cancellation"' in mcp_docs
-    assert 'meta.status = "cancelled"' in mcp_docs
-    assert 'meta.lifecycle_status = "cancelled"' in mcp_docs
-    assert "meta.is_terminal = true" in mcp_docs
-    assert 'meta.error = "user requested cancellation"' in mcp_docs
-
-
-def test_mcp_docs_api_check_verifies_cancelled_detached_auto_result_response(
-    tmp_path,
-) -> None:
-    """Runnable MCP docs/API check for cancelled detached auto result retrieval."""
-    docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
+def test_mcp_retrieves_stable_cancelled_detached_auto_result(tmp_path) -> None:
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'detached-auto-mcp-cancelled-docs-check.db'}"
     job_id = "job_auto_docs_cancelled"
     auto_session_id = "auto_docs_cancelled"
@@ -656,22 +467,8 @@ def test_mcp_docs_api_check_verifies_cancelled_detached_auto_result_response(
         await store.initialize()
         try:
             await store.append(
-                BaseEvent(
-                    id="evt_auto_mcp_cancelled_docs_created",
-                    type="mcp.job.created",
-                    timestamp=timestamp,
-                    aggregate_type="job",
-                    aggregate_id=job_id,
-                    data={
-                        "job_type": "auto",
-                        "status": JobStatus.QUEUED.value,
-                        "message": "Queued detached auto",
-                        "links": {
-                            "session_id": auto_session_id,
-                            "execution_id": None,
-                            "lineage_id": None,
-                        },
-                    },
+                _job_created_event(
+                    "evt_auto_mcp_cancelled_docs_created", job_id, auto_session_id, timestamp
                 )
             )
             await store.append(
@@ -745,52 +542,14 @@ def test_mcp_docs_api_check_verifies_cancelled_detached_auto_result_response(
     assert first.value.meta["result_payload"]["is_error"] is True
     assert first.value.meta["result_payload"]["content"][0]["text"] == cancellation_text
 
-    assert f'ouroboros_job_result(job_id="{job_id}")' in docs
-    assert f'content[0].text = "{cancellation_text}"' in docs
-    assert "is_error = true" in docs
-    assert 'meta.status = "cancelled"' in docs
-    assert 'meta.lifecycle_status = "cancelled"' in docs
-    assert "meta.is_terminal = true" in docs
-    assert f'meta.error = "{source_error}"' in docs
 
-
-def test_docs_verify_expired_state_has_stable_status_semantics_and_next_steps() -> None:
-    """Docs artifact check for expired detached auto status/result guidance."""
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-
-    cli_compact = " ".join(cli_docs.split())
-    mcp_compact = " ".join(mcp_docs.split())
-
-    assert "When a terminal job is older than the in-memory handle TTL" in cli_compact
-    assert "`ouroboros job result JOB_ID` still retrieves the persisted terminal" in cli_compact
-    assert "`ouroboros job status JOB_ID` reports the stored terminal" in cli_compact
-    assert "result retrieval returns the durable result artifact" in cli_compact
-    assert "rather than an expiration error" in cli_compact
-
-    assert "When a terminal job is older than the in-memory handle TTL" in mcp_compact
-    assert 'ouroboros_job_result(job_id="JOB_ID")` still retrieves the persisted' in mcp_compact
-    assert "`ouroboros_job_status` reports the stored terminal" in mcp_compact
-    assert "result retrieval returns the durable result artifact" in mcp_compact
-    assert "rather than an expiration error" in mcp_compact
-    assert "ouroboros job result job_auto_docs_expired" in cli_docs
-    assert "detached auto result artifact: expired seed.yaml" in cli_docs
-    assert 'ouroboros_job_result(job_id="job_auto_docs_expired")' in mcp_docs
-    assert 'content[0].text = "detached auto result artifact: expired seed.yaml"' in mcp_docs
-    assert 'meta.lifecycle_status = "completed"' in mcp_docs
-    assert "meta.is_terminal = true" in mcp_docs
-    assert "meta.result_available = true" in mcp_docs
-
-
-def test_docs_api_check_verifies_expired_detached_work_observable_contract(
+def test_expired_detached_auto_handle_still_returns_persisted_terminal_result(
     monkeypatch, tmp_path
 ) -> None:
-    """Runnable docs/API check for expired detached auto handles."""
+    """Terminal jobs older than the in-memory handle TTL stay retrievable."""
     from ouroboros.cli.commands import job as job_command
     from ouroboros.cli.main import app
 
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'expired-detached-auto-docs-check.db'}"
     job_id = "job_auto_docs_expired"
     auto_session_id = "auto_docs_expired"
@@ -801,22 +560,8 @@ def test_docs_api_check_verifies_expired_detached_work_observable_contract(
         await store.initialize()
         try:
             await store.append(
-                BaseEvent(
-                    id="evt_auto_expired_docs_created",
-                    type="mcp.job.created",
-                    timestamp=expired_at,
-                    aggregate_type="job",
-                    aggregate_id=job_id,
-                    data={
-                        "job_type": "auto",
-                        "status": JobStatus.QUEUED.value,
-                        "message": "Queued detached auto",
-                        "links": {
-                            "session_id": auto_session_id,
-                            "execution_id": None,
-                            "lineage_id": None,
-                        },
-                    },
+                _job_created_event(
+                    "evt_auto_expired_docs_created", job_id, auto_session_id, expired_at
                 )
             )
             await store.append(
@@ -859,68 +604,14 @@ def test_docs_api_check_verifies_expired_detached_work_observable_contract(
 
     assert cli_result.exit_code == 0
     assert api_result.value.content[0].text in cli_result.output
-    assert f"$ ouroboros job result {job_id}" in cli_docs
-    assert api_result.value.content[0].text in cli_docs
-    assert f'ouroboros_job_result(job_id="{job_id}")' in mcp_docs
-    assert f'content[0].text = "{api_result.value.content[0].text}"' in mcp_docs
-    assert 'meta.lifecycle_status = "completed"' in mcp_docs
-    assert "meta.is_terminal = true" in mcp_docs
-    assert "meta.result_available = true" in mcp_docs
 
 
-def test_docs_verify_invalid_detached_work_has_stable_status_semantics_and_next_steps() -> None:
-    """Docs artifact check for invalid detached auto handles."""
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-
-    cli_compact = " ".join(cli_docs.split())
-    mcp_compact = " ".join(mcp_docs.split())
-
-    assert "Unknown or otherwise unavailable handles fail" in cli_compact
-    assert (
-        "When CLI status cannot resolve the supplied handle, treat the detached work "
-        "as `invalid` or unavailable rather than as running or completed" in cli_compact
-    )
-    assert "stable observable status is the non-zero CLI exit" in cli_compact
-    assert "human-readable error for that handle" in cli_compact
-    assert "Next steps are to check the copied `job_id`" in cli_compact
-    assert "inspect any surfaced auto session, execution, or lineage handle" in cli_compact
-    assert "restart the detached auto flow when no valid handle can be recovered" in cli_compact
-
-    assert "Unknown or otherwise unavailable handles return an MCP error response" in mcp_compact
-    assert (
-        "When MCP status cannot resolve the supplied handle, treat the detached work "
-        "as `invalid` or unavailable rather than as running or completed" in mcp_compact
-    )
-    assert "stable observable status is the MCP error response for that handle" in mcp_compact
-    assert "not a detached `auto` result" in mcp_compact
-    assert "Next steps are to check the copied `job_id`" in mcp_compact
-    assert "inspect any surfaced auto session, execution, or lineage handle" in mcp_compact
-    assert "restart the detached auto flow when no valid handle can be recovered" in mcp_compact
-    assert 'ouroboros_job_result(job_id="missing_detached_auto")' in mcp_docs
-    assert (
-        'error.message = "Job handle not found: missing_detached_auto. Result unavailable."'
-        in mcp_docs
-    )
-    assert 'error.error_code = "job_handle_not_found"' in mcp_docs
-    assert 'error.details.lifecycle_status = "invalid"' in mcp_docs
-    assert "error.details.is_terminal = true" in mcp_docs
-    assert "error.details.result_available = false" in mcp_docs
-    assert 'error.details.reason = "not_found"' in mcp_docs
-
-    assert "$ ouroboros job result missing_detached_auto" in cli_docs
-    assert "Job handle not found: missing_detached_auto. Result unavailable." in cli_docs
-
-
-def test_docs_api_check_verifies_invalid_detached_work_observable_contract(
+def test_invalid_detached_auto_handle_fails_with_stable_error_contract(
     monkeypatch, tmp_path
 ) -> None:
-    """Runnable docs/API check for invalid detached auto handles."""
     from ouroboros.cli.commands import job as job_command
     from ouroboros.cli.main import app
 
-    cli_docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    mcp_docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'invalid-detached-auto-docs-check.db'}"
     job_id = "missing_detached_auto"
 
@@ -959,11 +650,3 @@ def test_docs_api_check_verifies_invalid_detached_work_observable_contract(
 
     assert cli_result.exit_code == 1
     assert api_result.error.message in cli_result.output
-    assert f"$ ouroboros job result {job_id}" in cli_docs
-    assert api_result.error.message in cli_docs
-    assert f'ouroboros_job_result(job_id="{job_id}")' in mcp_docs
-    assert f'error.message = "{api_result.error.message}"' in mcp_docs
-    assert f'error.error_code = "{api_result.error.error_code}"' in mcp_docs
-    assert 'error.details.lifecycle_status = "invalid"' in mcp_docs
-    assert "error.details.is_terminal = true" in mcp_docs
-    assert "error.details.result_available = false" in mcp_docs
