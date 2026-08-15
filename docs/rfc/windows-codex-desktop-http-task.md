@@ -182,10 +182,13 @@ holding the transaction lock.
 An occupied endpoint is a third compound-state input. Occupancy while `TM` is
 Running is only a candidate prior managed action, never listener ownership
 proof. Explicit reconciliation may stop that exactly proven task and continue
-only if the endpoint is then vacant. Occupancy in every other case, or
-occupancy that remains after the managed stop, is a foreign/residual listener
-conflict and fails closed. No mode adopts a listener from its URL or
-self-reported MCP identity.
+only if the endpoint is then vacant. Except for the receipt-proven inactive
+uninstall path below, occupancy in every other case, or occupancy that remains
+after a managed reconciliation stop, is a foreign/residual listener conflict
+and fails closed. During receipt-proven inactive uninstall, an already-occupied
+endpoint is foreign cleanup context only: it is neither adopted nor touched
+and does not block removal of the exactly owned inactive task. No mode adopts
+a listener from its URL or self-reported MCP identity.
 
 `auto` and `preserve` never repair a compound state. `preserve` validates an
 existing usable command/URL entry and performs no task/configuration lifecycle
@@ -297,12 +300,32 @@ On post-mutation failure, rollback reports primary and rollback errors
 together; no PID handling is allowed. A read-back mismatch is a setup failure
 and MUST NOT start the task or write TOML.
 
-TOML mutation MUST reuse the existing Codex setup snapshot/CAS transaction:
-`_snapshot_path`, `_atomic_write_text_if_current_matches`, and
-`_restore_path_snapshot_if_current_matches`. It constructs complete intended
-bytes without touching the source, preserves unrelated bytes, and uses the
-existing same-directory temp-write, flush, atomic replace, and read-back proof.
-No second TOML transaction or retry path is introduced.
+TOML mutation MUST narrowly extend, not duplicate, the existing Codex setup
+snapshot transaction. It constructs complete intended bytes without touching
+the source and preserves unrelated bytes.
+`_atomic_write_text_if_current_matches` MUST compare the current link-aware
+snapshot immediately before replacement, atomically replace complete bytes
+through a flushed and closed same-directory temporary file, and return an
+immediate post-replace `_snapshot_path(path)` read-back rather than a synthetic
+regular-file snapshot. That read-back MUST show the intended complete bytes and
+the expected regular-file or unchanged-symlink topology; otherwise the write
+fails.
+
+Rollback first compares an immediate link-aware snapshot with the recorded
+forward read-back. For a prior regular file, it restores complete prior bytes
+by same-directory temporary write and atomic replace. For a prior symlink, it
+requires the same link and exact recorded forward target snapshot, atomically
+replaces the target through a temporary file in the target directory, and MUST
+NOT unlink or recreate the symlink. For prior absence, it may unlink only a
+regular file whose immediate snapshot exactly equals the recorded forward
+regular-file snapshot. Every restoration is followed immediately by an exact
+`_snapshot_path(path)` read-back; an observed pre-mutation or read-back mismatch
+is an ownership conflict.
+
+These are compare-immediately-before-mutate checks, not a race-free
+operating-system compare-and-swap. A non-cooperating mutation after the final
+comparison remains the bounded TOCTOU risk stated below. V1 MUST NOT add a
+generalized file transaction, file-locking, retry, or journaling subsystem.
 
 If failure occurs after TOML replacement begins, rollback restores TOML before
 the task through the existing compare-before-restore contract. Exact prior
@@ -345,31 +368,45 @@ invocation is fresh consent to finish removal of the exactly proven task; exact
 `C0` is recorded as prior state and remains a no-op throughout. Every other
 incomplete, foreign, or mismatched state fails closed.
 
-Uninstall re-proves projection/Source before `End`, proves every InstanceGuid
-ceased plus task non-Running and port release, then atomically removes and
-verifies only the exact managed TOML entry for `TM + CM`; for `TM + C0`, it
-instead re-proves that TOML remains exactly absent without writing it. It
-re-proves projection/Source before deleting the task. Delete alone never counts
-as process cessation.
+Immediately before each `End`, TOML cleanup or absence proof, and `Delete`,
+uninstall MUST re-query and re-prove projection, Source, task state, and current
+InstanceGuids. If the receipt recorded a running instance, or if any new
+InstanceGuid is observed before a mutation, uninstall switches to the bounded
+`End`/cessation branch: it re-proves ownership, ends every observed instance,
+and proves each InstanceGuid ceased plus task non-Running before continuing.
+Failure of that proof preserves the task and configuration.
 
-After a post-End failure while the task is still present, rollback restores
-TOML first when `TM + CM` changed it; `TM + C0` retains exact absence. It then
-re-proves the stopped task and vacancy and restarts with a new InstanceGuid
-plus MCP readiness only when the receipt recorded a prior running instance;
-an inactive prior task remains inactive. An ambiguous delete is re-queried:
-proven absence with exact `C0` is the intended `T0 + C0` terminal state, while
-proven presence uses the rollback path above. Ownership conflict preserves
-observed artifacts and reports primary-first.
+A receipt-observed running task additionally requires port release before
+cleanup. A receipt-observed inactive task never requires vacancy during that
+uninstall; any listener remains foreign and untouched even if a newly observed
+managed InstanceGuid must be ended and proven ceased.
+
+Uninstall then atomically removes and verifies only the exact managed TOML
+entry for `TM + CM`; for `TM + C0`, it instead re-proves exact absence without
+writing it. It performs the required immediate ownership/state/InstanceGuid
+re-query before deleting the task. Delete alone never counts as process
+cessation.
+
+After any failure following `End` or TOML cleanup while the task remains
+present, rollback restores TOML first when `TM + CM` changed it; `TM + C0`
+retains exact absence. It re-proves the stopped task and restarts only when the
+receipt recorded a prior running instance, using vacancy, a new InstanceGuid,
+and MCP readiness proof. A receipt-observed inactive task remains inactive and
+requires no vacancy for rollback. An ambiguous delete is re-queried: proven
+absence with exact `C0` is the intended `T0 + C0` terminal state, while proven
+presence uses the rollback path above. Ownership conflict preserves observed
+artifacts and reports primary-first.
 
 Interruption before proven deletion leaves exact `TM + CM` or `TM + C0`;
 interruption after proven deletion leaves `T0 + C0`. A later explicit
 operation reclassifies those states and repeats the same bounded path.
 
-If End, InstanceGuid cessation, or port-release proof fails, preserve task and
-configuration and report the failure. Native evidence proves End changes a
-test task from Running to Ready/`267014` and terminates its action; real MCP
-End/port-release behavior remains required validation before implementation
-merge. If it fails, stop for RFC review rather than adding a PID framework.
+If End, InstanceGuid cessation, or a required port-release proof fails,
+preserve task and configuration and report the failure. Native evidence proves
+End changes a test task from Running to Ready/`267014` and terminates its
+action; real MCP End/port-release behavior remains required validation before
+implementation merge. If it fails, stop for RFC review rather than adding a
+PID framework.
 
 V1 does not migrate or clean up stdio installations. Existing stdio and other
 user-managed TOML entries remain byte-for-byte preserved. No broad scan,
@@ -474,20 +511,29 @@ A later implementation PR is acceptable only if it proves all of these:
     reported as an ownership-conflict rollback failure; replacement rollback
     restores exact prior XML/state and its prior Source only when the current
     Source is the receipt's `forward_write_id`.
-15. The existing Codex snapshot/CAS transaction captures exact prior whole-TOML
-    bytes/absence; same-directory atomic write/read-back and compare-before-
-    restore pass injected concurrent and post-write failures.
+15. The existing Codex snapshot transaction captures exact prior whole-TOML
+    bytes or absence. A forward snapshot-checked write returns an immediate
+    truthful link-aware `_snapshot_path` read-back. Rollback atomically replaces
+    complete regular-file or symlink-target bytes without replacing the symlink
+    itself; prior absence unlinks only a regular file matching the recorded
+    forward snapshot. Tests cover regular files, symlinks, prior absence,
+    mismatch before the final comparison, failure before replacement, and
+    mismatch in the immediate post-replace read-back. The implementation does
+    not claim race-free filesystem compare-and-swap.
 16. Rollback restores exact prior TOML before task rollback; for prior
     `TM + C0`, it instead restores or retains exact absence and never
     synthesizes TOML. TOML ownership conflict preserves the serving task, and
     rollback diagnostics never mask the primary error.
-17. Uninstall from exact `TM + CM` or exact `TM + C0` stops before cleanup,
-    proves Ready/not Running and port release, then re-proves and deletes only
-    the exact managed task. `TM + CM` atomically cleans only exact managed
-    TOML; `TM + C0` treats verified absence as an already-satisfied no-op.
-    Every failure stage follows the specified conditional restart, vacancy,
-    InstanceGuid, readiness, and conflict-preserve rules, including
-    fault-injected ambiguous delete.
+17. Uninstall immediately re-proves ownership, state, and InstanceGuids before
+    every `End`, TOML mutation or absence proof, and `Delete`. A
+    receipt-observed running instance, or any newly observed InstanceGuid,
+    enters the bounded `End`/cessation branch before cleanup. Receipt-observed
+    running state requires port release. Receipt-observed inactive state never
+    requires vacancy during that uninstall; any foreign listener remains
+    untouched and cannot block cleanup. Failure after either `End` or
+    inactive-path TOML cleanup follows the same receipt-conditional rollback
+    rules. The exact managed task alone is deleted, and `TM + C0` never
+    synthesizes TOML.
 18. Fault injection after every durable setup, `TM + C0` recovery, and
     uninstall boundary, followed by abandoned-mutex reclassification, proves
     repeated explicit `http-task` converges to `TM + CM` and repeated uninstall
@@ -513,10 +559,13 @@ to the exact prior partial state without automatic repair.
 
 Risks are fixed-port contention, one-minute launch delay, cooperative-trust
 loopback impersonation, non-cooperating external mutation, and unverified
-session boundaries. This RFC does not provide multi-user support, remote
-access, strong local authentication, administrator/malware protection, hung
-recovery, zero-downtime replacement, generalized task management, or
-non-Windows change.
+session boundaries. Non-cooperating TOML mutation between the final snapshot
+comparison and filesystem replacement or unlink is a residual TOCTOU risk.
+Snapshot equality also cannot distinguish an identical ABA recreation; v1
+introduces no generalized filesystem transaction or durable file identity.
+This RFC does not provide multi-user support, remote access, strong local
+authentication, administrator/malware protection, hung recovery, zero-downtime
+replacement, generalized task management, or non-Windows change.
 
 Alternatives rejected: native Codex-owned stdio child; `RestartOnFailure`;
 service/supervisor; dynamic/per-SID port in v1; bearer-token lifecycle; and an
