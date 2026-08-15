@@ -219,6 +219,10 @@ def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None
         ("ruby -I lib missing.rb", "missing.rb"),
         ("bash -O extglob ./missing-verify", "missing-verify"),
         ("FOO=bar echo ok; ./missing-verify", "missing-verify"),
+        ("env FOO=bar ./missing-verify", "missing-verify"),
+        ("timeout 10 ./missing-verify", "missing-verify"),
+        ("command ./missing-verify", "missing-verify"),
+        ("nice ./missing-verify", "missing-verify"),
     ),
 )
 def test_missing_wrapped_verification_program_blocks(
@@ -234,6 +238,29 @@ def test_missing_wrapped_verification_program_blocks(
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
     assert report.blocking_findings[0].subject == program
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "node -e missing.js",
+        "node --eval missing.js",
+        "node -p missing.js",
+        "ruby -e check.rb",
+    ),
+)
+def test_inline_runner_source_is_not_classified_as_a_missing_program(
+    tmp_path: Path, command: str
+) -> None:
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(description="Inline verifier passes", verify_command=command),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert not report.blocking_findings
 
 
 def test_missing_extensionless_executable_blocks_unless_declared_artifact(

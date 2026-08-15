@@ -300,6 +300,52 @@ def _command_program_tokens(command: str) -> frozenset[str]:
 
     programs: set[str] = set()
 
+    def unwrap_command(segment: list[str]) -> list[str]:
+        """Strip standard execution wrappers without guessing their payload."""
+        remaining = list(segment)
+        while remaining:
+            command_name = Path(remaining[0]).name
+            if command_name == "env":
+                remaining = remaining[1:]
+                while remaining:
+                    token = remaining[0]
+                    if token in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}:
+                        remaining = remaining[2:]
+                        continue
+                    if token.startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+                        remaining = remaining[1:]
+                        continue
+                    break
+                continue
+            if command_name == "timeout":
+                remaining = remaining[1:]
+                while remaining:
+                    token = remaining[0]
+                    if token in {"-s", "--signal", "-k", "--kill-after"}:
+                        remaining = remaining[2:]
+                        continue
+                    if token.startswith("-"):
+                        remaining = remaining[1:]
+                        continue
+                    break
+                if remaining:  # duration operand
+                    remaining = remaining[1:]
+                continue
+            if command_name == "nice":
+                remaining = remaining[1:]
+                if remaining and remaining[0] in {"-n", "--adjustment"}:
+                    remaining = remaining[2:]
+                elif remaining and re.fullmatch(r"-\d+", remaining[0]):
+                    remaining = remaining[1:]
+                continue
+            if command_name == "command":
+                remaining = remaining[1:]
+                while remaining and remaining[0] in {"-p", "-v", "-V"}:
+                    remaining = remaining[1:]
+                continue
+            break
+        return remaining
+
     def shell_tokens(value: str) -> list[str]:
         lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
@@ -316,6 +362,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
         for segment in segments:
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
+            segment = unwrap_command(segment)
             if segment and "/" in segment[0] and not is_runner(segment[0]):
                 programs.add(_normalize_workspace_path(segment[0]))
         for index, token in enumerate(parts):
@@ -329,6 +376,12 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             runner = Path(token).name
             cursor = index + 1
             while cursor < len(parts) and parts[cursor].startswith("-"):
+                if (runner == "node" and parts[cursor] in {"-e", "--eval", "-p", "--print"}) or (
+                    runner == "ruby" and parts[cursor] in {"-e", "--eval"}
+                ):
+                    # The following token is source text, not a program path.
+                    cursor = len(parts)
+                    break
                 if parts[cursor] in {"-c", "--command"} and cursor + 1 < len(parts):
                     try:
                         scan(shell_tokens(parts[cursor + 1]))

@@ -2018,13 +2018,21 @@ class AutoPipeline:
         for attempt in range(1, max_attempts + 1):
             clear_seed_qa_verdict(state)  # a stale verdict must not outlive its attempt
             self._save(state)  # ...including across an interruption mid-attempt
-            timeout = self._deadline_capped_timeout(
-                state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-            )
             qa_result: EvaluateResult | None = None
             transient_reason = "evaluator_error"
             transient_detail = "Seed QA evaluator failed"
             for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+                if self._enforce_deadline(state):
+                    return (
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
+                        current_seed,
+                        current_review,
+                    )
+                timeout = self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
+                )
                 try:
                     candidate = await asyncio.wait_for(
                         self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
@@ -2054,7 +2062,16 @@ class AutoPipeline:
                     backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
                         min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
                     ]
-                    await asyncio.sleep(backoff)
+                    remaining = self._remaining_deadline_seconds(state)
+                    await asyncio.sleep(backoff if remaining is None else min(backoff, remaining))
+                    if self._enforce_deadline(state):
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
             if qa_result is None:
                 return await self._seed_qa_advisory_continue(
                     state,
@@ -2112,6 +2129,14 @@ class AutoPipeline:
                             state, current_seed, qa_result, attempt=attempt
                         )
                     )
+                    if self._enforce_deadline(state):
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
                 except SeedQaRepairMappingError as exc:
                     # The repair mapper only understands a bounded vocabulary of
                     # QA findings. Unmapped feedback means "this pipeline cannot
@@ -2238,6 +2263,8 @@ class AutoPipeline:
         )
         lateral_result: LateralResult | None = None
         for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+            if self._enforce_deadline(state):
+                return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
             try:
                 candidate = await asyncio.wait_for(
                     self.lateral_thinker(
@@ -2259,7 +2286,10 @@ class AutoPipeline:
                 backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
                     min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
                 ]
-                await asyncio.sleep(backoff)
+                remaining = self._remaining_deadline_seconds(state)
+                await asyncio.sleep(backoff if remaining is None else min(backoff, remaining))
+                if self._enforce_deadline(state):
+                    return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
         if lateral_result is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 

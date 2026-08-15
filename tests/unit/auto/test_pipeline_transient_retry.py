@@ -11,6 +11,7 @@ now with a dedicated ``*_transient_exhausted`` error code.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -241,6 +242,40 @@ async def test_seed_qa_gate_recovers_after_one_transient_error_result(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.08,))
+    calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("upstream QA judge unavailable")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.deadline_at = time.monotonic() + 0.03
+    state.deadline_at_epoch = time.time() + 0.03
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    pipeline = AutoPipeline(
+        _interview_driver(tmp_path),
+        _generate_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    started = time.monotonic()
+    result, _, _ = await pipeline._run_seed_qa_gate(state, ledger, _build_seed(), review=None)
+
+    assert time.monotonic() - started < 0.08
+    assert calls == 1
+    assert result is not None
+    assert result.status == "blocked"
+    assert state.last_tool_name == "pipeline_deadline"
+
+
+@pytest.mark.asyncio
 async def test_seed_qa_blocks_unrepairable_ambiguity_without_lowering_score(tmp_path) -> None:
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
         return EvaluateResult(
@@ -335,4 +370,41 @@ async def test_seed_repair_lateral_falls_back_after_transient_exhaustion(tmp_pat
     repaired = await pipeline._repair_seed_after_qa(state, _build_seed(), qa_result, attempt=1)
 
     assert calls == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
+    assert any("Non-goal:" in item for item in repaired.constraints)
+
+
+@pytest.mark.asyncio
+async def test_lateral_retry_backoff_cannot_outlive_pipeline_deadline(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.08,))
+    calls = 0
+
+    async def lateral(**kwargs: Any) -> LateralResult:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("lateral backend unavailable")
+
+    pipeline = AutoPipeline(
+        _interview_driver(tmp_path),
+        _generate_seed,
+        lateral_thinker=lateral,
+        store=AutoStore(tmp_path),
+    )
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.deadline_at = time.monotonic() + 0.03
+    state.deadline_at_epoch = time.time() + 0.03
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("non_goals are missing from executable constraints",),
+    )
+
+    started = time.monotonic()
+    repaired = await pipeline._repair_seed_after_qa(state, _build_seed(), qa_result, attempt=1)
+
+    assert time.monotonic() - started < 0.08
+    assert calls == 1
+    assert state.last_tool_name == "pipeline_deadline"
     assert any("Non-goal:" in item for item in repaired.constraints)
