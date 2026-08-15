@@ -9,11 +9,14 @@ import subprocess
 
 import pytest
 
-_HOOKS_PATH = Path(__file__).resolve().parents[3] / "hooks" / "hooks.json"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_HOOKS_PATH = _REPO_ROOT / "hooks" / "hooks.json"
+_CLAUDE_SETTINGS_PATH = _REPO_ROOT / ".claude" / "settings.json"
+_CODEX_HOOKS_PATH = _REPO_ROOT / ".codex" / "hooks.json"
 
 
-def _hook_command(event_name: str) -> str:
-    manifest = json.loads(_HOOKS_PATH.read_text(encoding="utf-8"))
+def _hook_command(manifest_path: Path, event_name: str) -> str:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entries = manifest["hooks"][event_name]
     assert len(entries) == 1
     hooks = entries[0]["hooks"]
@@ -21,8 +24,20 @@ def _hook_command(event_name: str) -> str:
     return hooks[0]["command"]
 
 
-@pytest.mark.parametrize("event_name", ["SessionStart", "UserPromptSubmit", "PostToolUse"])
+@pytest.mark.parametrize(
+    ("manifest_path", "event_name"),
+    [
+        (_HOOKS_PATH, "SessionStart"),
+        (_HOOKS_PATH, "UserPromptSubmit"),
+        (_HOOKS_PATH, "PostToolUse"),
+        (_CLAUDE_SETTINGS_PATH, "UserPromptSubmit"),
+        (_CLAUDE_SETTINGS_PATH, "PostToolUse"),
+        (_CODEX_HOOKS_PATH, "UserPromptSubmit"),
+        (_CODEX_HOOKS_PATH, "PostToolUse"),
+    ],
+)
 def test_advisory_hook_fails_open_when_loaded_plugin_version_was_removed(
+    manifest_path: Path,
     event_name: str,
     tmp_path: Path,
 ) -> None:
@@ -33,7 +48,7 @@ def test_advisory_hook_fails_open_when_loaded_plugin_version_was_removed(
     env["CLAUDE_PLUGIN_ROOT"] = str(removed_plugin_root)
 
     result = subprocess.run(
-        _hook_command(event_name),
+        _hook_command(manifest_path, event_name),
         shell=True,
         input=json.dumps({"hook_event_name": event_name}),
         capture_output=True,
@@ -45,7 +60,12 @@ def test_advisory_hook_fails_open_when_loaded_plugin_version_was_removed(
     assert result.returncode == 0, result.stderr
 
 
-def test_codex_plugin_root_takes_precedence_over_claude_compatibility_root(
+@pytest.mark.parametrize(
+    "manifest_path",
+    [_HOOKS_PATH, _CLAUDE_SETTINGS_PATH, _CODEX_HOOKS_PATH],
+)
+def test_plugin_root_takes_precedence_over_claude_compatibility_root(
+    manifest_path: Path,
     tmp_path: Path,
 ) -> None:
     plugin_root = tmp_path / "current-version"
@@ -57,7 +77,7 @@ def test_codex_plugin_root_takes_precedence_over_claude_compatibility_root(
     env["CLAUDE_PLUGIN_ROOT"] = str(tmp_path / "removed-version")
 
     result = subprocess.run(
-        _hook_command("UserPromptSubmit"),
+        _hook_command(manifest_path, "UserPromptSubmit"),
         shell=True,
         input="{}",
         capture_output=True,
