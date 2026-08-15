@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shlex
 
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed
 
@@ -48,7 +49,11 @@ _DEFAULTED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?-")
 _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
-_FILE_TOKEN_RE = re.compile(r"(?:\./)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b")
+_FILE_TOKEN_RE = re.compile(
+    r"(?:\./)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b"
+    r"|(?:\./)[\w.-]+\b"
+    r"|(?<![\w./-])[\w-]+\.[A-Za-z0-9]{1,5}\b"
+)
 # A standalone dependency entry that claims a workspace file. Requires a
 # directory separator so plain product names ("next.js", "Obsidian Vault")
 # are never treated as file claims.
@@ -214,6 +219,7 @@ def _check_verify_commands(
         if not command:
             continue
         scannable = _URL_RE.sub(" ", command)
+        program_tokens = _command_program_tokens(command)
         command_bound = {
             *_ENV_ASSIGN_RE.findall(scannable),
             *_FOR_VAR_RE.findall(scannable),
@@ -247,10 +253,13 @@ def _check_verify_commands(
                 continue
             seen_tokens.add(normalized)
             if _path_exists(token, workspace_root) is False:
+                is_program = normalized in program_tokens
                 findings.append(
                     PreflightFinding(
-                        code="verify_script_unconfirmed",
-                        blocking=False,
+                        code=(
+                            "verify_program_missing" if is_program else "verify_script_unconfirmed"
+                        ),
+                        blocking=is_program,
                         subject=normalized,
                         detail=(
                             f"verify_command references {normalized!r}, which neither "
@@ -263,6 +272,27 @@ def _check_verify_commands(
                     )
                 )
     return findings
+
+
+def _command_program_tokens(command: str) -> frozenset[str]:
+    """Return file operands that are the executable's verification program.
+
+    This deliberately handles only unambiguous shell forms. A missing operand
+    after ``python``/``bash``/``node`` or an explicit ``./program`` is a
+    decidable fabrication; ordinary command arguments remain advisory.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return frozenset()
+    runners = frozenset({"python", "python3", "python3.12", "bash", "sh", "node", "ruby"})
+    programs: set[str] = set()
+    for index, token in enumerate(tokens):
+        if (token.startswith("./") and index == 0) or (
+            index and tokens[index - 1] in runners and not token.startswith("-")
+        ):
+            programs.add(_normalize_workspace_path(token))
+    return frozenset(programs)
 
 
 def _check_unverifiable_criteria(seed: Seed) -> list[PreflightFinding]:

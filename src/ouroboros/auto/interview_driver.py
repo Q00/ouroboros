@@ -665,6 +665,23 @@ class AutoInterviewDriver:
                     self._save(state)
             else:
                 preassigned_id = _generate_interview_id()
+
+                async def reconcile_start(_exc: Exception) -> InterviewTurn | None:
+                    persisted_id = preassigned_id
+                    probe = getattr(self.backend, "is_session_persisted", None)
+                    if persisted_id and probe is not None:
+                        try:
+                            if not probe(persisted_id):
+                                persisted_id = None
+                        except Exception:
+                            persisted_id = None
+                    if not persisted_id:
+                        return None
+                    try:
+                        return await self.backend.resume(persisted_id)
+                    except Exception:
+                        return None
+
                 turn = _validate_turn(
                     await self._with_transient_retry(
                         lambda: self.backend.start(
@@ -672,6 +689,7 @@ class AutoInterviewDriver:
                         ),
                         state,
                         tool_name=interview_tool_name,
+                        reconcile=reconcile_start,
                     )
                 )
                 if turn.session_id != preassigned_id:
@@ -1274,6 +1292,23 @@ class AutoInterviewDriver:
         self.answerer.apply(answer, ledger, question=question_for_record)
 
         answer_session_id = turn.session_id
+
+        async def reconcile_answer(_exc: Exception) -> InterviewTurn | None:
+            """Adopt a persisted post-answer turn instead of replaying it."""
+            try:
+                recovered = await self.backend.resume(answer_session_id)
+            except Exception:
+                return None
+            if recovered.completed or recovered.seed_ready:
+                return recovered
+            if not question_for_record:
+                return recovered
+            if recovered.question.strip() != question_for_record.strip():
+                return recovered
+            # The backend still exposes the same pending question, so the
+            # failed answer was not committed; a bounded retry is safe.
+            return None
+
         try:
             turn = _validate_turn(
                 await self._with_transient_retry(
@@ -1284,6 +1319,7 @@ class AutoInterviewDriver:
                     ),
                     state,
                     tool_name="interview.answer",
+                    reconcile=reconcile_answer,
                 )
             )
         except TimeoutError as exc:
@@ -2208,6 +2244,7 @@ class AutoInterviewDriver:
         state: AutoPipelineState,
         *,
         tool_name: str,
+        reconcile: Callable[[Exception], Awaitable[InterviewTurn | None]] | None = None,
     ) -> InterviewTurn:
         """Bounded in-process retry around a single interview-backend call.
 
@@ -2222,7 +2259,14 @@ class AutoInterviewDriver:
         for attempt in range(1, _INTERVIEW_TRANSIENT_ATTEMPTS + 1):
             try:
                 return await self._with_timeout(make_awaitable(), state, tool_name=tool_name)
-            except Exception:
+            except Exception as exc:
+                if reconcile is not None:
+                    try:
+                        recovered = await reconcile(exc)
+                    except Exception:
+                        recovered = None
+                    if recovered is not None:
+                        return recovered
                 if attempt == _INTERVIEW_TRANSIENT_ATTEMPTS:
                     raise
                 backoff = _INTERVIEW_TRANSIENT_BACKOFF_SECONDS[

@@ -1523,6 +1523,49 @@ async def test_ralph_handoff_resume_polls_persisted_job_to_complete(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_deadline_blocked_ralph_checkpoint_reconciles_without_duplicate_dispatch(
+    tmp_path,
+) -> None:
+    state = _state_in_ralph_handoff(tmp_path)
+    state.deadline_at = time.monotonic() - 1
+    state.deadline_at_epoch = time.time() - 1
+    state.mark_blocked(
+        "pipeline_timeout: deadline exceeded during ralph_handoff",
+        tool_name="pipeline_deadline",
+    )
+    polled: list[str] = []
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:
+        polled.append(job_id)
+        return {
+            "job_id": job_id,
+            "lineage_id": state.ralph_lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("resume must not enqueue a duplicate Ralph job")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert polled == ["job_ralph_existing"]
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+
+
+@pytest.mark.asyncio
 async def test_ralph_handoff_resume_prefers_generations_over_iterations(tmp_path) -> None:
     """Resumed poller metadata must preserve lineage generation over iteration count."""
     state = _state_in_ralph_handoff(tmp_path)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.auto import interview_driver
+from ouroboros.auto.adapters import PartialInterviewStartError
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -136,6 +137,94 @@ async def test_answer_round_raises_once_then_succeeds_not_blocked(tmp_path) -> N
     # was not double-counted against the interview round budget.
     assert answer_calls == baseline_state.current_round + 1
     assert state.current_round == baseline_state.current_round
+
+
+@pytest.mark.asyncio
+async def test_answer_post_commit_failure_reconciles_without_duplicate_replay(tmp_path) -> None:
+    answer_calls = 0
+    resume_calls = 0
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_post_commit")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        nonlocal answer_calls
+        answer_calls += 1
+        raise RuntimeError("question generation failed after answer save")
+
+    async def resume(session_id: str) -> InterviewTurn:
+        nonlocal resume_calls
+        resume_calls += 1
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.0,
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    ledger.sections["runtime_context"].entries.clear()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, resume=resume),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert answer_calls == 1
+    assert resume_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_start_failure_resumes_persisted_session_without_restart(tmp_path) -> None:
+    start_calls = 0
+    resume_calls = 0
+    persisted_id: str | None = None
+
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        nonlocal start_calls, persisted_id
+        start_calls += 1
+        assert interview_id is not None
+        persisted_id = interview_id
+        raise PartialInterviewStartError("first question failed", session_id=interview_id)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def resume(session_id: str) -> InterviewTurn:
+        nonlocal resume_calls
+        resume_calls += 1
+        return InterviewTurn("What should we verify?", session_id)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(
+            start,
+            answer,
+            resume=resume,
+            is_session_persisted=lambda session_id: session_id == persisted_id,
+        ),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+        timeout_seconds=5,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status != "blocked"
+    assert start_calls == 1
+    assert resume_calls == 1
+    assert state.interview_session_id == persisted_id
 
 
 @pytest.mark.asyncio

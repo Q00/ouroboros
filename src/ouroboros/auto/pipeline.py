@@ -699,7 +699,11 @@ class AutoPipeline:
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-            resume_phase = _recoverable_phase_for_tool(state.last_tool_name)
+            resume_phase = (
+                AutoPhase.RALPH_HANDOFF
+                if _has_reconciliable_ralph_resume_checkpoint(state)
+                else _recoverable_phase_for_tool(state.last_tool_name)
+            )
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
@@ -4965,9 +4969,12 @@ def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool
     unconfirmed ``plugin_pending`` checkpoint must still obey normal deadline
     enforcement because resume has to retry the side-effecting plugin dispatch.
     """
-    if state.phase is not AutoPhase.RALPH_HANDOFF:
+    has_handle = state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
+    if not has_handle:
         return False
-    return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
+    if state.phase is AutoPhase.RALPH_HANDOFF:
+        return True
+    return state.phase is AutoPhase.BLOCKED and state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
 
 
 def _is_active_recovery_redispatch(state: AutoPipelineState) -> bool:

@@ -308,6 +308,7 @@ def test_seed_preflight_blocked_relays_open_questions() -> None:
     ]
     assert relay["evidence"]["open_questions"][0].startswith("What concrete value")
 
+
 def test_seed_qa_advisory_reports_without_claiming_ownership() -> None:
     """An advisory verdict is information, not an ownership claim.
 

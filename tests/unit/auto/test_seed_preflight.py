@@ -129,7 +129,10 @@ def test_unbound_env_var_blocks(tmp_path: Path) -> None:
     report = run_seed_preflight(seed, workspace_root=tmp_path)
 
     blocking = list(report.blocking_findings)
-    assert [finding.code for finding in blocking] == ["unbound_env_var"]
+    assert [finding.code for finding in blocking] == [
+        "unbound_env_var",
+        "verify_program_missing",
+    ]
     # $HOME is host-bound and must not be flagged.
     assert blocking[0].subject == "$VAULT_PATH"
 
@@ -177,7 +180,51 @@ def test_verify_script_reference_is_advisory_not_blocking(tmp_path: Path) -> Non
     assert advisory[0].subject == "tests/test_cli.py"
 
 
+def test_missing_root_python_program_blocks(tmp_path: Path) -> None:
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Contract checker passes",
+                verify_command="python check.py",
+            ),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "verify_program_missing"
+    ]
+    assert report.blocking_findings[0].subject == "check.py"
+
+
+def test_missing_extensionless_executable_blocks_unless_declared_artifact(
+    tmp_path: Path,
+) -> None:
+    criterion = AcceptanceCriterionSpec(
+        description="Custom verifier passes",
+        verify_command="./verify",
+    )
+    blocked = run_seed_preflight(
+        _seed(acceptance_criteria=(criterion,)), workspace_root=tmp_path
+    )
+    declared = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                criterion.model_copy(update={"expected_artifacts": ("verify",)}),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in blocked.blocking_findings] == [
+        "verify_program_missing"
+    ]
+    assert declared.passed
+
+
 def test_verify_reference_declared_as_artifact_is_clean(tmp_path: Path) -> None:
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
     seed = _seed(
         acceptance_criteria=(
             AcceptanceCriterionSpec(
