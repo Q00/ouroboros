@@ -223,6 +223,8 @@ def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None
         ("timeout 10 ./missing-verify", "missing-verify"),
         ("command ./missing-verify", "missing-verify"),
         ("nice ./missing-verify", "missing-verify"),
+        ("env -S 'python missing.py'", "missing.py"),
+        ('env --split-string="python missing.py"', "missing.py"),
     ),
 )
 def test_missing_wrapped_verification_program_blocks(
@@ -261,6 +263,42 @@ def test_inline_runner_source_is_not_classified_as_a_missing_program(
     report = run_seed_preflight(seed, workspace_root=tmp_path)
 
     assert not report.blocking_findings
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "python -c 'print(\"$LITERAL\")'",
+        r"printf '%s' \$LITERAL",
+    ),
+)
+def test_literal_or_escaped_dollar_is_not_an_environment_expansion(
+    tmp_path: Path, command: str
+) -> None:
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(description="Literal verifier", verify_command=command),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert all(finding.code != "unbound_env_var" for finding in report.findings)
+
+
+def test_environment_assignment_after_use_does_not_bind_earlier_expansion(tmp_path: Path) -> None:
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Ordered shell expansion",
+                verify_command='echo "$TOKEN"; TOKEN=x true',
+            ),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert [finding.subject for finding in report.blocking_findings] == ["$TOKEN"]
 
 
 def test_missing_extensionless_executable_blocks_unless_declared_artifact(

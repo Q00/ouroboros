@@ -55,6 +55,52 @@ _FILE_TOKEN_RE = re.compile(
     r"|(?:\./)[\w.-]+\b"
     r"|(?<![\w./-])[\w-]+\.[A-Za-z0-9]{1,5}\b"
 )
+
+
+def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
+    """Return ordered shell assignment/expansion events outside literal quoting."""
+    expandable = [True] * len(command)
+    unquoted = [True] * len(command)
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(command):
+        if escaped:
+            expandable[index] = False
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            expandable[index] = False
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            expandable[index] = False
+            unquoted[index] = False
+            continue
+        if quote == "'":
+            expandable[index] = False
+        if quote is not None:
+            unquoted[index] = False
+
+    events: list[tuple[int, str, str]] = []
+    for match in _ENV_ASSIGN_RE.finditer(command):
+        if unquoted[match.start()]:
+            events.append((match.start(), "bind", match.group(1)))
+    for match in _FOR_VAR_RE.finditer(command):
+        if unquoted[match.start()]:
+            events.append((match.start(), "bind", match.group(1)))
+    for match in _ENV_VAR_RE.finditer(command):
+        if not expandable[match.start()]:
+            continue
+        if _DEFAULTED_VAR_RE.match(command, match.start()) is not None:
+            continue
+        events.append((match.start(), "expand", match.group(1)))
+    return tuple(sorted(events))
+
+
 # A standalone dependency entry that claims a workspace file. Requires a
 # directory separator so plain product names ("next.js", "Obsidian Vault")
 # are never treated as file claims.
@@ -221,12 +267,15 @@ def _check_verify_commands(
             continue
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
-        command_bound = {
-            *_ENV_ASSIGN_RE.findall(scannable),
-            *_FOR_VAR_RE.findall(scannable),
-            *_DEFAULTED_VAR_RE.findall(scannable),
-        }
-        for variable in _ENV_VAR_RE.findall(scannable):
+        command_bound: set[str] = set()
+        # The outer shell quotes an inner ``sh -c`` program; assignments inside
+        # that program are the binding authority for its later expansions.
+        if re.search(r"(?:^|[;&|]\s*)sh\s+-c\s", scannable):
+            command_bound.update(_ENV_ASSIGN_RE.findall(scannable))
+        for _, event, variable in _shell_variable_events(scannable):
+            if event == "bind":
+                command_bound.add(variable)
+                continue
             if (
                 variable in _HOST_BOUND_ENV_VARS
                 or variable in command_bound
@@ -309,7 +358,19 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 remaining = remaining[1:]
                 while remaining:
                     token = remaining[0]
-                    if token in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}:
+                    if token in {"-S", "--split-string"} and len(remaining) >= 2:
+                        try:
+                            scan(shell_tokens(remaining[1]))
+                        except ValueError:
+                            pass
+                        return []
+                    if token.startswith("--split-string="):
+                        try:
+                            scan(shell_tokens(token.partition("=")[2]))
+                        except ValueError:
+                            pass
+                        return []
+                    if token in {"-u", "--unset", "-C", "--chdir"}:
                         remaining = remaining[2:]
                         continue
                     if token.startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
