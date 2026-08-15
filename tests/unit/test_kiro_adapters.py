@@ -225,9 +225,12 @@ class TestKiroCodeAdapterComplete:
                 return _make_proc(stderr=b"err", returncode=1)
             return _make_proc(stdout=b"ok", returncode=0)
 
-        with patch(
-            "ouroboros.providers.kiro_adapter.asyncio.create_subprocess_exec",
-            side_effect=_factory,
+        with (
+            patch(
+                "ouroboros.providers.kiro_adapter.asyncio.create_subprocess_exec",
+                side_effect=_factory,
+            ),
+            patch("ouroboros.providers.kiro_adapter.asyncio.sleep", new=AsyncMock()),
         ):
             from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
@@ -741,9 +744,12 @@ class TestKiroAgentAdapterExecuteTaskToResult:
     @pytest.mark.asyncio
     async def test_non_retryable_error_fails_immediately(self) -> None:
         proc = _make_proc(stderr=b"permission denied", returncode=126)
-        with patch(
-            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
-            return_value=proc,
+        with (
+            patch(
+                "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+                return_value=proc,
+            ),
+            patch("ouroboros.orchestrator.kiro_adapter.asyncio.sleep", new=AsyncMock()),
         ):
             from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
