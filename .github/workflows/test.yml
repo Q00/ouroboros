@@ -98,7 +98,7 @@ jobs:
           PY
           uv pip check
 
-      - name: Run pytest with coverage
+      - name: Run pytest
         env:
           PYTHONFAULTHANDLER: "1"
         run: |
@@ -146,6 +146,9 @@ jobs:
         with:
           files: ./coverage/coverage-3.12/coverage.xml,./coverage/coverage-3.13/coverage.xml,./coverage/coverage-3.14/coverage.xml
           use_oidc: true
-          fail_ci_if_error: false
+          # This job now runs only on push (PRs skip coverage entirely), making
+          # it the sole coverage-publication path. A silent upload failure here
+          # would mean coverage stops updating with no signal, so surface it.
+          fail_ci_if_error: true
           flags: unittests
           name: codecov
