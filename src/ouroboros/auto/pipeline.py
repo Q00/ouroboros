@@ -2000,6 +2000,13 @@ class AutoPipeline:
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
 
+        def deadline_result() -> tuple[AutoPipelineResult, Seed, SeedReview | None]:
+            return (
+                self._result(state, ledger, review=current_review, blocker=state.last_error),
+                current_seed,
+                current_review,
+            )
+
         async def advisory(
             reason: str, detail: str, *, score: float | None = None
         ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
@@ -2022,14 +2029,6 @@ class AutoPipeline:
             transient_reason = "evaluator_error"
             transient_detail = "Seed QA evaluator failed"
             for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
-                if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
-                    )
                 timeout = self._deadline_capped_timeout(
                     state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
                 )
@@ -2039,13 +2038,7 @@ class AutoPipeline:
                     )
                 except TimeoutError:
                     if self._enforce_deadline(state):
-                        return (
-                            self._result(
-                                state, ledger, review=current_review, blocker=state.last_error
-                            ),
-                            current_seed,
-                            current_review,
-                        )
+                        return deadline_result()
                     transient_reason = "evaluator_timeout"
                     transient_detail = f"Seed QA timed out after {timeout:.0f}s"
                 except Exception as exc:
@@ -2062,16 +2055,9 @@ class AutoPipeline:
                     backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
                         min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
                     ]
-                    remaining = self._remaining_deadline_seconds(state)
-                    await asyncio.sleep(backoff if remaining is None else min(backoff, remaining))
+                    await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
                     if self._enforce_deadline(state):
-                        return (
-                            self._result(
-                                state, ledger, review=current_review, blocker=state.last_error
-                            ),
-                            current_seed,
-                            current_review,
-                        )
+                        return deadline_result()
             if qa_result is None:
                 return await self._seed_qa_advisory_continue(
                     state,
@@ -2130,13 +2116,7 @@ class AutoPipeline:
                         )
                     )
                     if self._enforce_deadline(state):
-                        return (
-                            self._result(
-                                state, ledger, review=current_review, blocker=state.last_error
-                            ),
-                            current_seed,
-                            current_review,
-                        )
+                        return deadline_result()
                 except SeedQaRepairMappingError as exc:
                     # The repair mapper only understands a bounded vocabulary of
                     # QA findings. Unmapped feedback means "this pipeline cannot
@@ -2263,8 +2243,6 @@ class AutoPipeline:
         )
         lateral_result: LateralResult | None = None
         for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
-            if self._enforce_deadline(state):
-                return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
             try:
                 candidate = await asyncio.wait_for(
                     self.lateral_thinker(
@@ -2286,8 +2264,7 @@ class AutoPipeline:
                 backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
                     min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
                 ]
-                remaining = self._remaining_deadline_seconds(state)
-                await asyncio.sleep(backoff if remaining is None else min(backoff, remaining))
+                await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
                 if self._enforce_deadline(state):
                     return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
         if lateral_result is None:
