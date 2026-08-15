@@ -130,9 +130,10 @@ def install_hermes_skills(
 
         # Build the complete replacement beside the live generation.  A
         # mid-copy failure must never remove a previously working install.
-        staging_dir: Path | None = Path(
+        staging_dir = Path(
             tempfile.mkdtemp(prefix=".ouroboros-skills-", dir=target_dir.parent)
         )
+        cleanup_staging_dir: Path | None = staging_dir
         try:
             if target_dir.is_dir():
                 shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
@@ -173,9 +174,9 @@ def install_hermes_skills(
                     os.replace(backup_dir, target_dir)
                 raise
             _remove_target_path(backup_dir)
-            staging_dir = None
+            cleanup_staging_dir = None
         finally:
-            if staging_dir is not None:
-                _remove_target_path(staging_dir)
+            if cleanup_staging_dir is not None:
+                _remove_target_path(cleanup_staging_dir)
 
     return target_dir
