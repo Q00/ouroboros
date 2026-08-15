@@ -112,6 +112,19 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         mock_hermes.assert_called_once_with()
         assert "hermes" in result.output
 
+    def test_dangling_hermes_target_is_reported_as_refresh_failure(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+        skill_dir.parent.mkdir(parents=True)
+        skill_dir.symlink_to(tmp_path / "missing-hermes-target", target_is_directory=True)
+        with patch(
+            "ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=False
+        ) as mock_hermes:
+            result = _invoke_refresh(tmp_path)
+
+        mock_hermes.assert_called_once_with()
+        assert result.exit_code == 1
+        assert "Runtime artifact refresh incomplete: hermes" in result.output
+
     def test_failure_only_refresh_does_not_claim_no_artifacts_found(self, tmp_path: Path) -> None:
         skill_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
         skill_dir.mkdir(parents=True)

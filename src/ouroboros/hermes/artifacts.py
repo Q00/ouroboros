@@ -236,7 +236,20 @@ def install_hermes_skills(
                 if backup_dir.exists() and not target_dir.exists():
                     os.replace(backup_dir, target_dir)
                 raise
-            _remove_target_path(backup_dir)
+            try:
+                _remove_target_path(backup_dir)
+            except BaseException:
+                # Publication is not committed until the old generation is
+                # retired. Restore the old generation atomically so callers
+                # can report failure without silently switching live content.
+                if target_dir.exists() and not backup_dir.exists():
+                    raise
+                if target_dir.exists():
+                    os.replace(target_dir, staging_dir)
+                if backup_dir.exists():
+                    os.replace(backup_dir, target_dir)
+                    _remove_target_path(target_dir / _SWAP_MARKER)
+                raise
             cleanup_staging_dir = None
         finally:
             if cleanup_staging_dir is not None:

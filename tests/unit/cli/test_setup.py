@@ -7774,6 +7774,43 @@ class TestHermesSetup:
         else:
             assert not target.exists()
 
+    def test_setup_hermes_rollback_staging_failure_keeps_published_generation(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=OSError("synthetic staging write failure"),
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "published\n"
+
     def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
         self, tmp_path: Path
     ) -> None:

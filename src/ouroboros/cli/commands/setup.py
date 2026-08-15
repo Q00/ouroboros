@@ -46,6 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.setup_atomic_restore import restore_hermes
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -3030,13 +3031,11 @@ def _setup_hermes(hermes_path: str) -> bool:
 
     def rollback_hermes_skills() -> None:
         try:
-            _restore_path_snapshot_if_current_matches(
-                hermes_skill_target,
-                hermes_skill_snapshot,
-                hermes_skill_published,
-                restore_link_targets=False,
-                follow_links=False,
+            restored = restore_hermes(
+                hermes_skill_target, hermes_skill_snapshot, hermes_skill_published
             )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
         except OSError as exc:
             print_error(f"Hermes activation rollback could not restore skills: {exc}")
 
@@ -5054,7 +5053,7 @@ def refresh_artifacts() -> None:
             refreshed.append("codex")
 
     hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
-    if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
+    if os.path.lexists(hermes_skill_dir / HERMES_SKILL_NAME):
         if not _install_hermes_artifacts():
             failed.append("hermes")
         else:

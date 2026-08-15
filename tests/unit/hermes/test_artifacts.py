@@ -493,6 +493,29 @@ class TestInstallHermesSkills:
         assert operator_note.read_text(encoding="utf-8") == "newest operator state"
         assert not tuple(target_dir.parent.glob(".ouroboros.old.*"))
 
+    def test_backup_cleanup_failure_restores_previous_live_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def fail_backup_cleanup(path: Path) -> None:
+            if path.name.startswith(".ouroboros.old."):
+                raise OSError("synthetic backup cleanup failure")
+            real_remove(path)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_backup_cleanup)
+        with pytest.raises(OSError, match="backup cleanup failure"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
+        assert not target.joinpath(_SWAP_MARKER).exists()
+
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(
         self, tmp_path: Path, monkeypatch, target_exists: bool
