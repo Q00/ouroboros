@@ -585,6 +585,26 @@ class TestInstallHermesSkills:
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
         assert target.joinpath("operator.txt").read_text(encoding="utf-8") == "preserve\n"
 
+    def test_live_mutation_after_staging_copy_aborts_publication(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.mkdir(parents=True)
+        real_copytree = shutil.copytree
+
+        def mutate_during_staging(src, dst, *args, **kwargs):
+            if Path(src) == source / "run":
+                target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+            return real_copytree(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.copytree", mutate_during_staging)
+        with pytest.raises(OSError, match="changed during publication"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+
     def test_interrupted_generation_removal_replays_as_removal(
         self, tmp_path: Path, monkeypatch
     ) -> None:

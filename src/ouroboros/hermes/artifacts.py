@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -27,6 +27,25 @@ _LEGACY_PACKAGE_ARTIFACTS = ("__init__.py", "artifacts.py", "__pycache__")
 _SWAP_MARKER = ".ouroboros-managed-swap"
 _SWAP_MARKER_CONTENT = "ouroboros-hermes-swap-v1\n"
 _SWAP_INTENT_SUFFIX = ".intent"
+_EXPECTED_UNSET = object()
+
+
+def _tree_fingerprint(path: Path) -> tuple[object, ...] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if path.is_symlink():
+        return ("link", os.readlink(path))
+    if path.is_file():
+        return ("file", info.st_mode, path.read_bytes())
+    if path.is_dir():
+        return (
+            "dir",
+            info.st_mode,
+            tuple((child.name, _tree_fingerprint(child)) for child in sorted(path.iterdir())),
+        )
+    return ("other", info.st_mode)
 
 
 def _swap_intent_path(backup: Path) -> Path:
@@ -65,12 +84,24 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
             _remove_target_path(intent)
 
 
-def atomic_swap_generation(target: Path, replacement: Path) -> None:
+def atomic_swap_generation(
+    target: Path,
+    replacement: Path,
+    *,
+    expected: tuple[object, ...] | None | object = _EXPECTED_UNSET,
+    expected_check: Callable[[], bool] | None = None,
+) -> None:
     """Publish a complete sibling generation with restart-recognizable recovery."""
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
     intent.write_text(_intent_content("swap", backup), encoding="utf-8")
     if target.exists():
+        if expected_check is not None and not expected_check():
+            _remove_target_path(intent)
+            raise OSError(f"Hermes live generation changed during publication: {target}")
+        if expected is not _EXPECTED_UNSET and _tree_fingerprint(target) != expected:
+            _remove_target_path(intent)
+            raise OSError(f"Hermes live generation changed during publication: {target}")
         os.replace(target, backup)
     try:
         os.replace(replacement, target)
@@ -88,11 +119,16 @@ def atomic_swap_generation(target: Path, replacement: Path) -> None:
     _remove_target_path(intent)
 
 
-def atomic_remove_generation(target: Path) -> None:
+def atomic_remove_generation(
+    target: Path, *, expected_check: Callable[[], bool] | None = None
+) -> None:
     """Remove a generation through a restart-recognizable backup rename."""
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
     intent.write_text(_intent_content("remove", backup), encoding="utf-8")
+    if expected_check is not None and not expected_check():
+        _remove_target_path(intent)
+        raise OSError(f"Hermes live generation changed during removal: {target}")
     os.replace(target, backup)
     try:
         _remove_target_path(backup)
@@ -257,6 +293,7 @@ def install_hermes_skills(
     with _packaged_skills_dir() as source_root:
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
+        source_generation = _tree_fingerprint(target_dir)
 
         # Build the complete replacement beside the live generation.  A
         # mid-copy failure must never remove a previously working install.
@@ -292,7 +329,7 @@ def install_hermes_skills(
                     ):
                         _remove_target_path(existing_path)
 
-            atomic_swap_generation(target_dir, staging_dir)
+            atomic_swap_generation(target_dir, staging_dir, expected=source_generation)
             cleanup_staging_dir = None
         finally:
             if cleanup_staging_dir is not None:

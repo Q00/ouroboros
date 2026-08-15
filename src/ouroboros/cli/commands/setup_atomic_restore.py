@@ -29,10 +29,17 @@ def atomic_restore_generation(
         raise
     from ouroboros.hermes.artifacts import atomic_remove_generation, atomic_swap_generation
 
+    def commit_check() -> bool:
+        return snapshot(path) == expected
+
     if getattr(prior, "kind", None) == "missing":
-        atomic_remove_generation(path)
+        atomic_remove_generation(path, expected_check=commit_check)
         return True
-    atomic_swap_generation(path, stage)
+    try:
+        atomic_swap_generation(path, stage, expected_check=commit_check)
+    except BaseException:
+        remove(stage)
+        raise
     return True
 
 
