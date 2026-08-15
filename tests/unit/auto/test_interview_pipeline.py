@@ -5265,11 +5265,12 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
 
     result = await driver.run(state, ledger)
 
-    # The driver MUST surface the backend failure as a blocker only after
-    # exhausting the bounded transient retry budget; the round never
-    # completed.
+    # The driver MUST surface the backend failure as a blocker without
+    # replaying a possibly committed answer; the round never completed.
     assert result.status == "blocked"
-    assert apply_calls == interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
+    # Reconciliation is unavailable on this backend, so the replay-safe
+    # contract fails closed after the first possibly-committed attempt.
+    assert apply_calls == 1
     assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: ``state.ledger`` on disk is still the
     # pre-answer snapshot. The in-memory ``ledger`` parameter may have the
@@ -5348,6 +5349,18 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
             ambiguity_score=0.40,
         )
 
+    async def resume(session_id: str) -> InterviewTurn:
+        # Explicitly confirm that the same question is still pending.  This
+        # is the only evidence that makes retrying a possibly-committed
+        # answer safe under the replay-guarded contract.
+        return InterviewTurn(
+            "What is the primary goal of the CLI?",
+            session_id,
+            seed_ready=False,
+            completed=False,
+            ambiguity_score=0.40,
+        )
+
     # Start from an INCOMPLETE ledger so the answerer actually has work
     # to do and the failure-injected backend.answer call is on the path.
     # This is the rewrite that addresses the bot review #2 follow-up:
@@ -5360,7 +5373,7 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     pre_answer_ledger_snapshot = ledger.to_dict()
 
     driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
+        FunctionInterviewBackend(start, answer, resume),
         store=AutoStore(tmp_path),
         max_rounds=4,
         timeout_seconds=5,

@@ -83,8 +83,11 @@ async def _run_gap_closure_driver(tmp_path, answer_fn) -> tuple[object, object]:
     ledger.sections["runtime_context"].entries.clear()
     assert ledger.open_gaps() == ["runtime_context"]
 
+    async def resume(session_id: str) -> InterviewTurn:
+        return InterviewTurn("What else should we know?", session_id)
+
     driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer_fn),
+        FunctionInterviewBackend(start, answer_fn, resume=resume),
         store=AutoStore(tmp_path),
         max_rounds=5,
         timeout_seconds=5,
@@ -248,13 +251,16 @@ async def test_answer_round_exhausts_retries_and_blocks(tmp_path) -> None:
         answer_calls += 1
         raise RuntimeError("persistent backend failure")
 
+    async def resume(session_id: str) -> InterviewTurn:
+        return InterviewTurn("What is the primary goal?", session_id)
+
     state = AutoPipelineState(goal="Build a habit-tracker CLI", cwd=str(tmp_path))
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
     ledger.sections["runtime_context"].entries.clear()
 
     driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
+        FunctionInterviewBackend(start, answer, resume=resume),
         store=AutoStore(tmp_path),
         max_rounds=3,
         timeout_seconds=5,
@@ -401,3 +407,32 @@ async def test_backend_resume_exhausted_non_allowlisted_failure_still_blocks(tmp
     assert result.status == "blocked"
     assert state.last_error_code == "interview_backend_transient_exhausted"
     assert state.last_tool_name == "interview.resume"
+
+
+@pytest.mark.asyncio
+async def test_inconclusive_reconciliation_never_replays_possible_committed_answer(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
+    calls = 0
+    state = AutoPipelineState(goal="Build a CLI", cwd=".")
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("response lost after durable commit")
+
+    async def inconclusive(_exc: Exception):
+        return None
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        await interview_recovery.with_transient_retry(
+            operation,
+            state,
+            tool_name="interview.answer",
+            timeout_seconds=1,
+            reconcile=inconclusive,
+            require_reconcile_confirmation=True,
+        )
+
+    assert calls == 1

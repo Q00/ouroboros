@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -14,6 +15,14 @@ log = structlog.get_logger(__name__)
 
 _INTERVIEW_TRANSIENT_ATTEMPTS = 3
 _INTERVIEW_TRANSIENT_BACKOFF_SECONDS = (1.0, 5.0)
+
+
+@dataclass(frozen=True)
+class ReconcileOutcome[T]:
+    """Explicitly distinguish recovered, retry-safe, and inconclusive state."""
+
+    value: T | None = None
+    retry_safe: bool = False
 
 
 async def with_timeout[T](
@@ -39,7 +48,8 @@ async def with_transient_retry[T](
     *,
     tool_name: str,
     timeout_seconds: float,
-    reconcile: Callable[[Exception], Awaitable[T | None]] | None = None,
+    reconcile: Callable[[Exception], Awaitable[T | ReconcileOutcome[T] | None]] | None = None,
+    require_reconcile_confirmation: bool = False,
 ) -> T:
     """Retry one idempotently re-enterable interview backend operation."""
     for attempt in range(1, _INTERVIEW_TRANSIENT_ATTEMPTS + 1):
@@ -50,11 +60,20 @@ async def with_transient_retry[T](
         except Exception as exc:
             if reconcile is not None:
                 try:
-                    recovered = await reconcile(exc)
+                    reconciled = await reconcile(exc)
                 except Exception:
-                    recovered = None
-                if recovered is not None:
-                    return recovered
+                    if require_reconcile_confirmation:
+                        raise exc
+                    reconciled = None
+                if isinstance(reconciled, ReconcileOutcome):
+                    if reconciled.value is not None:
+                        return reconciled.value
+                    if not reconciled.retry_safe:
+                        raise exc
+                elif reconciled is not None:
+                    return reconciled
+                elif require_reconcile_confirmation:
+                    raise exc
             if attempt == _INTERVIEW_TRANSIENT_ATTEMPTS:
                 raise
             backoff = _INTERVIEW_TRANSIENT_BACKOFF_SECONDS[

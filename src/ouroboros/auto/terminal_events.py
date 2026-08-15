@@ -19,7 +19,9 @@ async def emit_blocked_session_event(
             "status": result.status,
             "stop_reason_code": state.last_error_code,
             "tool_name": state.last_tool_name,
-            "blocker": (result.blocker or "")[:320],
+            # Blockers may contain provider stderr, credentials, and local
+            # paths. Keep raw detail on the local result surface only.
+            "blocker": "Auto session requires operator attention",
             "resume_capability": result.resume_capability.value,
         },
     )

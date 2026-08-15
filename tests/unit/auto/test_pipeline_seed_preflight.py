@@ -196,7 +196,8 @@ async def test_pipeline_blocks_fabricated_seed_before_run(tmp_path) -> None:
     assert len(session_blocked) == 1
     assert session_blocked[0].data["stop_reason_code"] == "seed_preflight_unexecutable"
     assert session_blocked[0].data["tool_name"] == "seed_preflight"
-    assert "Obsidian Vault" in session_blocked[0].data["blocker"]
+    assert session_blocked[0].data["blocker"] == "Auto session requires operator attention"
+    assert "Obsidian Vault" not in session_blocked[0].data["blocker"]
 
 
 @pytest.mark.asyncio

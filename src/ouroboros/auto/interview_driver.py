@@ -29,6 +29,7 @@ from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.intent_guard import IntentGuardStatus, guard_auto_answer
 from ouroboros.auto.interview_recovery import (
+    ReconcileOutcome,
     reconcile_persisted_session,
     record_evidence_based_session_id,
     with_timeout,
@@ -1277,21 +1278,21 @@ class AutoInterviewDriver:
 
         answer_session_id = turn.session_id
 
-        async def reconcile_answer(_exc: Exception) -> InterviewTurn | None:
+        async def reconcile_answer(_exc: Exception) -> ReconcileOutcome[InterviewTurn]:
             """Adopt a persisted post-answer turn instead of replaying it."""
             try:
                 recovered = await self.backend.resume(answer_session_id)
             except Exception:
-                return None
+                return ReconcileOutcome()
             if recovered.completed or recovered.seed_ready:
-                return recovered
+                return ReconcileOutcome(value=recovered)
             if not question_for_record:
-                return recovered
+                return ReconcileOutcome(value=recovered)
             if recovered.question.strip() != question_for_record.strip():
-                return recovered
+                return ReconcileOutcome(value=recovered)
             # The backend still exposes the same pending question, so the
             # failed answer was not committed; a bounded retry is safe.
-            return None
+            return ReconcileOutcome(retry_safe=True)
 
         try:
             turn = _validate_turn(
@@ -1305,6 +1306,7 @@ class AutoInterviewDriver:
                     tool_name="interview.answer",
                     timeout_seconds=self.timeout_seconds,
                     reconcile=reconcile_answer,
+                    require_reconcile_confirmation=True,
                 )
             )
         except TimeoutError as exc:

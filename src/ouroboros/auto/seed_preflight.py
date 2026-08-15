@@ -50,7 +50,8 @@ _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
 _FILE_TOKEN_RE = re.compile(
-    r"(?:\./|/)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b"
+    r"(?:(?:\.\.?/)+|/)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b"
+    r"|(?:(?:\.\.?/)+|/)(?:[\w.-]+/)*[\w.-]+\b"
     r"|(?:\./)[\w.-]+\b"
     r"|(?<![\w./-])[\w-]+\.[A-Za-z0-9]{1,5}\b"
 )
@@ -291,13 +292,14 @@ def _command_program_tokens(command: str) -> frozenset[str]:
         executable = Path(token).name
         return (
             executable in runners
-            or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable) is not None
+            or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?t?", executable) is not None
+            or re.fullmatch(r"pypy\d*", executable) is not None
         )
 
     programs: set[str] = set()
 
     def scan(parts: list[str]) -> None:
-        if parts and parts[0].startswith("./"):
+        if parts and "/" in parts[0] and not is_runner(parts[0]):
             programs.add(_normalize_workspace_path(parts[0]))
         for index, token in enumerate(parts):
             if token in {"bash", "sh"} and index + 2 < len(parts) and parts[index + 1] == "-c":
@@ -317,7 +319,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     break
                 if parts[cursor] in {"-m", "--module"}:
                     break
-                if parts[cursor] in {"-X", "-W"}:
+                if parts[cursor] in {"-X", "-W", "--check-hash-based-pycs"}:
                     cursor += 2
                     continue
                 cursor += 1
