@@ -141,5 +141,12 @@ Ranked, all compatible with each other:
 - Full unit suite (excl. `tests/unit/mcp`): 18160 passed / 87 skipped.
 - `dsh` client/adapter tests: 22 passed (protocol exercised against the shared
   CI-safe ACP fake).
-- Real-binary smoke: blocked by the upstream npm packaging bug (§2-3);
-  attempted from-source build instead — see PR notes for the outcome.
+- Real-binary smoke: npm install path is blocked by the upstream packaging bug
+  (§2-3), so the smoke ran against a from-source build (`pnpm install && pnpm
+  run build` @ `47f9438`). `DshAcpClient` completed the full wire against the
+  built `dsh-acp-demo` bin — spawn → `initialize` → `session/new` (the
+  mandatory `mcpServers: []` was accepted) → `session/prompt` dispatched into
+  dsh's LLM layer — and failed only at the expected terminal point, the
+  missing `DEEPSEEK_API_KEY`, surfaced through the adapter's generic
+  `rpc_error` classification. Everything except the paid model call is
+  verified against the real binary.
