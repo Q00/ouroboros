@@ -271,7 +271,7 @@ class TestInstallHermesSkills:
         assert link.is_symlink()
         assert link.resolve() == external_dir.resolve()
 
-    def test_first_swap_failure_restores_live_marker_byte_for_byte(
+    def test_preexisting_live_marker_is_refused_and_preserved_byte_for_byte(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         source_skills_dir = tmp_path / "source-skills"
@@ -284,18 +284,35 @@ class TestInstallHermesSkills:
         target_dir.mkdir(parents=True)
         original_marker = target_dir / _SWAP_MARKER
         original_marker.write_text("operator marker\n", encoding="utf-8")
-        real_replace = os.replace
-
-        def fail_first_swap(src, dst):
-            if Path(src) == target_dir:
-                raise OSError("synthetic first swap failure")
-            return real_replace(src, dst)
-
-        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", fail_first_swap)
-        with pytest.raises(OSError, match="first swap failure"):
+        with pytest.raises(OSError, match="reserved Hermes swap marker"):
             install_hermes_skills(hermes_dir=tmp_path / ".hermes")
 
         assert original_marker.read_text(encoding="utf-8") == "operator marker\n"
+
+    def test_symlinked_managed_backup_is_never_followed_or_recovered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target_dir.parent.mkdir(parents=True)
+        external_dir = tmp_path / "external-generation"
+        external_dir.mkdir()
+        external_dir.joinpath(_SWAP_MARKER).write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+        external_secret = external_dir / "operator-secret.txt"
+        external_secret.write_text("do not ingest", encoding="utf-8")
+        backup_link = target_dir.with_name(".ouroboros.old.symlink")
+        backup_link.symlink_to(external_dir, target_is_directory=True)
+
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert external_secret.read_text(encoding="utf-8") == "do not ingest"
+        assert backup_link.is_symlink()
+        assert not target_dir.joinpath("operator-secret.txt").exists()
 
     def test_interrupted_swap_recovers_previous_generation_on_retry(
         self, tmp_path: Path, monkeypatch

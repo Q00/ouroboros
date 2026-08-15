@@ -129,10 +129,16 @@ def install_hermes_skills(
         raise OSError(msg)
     if target_dir.exists() and not target_dir.is_dir():
         _remove_target_path(target_dir)
+    live_marker = target_dir / _SWAP_MARKER
+    if target_dir.exists() and (live_marker.exists() or live_marker.is_symlink()):
+        msg = f"Refusing to overwrite reserved Hermes swap marker: {live_marker}"
+        raise OSError(msg)
     managed_backups = [
         candidate
         for candidate in target_dir.parent.glob(f"{backup_prefix}*")
-        if candidate.is_dir()
+        if not candidate.is_symlink()
+        and candidate.is_dir()
+        and not candidate.joinpath(_SWAP_MARKER).is_symlink()
         and candidate.joinpath(_SWAP_MARKER).is_file()
         and candidate.joinpath(_SWAP_MARKER).read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
     ]
