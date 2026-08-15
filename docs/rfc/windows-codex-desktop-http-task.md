@@ -52,7 +52,7 @@ The one canonical action is a direct absolute resolved Ouroboros launcher
 `Exec` with this fixed suffix:
 
 ```text
-mcp serve --transport streamable-http --host 127.0.0.1 --port 8765
+mcp serve --runtime codex --llm-backend codex --transport streamable-http --host 127.0.0.1 --port 8765
 ```
 
 There is no generated PowerShell runner, script wrapper, alternative launcher
@@ -503,6 +503,11 @@ A later implementation PR is acceptable only if it proves all of these:
     unknown fields, duplicates, and non-equivalent defaults are foreign while
     only the closed normalization rules are equal; native create/query
     round-trip and exact `CommandLineToArgvW` token tests pass.
+    The accepted action projection includes the explicit
+    `--runtime codex --llm-backend codex` selectors for every permitted
+    executable prefix; omitting either selector is foreign and a fresh
+    scheduled action must start successfully without relying on global runtime
+    configuration.
 13. A forward write read-back Source/definition mismatch fails before start,
     readiness, or TOML; exact UUID-owned fresh rollback restores absence only
     after End, exact InstanceGuid cessation, and port-closed proof before
