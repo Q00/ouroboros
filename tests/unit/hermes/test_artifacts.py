@@ -200,6 +200,26 @@ class TestInstallHermesSkills:
 
         assert live_skill.read_bytes() == b"working skill\n"
 
+    def test_non_directory_live_target_is_refused_without_mutation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """An operator-owned obstruction must survive a failed activation byte-for-byte."""
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"operator-owned obstruction\x00")
+
+        with pytest.raises(OSError, match="non-directory Hermes skill target"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert target.is_file()
+        assert target.read_bytes() == b"operator-owned obstruction\x00"
+
     def test_failed_fresh_install_leaves_no_refresh_eligible_target(
         self, tmp_path: Path, monkeypatch
     ) -> None:

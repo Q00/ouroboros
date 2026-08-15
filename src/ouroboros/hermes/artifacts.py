@@ -142,7 +142,11 @@ def install_hermes_skills(
         msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
         raise OSError(msg)
     if target_dir.exists() and not target_dir.is_dir():
-        _remove_target_path(target_dir)
+        # This path is operator-owned unless a managed generation was
+        # published there.  Never delete an unowned file/socket/device just
+        # to make the destination usable; refuse before staging or swapping.
+        msg = f"Refusing to replace non-directory Hermes skill target: {target_dir}"
+        raise OSError(msg)
     live_marker = target_dir / _SWAP_MARKER
     if target_dir.exists() and (live_marker.exists() or live_marker.is_symlink()):
         msg = f"Refusing to overwrite reserved Hermes swap marker: {live_marker}"

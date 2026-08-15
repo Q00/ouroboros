@@ -7816,6 +7816,49 @@ class TestHermesSetup:
         assert target.joinpath("operator-link").is_symlink()
         assert external.read_text(encoding="utf-8") == "concurrent\n"
 
+    def test_setup_hermes_rollback_preserves_concurrent_managed_tree_edits(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("operator-note.txt").parent.mkdir(parents=True)
+        target.joinpath("operator-note.txt").write_text("before\n", encoding="utf-8")
+
+        def fail_after_tree_update(*, detected) -> bool:  # noqa: ARG001
+            target.joinpath("operator-note.txt").write_text("concurrent\n", encoding="utf-8")
+            target.joinpath("new-note.txt").write_text("new concurrent file\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_tree_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "concurrent\n"
+        assert target.joinpath("new-note.txt").read_text(encoding="utf-8") == (
+            "new concurrent file\n"
+        )
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"
