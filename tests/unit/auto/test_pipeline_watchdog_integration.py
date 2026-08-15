@@ -307,8 +307,18 @@ async def test_retired_phase_migration_preempts_fired_watchdog(
     assert result.status == "blocked"
     assert "was retired with --complete-product" in (result.blocker or "")
     assert result.stop_reason_code != WATCHDOG_STOP_REASON_CODE
-    assert state.last_tool_name == "run_starter"
+    assert state.last_tool_name == "retired_phase_migration"
+    assert state.resume_capability().value == "none"
     assert appender.events == []
+
+    # The migration blocker is intentionally non-recoverable.  Resuming the
+    # persisted state must preserve the explanation rather than dispatching
+    # through the normal run-starter recovery path.
+    second = await pipeline.run(state)
+    assert second.status == "blocked"
+    assert second.blocker == result.blocker
+    assert state.phase == AutoPhase.BLOCKED
+    assert state.resume_capability().value == "none"
 
 
 @pytest.mark.asyncio
