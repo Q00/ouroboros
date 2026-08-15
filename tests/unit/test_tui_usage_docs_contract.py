@@ -95,8 +95,50 @@ def _slt_screens_table_rows(text: str) -> list[tuple[str, str, str]]:
     return re.findall(r"\| `(\d)` \|(?: `(\w)`)? \| \*\*(\w+)\*\* \|", section)
 
 
+def _markdown_table(section: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 2 and not set("".join(cells)) <= {"-", ":"}:
+            rows.append((cells[0], cells[1]))
+    return rows[1:]  # header
+
+
+def _documented_textual_actions(path: Path) -> dict[str, str]:
+    section = _contract_section(_read(path), "<!-- tui-contract:textual-keys -->")
+    documented: dict[str, str] = {}
+    contexts = {
+        "dashboard": ("Dashboard", "대시보드"),
+        "session_selector": ("Session Selector", "세션 선택 화면"),
+        "execution": ("Execution", "실행 화면"),
+        "debug": ("Debug", "디버그 화면"),
+        "logs": ("Logs", "로그 화면"),
+        "lineage_selector": ("Lineage selector", "계보 선택 화면"),
+        "lineage_detail": ("Lineage detail", "계보 상세 화면"),
+    }
+    for key_cell, action_cell in _markdown_table(section):
+        if "`r`" not in key_cell:
+            continue
+        for context, labels in contexts.items():
+            if any(label.lower() in key_cell.lower() for label in labels):
+                lowered = action_cell.lower()
+                if "rewind" in lowered:
+                    action = "rewind"
+                elif "no active binding" in lowered or "활성 바인딩 없음" in action_cell:
+                    action = "unbound"
+                elif "refresh" in lowered or "새로고침" in action_cell:
+                    action = "refresh"
+                elif "resume" in lowered or "재개 요청" in action_cell:
+                    action = "resume"
+                else:
+                    action = "unknown"
+                documented[context] = action
+    return documented
+
+
 def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
-    assert _binding_actions("src/ouroboros/tui/app.py", "OuroborosTUI") == {
+    app_actions = _binding_actions("src/ouroboros/tui/app.py", "OuroborosTUI")
+    assert app_actions == {
         "q": "quit",
         "p": "pause",
         "r": "resume",
@@ -129,19 +171,25 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
         == "rewind"
     )
 
-    en_keys = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:textual-keys -->")
-    ko_keys = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:textual-keys -->")
-    for screen in ("Execution", "Debug", "Logs", "Lineage selector", "Lineage detail"):
-        assert screen in en_keys
-    for screen in (
-        "실행 화면",
-        "디버그 화면",
-        "로그 화면",
-        "계보 선택 화면",
-        "계보 상세 화면",
-    ):
-        assert screen in ko_keys
-    assert "rewind" in en_keys and "rewind" in ko_keys
+    source_actions = {
+        "dashboard": _binding_actions(
+            "src/ouroboros/tui/screens/dashboard_v3.py", "DashboardScreenV3"
+        )["r"],
+        "session_selector": app_actions["r"],
+        "execution": _binding_actions("src/ouroboros/tui/screens/execution.py", "ExecutionScreen")[
+            "r"
+        ],
+        "debug": _binding_actions("src/ouroboros/tui/screens/debug.py", "DebugScreen")["r"],
+        "logs": "unbound",
+        "lineage_selector": _binding_actions(
+            "src/ouroboros/tui/screens/lineage_selector.py", "LineageSelectorScreen"
+        )["r"],
+        "lineage_detail": _binding_actions(
+            "src/ouroboros/tui/screens/lineage_detail.py", "LineageDetailScreen"
+        )["r"],
+    }
+    assert _documented_textual_actions(EN_GUIDE) == source_actions
+    assert _documented_textual_actions(KO_GUIDE) == source_actions
 
 
 def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
@@ -201,11 +249,27 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     for guide in GUIDES:
         text = _read(guide)
         lifecycle = _contract_section(text, "<!-- tui-contract:slt-lifecycle -->")
+        compact_lifecycle = " ".join(lifecycle.split())
         assert "--mock" in lifecycle
+        if guide == EN_GUIDE:
+            assert "contains no events" in compact_lifecycle
+            assert "database cannot be opened" in compact_lifecycle
+            assert "observer" in compact_lifecycle
+            assert "lifecycle controls are removed" in compact_lifecycle
+        else:
+            assert "이벤트가 하나도 없는" in compact_lifecycle
+            assert "데이터베이스를 열 수 없어" in compact_lifecycle
+            assert "관찰자" in compact_lifecycle
+            assert "생명주기 제어가 사라집니다" in compact_lifecycle
         assert "`p`" in lifecycle and "`r`" in lifecycle
 
     slt_readme = _read(SLT_README)
-    for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`", "`Esc`"):
+    readme_screen_by_key = {
+        key: doc_screen_name_normalization.get(screen, screen)
+        for key, _alt, screen in re.findall(r"\| `(\d)` \|(?: `?(\w*)`?)? \| (\w+)", slt_readme)
+    }
+    assert readme_screen_by_key == source_screen_by_key
+    for key in ("`e`", "`s`", "`l`", "`Esc`"):
         assert key in slt_readme
 
 

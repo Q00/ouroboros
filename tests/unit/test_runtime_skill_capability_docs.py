@@ -21,7 +21,7 @@ def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> Non
         and not row.startswith("| ---")
         and "Generated artifact surface" not in row
     }
-    assert set(runtime_backend_choices()) <= documented_runtime_names
+    assert documented_runtime_names == set(runtime_backend_choices())
 
     assert "render_backend_skill_capability_guide(<backend>)" in docs
     assert "## Capability graph contract" in docs
@@ -39,12 +39,14 @@ def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() 
     option_row = next(
         line for line in docs.splitlines() if line.startswith("| `-r, --runtime TEXT`")
     )
-    documented_backends = set(re.findall(r"`([\w-]+)`", option_row)) - {"-r, --runtime TEXT"}
+    shipped_values = option_row.split("Shipped values:", 1)[1].split("Auto-detected", 1)[0]
+    documented_backends = set(re.findall(r"`([\w-]+)`", shipped_values))
 
     # MCP worker variants (codex_mcp, claude_mcp) are internal leader-driven
     # runtimes, not user-facing `ouroboros setup --runtime` choices.
     user_facing_backends = {b for b in runtime_backend_choices() if not b.endswith("_mcp")}
-    assert user_facing_backends <= documented_backends
+    user_facing_backends |= {"claude-sdk", "claude-cli"}
+    assert documented_backends == user_facing_backends
 
     assert "ouroboros setup --runtime" in docs
     assert Path("docs/runtime-guides/zcode.md").is_file()

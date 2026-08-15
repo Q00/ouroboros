@@ -1,7 +1,7 @@
 """Tests for detached auto user-facing documentation and result retrieval.
 
-Docs tests assert durable anchors only (section headings and command/tool
-invocation strings), so rewording surrounding prose never breaks them.
+Docs tests parse bounded lifecycle examples and durable semantic anchors, so
+rewording surrounding prose never breaks them while state guidance cannot drift.
 Behavior tests exercise the real JobResultHandler/CLI contract per terminal
 state.
 """
@@ -32,9 +32,19 @@ MCP_JOB_TOOLS = (
 )
 
 
+def _status_guidance(section: str, status: str, next_status: str | None = None) -> str:
+    anchor = f"status reports `{status}`"
+    start = section.index(anchor)
+    if next_status is None:
+        return section[start:]
+    end = section.index(f"status reports `{next_status}`", start + len(anchor))
+    return section[start:end]
+
+
 def test_cli_docs_cover_detached_auto_wait_and_retrieve() -> None:
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
+    section = docs.split("### Detached `auto` wait and retrieve", 1)[1].split("## ", 1)[0]
+    compact = " ".join(section.split())
 
     assert "Detached `auto` wait and retrieve" in docs
     for cli_command in CLI_JOB_COMMANDS:
@@ -46,27 +56,45 @@ def test_cli_docs_cover_detached_auto_wait_and_retrieve() -> None:
     # steps", and an expired in-memory handle still resolves. These survive
     # rewording of the surrounding prose but still fail if the underlying
     # semantic content is deleted.
-    assert compact.count("non-terminal") >= 1
-    assert compact.count("terminal and still observable") == 2  # failed, cancelled
-    assert compact.count("Next steps") == 3  # failed, cancelled, invalid
-    assert "Job handle not found" in compact
+    assert "running" in compact and "non-terminal" in compact
+    for status, next_status in (
+        ("completed", "failed"),
+        ("failed", "cancelled"),
+        ("cancelled", None),
+    ):
+        state = _status_guidance(compact, status, next_status)
+        assert "ouroboros job result JOB_ID" in state
+        if status != "completed":
+            assert "terminal and still observable" in state
+            assert "Next steps" in state
+    assert "Job handle not found" in compact and "invalid" in compact
     assert "in-memory handle TTL" in compact
+    assert "job_auto_docs_done" in compact and "detached auto result artifact" in compact
 
 
 def test_mcp_docs_cover_detached_auto_jobs() -> None:
     docs = Path("docs/api/mcp.md").read_text(encoding="utf-8")
-    compact = " ".join(docs.split())
+    section = docs.split("### Detached `auto` Jobs", 1)[1].split("### Read-only Project Status", 1)[
+        0
+    ]
+    compact = " ".join(section.split())
 
     assert "Detached `auto` Jobs" in docs
     for mcp_tool in MCP_JOB_TOOLS:
         assert mcp_tool in docs
 
-    assert compact.count("non-terminal") >= 1
-    assert compact.count("terminal and still observable") == 2  # failed, cancelled
-    assert compact.count("Next steps") == 3  # failed, cancelled, invalid
-    assert '"job_handle_not_found"' in compact
+    assert "running" in compact and "non-terminal" in compact
+    completed = _status_guidance(compact, "completed", "failed")
+    assert 'ouroboros_job_result(job_id="JOB_ID")' in completed
+    for status, next_status in (("failed", "cancelled"), ("cancelled", None)):
+        state = _status_guidance(compact, status, next_status)
+        assert 'ouroboros_job_result(job_id="JOB_ID")' in state
+        assert "terminal and still observable" in state
+        assert "Next steps" in state
+        assert "is_error=true" in state
+    assert '"job_handle_not_found"' in compact and 'lifecycle_status = "invalid"' in compact
     assert "in-memory handle TTL" in compact
-    assert compact.count("is_error=true") == 2  # failed, cancelled
+    assert 'meta.status = "completed"' in compact and "meta.is_terminal = true" in compact
 
 
 def _job_created_event(
