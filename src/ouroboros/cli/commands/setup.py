@@ -4993,6 +4993,7 @@ def refresh_artifacts() -> None:
     )
 
     refreshed: list[str] = []
+    failed: list[str] = []
 
     codex_dir = _codex_home_candidate_for_setup()
     if codex_dir.exists() or shutil.which("codex"):
@@ -5003,6 +5004,7 @@ def refresh_artifacts() -> None:
         except OSError as exc:
             # One runtime failing must not leave the remaining ones stale.
             print_warning(f"Could not refresh Codex artifacts: {exc}")
+            failed.append("codex")
         else:
             print_success(f"Installed Codex rules → {result.rules_path}")
             print_success(
@@ -5016,6 +5018,7 @@ def refresh_artifacts() -> None:
             _install_hermes_artifacts()
         except OSError as exc:
             print_warning(f"Could not refresh Hermes artifacts: {exc}")
+            failed.append("hermes")
         else:
             refreshed.append("hermes")
 
@@ -5060,6 +5063,9 @@ def refresh_artifacts() -> None:
         print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
     else:
         print_info("No installed runtime artifacts found to refresh.")
+    if failed:
+        print_warning(f"Runtime artifact refresh incomplete: {', '.join(failed)}")
+        raise typer.Exit(1)
 
 
 # ── Brownfield subcommands ───────────────────────────────────────

@@ -1229,6 +1229,49 @@ class TestUpdateFlow:
         assert "Updated to v99.0.0" in _plain(result.output)
         assert "Restart active claude and codex sessions" in _plain(result.output)
 
+    def test_all_runtime_update_reports_partial_artifact_refresh(self) -> None:
+        def topology(runtime: str) -> RuntimeRefreshTopology:
+            env_key = "OUROBOROS_CLI_PATH" if runtime == "claude" else "OUROBOROS_CODEX_CLI_PATH"
+            return RuntimeRefreshTopology(
+                runtime_backend=runtime,
+                runtime_executable=f"/configured/{runtime}",
+                runtime_executable_env_key=env_key,
+            )
+
+        def run_command(command: list[str], **_kwargs: object) -> MagicMock:
+            if command == ["/managed/uv/venvs/ouroboros-ai/bin/ouroboros", "--version"]:
+                return MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+            if command[-2:] == ["setup", "refresh"]:
+                return MagicMock(returncode=1, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                side_effect=topology,
+            ),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=run_command,
+            ),
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "all"])
+
+        assert result.exit_code == 1
+        output = _plain(result.output)
+        assert "Ouroboros partially updated" in output
+        assert "installed runtime artifact refresh" in output
+        assert "Updated to v99.0.0" not in output
+
     def test_auto_runtime_without_claude_or_codex_skips_refresh(self) -> None:
         with (
             patch("ouroboros.cli.commands.update.__version__", "0.1.0"),

@@ -155,8 +155,9 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
 
         result = _invoke_refresh(tmp_path)
 
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "Could not refresh Codex artifacts" in result.output
+        assert "Runtime artifact refresh incomplete: codex" in result.output
         assert not (real_home / "rules").exists()
 
 
