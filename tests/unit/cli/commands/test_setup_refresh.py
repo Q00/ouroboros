@@ -112,6 +112,17 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         mock_hermes.assert_called_once_with()
         assert "hermes" in result.output
 
+    def test_failure_only_refresh_does_not_claim_no_artifacts_found(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+        skill_dir.mkdir(parents=True)
+
+        with patch("ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=False):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert "Runtime artifact refresh incomplete: hermes" in result.output
+        assert "No installed runtime artifacts found" not in result.output
+
     def test_refreshes_existing_pi_bridge(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
         bridge.parent.mkdir(parents=True)

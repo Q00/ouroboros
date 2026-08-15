@@ -7697,6 +7697,30 @@ class TestHermesSetup:
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
+    def test_setup_hermes_reports_failure_when_required_skills_are_not_installed(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_hermes_artifacts",
+                return_value=False,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server"),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        output = capsys.readouterr().out
+        assert result is False
+        assert "activation incomplete" in output
+        assert "Configured Hermes runtime" not in output
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"

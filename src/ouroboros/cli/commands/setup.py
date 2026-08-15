@@ -2881,8 +2881,8 @@ def _install_hermes_artifacts() -> bool:
     try:
         skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
         print_success(f"Installed Hermes skills → {skill_path}")
-    except OSError:
-        print_error("Could not locate packaged skills for Hermes.")
+    except OSError as exc:
+        print_error(f"Could not install packaged skills for Hermes: {exc}")
         return False
     return True
 
@@ -3015,11 +3015,13 @@ def _setup_hermes(hermes_path: str) -> bool:
     ):
         return False
 
+    # Install Ouroboros skills for Hermes
+    if not _install_hermes_artifacts():
+        print_error("Hermes runtime activation incomplete: required skills were not installed.")
+        return False
+
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
-
-    # Install Ouroboros skills for Hermes
-    _install_hermes_artifacts()
     return True
 
 
@@ -5070,7 +5072,7 @@ def refresh_artifacts() -> None:
 
     if refreshed:
         print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
-    else:
+    elif not failed:
         print_info("No installed runtime artifacts found to refresh.")
     if failed:
         print_warning(f"Runtime artifact refresh incomplete: {', '.join(failed)}")
