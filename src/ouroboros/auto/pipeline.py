@@ -1249,17 +1249,8 @@ class AutoPipeline:
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                 state.run_handoff_guidance = None
-                # A persisted handle proves the execute job was *dispatched*,
-                # not that it reached terminal success (Q00/ouroboros#1590):
-                # the owning process may have exited (deadline/Ctrl-C/kill)
-                # leaving the job cancelled, or the run may have paused
-                # (usage-limit) or failed. Reconcile the owned job's terminal
-                # state before declaring COMPLETE so ``--resume`` cannot return
-                # a stale product-complete for an incomplete run. When no poll
-                # channel is available (plain-function run starter, pruned job,
-                # etc.) fall back to the historical "trust the handle" behavior
-                # so genuinely-complete sessions and legacy handles are
-                # unaffected.
+                # A handle proves dispatch, not success (#1590). Reconcile when
+                # possible; unpollable legacy handles retain historical trust.
                 run_verdict = (
                     await _wait_owned_run_job_terminal(
                         self.run_starter,
@@ -1569,22 +1560,7 @@ class AutoPipeline:
     def _block_resume_if_run_not_successful(
         self, state: AutoPipelineState, run_verdict: dict[str, Any] | None
     ) -> bool | None:
-        """Block a non-complete-product RUN resume unless the owned job succeeded.
-
-        ``run_verdict`` is the owned execute job's terminal ``result_meta``
-        (from :func:`_wait_owned_run_job_terminal`), or ``None`` when no poll
-        channel was available. Returns ``True`` when the state was marked
-        BLOCKED (the run did not reach terminal success), or ``None`` to let the
-        caller proceed to COMPLETE.
-
-        Conservative on ambiguity: ``None`` verdict (unpollable / pruned /
-        plain-function starter) or a non-terminal ``running``/``queued`` status
-        preserves the historical "trust the persisted handle" behavior, so
-        genuinely-complete and legacy sessions are unaffected. Only an
-        *observed* non-success terminal (paused / failed / cancelled /
-        interrupted / unknown) blocks — resumably, via ``run_starter`` — so a
-        later ``--resume`` re-reconciles instead of returning stale COMPLETE.
-        """
+        """Block an observed non-success terminal; preserve ambiguous legacy handles."""
         if run_verdict is None:
             return None
         status = _optional_str(run_verdict.get("status"))
