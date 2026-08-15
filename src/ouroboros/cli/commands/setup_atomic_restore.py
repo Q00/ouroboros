@@ -22,7 +22,11 @@ def atomic_restore_generation(
         return False
     stage = Path(tempfile.mkdtemp(prefix=".ouroboros-rollback-", dir=path.parent))
     remove(stage)
-    restore(stage, prior)
+    try:
+        restore(stage, prior)
+    except BaseException:
+        remove(stage)
+        raise
     from ouroboros.hermes.artifacts import atomic_remove_generation, atomic_swap_generation
 
     if getattr(prior, "kind", None) == "missing":

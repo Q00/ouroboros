@@ -14,6 +14,7 @@ from ouroboros.hermes.artifacts import (
     HERMES_SKILL_CAPABILITY_GUIDE_FILENAME,
     HERMES_SKILL_CATEGORY,
     _remove_target_path,
+    atomic_remove_generation,
     install_hermes_skills,
 )
 
@@ -540,6 +541,27 @@ class TestInstallHermesSkills:
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
         assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "fresh\n"
 
+    def test_foreign_or_malformed_swap_intent_fails_before_mutation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        target = parent / "ouroboros"
+        target.mkdir(parents=True)
+        foreign = parent / f".ouroboros.old.{'a' * 32}"
+        foreign.mkdir()
+        foreign.joinpath("operator.txt").write_text("foreign\n", encoding="utf-8")
+        foreign.with_name(foreign.name + ".intent").write_text(
+            "not-an-owned-intent\n", encoding="utf-8"
+        )
+
+        with pytest.raises(OSError, match="malformed Hermes swap intent"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.is_dir()
+        assert foreign.joinpath("operator.txt").read_text(encoding="utf-8") == "foreign\n"
+
     def test_mid_backup_deletion_failure_never_replaces_complete_live_tree(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -562,6 +584,32 @@ class TestInstallHermesSkills:
         )
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
         assert target.joinpath("operator.txt").read_text(encoding="utf-8") == "preserve\n"
+
+    def test_interrupted_generation_removal_replays_as_removal(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("SKILL.md").write_text("published\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def interrupt_backup_removal(path: Path) -> None:
+            if path.name.startswith(".ouroboros.old."):
+                raise OSError("synthetic removal interruption")
+            real_remove(path)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_target_path", interrupt_backup_removal
+        )
+        atomic_remove_generation(target)
+        assert not target.exists()
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
+        from ouroboros.hermes.artifacts import _recover_swap_intents
+
+        _recover_swap_intents(target, ".ouroboros.old.")
+        assert not target.exists()
+        assert not tuple(tmp_path.glob(".ouroboros.old.*"))
 
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(

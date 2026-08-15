@@ -7810,6 +7810,7 @@ class TestHermesSetup:
             assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
 
         assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "published\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
 
     def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
         self, tmp_path: Path

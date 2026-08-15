@@ -5051,9 +5051,10 @@ def refresh_artifacts() -> None:
                 f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}"
             )
             refreshed.append("codex")
-
     hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
-    if os.path.lexists(hermes_skill_dir / HERMES_SKILL_NAME):
+    if os.path.lexists(hermes_skill_dir / HERMES_SKILL_NAME) or any(
+        hermes_skill_dir.glob(f".{HERMES_SKILL_NAME}.old.*.intent")
+    ):
         if not _install_hermes_artifacts():
             failed.append("hermes")
         else:

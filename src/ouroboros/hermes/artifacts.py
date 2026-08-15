@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from uuid import uuid4
@@ -32,13 +33,33 @@ def _swap_intent_path(backup: Path) -> Path:
     return backup.with_name(backup.name + _SWAP_INTENT_SUFFIX)
 
 
+def _intent_content(operation: str, backup: Path) -> str:
+    return f"ouroboros-hermes-{operation}-v1:{backup.name}\n"
+
+
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
     """Recover every externally-marked rename window before touching live state."""
+    records: list[tuple[Path, Path, str]] = []
     for intent in target.parent.glob(f"{backup_prefix}*{_SWAP_INTENT_SUFFIX}"):
         backup = intent.with_name(intent.name.removesuffix(_SWAP_INTENT_SUFFIX))
-        if not target.exists() and backup.exists():
+        suffix = backup.name.removeprefix(backup_prefix)
+        if intent.is_symlink() or not intent.is_file() or not re.fullmatch(r"[0-9a-f]{32}", suffix):
+            raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
+        content = intent.read_text(encoding="utf-8")
+        operations = [op for op in ("swap", "remove") if content == _intent_content(op, backup)]
+        if len(operations) != 1 or backup.is_symlink() or backup.exists() and not backup.is_dir():
+            raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
+        records.append((intent, backup, operations[0]))
+    if len(records) > 1:
+        raise OSError("Refusing ambiguous Hermes recovery with multiple swap intents")
+    for intent, backup, operation in records:
+        if operation == "swap" and not target.exists() and backup.exists():
             os.replace(backup, target)
+        elif operation == "remove" and not target.exists() and backup.exists():
+            _remove_target_path(backup)
         elif target.exists() and backup.exists():
+            if operation == "remove":
+                raise OSError("Refusing concurrent Hermes mutation during removal recovery")
             _remove_target_path(backup)
         if not backup.exists():
             _remove_target_path(intent)
@@ -48,7 +69,7 @@ def atomic_swap_generation(target: Path, replacement: Path) -> None:
     """Publish a complete sibling generation with restart-recognizable recovery."""
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
-    intent.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+    intent.write_text(_intent_content("swap", backup), encoding="utf-8")
     if target.exists():
         os.replace(target, backup)
     try:
@@ -71,7 +92,7 @@ def atomic_remove_generation(target: Path) -> None:
     """Remove a generation through a restart-recognizable backup rename."""
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
-    intent.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+    intent.write_text(_intent_content("remove", backup), encoding="utf-8")
     os.replace(target, backup)
     try:
         _remove_target_path(backup)
