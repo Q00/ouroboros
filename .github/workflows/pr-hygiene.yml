@@ -84,10 +84,13 @@ jobs:
           # stdout, so a warning printed there would be concatenated with the
           # count and turn a successful retry into `integer expression
           # expected` -- silently discarding a valid closing link.
+          # The backoff is overridable so the shell-level tests that exercise
+          # this function do not each pay a real five-second wait; CI leaves it
+          # unset and gets the five seconds.
           api_retry() {
             "$@" && return 0
             echo "::warning::GitHub API call failed; retrying once." >&2
-            sleep 5
+            sleep "${API_RETRY_DELAY_SECONDS:-5}"
             "$@" && return 0
             return 1
           }
