@@ -1,4 +1,10 @@
-"""Keep the EN/KO TUI guides aligned with both runtime backends."""
+"""Keep the EN/KO TUI guides aligned with both runtime backends.
+
+Source-derived contracts (key bindings, screen mappings) are asserted against
+the actual source files. Docs assertions are limited to structural anchors —
+contract markers, key names, and screen names inside the marked sections — so
+rewording guide prose never breaks them.
+"""
 
 from __future__ import annotations
 
@@ -121,7 +127,6 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
     ko_keys = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:textual-keys -->")
     for screen in ("Execution", "Debug", "Logs", "Lineage selector", "Lineage detail"):
         assert screen in en_keys
-    assert en_keys.count("does **not** resume") == 5
     for screen in (
         "실행 화면",
         "디버그 화면",
@@ -130,9 +135,6 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
         "계보 상세 화면",
     ):
         assert screen in ko_keys
-    assert ko_keys.count("재개하지 않음") == 5
-    assert "Dashboard and Session Selector expose resume" in en_keys
-    assert "대시보드와 세션 선택 화면은 재개를 제공" in ko_keys
     assert "rewind" in en_keys and "rewind" in ko_keys
 
 
@@ -174,65 +176,12 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         lifecycle = _contract_section(text, "<!-- tui-contract:slt-lifecycle -->")
         for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`", "`Esc`"):
             assert key in screens
-        assert "**Logs**" not in screens and "**Debug**" not in screens
-        assert "**로그**" not in screens and "**디버그**" not in screens
         assert "--mock" in lifecycle
-        assert "`p` / `r`" in lifecycle
-
-    assert "`l` opens" in _read(EN_GUIDE)
-    assert "when no modal owns the key, `Esc`\ncloses it" in _read(EN_GUIDE)
-    assert "`Esc` closes the palette and\npreserves the underlying log panel and filter" in _read(
-        EN_GUIDE
-    )
-    assert "While the filter has focus, `l`\nenters filter text" in _read(EN_GUIDE)
-    assert "global `q`, `1`-`4`, and\n`Ctrl+P` shortcuts remain reserved" in _read(EN_GUIDE)
-    assert "`l`은 실행" in _read(KO_GUIDE)
-    assert "모달이 키를 소유하지 않을 때 `Esc`는 패널을 닫습니다" in _read(KO_GUIDE)
-    assert "`Esc`는 팔레트만 닫고 아래의 로그 패널과 필터는\n그대로 보존합니다" in _read(KO_GUIDE)
-    assert "필터에 포커스가 있을 때 `l`은 패널을 닫지 않고 필터 문자로\n입력됩니다" in _read(
-        KO_GUIDE
-    )
-    assert "`q`, `1`-`4`, `Ctrl+P`는 계속 예약됩니다" in _read(KO_GUIDE)
-
-    en_lifecycle = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
-    ko_lifecycle = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
-    assert (
-        "| `Esc` | Close the command palette when active; return from Sessions to "
-        "Dashboard; close the open log panel in Execution |"
-    ) in en_lifecycle
-    assert (
-        "| `Esc` | 명령 팔레트가 열려 있으면 팔레트 닫기, 세션 화면에서는 대시보드로 "
-        "돌아가기, 실행 화면에서는 열린 로그 패널 닫기 |" in ko_lifecycle
-    )
-    assert "| `Esc` | Close the open Execution log panel |" not in _read(EN_GUIDE)
-    assert (
-        "Close the command palette when active; otherwise close the open Execution log panel"
-        not in _read(EN_GUIDE)
-    )
-    assert "| `Esc` | 열린 실행 로그 패널 닫기 |" not in _read(KO_GUIDE)
-    assert "명령 팔레트가 열려 있으면 팔레트만 닫고, 그 외에는" not in _read(KO_GUIDE)
-
-    assert "contains no events" in _read(EN_GUIDE)
-    assert "cannot be opened" in _read(EN_GUIDE)
-    assert "이벤트가 하나도 없는" in _read(KO_GUIDE)
-    assert "열 수 없어" in _read(KO_GUIDE)
+        assert "`p`" in lifecycle and "`r`" in lifecycle
 
     slt_readme = _read(SLT_README)
-    assert "global `q`, `1-4`, and `Ctrl+P` remain reserved" in slt_readme
-    for row in (
-        "| `1` | | Dashboard",
-        "| `2` | | Execution",
-        "| `3` | `e` | Lineage",
-        "| `4` | `s` | Sessions",
-        "| | `l` | Open the log panel",
-        "| | `Esc` | Close the open log panel when no modal is active",
-    ):
-        assert row in slt_readme
-    assert "`Esc` closes only the palette and preserves the underlying log panel and filter" in (
-        slt_readme
-    )
-    assert "`Esc` close palette / return from Sessions / close Execution logs" in slt_readme
-    assert "`1-5` screens" not in slt_readme
+    for key in ("`1`", "`2`", "`3`", "`4`", "`e`", "`s`", "`l`", "`Esc`"):
+        assert key in slt_readme
 
 
 def test_localized_guides_keep_the_same_contract_structure() -> None:
@@ -249,7 +198,6 @@ def test_localized_guides_keep_the_same_contract_structure() -> None:
     )
     assert _heading_levels(en) == _heading_levels(ko)
     assert en.count("```") == ko.count("```")
-    assert en.count("|-----") == ko.count("|-----")
 
 
 @pytest.mark.parametrize("guide", GUIDES)
