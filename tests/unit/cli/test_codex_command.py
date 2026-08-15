@@ -39,6 +39,9 @@ _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
     "ouroboros_generate_seed",
 }
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_PLUGIN_VERSION = json.loads(
+    (_REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+)["version"]
 _CANONICAL_CODEX_MCP_ENTRY = (
     "[mcp_servers.ouroboros]\n"
     'command = "uvx"\n'
@@ -1269,7 +1272,7 @@ class TestCodexDoctor:
 
         assert failures == []
 
-    @pytest.mark.parametrize("pin", ["ouroboros-ai[mcp]", "ouroboros-ai[mcp]==0.51.2"])
+    @pytest.mark.parametrize("pin", ["ouroboros-ai[mcp]", f"ouroboros-ai[mcp]=={_PLUGIN_VERSION}"])
     def test_doctor_accepts_unpinned_and_release_pinned_requirements(self, pin: str) -> None:
         """#2066: the shipped plugin descriptors pin the served package, so
         the canonical launcher is accepted with the exact release pin too."""
