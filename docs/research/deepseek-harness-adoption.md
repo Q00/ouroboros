@@ -148,5 +148,16 @@ Ranked, all compatible with each other:
   mandatory `mcpServers: []` was accepted) → `session/prompt` dispatched into
   dsh's LLM layer — and failed only at the expected terminal point, the
   missing `DEEPSEEK_API_KEY`, surfaced through the adapter's generic
-  `rpc_error` classification. Everything except the paid model call is
-  verified against the real binary.
+  `rpc_error` classification.
+- **Keyed full-turn run (2026-08-15)**: with a short-lived OpenRouter key, the
+  complete production path ran end to end —
+  `create_llm_adapter(backend="dsh")` (env-configured via
+  `OUROBOROS_DSH_CLI_PATH` / `OUROBOROS_DSH_CONFIG_PATH`) → `DshAcpClient` →
+  `dsh-acp-demo` → dsh's `llm-deepseek` adapter pointed at OpenRouter
+  (`baseURL` + `apiKeyEnv` overrides) → `deepseek/deepseek-v4-flash`. A plain
+  turn returned exactly the requested text (`finish_reason: stop`), and a
+  `response_format: json_schema` request came back as valid conforming JSON
+  through the adapter's cooperative extract-and-validate path. One dsh loader
+  fact learned on the way: plugin package names in a composition file resolve
+  relative to the **config file's directory**, so a composition must live
+  where dsh's `node_modules` (or workspace) is reachable.
