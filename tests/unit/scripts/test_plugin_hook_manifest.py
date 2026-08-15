@@ -61,6 +61,47 @@ def test_advisory_hook_fails_open_when_loaded_plugin_version_was_removed(
 
 
 @pytest.mark.parametrize(
+    ("event_name", "script_name"),
+    [
+        ("SessionStart", "session-start.py"),
+        ("UserPromptSubmit", "keyword-detector.py"),
+        ("PostToolUse", "drift-monitor.py"),
+    ],
+)
+def test_packaged_hook_does_not_execute_project_script_without_plugin_root(
+    event_name: str,
+    script_name: str,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "untrusted-project"
+    script = project_root / "scripts" / script_name
+    script.parent.mkdir(parents=True)
+    marker = tmp_path / "executed"
+    script.write_text(
+        "import os\nfrom pathlib import Path\nPath(os.environ['MARKER']).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PLUGIN_ROOT", None)
+    env.pop("CLAUDE_PLUGIN_ROOT", None)
+    env["MARKER"] = str(marker)
+
+    result = subprocess.run(
+        _hook_command(_HOOKS_PATH, event_name),
+        shell=True,
+        input=json.dumps({"hook_event_name": event_name}),
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
     "manifest_path",
     [_HOOKS_PATH, _CLAUDE_SETTINGS_PATH, _CODEX_HOOKS_PATH],
 )
