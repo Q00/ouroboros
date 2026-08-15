@@ -2004,7 +2004,7 @@ async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
             passed=False,
             score=0.0,
             verdict="",
-            error="upstream adapter unavailable",
+            error="upstream adapter unavailable; stderr token=sk_live_do_not_persist /private/data",
         )
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -2045,7 +2045,10 @@ async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
     assert advisory["differences"] == []
     assert advisory["suggestions"] == []
     if failure == "transient":
-        assert advisory["detail"].endswith("upstream adapter unavailable")
+        assert advisory["detail"].endswith("provider connectivity failure")
+        persisted = repr(advisory) + (state.last_progress_message or "")
+        assert "sk_live_do_not_persist" not in persisted
+        assert "/private/data" not in persisted
     assert result.status == "complete"
 
 
