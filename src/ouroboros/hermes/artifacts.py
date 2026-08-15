@@ -121,6 +121,9 @@ def install_hermes_skills(
     target_dir = resolved_hermes_dir / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
     backup_prefix = f".{target_dir.name}.old."
 
+    # Validate the complete destination chain before inspecting or mutating
+    # any target or recovery path beneath it.
+    _prepare_hermes_install_root(target_dir.parent)
     if target_dir.is_symlink():
         msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
         raise OSError(msg)
@@ -146,9 +149,6 @@ def install_hermes_skills(
             _remove_target_path(managed_backup)
 
     with _packaged_skills_dir() as source_root:
-        # Prepare only the parent. A fresh install must not materialize the
-        # live target until the complete staged generation is publishable.
-        _prepare_hermes_install_root(target_dir.parent)
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
 
@@ -158,7 +158,7 @@ def install_hermes_skills(
         cleanup_staging_dir: Path | None = staging_dir
         try:
             if target_dir.is_dir():
-                shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
+                shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True, symlinks=True)
 
             capability_guide_path = staging_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME
             _remove_target_path(capability_guide_path)
@@ -174,7 +174,7 @@ def install_hermes_skills(
             for source_skill_dir in source_skill_dirs:
                 destination_skill_dir = staging_dir / source_skill_dir.name
                 _remove_target_path(destination_skill_dir)
-                shutil.copytree(source_skill_dir, destination_skill_dir)
+                shutil.copytree(source_skill_dir, destination_skill_dir, symlinks=True)
 
             if prune:
                 for existing_path in staging_dir.iterdir():
@@ -188,8 +188,17 @@ def install_hermes_skills(
 
             backup_dir = target_dir.with_name(f"{backup_prefix}{uuid4().hex}")
             if target_dir.exists() or target_dir.is_symlink():
-                target_dir.joinpath(_SWAP_MARKER).write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
-                os.replace(target_dir, backup_dir)
+                marker_path = target_dir / _SWAP_MARKER
+                previous_marker = marker_path.read_bytes() if marker_path.is_file() else None
+                try:
+                    marker_path.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+                    os.replace(target_dir, backup_dir)
+                except BaseException:
+                    if previous_marker is None:
+                        _remove_target_path(marker_path)
+                    else:
+                        marker_path.write_bytes(previous_marker)
+                    raise
             try:
                 os.replace(staging_dir, target_dir)
             except OSError:
