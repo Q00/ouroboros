@@ -344,6 +344,22 @@ class TestInstallHermesSkills:
             install_hermes_skills(hermes_dir=tmp_path / ".hermes")
 
         monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        real_copytree = shutil.copytree
+        failed_recovery_copy = False
+
+        def fail_source_copy_once(src, dst, *args, **kwargs):
+            nonlocal failed_recovery_copy
+            if Path(src) == source_skills_dir / "run" and not failed_recovery_copy:
+                failed_recovery_copy = True
+                raise OSError("synthetic recovery copy failure")
+            return real_copytree(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.copytree", fail_source_copy_once)
+        with pytest.raises(OSError, match="recovery copy failure"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert not target_dir.joinpath(_SWAP_MARKER).exists()
+        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.copytree", real_copytree)
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
 
         assert live_note.read_text(encoding="utf-8") == "keep across crash"

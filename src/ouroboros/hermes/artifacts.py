@@ -147,6 +147,10 @@ def install_hermes_skills(
             msg = "Refusing ambiguous Hermes skill recovery with multiple managed backups"
             raise OSError(msg)
         os.replace(managed_backups[0], target_dir)
+        # The marker proves ownership only while the generation is a backup.
+        # Once restored live, retaining it would make any later failed refresh
+        # poison every retry via the reserved-marker guard above.
+        _remove_target_path(target_dir / _SWAP_MARKER)
     elif managed_backups:
         # A previous publish may have succeeded before its old-generation
         # cleanup failed.  Remove every stale managed backup before moving the

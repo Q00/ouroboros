@@ -3000,10 +3000,24 @@ def _setup_hermes(hermes_path: str) -> bool:
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
 
+    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
+
+    hermes_skill_target = (
+        Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+    )
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target)
+
+    def rollback_hermes_skills() -> None:
+        try:
+            _restore_path_snapshot(hermes_skill_target, hermes_skill_snapshot)
+        except OSError as exc:
+            print_error(f"Hermes activation rollback could not restore skills: {exc}")
+
     # Skills are a required Hermes activation artifact. Install them before
     # selecting Hermes or registering its MCP server so a failed installation
     # cannot leave an incomplete runtime represented as active durable state.
     if not _install_hermes_artifacts():
+        rollback_hermes_skills()
         print_error("Hermes runtime activation incomplete: required skills were not installed.")
         return False
 
@@ -3020,6 +3034,7 @@ def _setup_hermes(hermes_path: str) -> bool:
         register_host=lambda: _register_hermes_mcp_server(detected=detected),
         create_defaults=create_default_config,
     ):
+        rollback_hermes_skills()
         return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")

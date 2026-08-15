@@ -7731,6 +7731,49 @@ class TestHermesSetup:
         assert hermes_config.read_text(encoding="utf-8") == original_hermes_config
         mock_register.assert_not_called()
 
+    @pytest.mark.parametrize("target_existed", (False, True))
+    def test_setup_hermes_rolls_back_skills_when_activation_fails(
+        self, tmp_path: Path, target_existed: bool
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_run = source_skills / "run"
+        source_run.mkdir(parents=True)
+        source_run.joinpath("SKILL.md").write_text("fresh skill\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        if target_existed:
+            target.joinpath("run").mkdir(parents=True)
+            target.joinpath("run", "SKILL.md").write_text("operator generation\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        if target_existed:
+            assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == (
+                "operator generation\n"
+            )
+        else:
+            assert not target.exists()
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"
