@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
 from ouroboros.hermes.artifacts import (
     HERMES_SKILL_CAPABILITY_GUIDE_FILENAME,
+    HERMES_SKILL_CATEGORY,
     install_hermes_skills,
 )
 
@@ -162,6 +164,37 @@ class TestInstallHermesSkills:
         assert not stale_skill_dir.exists()
         assert target_dir.joinpath("run", "SKILL.md").is_file()
         assert target_dir.joinpath("notes.txt").read_text(encoding="utf-8") == "keep me"
+
+    def test_mid_copy_failure_preserves_existing_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failed staged refresh must leave the live Hermes skills byte-identical."""
+        source_skills_dir = tmp_path / "source-skills"
+        source_skill_dir = self._write_skill(source_skills_dir, "run", body="new skill\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        target_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        live_skill = target_dir / "run" / "SKILL.md"
+        live_skill.parent.mkdir(parents=True)
+        live_skill.write_text("working skill\n", encoding="utf-8")
+
+        real_copytree = shutil.copytree
+
+        def fail_new_generation(src, dst, *args, **kwargs):
+            if Path(src) == source_skill_dir:
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                Path(dst, "SKILL.md").write_text("partial", encoding="utf-8")
+                raise OSError("simulated disk full")
+            return real_copytree(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.copytree", fail_new_generation)
+
+        with pytest.raises(OSError, match="disk full"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes", prune=True)
+
+        assert live_skill.read_bytes() == b"working skill\n"
 
     def test_replaces_symlinked_capability_guide_without_following_it(
         self, tmp_path: Path, monkeypatch

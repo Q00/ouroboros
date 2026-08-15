@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
+import tempfile
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.skills.artifacts import (
@@ -127,26 +128,54 @@ def install_hermes_skills(
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
 
-        capability_guide_path = target_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME
-        _remove_target_path(capability_guide_path)
-        capability_guide_path.write_text(
-            render_backend_skill_capability_guide("hermes"),
-            encoding="utf-8",
+        # Build the complete replacement beside the live generation.  A
+        # mid-copy failure must never remove a previously working install.
+        staging_dir: Path | None = Path(
+            tempfile.mkdtemp(prefix=".ouroboros-skills-", dir=target_dir.parent)
         )
+        try:
+            if target_dir.is_dir():
+                shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
 
-        for artifact_name in _LEGACY_PACKAGE_ARTIFACTS:
-            _remove_target_path(target_dir / artifact_name)
+            capability_guide_path = staging_dir / HERMES_SKILL_CAPABILITY_GUIDE_FILENAME
+            _remove_target_path(capability_guide_path)
+            capability_guide_path.write_text(
+                render_backend_skill_capability_guide("hermes"),
+                encoding="utf-8",
+            )
 
-        for source_skill_dir in source_skill_dirs:
-            destination_skill_dir = target_dir / source_skill_dir.name
-            _remove_target_path(destination_skill_dir)
-            shutil.copytree(source_skill_dir, destination_skill_dir)
+            for artifact_name in _LEGACY_PACKAGE_ARTIFACTS:
+                _remove_target_path(staging_dir / artifact_name)
 
-        if prune:
-            for existing_path in target_dir.iterdir():
-                if existing_path.name in desired_skill_names:
-                    continue
-                if existing_path.is_dir() and existing_path.joinpath(_SKILL_ENTRYPOINT).is_file():
-                    _remove_target_path(existing_path)
+            for source_skill_dir in source_skill_dirs:
+                destination_skill_dir = staging_dir / source_skill_dir.name
+                _remove_target_path(destination_skill_dir)
+                shutil.copytree(source_skill_dir, destination_skill_dir)
+
+            if prune:
+                for existing_path in staging_dir.iterdir():
+                    if existing_path.name in desired_skill_names:
+                        continue
+                    if (
+                        existing_path.is_dir()
+                        and existing_path.joinpath(_SKILL_ENTRYPOINT).is_file()
+                    ):
+                        _remove_target_path(existing_path)
+
+            backup_dir = target_dir.with_name(f".{target_dir.name}.old")
+            _remove_target_path(backup_dir)
+            if target_dir.exists() or target_dir.is_symlink():
+                os.replace(target_dir, backup_dir)
+            try:
+                os.replace(staging_dir, target_dir)
+            except OSError:
+                if backup_dir.exists() and not target_dir.exists():
+                    os.replace(backup_dir, target_dir)
+                raise
+            _remove_target_path(backup_dir)
+            staging_dir = None
+        finally:
+            if staging_dir is not None:
+                _remove_target_path(staging_dir)
 
     return target_dir
