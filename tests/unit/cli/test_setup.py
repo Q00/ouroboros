@@ -7774,6 +7774,48 @@ class TestHermesSetup:
         else:
             assert not target.exists()
 
+    def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-state.txt"
+        external.write_text("before\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+
+        def fail_after_external_update(*, detected) -> bool:  # noqa: ARG001
+            external.write_text("concurrent\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_external_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "concurrent\n"
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"

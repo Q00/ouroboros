@@ -314,6 +314,23 @@ class TestInstallHermesSkills:
         assert backup_link.is_symlink()
         assert not target_dir.joinpath("operator-secret.txt").exists()
 
+    def test_malformed_managed_backup_marker_fails_as_controlled_oserror(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        backup = parent / ".ouroboros.old.corrupt"
+        backup.mkdir(parents=True)
+        backup.joinpath(_SWAP_MARKER).write_bytes(b"\xff\xfe")
+
+        with pytest.raises(OSError, match="malformed Hermes backup marker"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
     def test_interrupted_swap_recovers_previous_generation_on_retry(
         self, tmp_path: Path, monkeypatch
     ) -> None:

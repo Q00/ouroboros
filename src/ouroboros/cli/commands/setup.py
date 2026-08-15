@@ -3009,7 +3009,11 @@ def _setup_hermes(hermes_path: str) -> bool:
 
     def rollback_hermes_skills() -> None:
         try:
-            _restore_path_snapshot(hermes_skill_target, hermes_skill_snapshot)
+            _restore_path_snapshot(
+                hermes_skill_target,
+                hermes_skill_snapshot,
+                restore_link_targets=False,
+            )
         except OSError as exc:
             print_error(f"Hermes activation rollback could not restore skills: {exc}")
 

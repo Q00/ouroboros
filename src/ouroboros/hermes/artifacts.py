@@ -108,6 +108,20 @@ def _refuse_symlinked_candidate_path_component(path: Path) -> None:
         raise OSError(msg)
 
 
+def _is_managed_backup(candidate: Path) -> bool:
+    """Validate one backup marker without trusting symlinks or corrupt text."""
+    marker = candidate / _SWAP_MARKER
+    if candidate.is_symlink() or not candidate.is_dir() or marker.is_symlink():
+        return False
+    if not marker.is_file():
+        return False
+    try:
+        return marker.read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
+    except UnicodeError as exc:
+        msg = f"Refusing malformed Hermes backup marker: {marker}"
+        raise OSError(msg) from exc
+
+
 def install_hermes_skills(
     *,
     hermes_dir: str | Path | None = None,
@@ -136,11 +150,7 @@ def install_hermes_skills(
     managed_backups = [
         candidate
         for candidate in target_dir.parent.glob(f"{backup_prefix}*")
-        if not candidate.is_symlink()
-        and candidate.is_dir()
-        and not candidate.joinpath(_SWAP_MARKER).is_symlink()
-        and candidate.joinpath(_SWAP_MARKER).is_file()
-        and candidate.joinpath(_SWAP_MARKER).read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
+        if _is_managed_backup(candidate)
     ]
     if managed_backups and not target_dir.exists():
         if len(managed_backups) != 1:
