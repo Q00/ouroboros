@@ -59,10 +59,6 @@ _BACKEND_VENDOR: dict[str, str] = {
     "claude": "anthropic",
     "claude_mcp": "anthropic",
     "ourocode": "anthropic",
-    # dsh's model is composition-owned (DeepSeek by default, but swappable to
-    # any provider), so vendor cannot be asserted from the backend name alone.
-    # "deepseek" reflects the shipped default composition.
-    "dsh": "deepseek",
     "codex": "openai",
     "codex_mcp": "openai",
     "copilot": "openai",

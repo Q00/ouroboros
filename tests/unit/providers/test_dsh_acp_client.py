@@ -18,6 +18,7 @@ _FAKE_ACP = Path(__file__).parents[2] / "fixtures" / "fake_ourocode_acp.py"
 
 
 def _client(tmp_path: Path, **kwargs: object) -> DshAcpClient:
+    kwargs.setdefault("config_path", tmp_path / "trusted-cordis.yml")
     return DshAcpClient(
         cli_path=_FAKE_ACP,
         cwd=tmp_path,
@@ -27,9 +28,12 @@ def _client(tmp_path: Path, **kwargs: object) -> DshAcpClient:
     )
 
 
-def test_spawn_argv_omits_config_flag_when_unset(tmp_path: Path) -> None:
-    argv = _client(tmp_path)._spawn_argv()
-    assert argv == [str(_FAKE_ACP)]
+def test_spawn_argv_rejects_unset_config_instead_of_loading_from_cwd(tmp_path: Path) -> None:
+    with pytest.raises(AcpClientError) as excinfo:
+        _client(tmp_path, config_path=None)._spawn_argv()
+
+    assert excinfo.value.error_type == "invalid_config"
+    assert "OUROBOROS_DSH_CONFIG_PATH" in excinfo.value.message
 
 
 def test_spawn_argv_forwards_config_path(tmp_path: Path) -> None:
@@ -83,12 +87,15 @@ async def test_cli_unavailable_hint_names_dsh(tmp_path: Path) -> None:
     client = DshAcpClient(
         cli_path=tmp_path / "definitely-missing-dsh-acp-demo",
         cwd=tmp_path,
+        config_path=tmp_path / "trusted-cordis.yml",
     )
     with pytest.raises(AcpClientError) as excinfo:
         await client.run_turn("hi")
     assert excinfo.value.error_type == "cli_unavailable"
     assert "dsh-acp-demo" in excinfo.value.message
     assert "OUROBOROS_DSH_CLI_PATH" in excinfo.value.message
+    assert "47f9438" in excinfo.value.message
+    assert "published npm install path is currently broken" in excinfo.value.message
     assert "ourocode" not in excinfo.value.message
 
 

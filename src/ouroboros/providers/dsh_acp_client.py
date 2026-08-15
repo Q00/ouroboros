@@ -11,10 +11,10 @@ subclass that only changes how the server process is launched.
 
 dsh-specific launch facts (verified against deepseek-harness@0.1.0-rc.5):
 
-- The bin takes ``--config <cordis.yml>`` and defaults to ``./cordis.yml`` in
-  its cwd. The composition file decides everything else (provider, sandbox,
-  tools), so this client forwards an optional ``config_path`` and otherwise
-  leaves composition to the deployment.
+- The bin takes ``--config <cordis.yml>`` and otherwise defaults to
+  ``./cordis.yml`` in its cwd. Because the composition can execute plugins,
+  this client requires an explicit trusted ``config_path`` and never permits
+  project-cwd discovery.
 - ``session/new`` **requires** ``mcpServers`` to be present (the server indexes
   ``params.mcpServers.length`` unconditionally and rejects a non-empty list).
   An empty list is therefore always sent.
@@ -55,9 +55,8 @@ class DshAcpClient(OurocodeAcpClient):
             ``dsh-acp-demo`` on PATH (``npm install -g @deepseek-ai/dsh-acp-demo``).
         cwd: Working directory for the ACP session (``session/new`` requires an
             absolute path; resolved against the process cwd when relative).
-        config_path: Optional dsh Cordis composition file passed as
-            ``--config``. When ``None`` the bin resolves ``./cordis.yml``
-            relative to ``cwd``.
+        config_path: Trusted dsh Cordis composition file passed as
+            ``--config``. A missing value fails closed before process spawn.
         startup_timeout: Seconds to wait for the initialize/session-new frames.
         turn_timeout: Seconds to wait for the ``session/prompt`` result.
     """
@@ -107,17 +106,20 @@ class DshAcpClient(OurocodeAcpClient):
         return env
 
     def _spawn_argv(self) -> list[str]:
-        argv = [self._cli_path]
-        if self._config_path is not None:
-            argv.extend(["--config", self._config_path])
-        return argv
+        if self._config_path is None:
+            raise AcpClientError(
+                "dsh requires an explicit trusted Cordis composition path; "
+                "set OUROBOROS_DSH_CONFIG_PATH",
+                error_type="invalid_config",
+            )
+        return [self._cli_path, "--config", self._config_path]
 
     def _spawn_failure_hint(self) -> str:
         return (
-            "Install DeepSeek Harness's ACP server "
-            "(`npm install -g @deepseek-ai/dsh-acp-demo`, needs Node.js >= 22) "
-            "and ensure `dsh-acp-demo` is on PATH, or set "
-            "OUROBOROS_DSH_CLI_PATH."
+            "Build deepseek-ai/deepseek-harness from source at verified commit "
+            "47f9438 (`pnpm install && pnpm run build`, Node.js >= 22), then "
+            "put its `dsh-acp-demo` bin on PATH or set OUROBOROS_DSH_CLI_PATH. "
+            "The published npm install path is currently broken upstream."
         )
 
     def _session_new_params(self) -> dict[str, Any]:
