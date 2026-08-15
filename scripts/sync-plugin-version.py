@@ -530,6 +530,9 @@ def _read_mcp_from_spec(data: object) -> tuple[int, str]:
     args = server.get("args")
     if not isinstance(args, list):
         raise ValueError("mcpServers.ouroboros.args must be an array")
+    from_positions = [index for index, arg in enumerate(args) if arg == "--from"]
+    if len(from_positions) != 1:
+        raise ValueError("expected exactly one --from option")
     positions = [
         index + 1
         for index, arg in enumerate(args[:-1])

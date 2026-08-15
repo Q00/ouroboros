@@ -168,7 +168,9 @@ def get_latest_version(*, current: str | None = None) -> str | None:
                 existing_cache: dict = {}
                 try:
                     if _CACHE_FILE.exists():
-                        existing_cache = json.loads(_CACHE_FILE.read_text())
+                        loaded_cache = json.loads(_CACHE_FILE.read_text())
+                        if isinstance(loaded_cache, dict):
+                            existing_cache = loaded_cache
                 except Exception:
                     pass
                 now = time.time()

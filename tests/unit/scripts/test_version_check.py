@@ -204,6 +204,24 @@ class TestGetLatestVersion:
         assert "latest_version_checked_at" in payload
         assert "latest_version_pre_checked_at" in payload
 
+    def test_non_object_json_cache_is_replaced(self, tmp_path: Path) -> None:
+        """Valid JSON with the wrong shape must not disable cache refreshes."""
+        for malformed_payload in ([], "invalid"):
+            cache_file = tmp_path / "version-check-cache.json"
+            cache_file.write_text(json.dumps(malformed_payload))
+            with (
+                patch.object(version_check, "_CACHE_FILE", cache_file),
+                patch.object(version_check, "_CACHE_DIR", tmp_path),
+                patch.object(
+                    version_check, "_get_latest_from_pypi", return_value="2.0.0"
+                ),
+            ):
+                assert version_check.get_latest_version() == "2.0.0"
+
+            payload = json.loads(cache_file.read_text())
+            assert payload["latest_version"] == "2.0.0"
+            assert "latest_version_checked_at" in payload
+
 
 class TestCheckUpdate:
     """Test check_update logic."""
