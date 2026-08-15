@@ -1454,32 +1454,6 @@ class TestBackgroundJobPath:
         assert state.worktree_policy is AutoWorktreePolicy.ALWAYS
 
     @pytest.mark.asyncio
-    async def test_complete_product_with_short_timeout_fails_fast(
-        self, event_store, tmp_path, fake_inner_auto
-    ) -> None:
-        job_manager = MagicMock()
-        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
-        store = AutoStore(tmp_path / "store")
-        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
-        h._inner_auto = fake_inner_auto
-
-        result = await h.handle(
-            {
-                "goal": "build a product",
-                "cwd": str(tmp_path),
-                "complete_product": True,
-                "pipeline_timeout_seconds": 100,
-            }
-        )
-
-        assert result.is_err
-        assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(
-            result.error
-        )
-        job_manager.start_job.assert_not_called()
-        fake_inner_auto.handle.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_fresh_structured_goal_runner_resumes_without_preference_override(
         self, event_store, tmp_path
     ) -> None:
@@ -1572,21 +1546,21 @@ class TestBackgroundJobPath:
         kwargs = captured["pipeline_kwargs"]
         assert kwargs["seed_qa_evaluator"] is not None
         assert kwargs["seed_qa_evaluator"].qa_handler is qa_handler
-        assert kwargs["evaluator"] is None
+        # The pipeline no longer takes an `evaluator`: the run job's chain owns
+        # the post-run verdict.
+        assert "evaluator" not in kwargs
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("complete_product", [False, True])
-    async def test_run_starter_owns_successors_only_in_complete_product_mode(
-        self, event_store, tmp_path, monkeypatch: pytest.MonkeyPatch, complete_product: bool
+    async def test_auto_never_suppresses_the_run_job_successors(
+        self, event_store, tmp_path
     ) -> None:
-        """Exactly one owner for the post-run evaluation.
+        """Auto has no post-run phase left, so the run job's chain is the only owner.
 
-        Complete-product Auto drives RALPH_HANDOFF → EVALUATE itself, so the run
-        job's own chain is suppressed. Default Auto has no such path — it stops
-        at COMPLETE once the run has a handle — so the run job keeps its
-        run → evaluate → ralph chain instead of finishing unevaluated.
+        The suppression flag existed for complete-product Auto, which drove
+        RALPH_HANDOFF -> EVALUATE itself. With that path retired there is no
+        second owner to protect against, and an override would leave the
+        finished run ungraded.
         """
-
         captured: dict[str, object] = {}
 
         class FakeAutoPipeline:
@@ -1600,14 +1574,12 @@ class TestBackgroundJobPath:
                     phase=str(state.phase.value),
                 )
 
-        monkeypatch.setattr("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline)
+        with patch("ouroboros.mcp.tools.auto_handler.AutoPipeline", FakeAutoPipeline):
+            h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
+            await h._run({"goal": "build a CLI"})
 
-        h = AutoHandler(store=AutoStore(tmp_path), event_store=event_store)
-
-        await h._run({"goal": "build a CLI", "complete_product": complete_product})
-
-        kwargs = captured["pipeline_kwargs"]
-        assert kwargs["run_starter"].owns_successors is complete_product
+        run_starter = captured["pipeline_kwargs"]["run_starter"]
+        assert not hasattr(run_starter, "owns_successors")
 
     @pytest.mark.asyncio
     async def test_plugin_mode_returns_subagent_without_enqueue(

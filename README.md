@@ -175,6 +175,8 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
+> **DeepSeek support.** Ouroboros speaks DeepSeek two ways. Point the interview/Seed/QA pipeline at DeepSeek's own models with `--llm-backend dsh` (`ouroboros mcp serve --llm-backend dsh`, or `OUROBOROS_LLM_BACKEND=dsh`) — this drives [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)'s ACP server under the hood. Or go the other way: mount the Ouroboros MCP server straight into a DeepSeek Harness `cordis.yml` (`@deepseek-ai/dsh-mcp-client`) and type `ooo interview` / `ooo auto` directly in the DeepSeek Harness chat — the same `ouroboros_interview` / `ouroboros_auto` tools run natively inside it, Socratic questions and all.
+
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
 

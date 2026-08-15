@@ -458,24 +458,6 @@ async def test_mcp_handler_rejects_timeout_below_floor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_handler_rejects_complete_product_short_timeout_before_pipeline() -> None:
-    """Complete-product auto should fail fast when the explicit deadline is too short."""
-    from ouroboros.mcp.tools.auto_handler import AutoHandler
-
-    handler = AutoHandler()
-    outcome = await handler.handle(
-        {
-            "goal": "Build a product",
-            "complete_product": True,
-            "pipeline_timeout_seconds": 100,
-        }
-    )
-
-    assert outcome.is_err
-    assert "complete_product=true requires pipeline_timeout_seconds >= 1800" in str(outcome.error)
-
-
-@pytest.mark.asyncio
 async def test_mcp_handler_rejects_timeout_above_ceiling() -> None:
     """The MCP handler rejects ``pipeline_timeout_seconds`` above the 86400s ceiling."""
     from ouroboros.mcp.tools.auto_handler import AutoHandler
@@ -484,3 +466,35 @@ async def test_mcp_handler_rejects_timeout_above_ceiling() -> None:
     outcome = await handler.handle({"goal": "Build a CLI", "pipeline_timeout_seconds": 100000})
     assert outcome.is_err
     assert "pipeline_timeout_seconds must be between" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retired_phase",
+    [AutoPhase.RALPH_HANDOFF, AutoPhase.EVALUATE, AutoPhase.UNSTUCK_LATERAL],
+    ids=lambda phase: phase.value,
+)
+async def test_retired_phase_resume_explains_itself_even_when_the_deadline_expired(
+    tmp_path, retired_phase: AutoPhase
+) -> None:
+    """The explanation must not depend on whether the old deadline is spent.
+
+    A session parked in a retired phase cannot be driven forward either way, so
+    answering with the generic `pipeline_timeout` message would make the
+    migration guidance appear or vanish based on an unrelated clock.
+    """
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = retired_phase
+    state.deadline_at = time.monotonic() - 5.0
+    state.deadline_at_epoch = time.time() - 5.0
+
+    pipeline = AutoPipeline(_NeverInterviewDriver(), _unused_seed_generator)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "was retired with --complete-product" in result.blocker
+    assert "ouroboros_job_status" in result.blocker
+    assert "pipeline_timeout" not in result.blocker
+    assert state.last_tool_name == "retired_phase_migration"

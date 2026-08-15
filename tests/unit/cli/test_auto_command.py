@@ -205,8 +205,8 @@ def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance(
         return result_value()
 
     with patch("ouroboros.cli.commands.auto.asyncio.run", side_effect=consume):
-        first = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
-        second = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
+        first = runner.invoke(app, ["auto", "safe detached goal"])
+        second = runner.invoke(app, ["auto", "safe detached goal"])
 
     assert first.exit_code == 0
     assert second.exit_code == 0
@@ -288,7 +288,7 @@ def test_auto_detached_start_output_includes_pollable_cli_job_handle() -> None:
         return result_value
 
     with patch("ouroboros.cli.commands.auto.asyncio.run", side_effect=consume):
-        result = runner.invoke(app, ["auto", "safe detached goal", "--complete-product"])
+        result = runner.invoke(app, ["auto", "safe detached goal"])
 
     output = _plain(result.output)
     assert result.exit_code == 0
@@ -564,30 +564,6 @@ def test_run_auto_accepts_current_worktree_policy_alias(tmp_path, monkeypatch) -
     assert captured["worktree_policy"] is AutoWorktreePolicy.CURRENT
 
 
-def test_run_auto_rejects_complete_product_short_timeout(tmp_path, monkeypatch) -> None:
-    import asyncio
-
-    import pytest
-
-    from ouroboros.cli.commands.auto import _run_auto
-
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises(ValueError, match="complete_product=true requires --timeout >= 1800"):
-        asyncio.run(
-            _run_auto(
-                goal="Build a product",
-                resume=None,
-                runtime="claude",
-                max_interview_rounds=None,
-                max_repair_rounds=None,
-                skip_run=False,
-                complete_product=True,
-                pipeline_timeout_seconds=100,
-            )
-        )
-
-
 def test_resume_rejects_lower_bound_override(tmp_path) -> None:
     """Tightening a bound on resume must be refused — never trap a session further."""
     import asyncio
@@ -723,53 +699,6 @@ def test_auto_result_pipeline_carries_runtime_labels(tmp_path) -> None:
     assert captured["mode"] is None
     assert result.runtime_backend == "codex"
     assert result.opencode_mode is None
-
-
-def test_run_auto_complete_product_configures_ralph_evolutionary_loop(
-    tmp_path, monkeypatch
-) -> None:
-    """Regression for #1090: CLI complete-product must not create a bare Ralph handler.
-
-    A bare ``RalphHandler(agent_runtime_backend=...)`` constructs an
-    ``EvolveStepHandler`` without an ``EvolutionaryLoop``. The background Ralph
-    job then fails at handoff time with ``EvolutionaryLoop not configured``.
-    """
-    import asyncio
-
-    from ouroboros.cli.commands.auto import _run_auto
-
-    captured = {}
-    monkeypatch.chdir(tmp_path)
-
-    async def fake_pipeline_run(self, run_state):  # noqa: ARG001
-        ralph_starter = self.ralph_starter
-        captured["evolve_handler"] = ralph_starter.handler._evolve_handler  # noqa: SLF001
-        captured["project_dir"] = ralph_starter.project_dir
-        return AutoPipelineResult(
-            status="complete",
-            auto_session_id=run_state.auto_session_id,
-            phase="complete",
-            grade="A",
-        )
-
-    with patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run):
-        result = asyncio.run(
-            _run_auto(
-                goal="safe goal",
-                resume=None,
-                runtime="hermes",
-                max_interview_rounds=2,
-                max_repair_rounds=1,
-                skip_run=False,
-                complete_product=True,
-            )
-        )
-
-    assert result.status == "complete"
-    evolve_handler = captured.get("evolve_handler")
-    assert evolve_handler is not None
-    assert getattr(evolve_handler, "evolutionary_loop", None) is not None
-    assert captured["project_dir"] == str(tmp_path)
 
 
 def test_run_auto_demotes_plugin_to_subprocess_in_state(tmp_path) -> None:

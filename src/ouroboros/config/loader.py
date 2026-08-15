@@ -1440,6 +1440,56 @@ def get_ourocode_cli_path() -> str | None:
     return None
 
 
+def get_dsh_cli_path() -> str | None:
+    """Get the DeepSeek Harness ACP server path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CLI_PATH environment variable
+        2. config.yaml orchestrator.dsh_cli_path
+        3. None (resolve ``dsh-acp-demo`` from PATH at runtime)
+
+    Returns:
+        Path to the ``dsh-acp-demo`` executable or None.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_cli_path:
+            return config.orchestrator.dsh_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_config_path() -> str | None:
+    """Get the dsh Cordis composition file path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CONFIG_PATH environment variable
+        2. config.yaml orchestrator.dsh_config_path
+        3. None (the dsh client fails closed before spawning)
+
+    Returns:
+        Path to the trusted composition YAML, or None when dsh is not configured.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CONFIG_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_config_path:
+            return config.orchestrator.dsh_config_path
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_mode() -> str | None:
     """Get configured OpenCode integration mode from config file.
 

@@ -14,13 +14,11 @@ import re
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
 from ouroboros.auto.adapters import (
-    EnvRuntimeProbeRunner,
-    HandlerEvaluator,
     HandlerInterviewBackend,
     HandlerLateralThinker,
-    HandlerRalphPoller,
-    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -67,7 +65,6 @@ from ouroboros.auto.state import (
     AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
-    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import (
     auto_worktree_cleanup_eligible,
@@ -273,10 +270,9 @@ class AutoHandler:
                     "complete_product",
                     ToolInputType.BOOLEAN,
                     (
-                        "When true, chain RUN → RALPH_HANDOFF after a successful run "
-                        "handoff so a single ouroboros_auto invocation iterates Ralph "
-                        "until QA passes, convergence, or a budget bound trips. "
-                        "Defaults to false (opt-in)."
+                        "Deprecated and ignored. The run job owns "
+                        "run -> evaluate -> ralph; follow it with ouroboros_job_status "
+                        "or ouroboros_job_wait instead."
                     ),
                     required=False,
                     default=False,
@@ -376,7 +372,17 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
-        complete_product = bool(arguments.get("complete_product", False))
+        # Accepted so existing callers do not hard-fail. It is read here and
+        # nowhere else: no validation, no persisted state, no resume merging —
+        # passing it must behave exactly like omitting it.
+        if arguments.get("complete_product"):
+            structlog.get_logger(__name__).info(
+                "auto.complete_product.ignored",
+                detail=(
+                    "complete_product is deprecated and ignored: the run job owns "
+                    "run -> evaluate -> ralph"
+                ),
+            )
         attach_execution = _optional_text_arg(arguments, "attach_execution")
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
@@ -396,10 +402,6 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
-        validate_complete_product_timeout(
-            complete_product=complete_product and not (isinstance(resume, str) and resume),
-            pipeline_timeout_seconds=pipeline_timeout_seconds,
-        )
         # Distinguish "caller did not pass user_preferences" from "caller
         # passed an empty mapping". Only validate/parse when the caller
         # actually supplied the arg so a resume call can defer to persisted
@@ -445,15 +447,6 @@ class AutoHandler:
                     state.ledger,
                     state.user_preferences,
                 ).to_dict()
-            # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
-            # session intent, not a per-invocation flag. Honor the persisted
-            # value so MCP callers that omit ``complete_product`` on resume
-            # still chain RUN → RALPH_HANDOFF for sessions that originally
-            # opted in. Mirrors the CLI policy in ``cli/commands/auto.py``.
-            if state.complete_product and not complete_product:
-                complete_product = True
-            elif complete_product and not state.complete_product:
-                state.complete_product = True
         else:
             supplied_user_preferences = (
                 _parse_user_preferences(arguments.get("user_preferences"))
@@ -487,7 +480,6 @@ class AutoHandler:
             ).to_dict()
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
-            state.complete_product = complete_product
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
@@ -551,7 +543,6 @@ class AutoHandler:
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
         runtime_event_store = await initialized_runtime_event_store(self.event_store)
-
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -559,45 +550,11 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
             lateral_thinker=lateral_thinker,
+            # AI answer refiner: concrete goal-specific answers so interview
+            # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
             event_store=runtime_event_store,
         )
-        # Complete-product Ralph follows the execute-stage runtime because it
-        # continues product mutation/evaluation after the initial run handoff.
-        # OpenCode plugin mode is intentionally preserved here: unlike
-        # interview/Seed authoring, Ralph can surface a plugin delegation
-        # receipt to the caller.
-        ralph_opencode_mode = (
-            state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
-            if runtime_plan.execute.runtime_backend == "opencode"
-            else None
-        )
-        ralph_handler = None
-        if complete_product:
-            ralph_handler = (
-                self.ralph_handler_factory(
-                    runtime_plan.execute.runtime_backend,
-                    ralph_opencode_mode,
-                )
-                if self.ralph_handler_factory is not None
-                else RalphHandler(
-                    agent_runtime_backend=runtime_plan.execute.runtime_backend,
-                    opencode_mode=ralph_opencode_mode,
-                )
-            )
-        ralph_starter = (
-            HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
-            if ralph_handler is not None
-            else None
-        )
-        # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
-        # same ``RalphHandler`` so MCP-side resumes of an interrupted
-        # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
-        # to a terminal auto phase. The same handler is reused so both the
-        # starter and the poller share a ``JobManager`` (and underlying
-        # ``EventStore``) — without that share the poller would query a
-        # fresh, empty job table.
-        ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
         # demoted authoring mode as Interview/GenerateSeed so QA executes
@@ -610,24 +567,12 @@ class AutoHandler:
         # EVALUATE → UNSTUCK_LATERAL path. The complete-product evaluator is
         # plugin-skipped based on the resolved EVALUATE stage, not the default
         # runtime, so explicit non-plugin stage overrides remain consumable.
-        evaluator = None
         seed_qa_handler = QAHandler(
             llm_backend=self.llm_backend,
             agent_runtime_backend=runtime_plan.interview.runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        evaluate_plugin_mode = should_dispatch_via_plugin(
-            runtime_plan.evaluate.runtime_backend,
-            runtime_plan.evaluate.opencode_mode,
-        )
-        if complete_product and not evaluate_plugin_mode:
-            evaluation_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
-                opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
-            )
-            evaluator = HandlerEvaluator(evaluation_handler)
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
             event_appender=runtime_event_store,
@@ -642,7 +587,6 @@ class AutoHandler:
                 efficiency_mode=state.efficiency_mode,
                 frugality_assurance=state.frugality_assurance,
                 frugality_assurance_explicit=state.frugality_assurance_explicit,
-                owns_successors=complete_product,
             ),
             store=store,
             repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -655,14 +599,9 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
-            ralph_starter=ralph_starter,
-            ralph_resumer=ralph_resumer,
-            complete_product=complete_product,
-            evaluator=evaluator,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
-            probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
         )
         result: AutoPipelineResult | None = None
         try:
@@ -773,10 +712,6 @@ class StartAutoHandler:
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
             requested_efficiency_mode = _optional_text_arg(arguments, "efficiency_mode")
             requested_frugality_assurance = _optional_text_arg(arguments, "frugality_assurance")
-            validate_complete_product_timeout(
-                complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
-                pipeline_timeout_seconds=requested_pipeline_timeout,
-            )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         if attach_requested and not has_resume:
@@ -1057,7 +992,6 @@ class StartAutoHandler:
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
-        state.complete_product = bool(arguments.get("complete_product", False))
         supplied_user_preferences: dict[str, str | None] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
             supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))

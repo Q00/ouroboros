@@ -27,7 +27,6 @@ def test_packaged_auto_skill_dispatches_to_ouroboros_start_auto(tmp_path: Path) 
         "max_interview_rounds": "",
         "max_repair_rounds": "",
         "skip_run": True,
-        "complete_product": "",
         "pipeline_timeout_seconds": "",
         "efficiency_mode": "",
         "frugality_assurance": "",

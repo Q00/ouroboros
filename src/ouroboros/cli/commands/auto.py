@@ -10,20 +10,15 @@ from pathlib import Path
 import time
 from typing import Annotated
 
-from rich.console import Console
 from rich.markup import escape as _rich_escape
 import typer
 
 from ouroboros.auto.adapters import (
-    EnvRuntimeProbeRunner,
     HandlerInterviewBackend,
     HandlerLateralThinker,
-    HandlerRalphPoller,
-    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
-    HandlerSynchronousRunStarter,
     build_answer_refiner,
     load_seed,
     save_seed,
@@ -56,7 +51,6 @@ from ouroboros.auto.state import (
     AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
-    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import (
     auto_worktree_cleanup_eligible,
@@ -257,9 +251,9 @@ def auto_command(
         typer.Option(
             "--complete-product",
             help=(
-                "Chain RUN → RALPH_HANDOFF after a successful run handoff so a "
-                "single ooo auto invocation iterates Ralph until QA passes, "
-                "convergence, or a budget bound trips. Default off."
+                "Deprecated and ignored. The run job now owns "
+                "run -> evaluate -> ralph; follow it with `ooo status` or the "
+                "job tools instead."
             ),
         ),
     ] = False,
@@ -299,6 +293,11 @@ def auto_command(
     in-process job manager dies with the process and would otherwise cancel the
     run on exit. Pass ``--no-wait`` to restore fire-and-forget behaviour.
     """
+    if complete_product:
+        print_warning(
+            "--complete-product is deprecated and ignored: the run job owns "
+            "run -> evaluate -> ralph. Follow it with `ooo status` or the job tools."
+        )
     if status:
         if not resume:
             print_error("--status requires --resume auto_<id>")
@@ -337,7 +336,6 @@ def auto_command(
                 reconcile_run=reconcile_run,
                 reconcile_source=reconcile_source,
                 pipeline_timeout_seconds=timeout,
-                complete_product=complete_product,
                 domain=domain,
                 commit_policy=commit_policy,
                 worktree_policy=worktree_policy,
@@ -351,15 +349,7 @@ def auto_command(
         print_error(f"Auto pipeline failed: {exc}")
         raise typer.Exit(1) from exc
 
-    blocked_state: AutoPipelineState | None = None
-    if result.status == "blocked":
-        try:
-            blocked_state = AutoStore().load(result.auto_session_id)
-        except Exception:
-            # Best-effort reload for the blocked panel's ``stage`` field —
-            # the panel degrades to result-only fields when this fails.
-            blocked_state = None
-    _print_result(result, show_ledger=show_ledger, state=blocked_state)
+    _print_result(result, show_ledger=show_ledger)
     if no_wait and _is_run_handoff_only_completion(result) and result.job_id:
         print_warning(
             "Detached with --no-wait: the execute job runs in this CLI process only. "
@@ -401,7 +391,6 @@ async def _run_auto(
     reconcile_run: bool = False,
     reconcile_source: str | None = None,
     pipeline_timeout_seconds: float | None = None,
-    complete_product: bool = False,
     domain: str | None = None,
     commit_policy: str | None = None,
     worktree_policy: str | None = None,
@@ -419,11 +408,6 @@ async def _run_auto(
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
-    validate_complete_product_timeout(
-        complete_product=complete_product and not bool(resume),
-        pipeline_timeout_seconds=pipeline_timeout_seconds,
-        option_name="--timeout",
-    )
     if resume:
         if pipeline_timeout_seconds is not None:
             raise ValueError(
@@ -468,17 +452,6 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
-        # Q00/ouroboros#773 (review-3): ``--complete-product`` is durable
-        # session intent, not a per-invocation flag. Honor the persisted value
-        # on resume so a session originally started with ``--complete-product``
-        # keeps chaining RUN → RALPH_HANDOFF even when the operator forgets to
-        # re-pass the flag. Lowering on resume is rejected to mirror the
-        # ``--max-*-rounds`` policy: a bound that already shaped behavior must
-        # be raised explicitly, never silently tightened.
-        if state.complete_product and not complete_product:
-            complete_product = True
-        elif complete_product and not state.complete_product:
-            state.complete_product = True
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -492,7 +465,6 @@ async def _run_auto(
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
-        state.complete_product = complete_product
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = float(pipeline_timeout_seconds)
 
@@ -618,17 +590,12 @@ async def _run_auto(
                 opencode_mode=demote_plugin_opencode_mode(runtime_plan.reflect.opencode_mode),
             )
         )
+    watchdog_event_store = EventStore()
+    await watchdog_event_store.initialize()
     # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
     # goal-specific ones so interview ambiguity actually converges. Best-effort —
     # any construction failure leaves the deterministic answerer untouched.
     answer_refiner = build_answer_refiner()
-    # Runtime EventStore shared by the driver's ``auto.*`` observability events
-    # and the watchdog below. Without this handle every pipeline
-    # ``_emit_runtime_event`` call (``auto.seed_qa.blocked``,
-    # ``auto.seed_preflight.blocked``, ``auto.session.blocked``) silently
-    # no-ops, so status/TUI surfaces never learn a session blocked.
-    runtime_event_store = EventStore()
-    await runtime_event_store.initialize()
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
@@ -636,44 +603,8 @@ async def _run_auto(
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
-        event_store=runtime_event_store,
+        event_store=watchdog_event_store,
     )
-    ralph_handler = (
-        # Q00/ouroboros#782 review-7/8/10: pass the un-demoted
-        # ``ralph_opencode_mode`` so an OpenCode plugin session can take the
-        # plugin ``_subagent`` dispatch path. ``opencode_mode`` (demoted) is
-        # still correct for the authoring/run-handoff handlers above.
-        # Q00/ouroboros#1090: use the full MCP composition root rather than a
-        # bare RalphHandler so job-mode Ralph has an EvolutionaryLoop.
-        _build_configured_ralph_handler(
-            runtime=runtime_plan.execute.runtime_backend,
-            opencode_mode=(
-                state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
-                if runtime_plan.execute.runtime_backend == "opencode"
-                else None
-            ),
-        )
-        if complete_product
-        else None
-    )
-    ralph_starter = (
-        HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
-        if ralph_handler is not None
-        else None
-    )
-    # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the same
-    # ``RalphHandler`` so a session interrupted in ``RALPH_HANDOFF`` (e.g.
-    # client disconnects while the background Ralph job keeps running) can
-    # actually be reconciled to ``COMPLETE`` / ``BLOCKED`` / ``FAILED`` on
-    # ``--resume`` instead of being stranded in the non-terminal handoff
-    # state forever. Sharing the handler reuses the same ``JobManager``
-    # (and underlying ``EventStore``) so the poller sees the persisted job.
-    ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
-    # Share the driver's runtime EventStore so the watchdog and the
-    # ``auto.*`` observability events (``auto.session.blocked`` et al.) land
-    # in the same store the attention relay reads — a fresh EventStore here
-    # would silently fork the blocked-event stream.
-    watchdog_event_store = runtime_event_store
     # Auto does not have an execution id until interview/Seed handoff finishes.
     # Publish the picker now; it polls until the eventual run appears, and the
     # selected row supplies the pinned ?run=<execution_id> detail URL.
@@ -687,14 +618,10 @@ async def _run_auto(
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
-        run_starter=(
-            HandlerSynchronousRunStarter(execute_seed, cwd=state.cwd)
-            if complete_product
-            else HandlerRunStarter(
-                start_execute,
-                cwd=state.cwd,
-                use_worktree=auto_workspace is None,
-            )
+        run_starter=HandlerRunStarter(
+            start_execute,
+            cwd=state.cwd,
+            use_worktree=auto_workspace is None,
         ),
         store=store,
         repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -707,14 +634,10 @@ async def _run_auto(
         attach_source=attach_source,
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
-        ralph_starter=ralph_starter,
-        ralph_resumer=ralph_resumer,
-        complete_product=complete_product,
         seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
         lateral_thinker=lateral_thinker,
         progress_callback=progress_callback,
         watchdog=watchdog,
-        probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
     )
     result: AutoPipelineResult | None = None
     try:
@@ -1402,18 +1325,10 @@ def _render_blocked_panel(
     state: AutoPipelineState | None,
     result: AutoPipelineResult,
 ) -> None:
-    """Print a compact, actionable summary for a ``blocked`` terminal result.
-
-    Answers WHY the session stopped, WHAT (if anything) the user must
-    resolve, and HOW to resume — up front, before the full field-by-field
-    dump ``_print_result`` renders below it. ``state`` is the freshly
-    reloaded persisted session (``None`` when the reload failed); the panel
-    degrades to ``result``-only fields when it is unavailable.
-    """
+    """Print the stop reason, answerable gaps, and authoritative resume action."""
     stage = (state.last_tool_name if state is not None else None) or "unknown"
     reason_code = result.stop_reason_code or "-"
     blocker_text = " ".join((result.blocker or "").split())[:400]
-
     open_items: list[str] = []
     if reason_code == "seed_preflight_unexecutable" and result.blocker:
         _, _, tail = result.blocker.rpartition("resume: ")
@@ -1424,10 +1339,6 @@ def _render_blocked_panel(
     ):
         open_items = [*result.last_qa_differences, *result.last_qa_suggestions][:5]
 
-    # Derive the resume row from the single source of truth for resume
-    # syntax (resume_render.py) rather than re-deriving the CLI command
-    # here — this also closes the NONE-without-goal gap, where that helper
-    # returns no lines at all (no other surface fills that gap either).
     resume_lines = render_resume_lines(
         result.resume_capability, result.auto_session_id, goal=None, use_markup=False
     )
@@ -1453,12 +1364,7 @@ def _render_blocked_panel(
     console.print("────────────────────────────────────────────────")
 
 
-def _print_result(
-    result: AutoPipelineResult,
-    *,
-    show_ledger: bool,
-    state: AutoPipelineState | None = None,
-) -> None:
+def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
     external_ralph_plugin = _is_external_ralph_plugin_completion(result)
