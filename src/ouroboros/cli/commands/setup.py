@@ -3000,6 +3000,13 @@ def _setup_hermes(hermes_path: str) -> bool:
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
 
+    # Skills are a required Hermes activation artifact. Install them before
+    # selecting Hermes or registering its MCP server so a failed installation
+    # cannot leave an incomplete runtime represented as active durable state.
+    if not _install_hermes_artifacts():
+        print_error("Hermes runtime activation incomplete: required skills were not installed.")
+        return False
+
     if not _commit_runtime_activation(
         runtime_name="Hermes",
         host_path=Path.home() / ".hermes" / "config.yaml",
@@ -3013,11 +3020,6 @@ def _setup_hermes(hermes_path: str) -> bool:
         register_host=lambda: _register_hermes_mcp_server(detected=detected),
         create_defaults=create_default_config,
     ):
-        return False
-
-    # Install Ouroboros skills for Hermes
-    if not _install_hermes_artifacts():
-        print_error("Hermes runtime activation incomplete: required skills were not installed.")
         return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")

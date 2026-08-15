@@ -7704,6 +7704,13 @@ class TestHermesSetup:
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_runtime_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_runtime_config, encoding="utf-8")
+        hermes_config = tmp_path / ".hermes" / "config.yaml"
+        hermes_config.parent.mkdir()
+        original_hermes_config = "mcp_servers:\n  existing:\n    command: keep\n"
+        hermes_config.write_text(original_hermes_config, encoding="utf-8")
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -7712,7 +7719,7 @@ class TestHermesSetup:
                 "ouroboros.cli.commands.setup._install_hermes_artifacts",
                 return_value=False,
             ),
-            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as mock_register,
         ):
             result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
 
@@ -7720,6 +7727,9 @@ class TestHermesSetup:
         assert result is False
         assert "activation incomplete" in output
         assert "Configured Hermes runtime" not in output
+        assert config_path.read_text(encoding="utf-8") == original_runtime_config
+        assert hermes_config.read_text(encoding="utf-8") == original_hermes_config
+        mock_register.assert_not_called()
 
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
