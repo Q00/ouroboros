@@ -50,7 +50,7 @@ _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
 _FILE_TOKEN_RE = re.compile(
-    r"(?:\./)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b"
+    r"(?:\./|/)?(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,5}\b"
     r"|(?:\./)[\w.-]+\b"
     r"|(?<![\w./-])[\w-]+\.[A-Za-z0-9]{1,5}\b"
 )
@@ -315,6 +315,11 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     except ValueError:
                         pass
                     break
+                if parts[cursor] in {"-m", "--module"}:
+                    break
+                if parts[cursor] in {"-X", "-W"}:
+                    cursor += 2
+                    continue
                 cursor += 1
             if cursor < len(parts) and not parts[cursor].startswith("-"):
                 programs.add(_normalize_workspace_path(parts[cursor]))

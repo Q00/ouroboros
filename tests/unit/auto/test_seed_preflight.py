@@ -204,6 +204,9 @@ def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None
     (
         ("python -u check.py", "check.py"),
         ("/usr/bin/python3 check.py", "check.py"),
+        ("python -X dev check.py", "check.py"),
+        ("python -W error check.py", "check.py"),
+        ("/usr/bin/python3 /definitely/missing/check.py", "/definitely/missing/check.py"),
         ('sh -c "python check.py"', "check.py"),
         ("bash -c ./verify", "verify"),
     ),
