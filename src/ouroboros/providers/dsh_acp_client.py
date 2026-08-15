@@ -112,6 +112,12 @@ class DshAcpClient(OurocodeAcpClient):
                 "set OUROBOROS_DSH_CONFIG_PATH",
                 error_type="invalid_config",
             )
+        if not Path(self._config_path).is_absolute():
+            raise AcpClientError(
+                "dsh config_path must be an absolute trusted path; relative paths "
+                "could resolve against the untrusted project cwd",
+                error_type="invalid_config",
+            )
         return [self._cli_path, "--config", self._config_path]
 
     def _spawn_failure_hint(self) -> str:

@@ -86,8 +86,8 @@ class DshLLMAdapter:
         Args:
             cli_path: Path to ``dsh-acp-demo`` (PATH lookup if None).
             cwd: Working directory for the ACP session (resolved to absolute).
-            config_path: dsh Cordis composition file forwarded as ``--config``;
-                ``None`` lets the bin resolve ``./cordis.yml`` against ``cwd``.
+            config_path: absolute trusted dsh Cordis composition file forwarded
+                as ``--config``; ``None`` or a relative path fails closed.
             timeout: Per-turn wall-clock timeout in seconds.
             startup_timeout: Timeout for the initialize/session-new handshake.
             io_recorder: Optional IO journal recorder (#517). ``None`` records

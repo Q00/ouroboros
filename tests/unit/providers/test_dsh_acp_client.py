@@ -42,6 +42,14 @@ def test_spawn_argv_forwards_config_path(tmp_path: Path) -> None:
     assert argv == [str(_FAKE_ACP), "--config", str(config)]
 
 
+def test_spawn_argv_rejects_relative_config_path(tmp_path: Path) -> None:
+    with pytest.raises(AcpClientError) as excinfo:
+        _client(tmp_path, config_path="cordis.yml")._spawn_argv()
+
+    assert excinfo.value.error_type == "invalid_config"
+    assert "absolute trusted path" in excinfo.value.message
+
+
 def test_session_new_params_always_include_empty_mcp_servers(tmp_path: Path) -> None:
     """dsh's ACP server indexes ``params.mcpServers.length`` unconditionally.
 
