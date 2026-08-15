@@ -50,6 +50,7 @@ async def publish_advisory(
     state: AutoPipelineState,
     seed: Seed,
     reason: str,
+    detail: str,
     attempts: int,
     score: float | None,
     emit: Callable[[str, str, dict[str, Any]], Awaitable[None]],
@@ -68,7 +69,14 @@ async def publish_advisory(
     await emit(
         SEED_QA_ADVISORY_EVENT,
         state.auto_session_id,
-        seed_qa_advisory_payload(state, seed, reason=reason, attempts=attempts, score=score),
+        seed_qa_advisory_payload(
+            state,
+            seed,
+            reason=reason,
+            detail=detail,
+            attempts=attempts,
+            score=score,
+        ),
     )
 
 
@@ -94,6 +102,7 @@ def seed_qa_advisory_payload(
     seed: Seed,
     *,
     reason: str,
+    detail: str,
     attempts: int,
     score: float | None,
 ) -> dict[str, Any]:
@@ -114,6 +123,7 @@ def seed_qa_advisory_payload(
         "differences": list(state.last_qa_differences[:_MAX_EVIDENCE]),
         "suggestions": list(state.last_qa_suggestions[:_MAX_EVIDENCE]),
         "reason": reason,
+        "detail": " ".join(detail.split())[:200],
     }
 
 

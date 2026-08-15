@@ -2855,8 +2855,10 @@ class AutoPipeline:
                 return await advisory("evaluator_error", f"Seed QA raised {type(exc).__name__}")
 
             if qa_result.error:
+                detail = " ".join(str(qa_result.error).split())[:200] or "unspecified"
                 return await advisory(
-                    "evaluator_transient_error", "Seed QA reported a transient evaluator error"
+                    "evaluator_transient_error",
+                    f"Seed QA reported a transient evaluator error: {detail}",
                 )
 
             state.last_qa_score = float(qa_result.score)
@@ -2966,6 +2968,7 @@ class AutoPipeline:
             state=state,
             seed=seed,
             reason=reason,
+            detail=detail,
             attempts=attempts,
             score=score,
             emit=self._emit_runtime_event,

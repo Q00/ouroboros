@@ -2000,7 +2000,12 @@ async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
             raise AssertionError("unreachable")
         if failure == "exception":
             raise RuntimeError("evaluator crashed")
-        return EvaluateResult(passed=False, score=0.0, verdict="", error="transient")
+        return EvaluateResult(
+            passed=False,
+            score=0.0,
+            verdict="",
+            error="upstream adapter unavailable",
+        )
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.max_repair_rounds = 1
@@ -2039,6 +2044,8 @@ async def test_a_failed_evaluator_never_republishes_the_previous_verdict(
     assert advisory["score"] is None
     assert advisory["differences"] == []
     assert advisory["suggestions"] == []
+    if failure == "transient":
+        assert advisory["detail"].endswith("upstream adapter unavailable")
     assert result.status == "complete"
 
 
