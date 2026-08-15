@@ -199,6 +199,30 @@ def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None
     assert report.blocking_findings[0].subject == "check.py"
 
 
+@pytest.mark.parametrize(
+    ("command", "program"),
+    (
+        ("python -u check.py", "check.py"),
+        ("/usr/bin/python3 check.py", "check.py"),
+        ('sh -c "python check.py"', "check.py"),
+        ("bash -c ./verify", "verify"),
+    ),
+)
+def test_missing_wrapped_verification_program_blocks(
+    tmp_path: Path, command: str, program: str
+) -> None:
+    seed = _seed(
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(description="Verifier passes", verify_command=command),
+        )
+    )
+
+    report = run_seed_preflight(seed, workspace_root=tmp_path)
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert report.blocking_findings[0].subject == program
+
+
 def test_missing_extensionless_executable_blocks_unless_declared_artifact(
     tmp_path: Path,
 ) -> None:

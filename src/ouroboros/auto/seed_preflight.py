@@ -288,14 +288,38 @@ def _command_program_tokens(command: str) -> frozenset[str]:
     runners = frozenset({"bash", "sh", "node", "ruby"})
 
     def is_runner(token: str) -> bool:
-        return token in runners or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", token) is not None
+        executable = Path(token).name
+        return (
+            executable in runners
+            or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable) is not None
+        )
 
     programs: set[str] = set()
-    for index, token in enumerate(tokens):
-        if (token.startswith("./") and index == 0) or (
-            index and is_runner(tokens[index - 1]) and not token.startswith("-")
-        ):
-            programs.add(_normalize_workspace_path(token))
+
+    def scan(parts: list[str]) -> None:
+        if parts and parts[0].startswith("./"):
+            programs.add(_normalize_workspace_path(parts[0]))
+        for index, token in enumerate(parts):
+            if token in {"bash", "sh"} and index + 2 < len(parts) and parts[index + 1] == "-c":
+                try:
+                    scan(shlex.split(parts[index + 2]))
+                except ValueError:
+                    continue
+            if not is_runner(token):
+                continue
+            cursor = index + 1
+            while cursor < len(parts) and parts[cursor].startswith("-"):
+                if parts[cursor] in {"-c", "--command"} and cursor + 1 < len(parts):
+                    try:
+                        scan(shlex.split(parts[cursor + 1]))
+                    except ValueError:
+                        pass
+                    break
+                cursor += 1
+            if cursor < len(parts) and not parts[cursor].startswith("-"):
+                programs.add(_normalize_workspace_path(parts[cursor]))
+
+    scan(tokens)
     return frozenset(programs)
 
 
