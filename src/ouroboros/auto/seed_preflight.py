@@ -285,11 +285,15 @@ def _command_program_tokens(command: str) -> frozenset[str]:
         tokens = shlex.split(command)
     except ValueError:
         return frozenset()
-    runners = frozenset({"python", "python3", "python3.12", "bash", "sh", "node", "ruby"})
+    runners = frozenset({"bash", "sh", "node", "ruby"})
+
+    def is_runner(token: str) -> bool:
+        return token in runners or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", token) is not None
+
     programs: set[str] = set()
     for index, token in enumerate(tokens):
         if (token.startswith("./") and index == 0) or (
-            index and tokens[index - 1] in runners and not token.startswith("-")
+            index and is_runner(tokens[index - 1]) and not token.startswith("-")
         ):
             programs.add(_normalize_workspace_path(token))
     return frozenset(programs)

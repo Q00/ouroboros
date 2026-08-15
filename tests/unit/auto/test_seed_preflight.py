@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.auto.seed_preflight import run_seed_preflight
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
@@ -180,12 +182,13 @@ def test_verify_script_reference_is_advisory_not_blocking(tmp_path: Path) -> Non
     assert advisory[0].subject == "tests/test_cli.py"
 
 
-def test_missing_root_python_program_blocks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runner", ("python", "python3.11", "python3.14", "python12.3.4"))
+def test_missing_root_python_program_blocks(tmp_path: Path, runner: str) -> None:
     seed = _seed(
         acceptance_criteria=(
             AcceptanceCriterionSpec(
                 description="Contract checker passes",
-                verify_command="python check.py",
+                verify_command=f"{runner} check.py",
             ),
         )
     )

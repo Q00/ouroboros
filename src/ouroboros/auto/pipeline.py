@@ -237,6 +237,8 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
+_TRANSIENT_TOOL_ATTEMPTS = 3
+_TRANSIENT_RETRY_BACKOFF_SECONDS = (1.0, 5.0)
 DETACHED_STATUS = "detached"
 _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # Mirrors RalphHandler.MIN_MAX_TOTAL_SECONDS. The auto layer checks this before
@@ -569,24 +571,8 @@ class AutoPipeline:
             if state.seed_origin is SeedOrigin.NONE:
                 state.seed_origin = SeedOrigin.AUTO_PIPELINE
         _arm_legacy_missing_deadline(state)
-        # Top-level deadline check on resume (#779). When ``deadline_at`` is
-        # already set and has passed before this process even starts work,
-        # immediately transition to BLOCKED so no phase work is invoked. The
-        # message is the literal one the issue contract requires so external
-        # surfaces can distinguish a resume-expired session from a freshly
-        # tripped deadline mid-run.
-        #
-        # Q00/ouroboros#782 review-12 BLOCKING #1: never gate ``RALPH_HANDOFF``
-        # resume on the deadline-expired early returns when there is a
-        # persisted Ralph job / confirmed plugin dispatch waiting on
-        # reconciliation. Falling through to ``_resume_ralph_handoff`` lets
-        # the poller (or plugin-confirmed transition) finalize the auto
-        # phase if Ralph already finished in the background while the
-        # client was disconnected. If the job is still running, the
-        # poller's own deadline-aware wait fires the same ``pipeline_timeout``
-        # BLOCKED state via ``_enforce_deadline``. Same exception applies
-        # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
-        # recovery branch below.
+        # Preserve a dispatched Ralph checkpoint across an expired deadline;
+        # all other resumed work remains subject to the top-level gate.
         if (
             state.deadline_at is not None
             and not state.is_terminal()
@@ -621,7 +607,12 @@ class AutoPipeline:
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-            resume_phase = _recoverable_phase_for_tool(state.last_tool_name)
+            resume_phase = (
+                AutoPhase.RALPH_HANDOFF
+                if state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+                and _has_reconciliable_ralph_resume_checkpoint(state)
+                else _recoverable_phase_for_tool(state.last_tool_name)
+            )
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
@@ -699,13 +690,7 @@ class AutoPipeline:
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
     ) -> AutoPipelineResult | None:
-        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception as the
-        # early-return above — let RALPH_HANDOFF resume reach
-        # ``_resume_ralph_handoff`` so an already-terminal Ralph job can be
-        # reconciled. The poller's deadline-aware ``wait_for`` (and
-        # subsequent ``_enforce_deadline`` call inside ``_poll_ralph_job``)
-        # still fires ``pipeline_timeout`` if the job is genuinely still
-        # running after the persisted budget has expired.
+        # A dispatched Ralph checkpoint is reconciled before deadline blocking.
         if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
@@ -827,13 +812,6 @@ class AutoPipeline:
             AutoPhase.REVIEW,
             AutoPhase.RUN,
             AutoPhase.RALPH_HANDOFF,
-            # RFC #809 Phase 2.1/2.2 — EVALUATE and UNSTUCK_LATERAL are
-            # resumable phases. Their dedicated resume handlers below
-            # (around lines 505 / 519) re-enter ``_run_evaluate`` /
-            # ``_run_lateral`` which are idempotent via persisted artifact
-            # hashes. Without these entries in the allowlist, a session
-            # recovered to either phase from BLOCKED/FAILED would be
-            # immediately re-blocked here before reaching its handler.
             AutoPhase.EVALUATE,
             AutoPhase.UNSTUCK_LATERAL,
         }:
@@ -853,9 +831,6 @@ class AutoPipeline:
         *,
         resume_tool_name: str | None,
     ) -> AutoPipelineResult | Seed:
-        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception — let
-        # ``RALPH_HANDOFF`` resume reach ``_resume_ralph_handoff`` so the
-        # poller can reconcile an already-terminal Ralph job.
         if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
@@ -2046,30 +2021,50 @@ class AutoPipeline:
             timeout = self._deadline_capped_timeout(
                 state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
             )
-            try:
-                qa_result = await asyncio.wait_for(
-                    self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
-                )
-            except TimeoutError:
-                if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
+            qa_result: EvaluateResult | None = None
+            transient_reason = "evaluator_error"
+            transient_detail = "Seed QA evaluator failed"
+            for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+                try:
+                    candidate = await asyncio.wait_for(
+                        self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
                     )
-                return await advisory(
-                    "evaluator_timeout", f"Seed QA timed out after {timeout:.0f}s"
-                )
-            except Exception as exc:
-                return await advisory("evaluator_error", f"Seed QA raised {type(exc).__name__}")
-
-            if qa_result.error:
-                detail = _safe_seed_qa_error_detail(qa_result.error)
-                return await advisory(
-                    "evaluator_transient_error",
-                    f"Seed QA reported a transient evaluator error: {detail}",
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
+                    transient_reason = "evaluator_timeout"
+                    transient_detail = f"Seed QA timed out after {timeout:.0f}s"
+                except Exception as exc:
+                    transient_reason = "evaluator_error"
+                    transient_detail = f"Seed QA raised {type(exc).__name__}"
+                else:
+                    if not candidate.error:
+                        qa_result = candidate
+                        break
+                    detail = _safe_seed_qa_error_detail(candidate.error)
+                    transient_reason = "evaluator_transient_error"
+                    transient_detail = f"Seed QA reported a transient evaluator error: {detail}"
+                if transient_attempt < _TRANSIENT_TOOL_ATTEMPTS:
+                    backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                        min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    await asyncio.sleep(backoff)
+            if qa_result is None:
+                return await self._seed_qa_advisory_continue(
+                    state,
+                    ledger,
+                    current_seed,
+                    current_review,
+                    reason=transient_reason,
+                    detail=transient_detail,
+                    attempts=_TRANSIENT_TOOL_ATTEMPTS,
+                    score=None,
                 )
 
             state.last_qa_score = float(qa_result.score)
@@ -2095,6 +2090,22 @@ class AutoPipeline:
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
+                if _requests_seed_qa_ambiguity_repair(qa_result):
+                    blocker = (
+                        "seed_qa_ambiguity_unrepairable: Seed QA found unresolved ambiguity; "
+                        "new interview evidence is required before execution"
+                    )
+                    state.mark_blocked(
+                        blocker,
+                        tool_name="seed_qa",
+                        error_code="seed_qa_ambiguity_unrepairable",
+                    )
+                    self._save(state)
+                    return (
+                        self._result(state, ledger, review=current_review, blocker=blocker),
+                        current_seed,
+                        current_review,
+                    )
                 try:
                     current_seed = normalize_execution_acceptance(
                         await self._repair_seed_after_qa(
@@ -2225,22 +2236,31 @@ class AutoPipeline:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
-        try:
-            lateral_result = await asyncio.wait_for(
-                self.lateral_thinker(
-                    persona=persona,
-                    qa_differences=safe_feedback,
-                    qa_suggestions=(),
-                    run_artifact=seed_yaml,
-                ),
-                timeout=self._deadline_capped_timeout(
-                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-                ),
-            )
-        except Exception:  # noqa: BLE001 — lateral is best-effort; degrade gracefully
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
-
-        if lateral_result.error or not lateral_result.text.strip():
+        lateral_result: LateralResult | None = None
+        for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+            try:
+                candidate = await asyncio.wait_for(
+                    self.lateral_thinker(
+                        persona=persona,
+                        qa_differences=safe_feedback,
+                        qa_suggestions=(),
+                        run_artifact=seed_yaml,
+                    ),
+                    timeout=self._deadline_capped_timeout(
+                        state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — bounded best-effort retry
+                candidate = None
+            if candidate is not None and not candidate.error and candidate.text.strip():
+                lateral_result = candidate
+                break
+            if transient_attempt < _TRANSIENT_TOOL_ATTEMPTS:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(backoff)
+        if lateral_result is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 
         state.last_lateral_persona = lateral_result.persona or persona.value
@@ -2821,7 +2841,9 @@ def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool
     unconfirmed ``plugin_pending`` checkpoint must still obey normal deadline
     enforcement because resume has to retry the side-effecting plugin dispatch.
     """
-    if state.phase is not AutoPhase.RALPH_HANDOFF:
+    if state.phase is not AutoPhase.RALPH_HANDOFF and not (
+        state.phase is AutoPhase.BLOCKED and state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    ):
         return False
     return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
 
@@ -2888,7 +2910,7 @@ def _seed_with_seed_qa_lateral_feedback(
     binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
-    del attempt
+    del attempt, qa_result
     normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
     existing_constraints = tuple(
         constraint
@@ -2900,10 +2922,6 @@ def _seed_with_seed_qa_lateral_feedback(
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -2926,10 +2944,6 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -2950,7 +2964,6 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
-_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,

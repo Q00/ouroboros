@@ -50,7 +50,6 @@ from ouroboros.backends.capabilities import (
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 
-# Advisory prompt text moved to ``mcp.tools.advisory_prompts`` in #1754;
 # re-exported for importers that already reach for these names here.
 from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _GENERIC_ADVISORY_OUTPUT_SECTION,
@@ -76,6 +75,7 @@ from ouroboros.mcp.tools.fanout import (  # noqa: F401
     stamp_question_advisory_fanout,
     submit_fanout_results,
 )
+from ouroboros.mcp.tools.interview_prompt import bounded_system_prompt
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -91,7 +91,6 @@ _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
-_INTERVIEW_SUBAGENT_MAX_SYSTEM_PROMPT_CHARS = 3_150
 _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
 _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
@@ -844,16 +843,6 @@ def _truncate_head(text: str | None, max_chars: int) -> str:
     return text[:max_chars] + "\n[truncated]"
 
 
-def _truncate_prompt_section(text: str, max_chars: int) -> str:
-    """Bound a long instruction section while preserving opening and closing rules."""
-    if len(text) <= max_chars:
-        return text
-    marker = "\n[truncated]\n"
-    head_chars = (max_chars - len(marker)) * 3 // 4
-    tail_chars = max_chars - len(marker) - head_chars
-    return f"{text[:head_chars].rstrip()}{marker}{text[-tail_chars:].lstrip()}"
-
-
 def _truncate_prompt_line(line: str, max_content_chars: int) -> str:
     """Bound one formatted transcript line without losing its Q/A label."""
     marker = ":** "
@@ -1191,10 +1180,7 @@ def build_interview_subagent(
     """
     from ouroboros.agents.loader import load_agent_prompt
 
-    system_prompt = _truncate_prompt_section(
-        load_agent_prompt("socratic-interviewer"),
-        _INTERVIEW_SUBAGENT_MAX_SYSTEM_PROMPT_CHARS,
-    )
+    system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
