@@ -196,6 +196,39 @@ def get_latest_version(*, current: str | None = None) -> str | None:
         return None
 
 
+def consume_update_notice(*, current: str | None = None) -> bool:
+    """Claim the once-per-24h SessionStart notice for this release channel."""
+    include_pre = bool(current and _is_prerelease(current))
+    notice_key = "latest_version_pre_notified_at" if include_pre else "latest_version_notified_at"
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with _cache_write_lock():
+            cache: dict = {}
+            if _CACHE_FILE.exists():
+                loaded = json.loads(_CACHE_FILE.read_text())
+                if isinstance(loaded, dict):
+                    cache = loaded
+            now = time.time()
+            stamp = cache.get(notice_key, 0)
+            if isinstance(stamp, (int, float)) and 0 <= now - stamp < _CACHE_TTL:
+                return False
+            cache[notice_key] = now
+            payload = json.dumps(cache)
+            fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix=".tmp")
+            try:
+                with open(fd, "w") as handle:
+                    handle.write(payload)
+                Path(tmp_path).replace(_CACHE_FILE)
+            except Exception:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+        return True
+    except Exception:
+        # Delivery is advisory. Fail closed so a damaged cache cannot spam
+        # every new host session.
+        return False
+
+
 def check_update() -> dict:
     """Check if an update is available.
 

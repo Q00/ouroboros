@@ -300,6 +300,29 @@ def test_write_fails_before_mutation_on_unrelated_second_from(monkeypatch, tmp_p
     assert json.loads(mcp_json.read_text()) == descriptor
 
 
+def test_write_fails_before_mutation_on_equals_form_second_from(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _seed_sync_fixture(tmp_path, monkeypatch)
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    descriptor = _mcp_descriptor("ouroboros-ai[mcp]")
+    descriptor["mcpServers"]["ouroboros"]["args"].append("--from=other-package")
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    mcp_json.write_text(json.dumps(descriptor))
+    plugin_before = plugin_json.read_text()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    with pytest.raises(SystemExit, match="could not validate"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_text() == plugin_before
+    assert json.loads(mcp_json.read_text()) == descriptor
+
+
 def test_update_version_marker_preserves_unrelated_bytes_with_bom_and_crlf(
     tmp_path: Path,
     monkeypatch,

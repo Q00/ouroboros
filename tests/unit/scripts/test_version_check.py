@@ -221,6 +221,17 @@ class TestGetLatestVersion:
             assert "latest_version_checked_at" in payload
 
 
+class TestNoticeConsumption:
+    def test_notice_is_consumed_once_per_day(self, tmp_path: Path) -> None:
+        cache_file = tmp_path / "version-check-cache.json"
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+        ):
+            assert version_check.consume_update_notice(current="0.20.0") is True
+            assert version_check.consume_update_notice(current="0.20.0") is False
+
+
 class TestCheckUpdate:
     """Test check_update logic."""
 
