@@ -402,6 +402,43 @@ class TestInstallHermesSkills:
         assert live_note.read_text(encoding="utf-8") == "keep across crash"
         assert target_dir.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "new skill\n"
 
+    def test_recovery_marker_cleanup_failure_leaves_retryable_backup(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source_skills_dir = tmp_path / "source-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh\n")
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._repo_root_skills_dir",
+            lambda: source_skills_dir,
+        )
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        backup = parent / ".ouroboros.old.recoverable"
+        backup.mkdir(parents=True)
+        backup.joinpath(_SWAP_MARKER).write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+        backup.joinpath("operator-note.txt").write_text("preserve\n", encoding="utf-8")
+        target = parent / "ouroboros"
+        real_remove = _remove_target_path
+        failed = False
+
+        def fail_live_marker_cleanup(path: Path) -> None:
+            nonlocal failed
+            if path == target / _SWAP_MARKER and not failed:
+                failed = True
+                raise OSError("simulated marker cleanup failure")
+            real_remove(path)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_target_path", fail_live_marker_cleanup
+        )
+        with pytest.raises(OSError, match="marker cleanup failure"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert not target.exists()
+        assert backup.joinpath(_SWAP_MARKER).is_file()
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "preserve\n"
+
     def test_cleanup_failure_then_interruption_recovers_newest_generation(
         self, tmp_path: Path, monkeypatch
     ) -> None:

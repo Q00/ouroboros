@@ -7816,6 +7816,43 @@ class TestHermesSetup:
         assert target.joinpath("operator-link").is_symlink()
         assert external.read_text(encoding="utf-8") == "concurrent\n"
 
+    def test_setup_hermes_never_reads_nested_symlink_targets(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-secret.txt"
+        external.write_text("secret\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+        real_read_bytes = Path.read_bytes
+
+        def refuse_external_read(path: Path) -> bytes:
+            if path == external:
+                raise AssertionError("nested symlink target was read")
+            return real_read_bytes(path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.read_bytes", refuse_external_read),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "secret\n"
+
     def test_setup_hermes_rollback_preserves_concurrent_managed_tree_edits(
         self, tmp_path: Path
     ) -> None:

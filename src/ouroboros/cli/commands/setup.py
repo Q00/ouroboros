@@ -2275,7 +2275,9 @@ class _ConcurrentSetupMutationError(OSError):
     """A managed path no longer matches the generation setup read."""
 
 
-def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
+def _snapshot_path(
+    path: Path, *, _seen: frozenset[Path] = frozenset(), follow_links: bool = True
+) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
         stat_result = path.lstat()
@@ -2286,6 +2288,8 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISLNK(stat_result.st_mode):
         link_target = os.readlink(path)
+        if not follow_links:
+            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
         target_path = Path(link_target)
         if not target_path.is_absolute():
             target_path = path.parent / target_path
@@ -2295,6 +2299,7 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
         target_snapshot = _snapshot_path(
             target_path,
             _seen=_seen | {current_path},
+            follow_links=follow_links,
         )
         try:
             target_stat = target_path.lstat()
@@ -2328,7 +2333,12 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
 
     children: list[tuple[str, _PathSnapshot]] = []
     for child in sorted(path.iterdir(), key=lambda item: item.name):
-        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
+        children.append(
+            (
+                child.name,
+                _snapshot_path(child, _seen=_seen | {current_path}, follow_links=follow_links),
+            )
+        )
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
 
 
@@ -2401,9 +2411,13 @@ def _restore_path_snapshot_if_current_matches(
     expected_current: _PathSnapshot | None,
     *,
     restore_link_targets: bool = True,
+    follow_links: bool = True,
 ) -> bool:
     """Restore only when the current path still matches setup's last known write."""
-    if expected_current is not None and _snapshot_path(path) != expected_current:
+    if (
+        expected_current is not None
+        and _snapshot_path(path, follow_links=follow_links) != expected_current
+    ):
         print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
         return False
     _restore_path_snapshot(
@@ -2999,30 +3013,20 @@ def _setup_hermes(hermes_path: str) -> bool:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
-
     from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 
     hermes_skill_target = (
         Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
     )
-    # Reject a linked live target before snapshotting so setup never traverses
-    # an arbitrary external tree.
     if hermes_skill_target.is_symlink():
         print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
         return False
-    hermes_skill_snapshot = _snapshot_path(hermes_skill_target)
-
-    # Skills are a required Hermes activation artifact. Install them before
-    # selecting Hermes or registering its MCP server so a failed installation
-    # cannot leave an incomplete runtime represented as active durable state.
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target, follow_links=False)
     if not _install_hermes_artifacts():
         print_error("Hermes runtime activation incomplete: required skills were not installed.")
         return False
 
-    # Roll back only our own published generation.  If an operator edits the
-    # tree while MCP registration runs, preserve those edits instead of
-    # restoring a stale pre-install snapshot over them.
-    hermes_skill_published = _snapshot_path(hermes_skill_target)
+    hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
 
     def rollback_hermes_skills() -> None:
         try:
@@ -3031,6 +3035,7 @@ def _setup_hermes(hermes_path: str) -> bool:
                 hermes_skill_snapshot,
                 hermes_skill_published,
                 restore_link_targets=False,
+                follow_links=False,
             )
         except OSError as exc:
             print_error(f"Hermes activation rollback could not restore skills: {exc}")
