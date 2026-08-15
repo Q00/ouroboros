@@ -25,6 +25,59 @@ _SKILL_ENTRYPOINT = "SKILL.md"
 _LEGACY_PACKAGE_ARTIFACTS = ("__init__.py", "artifacts.py", "__pycache__")
 _SWAP_MARKER = ".ouroboros-managed-swap"
 _SWAP_MARKER_CONTENT = "ouroboros-hermes-swap-v1\n"
+_SWAP_INTENT_SUFFIX = ".intent"
+
+
+def _swap_intent_path(backup: Path) -> Path:
+    return backup.with_name(backup.name + _SWAP_INTENT_SUFFIX)
+
+
+def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
+    """Recover every externally-marked rename window before touching live state."""
+    for intent in target.parent.glob(f"{backup_prefix}*{_SWAP_INTENT_SUFFIX}"):
+        backup = intent.with_name(intent.name.removesuffix(_SWAP_INTENT_SUFFIX))
+        if not target.exists() and backup.exists():
+            os.replace(backup, target)
+        elif target.exists() and backup.exists():
+            _remove_target_path(backup)
+        if not backup.exists():
+            _remove_target_path(intent)
+
+
+def atomic_swap_generation(target: Path, replacement: Path) -> None:
+    """Publish a complete sibling generation with restart-recognizable recovery."""
+    backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
+    intent = _swap_intent_path(backup)
+    intent.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+    if target.exists():
+        os.replace(target, backup)
+    try:
+        os.replace(replacement, target)
+    except BaseException:
+        if backup.exists() and not target.exists():
+            os.replace(backup, target)
+        _remove_target_path(intent)
+        raise
+    try:
+        _remove_target_path(backup)
+    except OSError:
+        # The canonical target is already a complete committed generation.
+        # Keep the intent so the next invocation can finish retirement.
+        return
+    _remove_target_path(intent)
+
+
+def atomic_remove_generation(target: Path) -> None:
+    """Remove a generation through a restart-recognizable backup rename."""
+    backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
+    intent = _swap_intent_path(backup)
+    intent.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
+    os.replace(target, backup)
+    try:
+        _remove_target_path(backup)
+    except OSError:
+        return
+    _remove_target_path(intent)
 
 
 def _contains_skill_bundles(skills_dir: Path) -> bool:
@@ -138,6 +191,7 @@ def install_hermes_skills(
     # Validate the complete destination chain before inspecting or mutating
     # any target or recovery path beneath it.
     _prepare_hermes_install_root(target_dir.parent)
+    _recover_swap_intents(target_dir, backup_prefix)
     if target_dir.is_symlink():
         msg = f"Refusing to install Hermes skills into symlinked directory: {target_dir}"
         raise OSError(msg)
@@ -217,39 +271,7 @@ def install_hermes_skills(
                     ):
                         _remove_target_path(existing_path)
 
-            backup_dir = target_dir.with_name(f"{backup_prefix}{uuid4().hex}")
-            if target_dir.exists() or target_dir.is_symlink():
-                marker_path = target_dir / _SWAP_MARKER
-                previous_marker = marker_path.read_bytes() if marker_path.is_file() else None
-                try:
-                    marker_path.write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
-                    os.replace(target_dir, backup_dir)
-                except BaseException:
-                    if previous_marker is None:
-                        _remove_target_path(marker_path)
-                    else:
-                        marker_path.write_bytes(previous_marker)
-                    raise
-            try:
-                os.replace(staging_dir, target_dir)
-            except OSError:
-                if backup_dir.exists() and not target_dir.exists():
-                    os.replace(backup_dir, target_dir)
-                raise
-            try:
-                _remove_target_path(backup_dir)
-            except BaseException:
-                # Publication is not committed until the old generation is
-                # retired. Restore the old generation atomically so callers
-                # can report failure without silently switching live content.
-                if target_dir.exists() and not backup_dir.exists():
-                    raise
-                if target_dir.exists():
-                    os.replace(target_dir, staging_dir)
-                if backup_dir.exists():
-                    os.replace(backup_dir, target_dir)
-                    _remove_target_path(target_dir / _SWAP_MARKER)
-                raise
+            atomic_swap_generation(target_dir, staging_dir)
             cleanup_staging_dir = None
         finally:
             if cleanup_staging_dir is not None:

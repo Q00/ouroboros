@@ -467,8 +467,7 @@ class TestInstallHermesSkills:
         monkeypatch.setattr(
             "ouroboros.hermes.artifacts._remove_target_path", fail_first_backup_cleanup
         )
-        with pytest.raises(OSError, match="backup cleanup failure"):
-            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
 
         real_replace = os.replace
         live_backup_seen = False
@@ -493,7 +492,7 @@ class TestInstallHermesSkills:
         assert operator_note.read_text(encoding="utf-8") == "newest operator state"
         assert not tuple(target_dir.parent.glob(".ouroboros.old.*"))
 
-    def test_backup_cleanup_failure_restores_previous_live_generation(
+    def test_backup_cleanup_failure_keeps_complete_published_generation(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         source = tmp_path / "source-skills"
@@ -510,11 +509,59 @@ class TestInstallHermesSkills:
             real_remove(path)
 
         monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_backup_cleanup)
-        with pytest.raises(OSError, match="backup cleanup failure"):
-            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
 
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "fresh\n"
+        assert not target.joinpath(_SWAP_MARKER).exists()
+
+    def test_interruption_before_first_rename_leaves_live_retryable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def interrupt_before_rename(src, dst):
+            if Path(src) == target:
+                raise KeyboardInterrupt
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_before_rename)
+        with pytest.raises(KeyboardInterrupt):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
         assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
         assert not target.joinpath(_SWAP_MARKER).exists()
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "fresh\n"
+
+    def test_mid_backup_deletion_failure_never_replaces_complete_live_tree(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.mkdir(parents=True)
+        target.joinpath("operator.txt").write_text("preserve\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def partially_delete_backup(path: Path) -> None:
+            if path.name.startswith(".ouroboros.old."):
+                path.joinpath("operator.txt").unlink(missing_ok=True)
+                raise OSError("synthetic mid-delete failure")
+            real_remove(path)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_target_path", partially_delete_backup
+        )
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.joinpath("operator.txt").read_text(encoding="utf-8") == "preserve\n"
 
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(

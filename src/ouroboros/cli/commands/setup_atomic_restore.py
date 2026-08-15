@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import os
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -24,18 +23,12 @@ def atomic_restore_generation(
     stage = Path(tempfile.mkdtemp(prefix=".ouroboros-rollback-", dir=path.parent))
     remove(stage)
     restore(stage, prior)
-    failed = path.with_name(f".{path.name}.failed.{os.getpid()}")
-    os.replace(path, failed)
+    from ouroboros.hermes.artifacts import atomic_remove_generation, atomic_swap_generation
+
     if getattr(prior, "kind", None) == "missing":
-        remove(failed)
+        atomic_remove_generation(path)
         return True
-    try:
-        os.replace(stage, path)
-    except BaseException:
-        if failed.exists() and not path.exists():
-            os.replace(failed, path)
-        raise
-    remove(failed)
+    atomic_swap_generation(path, stage)
     return True
 
 
