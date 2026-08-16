@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -39,6 +40,7 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_task,
 )
 from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
+from ouroboros.mcp.tools.recent_findings import recent_finding_paths
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -285,6 +287,54 @@ def _lane_agent(raw_lane: Mapping[str, Any], persona: str, capability: str) -> s
     return "researcher" if capability in {"inspect_code", "web_research"} else "general"
 
 
+def _recent_findings_section(request: Mapping[str, Any]) -> str:
+    """Return the block naming what has already been found in this project.
+
+    Rendered by presence, like the scores above it: a project with nothing
+    recent carries no key and its children are handed no line about it.
+
+    **Paths, not findings.** Inlining what was found would grow the prompt with
+    every round and would make this server choose, without having read the
+    question, which of them matter. The child has read the question, so the
+    child chooses -- and pays for reading only what it chose. It also keeps the
+    producing side free of anything a child wrote, which is an obligation this
+    fan-out has independently of this feature.
+
+    **They may not be this session's.** A finding describes the system, and the
+    system does not change at session granularity -- so the boundary is recency
+    and another session's finding about this project is as good as this one's
+    (RFC Q00/ouroboros#2153). What does not carry across is the roster: a
+    session chooses which repositories it is asking about, and evidence from
+    outside this session's roster is rejected at submission. The child is told
+    so here, where it is deciding what to read.
+
+    What this must not become is a second set of rules. There is nothing here
+    about proving a stored finding sufficient, reporting what a reuse left
+    unsettled, or marking an answer as reused. Those would be bookkeeping about
+    incompleteness, and what the answer contracts guard is that an answer cannot
+    lie about its sources -- which holds whatever the child read.
+    """
+    raw = request.get("recent_findings")
+    paths = [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
+    if not paths:
+        return ""
+    listing = "\n".join(f"- {path}" for path in paths)
+    return f"""## Recently Found Here
+Advisory lanes have run in this project recently and their results were stored
+as JSON, newest first:
+
+{listing}
+
+Each file holds answers in the same shape you must return, keyed by `lane_id`
+under `result.aggregated_outputs`. Read what looks relevant before you inspect
+code or take a measurement, use what helps, and investigate whatever you still
+need for yourself.
+
+These may come from other sessions, which chose their own repositories. Report
+only what is true of the repositories *this* question gave you; a claim about
+any other is rejected when your answer is submitted."""
+
+
 def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[SubagentPayload]:
     """Build one advisory subagent payload per lane the catalog declares.
 
@@ -333,6 +383,11 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
         if label in request:
             session_lines.append(f"- {label}: {request[label]}")
     session_block = "\n".join(session_lines)
+    # One block for every lane of this turn: what has been found here is a
+    # property of the project, not of the lane, and a per-lane copy would be one
+    # text to keep in step for no difference in what it says.
+    recent_findings = _recent_findings_section(request)
+    recent_findings_section = f"\n{recent_findings}\n" if recent_findings else ""
 
     payloads: list[SubagentPayload] = []
     seen: set[str] = set()
@@ -381,7 +436,7 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
 {lane_task}
 
 {extra}
-
+{recent_findings_section}
 ## Synthesis Contract
 ```json
 {synthesis_contract_json}
@@ -427,6 +482,7 @@ def build_question_advisory_request(
     code_investigation_request: Mapping[str, Any] | None = None,
     repository_roster: list[dict[str, str]] | None = None,
     last_question: str | None = None,
+    recent_findings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the per-question advisory request for one tool's question turn.
 
@@ -465,6 +521,11 @@ def build_question_advisory_request(
         request["code_investigation_request"] = dict(code_investigation_request)
     if repository_roster is not None:
         request["repository_roster"] = repository_roster
+    # Attached only when it points at something. A project with nothing recent
+    # carries no key, and a child is not handed a line about an empty place --
+    # looking there would cost it a tool call to learn nothing.
+    if recent_findings:
+        request["recent_findings"] = list(recent_findings)
     return request
 
 
@@ -484,6 +545,7 @@ def attach_question_advisory(
     runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     fanout_registry: FanoutRegistry | None = None,
+    findings_root: Path | str | None = None,
 ) -> None:
     """Attach the advisory fan-out to a turn that shows a question to the user.
 
@@ -495,6 +557,12 @@ def attach_question_advisory(
     A build failure leaves the turn otherwise intact. The question is what the
     user needs; losing the lanes costs them evidence, while raising here would
     cost them the question.
+
+    ``findings_root`` is where this project's completed fan-outs were published.
+    It is the store's own resolved root, taken rather than re-derived, so no
+    later moment can resolve the same workspace into a different directory. A
+    caller without one still gets its lanes, and they investigate the way they
+    always did.
     """
     if not question:
         return
@@ -508,6 +576,7 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
+        recent_findings=recent_finding_paths(findings_root),
     )
     try:
         payloads = build_question_advisory_subagents(request)

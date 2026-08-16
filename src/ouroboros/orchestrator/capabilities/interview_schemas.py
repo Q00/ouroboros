@@ -500,8 +500,12 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
 
     There is no ``observed_at``. It was required here for two rounds and is
     removed by RFC #1754's second revision: ageing is accepted unconditionally,
-    and the interview session is the measurement's time envelope, so a field
-    restating it bought nothing a consumer read. It also asked an LLM child with
+    so a field restating it bought nothing a consumer read. The envelope that
+    reasoning named was the interview session; RFC #2153 supersedes that with
+    recency, on the reasoning that a measurement moves on the system's clock
+    rather than on the clock of whoever is being interviewed. What is unchanged
+    is why no field is needed: the aggregate is shown beside the question and
+    the user answers in their own words, so its age is theirs to weigh. It also asked an LLM child with
     no clock to testify about time, which cost three rounds of validators —
     digits, then component ranges, then a wall clock with a skew allowance. The
     close is structural rather than another validator: a field that does not

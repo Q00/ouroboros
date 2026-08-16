@@ -1606,11 +1606,10 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        create_fanout_handlers,
     )
     from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
@@ -2484,14 +2483,6 @@ def create_ouroboros_server(
             fanout_registry=fanout_registry,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
         ),
-        PMInterviewHandler(
-            data_dir=state_dir_path,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-        ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
@@ -2501,10 +2492,17 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        *create_fanout_handlers(
-            fanout_registry,
-            effective_cwd,
-            event_store,
+        # One store, and the producer is handed its resolved root rather than
+        # deriving the same path again when a question is asked (RFC #2153).
+        *create_fanout_wiring(
+            fanout_registry=fanout_registry,
+            workspace=effective_cwd,
+            event_store=event_store,
+            handler_event_store=event_store,
+            state_dir=state_dir_path,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=interview_runtime_backend,
+            opencode_mode=opencode_mode,
             ensure_ready=server.startup,
         ),
         evolve_step,
