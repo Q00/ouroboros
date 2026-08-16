@@ -5,8 +5,11 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import threading
 import time
 from unittest.mock import MagicMock, patch
+
+from ouroboros.mcp import update_notice
 
 # Load the script as a module
 _SCRIPT_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "version-check.py"
@@ -80,6 +83,153 @@ class TestGetLatestVersion:
             result = version_check.get_latest_version()
 
         assert result is None
+
+    def test_stale_prerelease_channel_refetches_after_stable_stamp(self, tmp_path: Path) -> None:
+        """#2066: a stamped stable refresh cannot vouch for the prerelease
+        channel — the unstamped leftover value is stale and refetched."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "2.0.0",
+                    "latest_version_checked_at": time.time(),
+                    "latest_version_pre": "2.0.0b1",
+                    "timestamp": time.time(),
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(
+            {"info": {"version": "2.0.0"}, "releases": {"2.1.0b2": [{}]}}
+        ).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version(current="2.0.0b1")
+
+        assert result == "2.1.0b2"
+        new_cache = json.loads(cache_file.read_text())
+        assert new_cache["latest_version_pre"] == "2.1.0b2"
+        assert "latest_version_pre_checked_at" in new_cache
+
+    def test_future_timestamp_is_not_fresh(self, tmp_path: Path) -> None:
+        """A clock-rollback or malformed future stamp must not be trusted —
+        matches the MCP reader's `0 <= age < TTL` rule (src/ouroboros/mcp/update_notice.py)."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "9.9.9",
+                    "latest_version_checked_at": time.time() + 10**9,
+                    "timestamp": time.time() + 10**9,
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": "2.0.0"}}).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version()
+
+        assert result == "2.0.0"
+
+    def test_future_shared_timestamp_is_not_fresh(self, tmp_path: Path) -> None:
+        """Same rejection for the legacy shared `timestamp` fallback used by
+        caches written before per-channel stamps existed."""
+        cache_file = tmp_path / "version-check-cache.json"
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "latest_version": "9.9.9",
+                    "timestamp": time.time() + 10**9,
+                }
+            )
+        )
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": "2.0.0"}}).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version()
+
+        assert result == "2.0.0"
+
+    def test_hook_and_mcp_concurrent_channel_writers_preserve_both_updates(
+        self, tmp_path: Path
+    ) -> None:
+        """The shared lock covers read/merge/replace, not only replacement."""
+        cache_file = tmp_path / "version-check-cache.json"
+        fetch_barrier = threading.Barrier(2)
+
+        def _hook_fetch(*, include_prerelease: bool = False) -> str:
+            assert include_prerelease is False
+            fetch_barrier.wait()
+            return "2.0.0"
+
+        def _mcp_fetch(*, include_prerelease: bool) -> str:
+            assert include_prerelease is True
+            fetch_barrier.wait()
+            return "2.1.0b2"
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch.object(version_check, "_get_latest_from_pypi", _hook_fetch),
+            patch.object(update_notice, "_CACHE_FILE", cache_file),
+            patch.object(update_notice.metadata, "version", return_value="2.1.0b1"),
+            patch.object(update_notice, "_fetch_latest_from_pypi", _mcp_fetch),
+        ):
+            hook = threading.Thread(target=version_check.get_latest_version)
+            mcp = threading.Thread(target=update_notice._refresh_cache_now)
+            hook.start()
+            mcp.start()
+            hook.join(timeout=5)
+            mcp.join(timeout=5)
+
+        assert not hook.is_alive()
+        assert not mcp.is_alive()
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert payload["latest_version"] == "2.0.0"
+        assert payload["latest_version_pre"] == "2.1.0b2"
+        assert "latest_version_checked_at" in payload
+        assert "latest_version_pre_checked_at" in payload
+
+    def test_non_object_json_cache_is_replaced(self, tmp_path: Path) -> None:
+        """Valid JSON with the wrong shape must not disable cache refreshes."""
+        for malformed_payload in ([], "invalid"):
+            cache_file = tmp_path / "version-check-cache.json"
+            cache_file.write_text(json.dumps(malformed_payload))
+            with (
+                patch.object(version_check, "_CACHE_FILE", cache_file),
+                patch.object(version_check, "_CACHE_DIR", tmp_path),
+                patch.object(version_check, "_get_latest_from_pypi", return_value="2.0.0"),
+            ):
+                assert version_check.get_latest_version() == "2.0.0"
+
+            payload = json.loads(cache_file.read_text())
+            assert payload["latest_version"] == "2.0.0"
+            assert "latest_version_checked_at" in payload
+
+
+class TestNoticeConsumption:
+    def test_notice_is_consumed_once_per_day(self, tmp_path: Path) -> None:
+        cache_file = tmp_path / "version-check-cache.json"
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+        ):
+            assert version_check.consume_update_notice(current="0.20.0") is True
+            assert version_check.consume_update_notice(current="0.20.0") is False
 
 
 class TestCheckUpdate:

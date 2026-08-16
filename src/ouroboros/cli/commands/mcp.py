@@ -698,6 +698,12 @@ async def _run_mcp_server(
             mcp_bridge=mcp_bridge,
         )
 
+        # Serve startup is the one place that may prime the update-notice
+        # cache (#2066): non-serving server constructions stay network-free.
+        from ouroboros.mcp.update_notice import maybe_schedule_cache_refresh
+
+        maybe_schedule_cache_refresh()
+
         tool_count = len(server.info.tools)
 
         # One event per host session attach (Claude/Codex spawn `mcp serve`

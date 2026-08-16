@@ -4442,6 +4442,32 @@ class TestCreateOuroborosServerCwdFallback:
         )
 
 
+class TestCreateOuroborosServerUpdateNoticeBoundary:
+    """The advisory update nudge must never fail server construction (#2066)."""
+
+    def test_metadata_failure_does_not_break_server_construction(self, monkeypatch):
+        """importlib.metadata errors beyond PackageNotFoundError — corrupt
+        dist-info, backend failures — stay inside the advisory seam and
+        never reach create_ouroboros_server()."""
+        from unittest.mock import MagicMock, patch
+
+        from ouroboros.mcp import update_notice
+
+        def _raise(_name: str) -> str:
+            raise OSError("corrupt dist-info")
+
+        monkeypatch.setattr(update_notice.metadata, "version", _raise)
+
+        mock_event_store = MagicMock()
+        mock_event_store.initialize = MagicMock()
+        with patch("ouroboros.mcp.tools.registry.ToolRegistry", MagicMock()):
+            from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+            server = create_ouroboros_server(event_store=mock_event_store)
+
+        assert server is not None
+
+
 class TestCreateOuroborosServerOpenCodeMode:
     """Verify create_ouroboros_server() threads opencode_mode to handlers."""
 
