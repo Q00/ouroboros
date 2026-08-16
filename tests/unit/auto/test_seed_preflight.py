@@ -415,6 +415,30 @@ def test_nested_shell_inherits_prior_sequential_export(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("command", "passed"),
     (
+        ("export FOO; sh -c 'set -u; printf %s \"$FOO\"'", False),
+        ("FOO=bar; export FOO; sh -c 'set -u; printf %s \"$FOO\"'", True),
+        ("export FOO; FOO=bar; sh -c 'set -u; printf %s \"$FOO\"'", True),
+    ),
+)
+def test_nested_shell_requires_concrete_value_for_bare_export(
+    tmp_path: Path, command: str, passed: bool
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Bare export", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed is passed
+    assert [finding.subject for finding in report.blocking_findings] == ([] if passed else ["$FOO"])
+
+
+@pytest.mark.parametrize(
+    ("command", "passed"),
+    (
         ('FOO=bar; sh -c "printf %s $FOO"', True),
         ('FOO=bar; sh -c "printf %s \\$FOO"', False),
     ),
@@ -442,6 +466,23 @@ def test_assignment_default_parameter_expansion_is_bound(tmp_path: Path, operato
         _seed(
             acceptance_criteria=(
                 AcceptanceCriterionSpec(description="Defaulted output", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+
+
+@pytest.mark.parametrize("operator", ("+", ":+"))
+def test_optional_parameter_expansion_does_not_require_binding(
+    tmp_path: Path, operator: str
+) -> None:
+    command = f'printf %s "${{OUTPUT{operator}alternate}}"'
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Optional output", verify_command=command),
             )
         ),
         workspace_root=tmp_path,

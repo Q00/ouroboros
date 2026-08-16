@@ -42,10 +42,11 @@ __all__ = [
 _HOST_BOUND_ENV_VARS = frozenset({"HOME", "PATH", "PWD", "SHELL", "TMPDIR", "USER"})
 _ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 # Variables the command binds itself: shell assignments (``tmp=$(mktemp)``),
-# ``for x in ...`` loop variables, and ``${VAR:-default}`` fallbacks.
+# ``for x in ...`` loop variables, and parameter expansions that do not
+# require a pre-existing value (defaults, assignments, and optional alternates).
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
 _FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
-_DEFAULTED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=]")
+_OPTIONAL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=+]")
 _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
@@ -207,7 +208,7 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
     for match in _ENV_VAR_RE.finditer(command):
         if not expandable[match.start()]:
             continue
-        if _DEFAULTED_VAR_RE.match(command, match.start()) is not None:
+        if _OPTIONAL_VAR_RE.match(command, match.start()) is not None:
             continue
         events.append((match.start(), "expand", match.group(1)))
     return tuple(sorted(events))
@@ -262,7 +263,8 @@ def _nested_shell_scopes(
             segments[-1][0].append(part)
     nested: list[tuple[str, frozenset[str]]] = []
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-    sequential_exports = set(inherited)
+    sequential_export_names = set(inherited)
+    sequential_values = set(inherited)
 
     def unwrap(segment: list[str], bound: set[str]) -> list[str]:
         remaining = list(segment)
@@ -338,19 +340,24 @@ def _nested_shell_scopes(
         return remaining
 
     for segment, separator_before, separator_after in segments:
-        launcher_bound = set(sequential_exports)
+        persists = not _is_subprocess_separator(
+            separator_before
+        ) and not _is_subprocess_separator(separator_after)
+        if persists and segment and all(assignment.fullmatch(token) for token in segment):
+            sequential_values.update(token.partition("=")[0] for token in segment)
         if (
-            not _is_subprocess_separator(separator_before)
-            and not _is_subprocess_separator(separator_after)
+            persists
             and segment
             and Path(segment[0]).name == "export"
         ):
             for token in segment[1:]:
                 if assignment.fullmatch(token):
-                    sequential_exports.add(token.partition("=")[0])
+                    name = token.partition("=")[0]
+                    sequential_values.add(name)
+                    sequential_export_names.add(name)
                 elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
-                    sequential_exports.add(token)
-            launcher_bound = set(sequential_exports)
+                    sequential_export_names.add(token)
+        launcher_bound = sequential_export_names & sequential_values
         while segment and assignment.fullmatch(segment[0]):
             launcher_bound.add(segment[0].partition("=")[0])
             segment = segment[1:]
