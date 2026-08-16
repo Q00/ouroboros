@@ -340,16 +340,12 @@ def _nested_shell_scopes(
         return remaining
 
     for segment, separator_before, separator_after in segments:
-        persists = not _is_subprocess_separator(
-            separator_before
-        ) and not _is_subprocess_separator(separator_after)
+        persists = not _is_subprocess_separator(separator_before) and not _is_subprocess_separator(
+            separator_after
+        )
         if persists and segment and all(assignment.fullmatch(token) for token in segment):
             sequential_values.update(token.partition("=")[0] for token in segment)
-        if (
-            persists
-            and segment
-            and Path(segment[0]).name == "export"
-        ):
+        if persists and segment and Path(segment[0]).name == "export":
             for token in segment[1:]:
                 if assignment.fullmatch(token):
                     name = token.partition("=")[0]
