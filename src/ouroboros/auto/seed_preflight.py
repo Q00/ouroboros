@@ -736,36 +736,12 @@ _NESTED_SHELL_PAYLOAD_RE = re.compile(
 )
 
 
-def _program_path_exists(
-    path_text: str,
+def _effective_program_root(
     command: str,
-    workspace_root: Path | None,
-    *,
+    workspace_root: Path,
     token_position: int,
-    artifacts: frozenset[str] = frozenset(),
-    claimed_files: frozenset[str] = frozenset(),
-) -> bool | None:
-    """Resolve verifier programs after deterministic shell directory changes.
-
-    Dynamic directory changes are intentionally inconclusive: blocking on the
-    launcher's root in that case would reject a command that the real shell can
-    execute from its effective working directory.
-    """
-    candidate = Path(path_text).expanduser()
-    if workspace_root is None or candidate.is_absolute():
-        return _path_exists(path_text, workspace_root)
-    for nested in _NESTED_SHELL_PAYLOAD_RE.finditer(command):
-        payload_start, payload_end = nested.span("payload")
-        if payload_start <= token_position < payload_end:
-            payload = nested.group("payload")
-            return _program_path_exists(
-                path_text,
-                payload,
-                workspace_root,
-                token_position=token_position - payload_start,
-                artifacts=artifacts,
-                claimed_files=claimed_files,
-            )
+) -> Path | None:
+    """Return the deterministic cwd at one command position."""
     effective_root = workspace_root
     preceding = [
         match for match in _DETERMINISTIC_CWD_RE.finditer(command) if match.start() < token_position
@@ -817,9 +793,51 @@ def _program_path_exists(
             return None
         changed = Path(directory).expanduser()
         effective_root = changed if changed.is_absolute() else effective_root / changed
+    return effective_root
+
+
+def _program_path_exists(
+    path_text: str,
+    command: str,
+    workspace_root: Path | None,
+    *,
+    token_position: int,
+    artifacts: frozenset[str] = frozenset(),
+    claimed_files: frozenset[str] = frozenset(),
+    _claim_root: Path | None = None,
+) -> bool | None:
+    """Resolve verifier programs after deterministic shell directory changes.
+
+    Dynamic directory changes are intentionally inconclusive: blocking on the
+    launcher's root in that case would reject a command that the real shell can
+    execute from its effective working directory.
+    """
+    candidate = Path(path_text).expanduser()
+    if workspace_root is None or candidate.is_absolute():
+        return _path_exists(path_text, workspace_root)
+    claim_root = _claim_root or workspace_root
+    for nested in _NESTED_SHELL_PAYLOAD_RE.finditer(command):
+        payload_start, payload_end = nested.span("payload")
+        if payload_start <= token_position < payload_end:
+            outer_root = _effective_program_root(command, workspace_root, nested.start())
+            if outer_root is None:
+                return None
+            payload = nested.group("payload")
+            return _program_path_exists(
+                path_text,
+                payload,
+                outer_root,
+                token_position=token_position - payload_start,
+                artifacts=artifacts,
+                claimed_files=claimed_files,
+                _claim_root=claim_root,
+            )
+    effective_root = _effective_program_root(command, workspace_root, token_position)
+    if effective_root is None:
+        return None
     effective_path = effective_root / candidate
     try:
-        effective_claim = _normalize_workspace_path(str(effective_path.relative_to(workspace_root)))
+        effective_claim = _normalize_workspace_path(str(effective_path.relative_to(claim_root)))
     except ValueError:
         effective_claim = ""
     if effective_claim in artifacts or effective_claim in claimed_files:
