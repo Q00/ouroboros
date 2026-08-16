@@ -205,11 +205,25 @@ def _publish_reclamation_manifest(
         "digest": digest,
         "entries": _reclamation_entries(source or reclamation),
     }
-    _publish_swap_intent(
-        manifest,
-        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-        token,
-    )
+    content = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    if manifest.exists() or manifest.is_symlink():
+        if (
+            manifest.is_symlink()
+            or not manifest.is_file()
+            or _read_swap_record(manifest) != content
+        ):
+            raise OSError(f"Refusing occupied Hermes reclamation manifest: {manifest}")
+        return manifest
+    staging = manifest.with_name(manifest.name + f".staging.{token}")
+    try:
+        staging.write_text(content, encoding="utf-8")
+        # A hard-link publication is atomic and refuses an occupied sibling;
+        # unlike os.replace it cannot overwrite operator-owned state.
+        os.link(staging, manifest)
+    except BaseException:
+        _remove_target_path(staging)
+        raise
+    _remove_target_path(staging)
     return manifest
 
 
@@ -469,6 +483,29 @@ def _retirement_record(path: Path, backup_prefix: str) -> tuple[Path, str, str, 
 
 def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
     """Bound retained generations before publishing another replacement."""
+    candidates = sorted(target.parent.glob(f"{backup_prefix}*.retired.*"))
+    manifest_suffix = ".reclaim.manifest.json"
+    for manifest in sorted(target.parent.glob(f"{backup_prefix}*.retired.*{manifest_suffix}")):
+        reclamation = manifest.with_name(manifest.name.removesuffix(".manifest.json"))
+        retirement = reclamation.with_name(reclamation.name.removesuffix(".reclaim"))
+        if reclamation.exists() or retirement.exists():
+            continue
+        payload, _entries = _read_reclamation_manifest(reclamation)
+        match = re.fullmatch(
+            rf"{re.escape(backup_prefix)}([0-9a-f]{{32}})\.retired\.([0-9a-f]{{32}})\.reclaim",
+            reclamation.name,
+        )
+        manifest_digest = payload.get("digest")
+        if (
+            match is None
+            or payload.get("backup") != f"{backup_prefix}{match.group(1)}"
+            or payload.get("token") != match.group(2)
+            or payload.get("operation") not in {"swap", "remove"}
+            or not isinstance(manifest_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_digest) is None
+        ):
+            raise OSError(f"Refusing foreign Hermes reclamation manifest: {manifest}")
+        manifest.unlink()
     candidates = sorted(target.parent.glob(f"{backup_prefix}*.retired.*"))
     retirements = [path for path in candidates if not path.name.endswith(".reclaim")]
     reclaiming = [path for path in candidates if path.name.endswith(".reclaim")]
@@ -805,7 +842,25 @@ def atomic_swap_generation(
         if backup.exists() and not target.exists():
             _restore_owned_backup(backup, target)
             _remove_target_path(intent)
-        elif not (backup.exists() and target.exists() and not replacement.exists()):
+        elif (
+            checked_fingerprint is None
+            and target.exists()
+            and not replacement.exists()
+            and _tree_fingerprint(target) == replacement_fingerprint
+        ):
+            try:
+                os.replace(target, replacement)
+            except BaseException:
+                if (
+                    not target.exists()
+                    and _tree_fingerprint(replacement) == replacement_fingerprint
+                ):
+                    _remove_target_path(intent)
+                else:
+                    raise
+            else:
+                _remove_target_path(intent)
+        elif not (target.exists() and not replacement.exists()):
             _remove_target_path(intent)
         raise
     if backup.exists():

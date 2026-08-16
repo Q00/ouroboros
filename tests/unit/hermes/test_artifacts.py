@@ -1248,6 +1248,93 @@ class TestInstallHermesSkills:
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
         assert not tuple(tmp_path.glob("*.reclaim.manifest.json"))
 
+    def test_fresh_publication_commit_then_raise_restores_unpublished_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("fresh\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def interrupt_after_fresh_commit(src, dst):
+            result = real_replace(src, dst)
+            if Path(src) == replacement and Path(dst) == target:
+                raise OSError("committed fresh publication")
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_fresh_commit)
+        with pytest.raises(OSError, match="committed fresh publication"):
+            atomic_swap_generation(target, replacement)
+
+        assert not target.exists()
+        assert replacement.joinpath("generation.txt").read_text(encoding="utf-8") == "fresh\n"
+        assert not tuple(tmp_path.glob("*.intent"))
+
+    def test_reclamation_manifest_publication_preserves_foreign_sibling(
+        self, tmp_path: Path
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        retirement = next(path for path in tmp_path.glob("*.retired.*") if path.is_dir())
+        manifest = retirement.with_name(retirement.name + ".reclaim.manifest.json")
+        manifest.write_text("operator-owned\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+
+        with pytest.raises(OSError, match="occupied Hermes reclamation manifest"):
+            atomic_swap_generation(target, replacement)
+
+        assert manifest.read_text(encoding="utf-8") == "operator-owned\n"
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
+
+    def test_retry_cleans_manifest_after_reclamation_rmdir_commit_then_raise(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        real_rmdir = Path.rmdir
+        interrupted = False
+
+        def interrupt_after_reclamation_rmdir(path: Path) -> None:
+            nonlocal interrupted
+            result = real_rmdir(path)
+            if path.name.endswith(".reclaim") and not interrupted:
+                interrupted = True
+                raise OSError("committed reclamation rmdir")
+            return result
+
+        monkeypatch.setattr(Path, "rmdir", interrupt_after_reclamation_rmdir)
+        with pytest.raises(OSError, match="committed reclamation rmdir"):
+            atomic_swap_generation(target, replacement)
+
+        assert tuple(tmp_path.glob("*.reclaim.manifest.json"))
+        monkeypatch.setattr(Path, "rmdir", real_rmdir)
+        atomic_swap_generation(target, replacement)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
+        assert not tuple(tmp_path.glob("*.reclaim.manifest.json"))
+
     @pytest.mark.parametrize("operation", ("swap", "remove"))
     def test_interrupted_intent_staging_is_retryable(
         self, tmp_path: Path, monkeypatch, operation: str

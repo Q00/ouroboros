@@ -7774,6 +7774,50 @@ class TestHermesSetup:
         else:
             assert not target.exists()
 
+    def test_setup_hermes_failed_first_publication_leaves_no_unactivated_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        real_replace = os.replace
+
+        def interrupt_after_first_publication(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst) == target and Path(src).name.startswith(".ouroboros-skills-"):
+                raise OSError("committed first publication")
+            return result
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.os.replace",
+                side_effect=interrupt_after_first_publication,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert not target.exists()
+        register.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == (
+            "orchestrator:\n  runtime_backend: claude\n"
+        )
+
     def test_setup_hermes_preserves_edit_after_publication_before_receipt(
         self, tmp_path: Path
     ) -> None:
