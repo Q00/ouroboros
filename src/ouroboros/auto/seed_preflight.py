@@ -637,6 +637,31 @@ def _outer_shell_scope(command: str) -> str:
     return "".join(masked)
 
 
+def _mask_statically_unreachable_program_clauses(command: str) -> str:
+    """Mask program operands behind literal-false shell control edges."""
+    output = list(command)
+    patterns = (
+        re.compile(
+            r"(?:^|[;\n]\s*)if\s+(?:false|!)\s*;?\s*then\s*(?P<body>.*?)"
+            r"(?=\b(?:else|elif|fi)\b)",
+            re.DOTALL,
+        ),
+        re.compile(
+            r"(?:^|[;\n]\s*)false\s*&&\s*(?P<body>.*?)(?=\|\||[;\n]|$)",
+            re.DOTALL,
+        ),
+        re.compile(
+            r"(?:^|[;\n]\s*)true\s*\|\|\s*(?P<body>.*?)(?=&&|[;\n]|$)",
+            re.DOTALL,
+        ),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(command):
+            start, end = match.span("body")
+            output[start:end] = " " * (end - start)
+    return "".join(output)
+
+
 # A standalone dependency entry that claims a workspace file. Requires a
 # directory separator so plain product names ("next.js", "Obsidian Vault")
 # are never treated as file claims.
@@ -1012,28 +1037,29 @@ def _check_verify_commands(
                         ),
                     )
                 )
+        program_scannable = _mask_statically_unreachable_program_clauses(scannable)
         program_spans: list[tuple[int, int]] = []
         occurrences: list[tuple[str, int, int, bool]] = []
-        for word_match in re.finditer(_STATIC_SHELL_WORD, scannable):
+        for word_match in re.finditer(_STATIC_SHELL_WORD, program_scannable):
             token = _decode_static_shell_word(word_match.group(0))
             if token is None:
                 continue
             normalized = _normalize_workspace_path(token)
             segment_start = (
                 max(
-                    scannable.rfind(separator, 0, word_match.start())
+                    program_scannable.rfind(separator, 0, word_match.start())
                     for separator in (";", "\n", "&", "|")
                 )
                 + 1
             )
-            occurrence_command = scannable[segment_start : word_match.end()]
+            occurrence_command = program_scannable[segment_start : word_match.end()]
             if _FILE_TOKEN_RE.search(token) is None or normalized not in _command_program_tokens(
                 occurrence_command
             ):
                 continue
             program_spans.append(word_match.span())
             occurrences.append((token, word_match.start(), word_match.end(), True))
-        for token_match in _FILE_TOKEN_RE.finditer(scannable):
+        for token_match in _FILE_TOKEN_RE.finditer(program_scannable):
             if any(
                 start <= token_match.start() and token_match.end() <= end
                 for start, end in program_spans
@@ -1181,6 +1207,28 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     break
                 if remaining:  # duration operand
                     remaining = remaining[1:]
+                continue
+            if command_name == "uv" and len(remaining) >= 2 and remaining[1] == "run":
+                remaining = remaining[2:]
+                option_operands = {
+                    "--directory",
+                    "--env-file",
+                    "--package",
+                    "--project",
+                    "--python",
+                    "--python-platform",
+                    "--with",
+                }
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    remaining = (
+                        remaining[2:]
+                        if token in option_operands and len(remaining) >= 2
+                        else remaining[1:]
+                    )
                 continue
             if command_name == "nice":
                 remaining = remaining[1:]

@@ -384,6 +384,28 @@ def test_existing_source_and_interpreter_programs_pass_with_shell_parity(
 @pytest.mark.parametrize(
     "command",
     (
+        "uv run python missing.py",
+        "uv run --python 3.12 python missing.py",
+        "uv run -- python missing.py",
+    ),
+)
+def test_uv_run_missing_verifier_blocks_with_shell_parity(tmp_path: Path, command: str) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="UV verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "python -c 'print(\"$LITERAL\")'",
         r"printf '%s' \$LITERAL",
     ),
@@ -1255,6 +1277,30 @@ def test_missing_program_in_compound_command_is_blocked(tmp_path: Path, command:
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "if false; then ./missing; fi; true",
+        "false && ./missing; true",
+        "true || ./missing; true",
+    ),
+)
+def test_statically_unreachable_programs_do_not_block_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Skipped verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
 @pytest.mark.parametrize(
