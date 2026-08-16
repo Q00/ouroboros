@@ -93,23 +93,79 @@ def _read_swap_record(path: Path) -> str:
 
 
 def _assert_owned_swap_backup(
+    path: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+    backup_identity: Path | None = None,
+) -> None:
+    """Revalidate exact backup ownership at a destructive boundary."""
+    backup = backup_identity or path
+    marker = path / _SWAP_MARKER
+    if (
+        path.is_symlink()
+        or not path.is_dir()
+        or marker.is_symlink()
+        or not marker.is_file()
+        or _read_swap_record(marker) != _ownership_content(operation, backup, token, digest)
+        or _fingerprint_digest(_owned_backup_fingerprint(path)) != digest
+    ):
+        raise OSError(f"Refusing foreign Hermes swap backup: {path}")
+
+
+def _marker_staging_path(target: Path, token: str) -> Path:
+    return target.with_name(f".{target.name}.marker.{token}")
+
+
+def _publish_ownership_marker(
+    target: Path,
     backup: Path,
     *,
     operation: str,
     token: str,
     digest: str,
 ) -> None:
-    """Revalidate exact backup ownership at a destructive boundary."""
-    marker = backup / _SWAP_MARKER
-    if (
-        backup.is_symlink()
-        or not backup.is_dir()
-        or marker.is_symlink()
-        or not marker.is_file()
-        or _read_swap_record(marker) != _ownership_content(operation, backup, token, digest)
-        or _fingerprint_digest(_owned_backup_fingerprint(backup)) != digest
-    ):
-        raise OSError(f"Refusing foreign Hermes swap backup: {backup}")
+    """Publish an ownership marker without exposing partial canonical bytes."""
+    staging = _marker_staging_path(target, token)
+    try:
+        staging.write_text(_ownership_content(operation, backup, token, digest), encoding="utf-8")
+        os.replace(staging, target / _SWAP_MARKER)
+    except BaseException:
+        _remove_target_path(staging)
+        raise
+
+
+def _retire_owned_backup(
+    backup: Path,
+    intent: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> None:
+    """Atomically detach an owned backup before fallible recursive cleanup."""
+    _assert_owned_swap_backup(backup, operation=operation, token=token, digest=digest)
+    retirement = backup.with_name(f".{backup.name.removeprefix('.')}.retired.{token}")
+    if retirement.exists() or retirement.is_symlink():
+        raise OSError(f"Refusing occupied Hermes retirement path: {retirement}")
+    os.replace(backup, retirement)
+    try:
+        _assert_owned_swap_backup(
+            retirement,
+            operation=operation,
+            token=token,
+            digest=digest,
+            backup_identity=backup,
+        )
+        intent.unlink(missing_ok=True)
+    except BaseException:
+        if retirement.exists() and not backup.exists():
+            os.replace(retirement, backup)
+        raise
+    # The active intent is gone before recursive deletion begins. A partial
+    # cleanup can therefore report failure without poisoning the next refresh.
+    shutil.rmtree(retirement)
 
 
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
@@ -145,30 +201,29 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
         if operation == "swap" and not target.exists() and backup.exists():
             _restore_owned_backup(backup, target)
         elif operation == "remove" and not target.exists() and backup.exists():
-            _assert_owned_swap_backup(
-                backup,
-                operation=operation,
-                token=token,
-                digest=digest,
-            )
-            _remove_target_path(backup)
+            _retire_owned_backup(backup, intent, operation=operation, token=token, digest=digest)
         elif target.exists() and backup.exists():
             if operation == "remove":
                 raise OSError("Refusing concurrent Hermes mutation during removal recovery")
-            _assert_owned_swap_backup(
-                backup,
-                operation=operation,
-                token=token,
-                digest=digest,
-            )
-            _remove_target_path(backup)
+            _retire_owned_backup(backup, intent, operation=operation, token=token, digest=digest)
+        if not intent.exists():
+            continue
         if not backup.exists():
             marker = target / _SWAP_MARKER
+            staging = _marker_staging_path(target, token)
             if marker.is_file() and not marker.is_symlink():
                 if _read_swap_record(marker) == _ownership_content(
                     operation, backup, token, digest
                 ):
+                    if _fingerprint_digest(_owned_backup_fingerprint(target)) != digest:
+                        raise OSError(f"Hermes live generation changed during recovery: {target}")
                     _remove_target_path(marker)
+                else:
+                    raise OSError(f"Refusing foreign Hermes swap marker: {marker}")
+            elif target.exists() and digest != _fingerprint_digest(None):
+                if _fingerprint_digest(_tree_fingerprint(target)) != digest:
+                    raise OSError(f"Hermes live generation changed during recovery: {target}")
+            _remove_target_path(staging)
             _remove_target_path(intent)
 
 
@@ -198,9 +253,17 @@ def atomic_swap_generation(
         if expected is not _EXPECTED_UNSET and _tree_fingerprint(target) != expected:
             _remove_target_path(intent)
             raise OSError(f"Hermes live generation changed during publication: {target}")
-        target.joinpath(_SWAP_MARKER).write_text(
-            _ownership_content("swap", backup, token, digest), encoding="utf-8"
-        )
+        try:
+            _publish_ownership_marker(
+                target,
+                backup,
+                operation="swap",
+                token=token,
+                digest=digest,
+            )
+        except BaseException:
+            _remove_target_path(intent)
+            raise
         try:
             os.replace(target, backup)
         except BaseException:
@@ -219,19 +282,10 @@ def atomic_swap_generation(
             _restore_owned_backup(backup, target)
         _remove_target_path(intent)
         raise
-    try:
-        _assert_owned_swap_backup(
-            backup,
-            operation="swap",
-            token=token,
-            digest=digest,
-        )
-        _remove_target_path(backup)
-    except OSError:
-        # The canonical target is already a complete committed generation.
-        # Keep the intent so the next invocation can finish retirement.
-        return
-    _remove_target_path(intent)
+    if backup.exists():
+        _retire_owned_backup(backup, intent, operation="swap", token=token, digest=digest)
+    else:
+        _remove_target_path(intent)
 
 
 def atomic_remove_generation(
@@ -252,9 +306,17 @@ def atomic_remove_generation(
     if expected_check is not None and not expected_check():
         _remove_target_path(intent)
         raise OSError(f"Hermes live generation changed during removal: {target}")
-    target.joinpath(_SWAP_MARKER).write_text(
-        _ownership_content("remove", backup, token, digest), encoding="utf-8"
-    )
+    try:
+        _publish_ownership_marker(
+            target,
+            backup,
+            operation="remove",
+            token=token,
+            digest=digest,
+        )
+    except BaseException:
+        _remove_target_path(intent)
+        raise
     try:
         os.replace(target, backup)
     except BaseException:
@@ -266,17 +328,7 @@ def atomic_remove_generation(
         _restore_owned_backup(backup, target)
         _remove_target_path(intent)
         raise OSError(f"Hermes live generation changed during removal: {target}")
-    try:
-        _assert_owned_swap_backup(
-            backup,
-            operation="remove",
-            token=token,
-            digest=digest,
-        )
-        _remove_target_path(backup)
-    except OSError:
-        return
-    _remove_target_path(intent)
+    _retire_owned_backup(backup, intent, operation="remove", token=token, digest=digest)
 
 
 def _contains_skill_bundles(skills_dir: Path) -> bool:
