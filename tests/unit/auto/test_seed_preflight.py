@@ -512,6 +512,10 @@ def test_optional_parameter_expansion_does_not_require_binding(
         ('printf %s "${FOO=default}"; test "$FOO" = default', True),
         ("env -u HOME sh -c 'test -n \"$HOME\"'", False),
         ("env -u HOME sh -c 'HOME=/tmp; test -n \"$HOME\"'", True),
+        ("env -i sh -c 'test -n \"$HOME\"'", False),
+        ("env --ignore-environment sh -c 'test -n \"$HOME\"'", False),
+        ("unset HOME; sh -c 'test -n \"$HOME\"'", False),
+        ("unset HOME; export HOME=/tmp; sh -c 'test -n \"$HOME\"'", True),
     ),
 )
 def test_ordered_shell_bind_and_unbind_effects_match_runtime(
@@ -527,6 +531,17 @@ def test_ordered_shell_bind_and_unbind_effects_match_runtime(
     )
 
     assert report.passed is passed
+    environment = os.environ.copy()
+    environment["HOME"] = "/host-home"
+    environment.pop("FOO", None)
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+    assert (runtime.returncode == 0) is passed
 
 
 @pytest.mark.parametrize(

@@ -298,6 +298,10 @@ def _nested_shell_scopes(
                             continue
                         except ValueError:
                             return []
+                    if token in {"-i", "--ignore-environment"}:
+                        bound.clear()
+                        remaining = remaining[1:]
+                        continue
                     if token in {"-u", "--unset"}:
                         if len(remaining) >= 2:
                             bound.discard(remaining[1])
@@ -363,6 +367,17 @@ def _nested_shell_scopes(
                     sequential_export_names.add(name)
                 elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
                     sequential_export_names.add(token)
+        if persists and segment and Path(segment[0]).name == "unset":
+            unset_variables = True
+            for token in segment[1:]:
+                if token in {"--", "-v"}:
+                    continue
+                if token == "-f":
+                    unset_variables = False
+                    continue
+                if unset_variables and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
+                    sequential_values.discard(token)
+                    sequential_export_names.discard(token)
         launcher_bound = sequential_export_names & sequential_values
         while segment and assignment.fullmatch(segment[0]):
             launcher_bound.add(segment[0].partition("=")[0])
