@@ -237,12 +237,6 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
-
-
-class _SeedQaRepairDeadlineExpired(Exception):
-    """Stop Seed QA immediately after its lateral repair consumes the deadline."""
-
-
 _TRANSIENT_TOOL_ATTEMPTS = 3
 _TRANSIENT_RETRY_BACKOFF_SECONDS = (1.0, 5.0)
 DETACHED_STATUS = "detached"
@@ -2121,9 +2115,7 @@ class AutoPipeline:
                             state, current_seed, qa_result, attempt=attempt
                         )
                     )
-                    if self._enforce_deadline(state):
-                        return deadline_result()
-                except _SeedQaRepairDeadlineExpired:
+                except TimeoutError:
                     return deadline_result()
                 except SeedQaRepairMappingError as exc:
                     # The repair mapper only understands a bounded vocabulary of
@@ -2226,8 +2218,7 @@ class AutoPipeline:
         mapped repair constraints into one *concrete decision* and fold that
         decision into the Seed — this resolves substance blockers (e.g. "no
         binding contract chosen; a section is missing") that the mechanical
-        feedback echo cannot, because the echo only restates the gap. Falls
-        back to the deterministic :func:`_seed_with_seed_qa_feedback` when no
+        feedback echo cannot, because the echo only restates the gap. Falls back when no
         lateral handle is wired, the persona chain is exhausted, or the lateral
         attempt fails (timeout / transient / plugin-delegation), so prior
         behaviour and the ``seed_qa`` → REVIEW resume contract are preserved.
@@ -2266,7 +2257,7 @@ class AutoPipeline:
             except Exception:  # noqa: BLE001 — bounded best-effort retry
                 candidate = None
             if self._enforce_deadline(state):
-                raise _SeedQaRepairDeadlineExpired
+                raise TimeoutError
             if candidate is not None and not candidate.error and candidate.text.strip():
                 lateral_result = candidate
                 break
@@ -2276,7 +2267,7 @@ class AutoPipeline:
                 ]
                 await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
                 if self._enforce_deadline(state):
-                    raise _SeedQaRepairDeadlineExpired
+                    raise TimeoutError
         if lateral_result is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 

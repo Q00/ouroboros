@@ -85,10 +85,108 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
         if quote is not None:
             unquoted[index] = False
 
+    segment_spans: list[tuple[int, int]] = []
+    segment_start = 0
+    quote = None
+    escaped = False
+    substitution_depth = 0
+    for index, character in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if character in {"'", '"'} and substitution_depth == 0:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if quote != "'" and command[index : index + 2] == "$(":
+            substitution_depth += 1
+            continue
+        if quote != "'" and character == ")" and substitution_depth:
+            substitution_depth -= 1
+            continue
+        if quote is None and substitution_depth == 0 and character in ";&|\n":
+            segment_spans.append((segment_start, index))
+            segment_start = index + 1
+    segment_spans.append((segment_start, len(command)))
+
+    def shell_words(segment: str) -> tuple[str, ...]:
+        words: list[str] = []
+        word: list[str] = []
+        local_quote: str | None = None
+        local_escaped = False
+        local_depth = 0
+        index = 0
+        while index < len(segment):
+            character = segment[index]
+            if local_escaped:
+                word.append(character)
+                local_escaped = False
+                index += 1
+                continue
+            if character == "\\" and local_quote != "'":
+                word.append(character)
+                local_escaped = True
+                index += 1
+                continue
+            if character in {"'", '"'} and local_depth == 0:
+                if local_quote is None:
+                    local_quote = character
+                elif local_quote == character:
+                    local_quote = None
+                word.append(character)
+                index += 1
+                continue
+            if local_quote != "'" and segment[index : index + 2] == "$(":
+                local_depth += 1
+                word.extend(("$", "("))
+                index += 2
+                continue
+            if local_quote != "'" and character == ")" and local_depth:
+                local_depth -= 1
+                word.append(character)
+                index += 1
+                continue
+            if character.isspace() and local_quote is None and local_depth == 0:
+                if word:
+                    words.append("".join(word))
+                    word = []
+            else:
+                word.append(character)
+            index += 1
+        if word:
+            words.append("".join(word))
+        return tuple(words)
+
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+    persistent_bindings: list[tuple[int, str]] = []
+    for start, end in segment_spans:
+        words = shell_words(command[start:end].strip())
+        if not words:
+            continue
+        assignment_only = all(assignment.fullmatch(word) for word in words)
+        assignment_builtin = Path(words[0]).name in {
+            "declare",
+            "export",
+            "local",
+            "readonly",
+            "typeset",
+        }
+        if assignment_only:
+            persistent_bindings.extend(
+                (end, word.partition("=")[0]) for word in words if assignment.fullmatch(word)
+            )
+        elif assignment_builtin:
+            persistent_bindings.extend(
+                (end, word.partition("=")[0]) for word in words[1:] if assignment.fullmatch(word)
+            )
+
     events: list[tuple[int, str, str]] = []
-    for match in _ENV_ASSIGN_RE.finditer(command):
-        if unquoted[match.start()] and _is_shell_assignment_position(command, match.start()):
-            events.append((match.start(), "bind", match.group(1)))
+    events.extend((position, "bind", name) for position, name in persistent_bindings)
     for match in _FOR_VAR_RE.finditer(command):
         if unquoted[match.start()]:
             events.append((match.start(), "bind", match.group(1)))
@@ -147,12 +245,16 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
                     token = remaining[0]
                     if token in {"-S", "--split-string"} and len(remaining) >= 2:
                         try:
-                            return shlex.split(remaining[1], posix=True) + remaining[2:]
+                            remaining = shlex.split(remaining[1], posix=True) + remaining[2:]
+                            continue
                         except ValueError:
                             return []
                     if token.startswith("--split-string="):
                         try:
-                            return shlex.split(token.partition("=")[2], posix=True) + remaining[1:]
+                            remaining = (
+                                shlex.split(token.partition("=")[2], posix=True) + remaining[1:]
+                            )
+                            continue
                         except ValueError:
                             return []
                     if token in {"-u", "--unset", "-C", "--chdir"}:
@@ -210,29 +312,29 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
 
 
 def _outer_shell_scope(command: str) -> str:
-    """Return top-level command segments, excluding nested-shell invocations."""
-    segments: list[str] = []
-    start = 0
-    quote: str | None = None
-    escaped = False
-    for index, character in enumerate(command):
-        if escaped:
-            escaped = False
+    """Mask nested-shell payloads while retaining their outer launcher scope."""
+    masked = list(command)
+    shell_entry = re.compile(r"(?<![\w./-])(?:sh|bash)\s+(?:-c|--command)\s+")
+    for match in shell_entry.finditer(command):
+        start = match.end()
+        if start >= len(command):
             continue
-        if character == "\\" and quote != "'":
-            escaped = True
-            continue
-        if character in {"'", '"'}:
-            if quote is None:
-                quote = character
-            elif quote == character:
-                quote = None
-            continue
-        if quote is None and character in ";&|\n":
-            segments.append(command[start:index])
-            start = index + 1
-    segments.append(command[start:])
-    return ";".join(segment for segment in segments if not _nested_shell_commands(segment))
+        quote = command[start] if command[start] in {"'", '"'} else None
+        cursor = start + 1 if quote is not None else start
+        escaped = False
+        while cursor < len(command):
+            character = command[cursor]
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote != "'":
+                escaped = True
+            elif (quote is not None and character == quote) or (
+                quote is None and (character.isspace() or character in ";&|\n")
+            ):
+                break
+            masked[cursor] = " "
+            cursor += 1
+    return "".join(masked)
 
 
 # A standalone dependency entry that claims a workspace file. Requires a

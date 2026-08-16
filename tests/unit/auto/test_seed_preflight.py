@@ -353,6 +353,30 @@ def test_wrapped_nested_and_outer_shell_scopes_are_all_scanned(
 
 
 @pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ('env TOKEN=$MISSING sh -c "echo ok"', {"$MISSING"}),
+        ('FOO=bar printf "%s\\n" "$FOO"', {"$FOO"}),
+        ('export FOO=bar; printf "%s\\n" "$FOO"', set()),
+        ('FOO=bar; printf "%s\\n" "$FOO"', set()),
+    ),
+)
+def test_shell_expansion_precedes_prefix_assignment_and_builtins_persist(
+    tmp_path: Path, command: str, expected: set[str]
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Shell binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert {finding.subject for finding in report.blocking_findings} == expected
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "command -- ./missing-verify",
