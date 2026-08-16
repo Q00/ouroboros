@@ -824,6 +824,26 @@ def test_allexport_assignment_reaches_nested_shell_with_posix_parity(
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
+def test_allexport_special_builtin_prefix_reaches_nested_shell(
+    tmp_path: Path,
+) -> None:
+    command = "set -a; FOO=bar :; sh -uc 'test \"$FOO\" = bar'"
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="allexport special builtin prefix",
+                    verify_command=command,
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
 @pytest.mark.parametrize(
     ("command", "passed"),
     (
@@ -1545,6 +1565,32 @@ def test_negated_nohup_missing_program_is_blocked_with_shell_parity(tmp_path: Pa
             acceptance_criteria=(
                 AcceptanceCriterionSpec(
                     description="Negated nohup verifier",
+                    verify_command=command,
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "! time ./definitely-missing-verifier",
+        "! /usr/bin/time -p ./definitely-missing-verifier",
+    ),
+)
+def test_negated_time_missing_program_is_blocked_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Negated time verifier",
                     verify_command=command,
                 ),
             )

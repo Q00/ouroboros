@@ -77,6 +77,24 @@ _BASH_INITIALIZED_ENV_VARS = frozenset(
         "UID",
     }
 )
+_POSIX_SPECIAL_BUILTINS = frozenset(
+    {
+        ":",
+        "break",
+        "continue",
+        "eval",
+        "exec",
+        "exit",
+        "export",
+        "readonly",
+        "return",
+        "set",
+        "shift",
+        "times",
+        "trap",
+        "unset",
+    }
+)
 
 
 def _host_bound_env_vars() -> frozenset[str]:
@@ -239,22 +257,7 @@ def _shell_variable_events(
         assignment_builtin = command_name in {"export", "readonly"} or (
             shell_dialect == "bash" and command_name in {"declare", "local", "typeset"}
         )
-        special_builtin = command_name in {
-            ":",
-            "break",
-            "continue",
-            "eval",
-            "exec",
-            "exit",
-            "export",
-            "readonly",
-            "return",
-            "set",
-            "shift",
-            "times",
-            "trap",
-            "unset",
-        }
+        special_builtin = command_name in _POSIX_SPECIAL_BUILTINS
         persists = (
             separator_before not in subshell_separators | {"&&", "||"}
             and separator_after not in subshell_separators
@@ -602,6 +605,18 @@ def _nested_shell_scopes(
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
+            if command_name == "time":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    if token in {"-f", "--format", "-o", "--output"}:
+                        remaining = remaining[2:] if len(remaining) >= 2 else []
+                    else:
+                        remaining = remaining[1:]
+                continue
             if command_name == "command":
                 remaining = remaining[1:]
                 while remaining and remaining[0] in {"--", "-p", "-v", "-V"}:
@@ -618,6 +633,11 @@ def _nested_shell_scopes(
         assignment_prefixes: list[str] = []
         while state_segment and assignment.fullmatch(state_segment[0]):
             assignment_prefixes.append(state_segment.pop(0))
+        if persists and state_segment and Path(state_segment[0]).name in _POSIX_SPECIAL_BUILTINS:
+            prefix_names = {token.partition("=")[0] for token in assignment_prefixes}
+            sequential_values.update(prefix_names)
+            if allexport:
+                sequential_export_names.update(prefix_names)
         if persists and segment and all(assignment.fullmatch(token) for token in segment):
             sequential_values.update(token.partition("=")[0] for token in segment)
             if allexport:
@@ -1489,6 +1509,18 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 remaining = remaining[1:]
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
+                continue
+            if command_name == "time":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    if token in {"-f", "--format", "-o", "--output"}:
+                        remaining = remaining[2:] if len(remaining) >= 2 else []
+                    else:
+                        remaining = remaining[1:]
                 continue
             if command_name == "command":
                 remaining = remaining[1:]
