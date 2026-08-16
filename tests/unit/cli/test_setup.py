@@ -7818,6 +7818,51 @@ class TestHermesSetup:
             "orchestrator:\n  runtime_backend: claude\n"
         )
 
+    def test_setup_hermes_rolls_back_when_post_publication_snapshot_fails(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        original_snapshot = setup_cmd._snapshot_path
+
+        def fail_published_snapshot(path: Path, **kwargs):
+            skill = target / "run" / "SKILL.md"
+            if path == target and skill.exists() and skill.read_text(encoding="utf-8") == "fresh\n":
+                raise OSError("synthetic post-publication snapshot failure")
+            return original_snapshot(path, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._snapshot_path",
+                side_effect=fail_published_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
+        assert config_path.read_text(encoding="utf-8") == original_config
+        register.assert_not_called()
+
     def test_setup_hermes_preserves_edit_after_publication_before_receipt(
         self, tmp_path: Path
     ) -> None:

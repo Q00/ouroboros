@@ -57,3 +57,19 @@ def restore_hermes(path: Path, prior: Any, expected: Any) -> bool:
         ),
         remove=setup._remove_path_topology,
     )
+
+
+def restore_hermes_receipt(path: Path, prior: Any, receipt: Any) -> bool:
+    """Restore only while the exact receipted Hermes generation remains live."""
+    from ouroboros.cli.commands import setup
+
+    return atomic_restore_generation(
+        path,
+        prior,
+        receipt,
+        snapshot=lambda target: receipt if receipt.matches(target) else None,
+        restore=lambda target, value: setup._restore_path_snapshot(
+            target, value, restore_link_targets=False
+        ),
+        remove=setup._remove_path_topology,
+    )

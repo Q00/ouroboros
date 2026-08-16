@@ -46,7 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
-from ouroboros.cli.commands.setup_atomic_restore import restore_hermes
+from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -2297,10 +2297,14 @@ def _snapshot_path(
         normalized_target = target_path.expanduser().absolute()
         if normalized_target in _seen:
             return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
-        target_snapshot = _snapshot_path(
-            target_path,
-            _seen=_seen | {current_path},
-            follow_links=follow_links,
+        target_snapshot = (
+            _snapshot_path(target_path, _seen=_seen | {current_path})
+            if follow_links
+            else _snapshot_path(
+                target_path,
+                _seen=_seen | {current_path},
+                follow_links=False,
+            )
         )
         try:
             target_stat = target_path.lstat()
@@ -2337,7 +2341,15 @@ def _snapshot_path(
         children.append(
             (
                 child.name,
-                _snapshot_path(child, _seen=_seen | {current_path}, follow_links=follow_links),
+                (
+                    _snapshot_path(child, _seen=_seen | {current_path})
+                    if follow_links
+                    else _snapshot_path(
+                        child,
+                        _seen=_seen | {current_path},
+                        follow_links=False,
+                    )
+                ),
             )
         )
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
@@ -3036,7 +3048,23 @@ def _setup_hermes(hermes_path: str) -> bool:
         print_error("Hermes runtime activation incomplete: required skills were not installed.")
         return False
 
-    hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
+    try:
+        hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
+    except OSError as exc:
+        print_error(f"Hermes activation could not snapshot published skills: {exc}")
+        try:
+            restored = isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and restore_hermes_receipt(
+                hermes_skill_target,
+                hermes_skill_snapshot,
+                hermes_publication,
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as rollback_exc:
+            print_error(f"Hermes activation rollback could not restore skills: {rollback_exc}")
+        return False
 
     def rollback_hermes_skills() -> None:
         try:
