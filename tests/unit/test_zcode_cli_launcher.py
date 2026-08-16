@@ -11,6 +11,7 @@ import pytest
 
 from ouroboros.zcode_cli_launcher import (
     build_zcode_command_prefix,
+    resolve_zcode_command_prefix,
     resolve_zcode_electron_node_path,
 )
 
@@ -57,6 +58,26 @@ def test_standalone_script_uses_system_node_without_metadata(tmp_path: Path) -> 
 
     assert resolve_zcode_electron_node_path(cli_path) is None
     assert build_zcode_command_prefix(cli_path, None) == ["node", str(cli_path)]
+
+
+def test_standalone_script_readiness_requires_system_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "zcode.cjs"
+    cli_path.write_text("// standalone zcode", encoding="utf-8")
+    monkeypatch.setattr("ouroboros.zcode_cli_launcher.shutil.which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="requires Node on PATH"):
+        resolve_zcode_command_prefix(cli_path)
+
+
+def test_app_bundle_command_readiness_validates_bundle_metadata(tmp_path: Path) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    cli_path.with_name(".node-bundle-meta.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        resolve_zcode_command_prefix(cli_path)
 
 
 def test_path_executable_runs_directly() -> None:

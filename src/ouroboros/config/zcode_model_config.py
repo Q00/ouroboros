@@ -67,9 +67,10 @@ def inspect_zcode_model_config(
     The probe mirrors the CLI's own acceptance rules: a string
     ``"provider-id/model-id"`` reference under ``model`` or ``model.main``,
     plus a matching entry in the file's ``provider`` registry carrying
-    ``kind`` or ``options.baseURL``. Anything else reproduces the CLI's
-    ``Model config is missing`` failure, so the returned status explains the
-    exact gap instead of letting setup and health checks report success.
+    non-empty ``kind``, ``options.baseURL``, and ``options.apiKey``. Anything
+    else reproduces the CLI's ``Model config is missing`` failure, so the
+    returned status explains the exact gap instead of letting setup and health
+    checks report success.
     """
 
     path = config_path or default_zcode_cli_config_path()

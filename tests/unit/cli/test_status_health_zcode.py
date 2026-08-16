@@ -121,3 +121,33 @@ def test_zcode_health_accepts_readable_script_path(monkeypatch, tmp_path):
 
     assert row["status"] == "ok"
     assert str(script) in row["detail"]
+
+
+def test_zcode_health_rejects_malformed_app_bundle(monkeypatch, tmp_path):
+    contents = tmp_path / "ZCode.app" / "Contents"
+    script = contents / "Resources" / "glm" / "zcode.cjs"
+    script.parent.mkdir(parents=True)
+    script.write_text("// zcode", encoding="utf-8")
+    script.with_name(".node-bundle-meta.json").write_text("{", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(script))
+
+    row = status_module._check_runtime_backend(
+        {"orchestrator": {"runtime_backend": "zcode"}, "llm": {"backend": "zcode"}}
+    )
+
+    assert row["status"] == "error"
+    assert "invalid JSON" in row["detail"]
+
+
+def test_zcode_health_rejects_standalone_script_without_node(monkeypatch, tmp_path):
+    script = tmp_path / "custom-zcode.cjs"
+    script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(script))
+    monkeypatch.setattr("ouroboros.zcode_cli_launcher.shutil.which", lambda _name: None)
+
+    row = status_module._check_runtime_backend(
+        {"orchestrator": {"runtime_backend": "zcode"}, "llm": {"backend": "zcode"}}
+    )
+
+    assert row["status"] == "error"
+    assert "requires Node on PATH" in row["detail"]
