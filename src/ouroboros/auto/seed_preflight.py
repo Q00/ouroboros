@@ -508,8 +508,13 @@ def _nested_shell_scopes(
         inherited = _host_bound_env_vars()
     if not _nested_payload:
         command = _mask_outer_double_quote_expansions(command)
+    command = _mask_statically_unreachable_program_clauses(command)
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        # A newline is a sequential command separator in POSIX shells. Keep
+        # it out of whitespace so the state interpreter cannot merge an
+        # assignment-only command into the next nested-shell launcher.
+        lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         lexer.commenters = ""
         parts = list(lexer)
@@ -517,7 +522,7 @@ def _nested_shell_scopes(
         return ()
     segments: list[tuple[list[str], str | None, str | None]] = [([], None, None)]
     for part in parts:
-        if re.fullmatch(r"[;&|]+", part):
+        if re.fullmatch(r"[;&|\n]+", part):
             current, before, _after = segments[-1]
             segments[-1] = (current, before, part)
             segments.append(([], part, None))

@@ -728,6 +728,78 @@ def test_nested_shell_inherits_prior_sequential_export(tmp_path: Path) -> None:
     assert report.passed
 
 
+@pytest.mark.parametrize(
+    ("command", "runtime_passed"),
+    (
+        ("FOO=bar\nsh -uc 'test \"$FOO\" = bar'", False),
+        ("export FOO=bar\nsh -uc 'test \"$FOO\" = bar'", True),
+        ("set -a\nFOO=bar\nsh -uc 'test \"$FOO\" = bar'", True),
+    ),
+)
+def test_newline_separated_nested_shell_state_matches_posix_shell(
+    tmp_path: Path, command: str, runtime_passed: bool
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Multiline shell state", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is runtime_passed
+    assert (runtime.returncode == 0) is runtime_passed
+
+
+@pytest.mark.parametrize(
+    ("command", "runtime_passed"),
+    (
+        ("false && export FOO=bar; sh -uc 'test \"$FOO\" = bar'", False),
+        ("true || export FOO=bar; sh -uc 'test \"$FOO\" = bar'", False),
+        ("false && FOO=bar; export FOO; sh -uc 'test \"$FOO\" = bar'", False),
+        ("true && export FOO=bar; sh -uc 'test \"$FOO\" = bar'", True),
+        ("false || export FOO=bar; sh -uc 'test \"$FOO\" = bar'", True),
+    ),
+)
+def test_conditional_nested_shell_exports_match_posix_shell(
+    tmp_path: Path, command: str, runtime_passed: bool
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Conditional nested export", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is runtime_passed
+    assert (runtime.returncode == 0) is runtime_passed
+
+
 def test_nested_shell_inherits_prefixed_export_with_shell_parity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
