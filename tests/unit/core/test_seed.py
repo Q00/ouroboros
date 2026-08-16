@@ -581,6 +581,24 @@ class TestSeed:
                 verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1),
             )
 
+    def test_success_contract_rejects_status_masking_at_persisted_schema_ingress(self) -> None:
+        seed = Seed(
+            goal="Preserve a saved widget",
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Widget state persists"),),
+            ontology_schema=OntologySchema(name="Widget", description="Saved widget state"),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+        persisted = seed.to_dict()
+        persisted["acceptance_criteria"] = [
+            {
+                "description": "Widget state persists",
+                "verify_command": 'python -c "import sys; sys.exit(1)" 2>&1 || true',
+            }
+        ]
+
+        with pytest.raises(PydanticValidationError, match="always-succeeding fallback"):
+            Seed.from_dict(persisted)
+
     @pytest.mark.parametrize(
         "artifact",
         (

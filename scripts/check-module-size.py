@@ -104,7 +104,7 @@ GRANDFATHERED: dict[str, int] = {
     "src/ouroboros/cli/commands/plugin.py": 3053,
     "src/ouroboros/mcp/job_manager.py": 2950,
     "src/ouroboros/mcp/tools/execution_handlers.py": 2869,
-    "src/ouroboros/bigbang/seed_generator.py": 2637,
+    "src/ouroboros/bigbang/seed_generator.py": 2079,
     "src/ouroboros/mcp/server/adapter.py": 2612,
     "src/ouroboros/auto/interview_driver.py": 2496,
     "src/ouroboros/mcp/tools/auto_handler.py": 2488,

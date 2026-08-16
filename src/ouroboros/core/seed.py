@@ -37,6 +37,7 @@ from pydantic import (
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from ouroboros.core.conductor import ConductorDirective
+from ouroboros.core.verify_commands import _status_masking_verify_command_reason
 
 _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
@@ -510,6 +511,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             stripped = value.strip()
             if not stripped or _is_none_sentinel(stripped):
                 return None
+            if reason := _status_masking_verify_command_reason(stripped):
+                raise ValueError(reason)
             return stripped
         return value
 
