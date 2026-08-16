@@ -353,6 +353,32 @@ def _finish_owned_cleanup(
     )
     generation = cleanup / "generation"
     active = cleanup / _CLEANUP_ACTIVE
+    retirement = _retirement_path(backup, token)
+    if retirement.exists() or retirement.is_symlink():
+        if generation.exists() or generation.is_symlink():
+            raise OSError("Refusing ambiguous Hermes cleanup generations")
+        _assert_owned_swap_backup(
+            retirement,
+            operation=operation,
+            token=token,
+            digest=digest,
+            backup_identity=backup,
+        )
+        # The generation-to-retirement rename committed before surfacing an
+        # interruption. Remove the authenticated empty cleanup shell, then
+        # replay the retirement transition from its durable destination.
+        _remove_target_path(active)
+        _remove_target_path(cleanup / _CLEANUP_MARKER)
+        cleanup.rmdir()
+        _finish_owned_retirement(
+            retirement,
+            backup,
+            intent,
+            operation=operation,
+            token=token,
+            digest=digest,
+        )
+        return
     if generation.exists() or generation.is_symlink():
         if not active.exists():
             _assert_owned_swap_backup(
@@ -384,7 +410,6 @@ def _finish_owned_cleanup(
         # for every descendant.  Preserve the authenticated prior generation
         # with one atomic directory rename instead of risking deletion of a
         # concurrent replacement.
-        retirement = _retirement_path(backup, token)
         if retirement.exists() or retirement.is_symlink():
             raise OSError(f"Refusing occupied Hermes retirement path: {retirement}")
         os.replace(generation, retirement)
@@ -472,7 +497,16 @@ def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
             try:
                 os.replace(path, reclamation)
             except BaseException:
-                _remove_target_path(manifest)
+                if reclamation.exists() and not path.exists():
+                    _assert_owned_swap_backup(
+                        reclamation,
+                        operation=operation,
+                        token=token,
+                        digest=digest,
+                        backup_identity=backup,
+                    )
+                else:
+                    _remove_target_path(manifest)
                 raise
             try:
                 _assert_owned_swap_backup(
@@ -658,7 +692,7 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
         retirement = _retirement_path(backup, token)
         cleanup = _cleanup_path(backup, token)
         if cleanup.exists() or cleanup.is_symlink():
-            if backup.exists() or retirement.exists() or retirement.is_symlink():
+            if backup.exists():
                 raise OSError("Refusing ambiguous Hermes cleanup generations")
             _finish_owned_cleanup(
                 cleanup,

@@ -1166,6 +1166,88 @@ class TestInstallHermesSkills:
         assert tuple(tmp_path.glob("*.retired.*"))
         assert not tuple(tmp_path.glob("*.cleanup.*"))
 
+    def test_retry_recovers_generation_to_retirement_commit_then_raise(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_replace = os.replace
+        interrupted = False
+
+        def interrupt_after_generation_retirement(src, dst):
+            nonlocal interrupted
+            result = real_replace(src, dst)
+            if Path(src).name == "generation" and ".retired." in Path(dst).name and not interrupted:
+                interrupted = True
+                raise OSError("committed generation retirement")
+            return result
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts.os.replace", interrupt_after_generation_retirement
+        )
+        with pytest.raises(OSError, match="committed generation retirement"):
+            atomic_swap_generation(target, replacement)
+
+        retry = tmp_path / "retry"
+        retry.mkdir()
+        retry.joinpath("generation.txt").write_text("retry\n", encoding="utf-8")
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        atomic_swap_generation(target, retry)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "retry\n"
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
+        assert not tuple(tmp_path.glob("*.intent"))
+
+    def test_retry_preserves_manifest_after_reclamation_commit_then_raise(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        real_replace = os.replace
+        interrupted = False
+
+        def interrupt_after_reclamation_commit(src, dst):
+            nonlocal interrupted
+            result = real_replace(src, dst)
+            if (
+                ".retired." in Path(src).name
+                and Path(dst).name.endswith(".reclaim")
+                and not interrupted
+            ):
+                interrupted = True
+                raise OSError("committed reclamation")
+            return result
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts.os.replace", interrupt_after_reclamation_commit
+        )
+        with pytest.raises(OSError, match="committed reclamation"):
+            atomic_swap_generation(target, replacement)
+
+        assert tuple(tmp_path.glob("*.reclaim.manifest.json"))
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        atomic_swap_generation(target, replacement)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
+        assert not tuple(tmp_path.glob("*.reclaim.manifest.json"))
+
     @pytest.mark.parametrize("operation", ("swap", "remove"))
     def test_interrupted_intent_staging_is_retryable(
         self, tmp_path: Path, monkeypatch, operation: str
