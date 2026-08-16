@@ -1,0 +1,95 @@
+"""Unit tests for the zcode model-config wiring in ``status health``."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from ouroboros.cli.commands import status as status_module
+from ouroboros.config.zcode_model_config import ZcodeModelConfigStatus
+
+
+def _probe_result(ok: bool, detail: str) -> ZcodeModelConfigStatus:
+    return ZcodeModelConfigStatus(
+        ok=ok, detail=detail, config_path=Path("/fake/.zcode/cli/config.json")
+    )
+
+
+def test_zcode_credentials_ok_includes_model_config_detail(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+    monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        status_module,
+        "inspect_zcode_model_config",
+        lambda: _probe_result(True, "model.main -> p/m (provider entry present)"),
+    )
+
+    row = status_module._check_credentials({"llm": {"backend": "zcode"}}, Path("/fake/config.yaml"))
+
+    assert row["status"] == "ok"
+    assert "model.main -> p/m" in row["detail"]
+
+
+def test_zcode_credentials_warning_when_model_config_missing(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+    monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        status_module,
+        "inspect_zcode_model_config",
+        lambda: _probe_result(False, "config.json not found"),
+    )
+
+    row = status_module._check_credentials({"llm": {"backend": "zcode"}}, Path("/fake/config.yaml"))
+
+    assert row["status"] == "warning"
+    assert "config.json not found" in row["detail"]
+
+
+def test_non_zcode_local_auth_backend_stays_ok_without_probe(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+    monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
+
+    def _fail_probe():
+        raise AssertionError("probe must not run for non-zcode backends")
+
+    monkeypatch.setattr(status_module, "inspect_zcode_model_config", _fail_probe)
+
+    row = status_module._check_credentials({"llm": {"backend": "gjc"}}, Path("/fake/config.yaml"))
+
+    assert row["status"] == "ok"
+
+
+def test_runtime_backend_row_warns_for_zcode_without_model_config(monkeypatch):
+    monkeypatch.setattr(
+        status_module,
+        "inspect_zcode_model_config",
+        lambda: _probe_result(False, "config.json not found"),
+    )
+
+    row = status_module._runtime_backend_health_row("zcode", "zcode: /bin/zcode.cjs")
+
+    assert row["status"] == "warning"
+    assert "model config: config.json not found" in row["detail"]
+
+
+def test_runtime_backend_row_ok_for_zcode_with_model_config(monkeypatch):
+    monkeypatch.setattr(
+        status_module,
+        "inspect_zcode_model_config",
+        lambda: _probe_result(True, "model.main -> p/m"),
+    )
+
+    row = status_module._runtime_backend_health_row("zcode", "zcode: /bin/zcode.cjs")
+
+    assert row["status"] == "ok"
+
+
+def test_runtime_backend_row_unchanged_for_other_backends(monkeypatch):
+    def _fail_probe():
+        raise AssertionError("probe must not run for non-zcode backends")
+
+    monkeypatch.setattr(status_module, "inspect_zcode_model_config", _fail_probe)
+
+    row = status_module._runtime_backend_health_row("codex", "codex: /bin/codex")
+
+    assert row["status"] == "ok"
+    assert row["detail"] == "codex: /bin/codex"

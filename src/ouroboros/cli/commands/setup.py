@@ -3830,6 +3830,37 @@ def _setup_grok(grok_path: str) -> None:
 def _setup_zcode(zcode_path: str) -> None:
     """Configure Ouroboros for the Zcode CLI runtime."""
     _setup_runtime_only_backend("zcode", zcode_path, "zcode_cli_path")
+    _warn_zcode_model_config()
+
+
+def _warn_zcode_model_config() -> None:
+    """Warn when the Zcode CLI itself has no usable model provider config.
+
+    Ouroboros setup only records the CLI path; the Zcode CLI separately
+    resolves its model from ``~/.zcode/cli/config.json`` on every headless
+    run and exits with ``Model config is missing`` when that file has no
+    effective ``model.main`` reference. Without this probe the failure only
+    appears mid-execution, after Ouroboros has already spawned the CLI.
+    """
+
+    from ouroboros.config.zcode_model_config import inspect_zcode_model_config
+
+    status = inspect_zcode_model_config()
+    if status.ok:
+        return
+
+    print_warning(f"Zcode model provider config not ready: {status.detail}")
+    print_info(
+        "Headless Zcode runs will exit with 'Model config is missing' until "
+        f"{status.config_path} defines model.main."
+    )
+    print_info(
+        'Example: {"model": {"main": "builtin:zai-coding-plan/GLM-5.3"}, '
+        '"provider": {"builtin:zai-coding-plan": {"kind": "anthropic", '
+        '"options": {"baseURL": "https://api.z.ai/api/anthropic", "apiKey": "..."}}}} '
+        "(model.main must be the provider/model string). "
+        "See docs/runtime-guides/zcode.md"
+    )
 
 
 def _setup_pi(pi_path: str) -> None:
