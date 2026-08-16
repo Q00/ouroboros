@@ -72,7 +72,9 @@ _FILE_TOKEN_RE = re.compile(
 )
 
 
-def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
+def _shell_variable_events(
+    command: str, *, shell_dialect: str = "sh"
+) -> tuple[tuple[int, str, str], ...]:
     """Return ordered shell assignment/expansion events outside literal quoting."""
     command = _strip_shell_comments(command)
     expandable = [True] * len(command)
@@ -201,13 +203,9 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             len(words),
         )
         command_name = Path(words[command_index]).name if command_index < len(words) else ""
-        assignment_builtin = command_name in {
-            "declare",
-            "export",
-            "local",
-            "readonly",
-            "typeset",
-        }
+        assignment_builtin = command_name in {"export", "readonly"} or (
+            shell_dialect == "bash" and command_name in {"declare", "local", "typeset"}
+        )
         persists = (
             separator_before not in subshell_separators | {"&&", "||"}
             and separator_after not in subshell_separators
@@ -373,7 +371,7 @@ def _nested_shell_scopes(
     inherited: frozenset[str] | None = None,
     *,
     _nested_payload: bool = False,
-) -> tuple[tuple[str, frozenset[str]], ...]:
+) -> tuple[tuple[str, frozenset[str], str], ...]:
     """Return nested ``sh -c`` payloads with launcher-exported bindings."""
     if inherited is None:
         inherited = _host_bound_env_vars()
@@ -394,7 +392,7 @@ def _nested_shell_scopes(
             segments.append(([], part, None))
         else:
             segments[-1][0].append(part)
-    nested: list[tuple[str, frozenset[str]]] = []
+    nested: list[tuple[str, frozenset[str], str]] = []
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
     sequential_export_names = set(inherited)
     sequential_values = set(inherited)
@@ -514,7 +512,7 @@ def _nested_shell_scopes(
             and segment[1] in {"-c", "--command"}
         ):
             scope = frozenset(launcher_bound | _SHELL_INITIALIZED_ENV_VARS)
-            nested.append((segment[2], scope))
+            nested.append((segment[2], scope, Path(segment[0]).name))
             nested.extend(_nested_shell_scopes(segment[2], scope, _nested_payload=True))
     return tuple(nested)
 
@@ -692,7 +690,13 @@ _DETERMINISTIC_CWD_RE = re.compile(
 )
 
 
-def _program_path_exists(path_text: str, command: str, workspace_root: Path | None) -> bool | None:
+def _program_path_exists(
+    path_text: str,
+    command: str,
+    workspace_root: Path | None,
+    *,
+    token_position: int,
+) -> bool | None:
     """Resolve verifier programs after deterministic shell directory changes.
 
     Dynamic directory changes are intentionally inconclusive: blocking on the
@@ -702,7 +706,9 @@ def _program_path_exists(path_text: str, command: str, workspace_root: Path | No
     candidate = Path(path_text).expanduser()
     if workspace_root is None or candidate.is_absolute():
         return _path_exists(path_text, workspace_root)
-    matches = list(_DETERMINISTIC_CWD_RE.finditer(command))
+    matches = [
+        match for match in _DETERMINISTIC_CWD_RE.finditer(command) if match.start() < token_position
+    ]
     if not matches:
         return _path_exists(path_text, workspace_root)
     match = matches[-1]
@@ -783,8 +789,10 @@ def _check_verify_commands(
         host_bound = _host_bound_env_vars()
         nested_shell_scopes = _nested_shell_scopes(scannable, host_bound)
         outer_shell_command = _outer_shell_scope(scannable)
-        shell_scopes = ((outer_shell_command, host_bound), *nested_shell_scopes)
-        for scope_index, (shell_command, inherited_bindings) in enumerate(shell_scopes):
+        shell_scopes = ((outer_shell_command, host_bound, "sh"), *nested_shell_scopes)
+        for scope_index, (shell_command, inherited_bindings, shell_dialect) in enumerate(
+            shell_scopes
+        ):
             if scope_index == 0:
                 # A variable in a double-quoted ``sh -c`` payload is expanded
                 # by this outer shell before the child starts. Keep that raw
@@ -794,7 +802,9 @@ def _check_verify_commands(
             if _has_unsupported_shell_state_grammar(shell_command):
                 continue
             command_bound: set[str] = set(inherited_bindings)
-            for _, event, variable in _shell_variable_events(shell_command):
+            for _, event, variable in _shell_variable_events(
+                shell_command, shell_dialect=shell_dialect
+            ):
                 if event == "bind":
                     command_bound.add(variable)
                     continue
@@ -818,14 +828,20 @@ def _check_verify_commands(
                         ),
                     )
                 )
-        for token in _FILE_TOKEN_RE.findall(scannable):
+        for token_match in _FILE_TOKEN_RE.finditer(scannable):
+            token = token_match.group(0)
             normalized = _normalize_workspace_path(token)
             if normalized in artifacts or normalized in claimed_files or normalized in seen_tokens:
                 continue
             seen_tokens.add(normalized)
             is_program = normalized in program_tokens
             path_status = (
-                _program_path_exists(token, command, workspace_root)
+                _program_path_exists(
+                    token,
+                    scannable,
+                    workspace_root,
+                    token_position=token_match.start(),
+                )
                 if is_program
                 else _path_exists(token, workspace_root)
             )

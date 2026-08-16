@@ -808,6 +808,98 @@ def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
 
 
+@pytest.mark.parametrize(
+    "command",
+    ("python3 check.py && cd sub", "python3 check.py && env -C sub true"),
+)
+def test_later_directory_change_does_not_rebase_earlier_verifier(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Ordered directory verifier", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("python3 check.py && cd sub", "python3 check.py && env -C sub true"),
+)
+def test_later_directory_change_cannot_hide_missing_earlier_verifier(
+    tmp_path: Path, command: str
+) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Ordered directory verifier", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize("builtin", ("declare", "local", "typeset"))
+def test_bash_assignment_builtins_do_not_bind_in_outer_posix_shell(
+    tmp_path: Path, builtin: str
+) -> None:
+    dash = Path("/bin/dash")
+    if not dash.exists():
+        pytest.skip("dash is required for strict POSIX-shell comparison")
+    command = f'{builtin} FOO=bar; set -u; test -n "$FOO"'
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="POSIX shell binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.subject for finding in report.blocking_findings] == ["$FOO"]
+    assert subprocess.run([dash, "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize("builtin", ("declare", "typeset"))
+def test_bash_assignment_builtins_bind_inside_explicit_bash_payload(
+    tmp_path: Path, builtin: str
+) -> None:
+    command = f"bash -c '{builtin} FOO=bar; set -u; test -n \"$FOO\"'"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Bash shell binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
 def test_verify_reference_declared_as_artifact_is_clean(tmp_path: Path) -> None:
     (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
     seed = _seed(
