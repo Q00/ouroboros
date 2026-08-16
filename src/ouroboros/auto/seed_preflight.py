@@ -720,11 +720,12 @@ def _path_exists(path_text: str, workspace_root: Path | None) -> bool | None:
     return (workspace_root / candidate).exists()
 
 
+_STATIC_SHELL_WORD = r"""(?:[^\s;&|\\'\"]+|\\.|'[^']*'|\"(?:\\.|[^\"])*\")+"""
 _DETERMINISTIC_CWD_RE = re.compile(
     r"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{\s*)cd\s+"
-    r"(?:(?:-L|-P|--)\s+)*(?P<cd>[^\s;&|]+)"
-    r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)=(?P<env_eq>[^\s;&|]+)"
-    r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>[^\s;&|]+)"
+    rf"(?:(?:-L|-P|--)\s+)*(?P<cd>{_STATIC_SHELL_WORD})"
+    rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)=(?P<env_eq>{_STATIC_SHELL_WORD})"
+    rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>{_STATIC_SHELL_WORD})"
 )
 _NESTED_SHELL_PAYLOAD_RE = re.compile(
     r"\b(?:sh|bash)"
@@ -734,6 +735,34 @@ _NESTED_SHELL_PAYLOAD_RE = re.compile(
     r"(?P=quote)",
     re.DOTALL,
 )
+
+
+def _decode_static_shell_word(raw: str) -> str | None:
+    """Decode one shell word when it has no runtime-dependent expansion."""
+    quote: str | None = None
+    escaped = False
+    for character in raw:
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if quote != "'" and character in {"$", "`"}:
+            return None
+    if escaped or quote is not None:
+        return None
+    try:
+        decoded = shlex.split(raw, posix=True)
+    except ValueError:
+        return None
+    return decoded[0] if len(decoded) == 1 else None
 
 
 def _effective_program_root(
@@ -747,9 +776,12 @@ def _effective_program_root(
         match for match in _DETERMINISTIC_CWD_RE.finditer(command) if match.start() < token_position
     ]
     for match in preceding:
-        directory = match.group("cd")
-        if directory is None:
+        raw_directory = match.group("cd")
+        if raw_directory is None:
             continue
+        directory = _decode_static_shell_word(raw_directory)
+        if directory is None:
+            return None
         # A plain/conditional ``cd`` does not establish the verifier's cwd:
         # it may fail or be skipped while a later command after ``;`` still
         # runs.  It is authoritative only while the verifier remains guarded
@@ -766,8 +798,6 @@ def _effective_program_root(
             condition = command[: match.start()]
             if re.search(r"\bif\s+(?:true|:)(?:\s*;)?\s*$", condition) is None:
                 return None
-        if any(character in directory for character in "'$\""):
-            return None
         changed = Path(directory).expanduser()
         changed_root = changed if changed.is_absolute() else effective_root / changed
         if re.search(r"[;\n]", suffix) and not changed_root.is_dir():
@@ -788,8 +818,11 @@ def _effective_program_root(
         None,
     )
     if local_env is not None:
-        directory = local_env.group("env") or local_env.group("env_eq")
-        if directory is None or any(character in directory for character in "'$\""):
+        raw_directory = local_env.group("env") or local_env.group("env_eq")
+        if raw_directory is None:
+            return None
+        directory = _decode_static_shell_word(raw_directory)
+        if directory is None:
             return None
         changed = Path(directory).expanduser()
         effective_root = changed if changed.is_absolute() else effective_root / changed

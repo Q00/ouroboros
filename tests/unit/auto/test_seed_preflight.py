@@ -942,6 +942,79 @@ def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd 'sub dir' && python check.py",
+        r"cd sub\ dir && python check.py",
+        "env -C 'sub dir' python check.py",
+        r"env -C sub\ dir python check.py",
+        'env --chdir="sub dir" python check.py',
+        "sh -c \"cd 'sub dir' && python check.py\"",
+        r"sh -c 'cd sub\ dir && python check.py'",
+        "cd 'sub dir' && sh -c 'python check.py'",
+        r"env -C sub\ dir sh -c 'python check.py'",
+    ),
+)
+def test_shell_decoded_working_directory_matches_production_shell(
+    tmp_path: Path, command: str
+) -> None:
+    sub = tmp_path / "sub dir"
+    sub.mkdir()
+    (sub / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Shell-word-aware directory", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    if "--chdir=" not in command or os.uname().sysname != "Darwin":
+        assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd 'sub dir' && python check.py",
+        r"cd sub\ dir && python check.py",
+        "env -C 'sub dir' python check.py",
+        r"env -C sub\ dir python check.py",
+        'env --chdir="sub dir" python check.py',
+        "sh -c \"cd 'sub dir' && python check.py\"",
+        r"sh -c 'cd sub\ dir && python check.py'",
+        "cd 'sub dir' && sh -c 'python check.py'",
+        r"env -C sub\ dir sh -c 'python check.py'",
+    ),
+)
+def test_shell_decoded_missing_program_matches_production_shell(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "sub dir").mkdir()
+    (tmp_path / "check.py").write_text("print('wrong directory')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Shell-word-aware directory", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    if "--chdir=" not in command or os.uname().sysname != "Darwin":
+        assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
 def test_root_artifact_does_not_satisfy_program_in_effective_directory(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     report = run_seed_preflight(
