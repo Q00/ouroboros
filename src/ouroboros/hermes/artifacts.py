@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -32,6 +33,17 @@ _SWAP_INTENT_SUFFIX = ".intent"
 _CLEANUP_MARKER = ".ouroboros-managed-cleanup"
 _CLEANUP_ACTIVE = ".ouroboros-cleanup-active"
 _EXPECTED_UNSET = object()
+
+
+@dataclass(frozen=True)
+class HermesPublicationReceipt:
+    """Exact content identity committed by one Hermes skill publication."""
+
+    target: Path
+    fingerprint: tuple[object, ...] | None
+
+    def matches(self, path: Path) -> bool:
+        return path == self.target and _tree_fingerprint(path) == self.fingerprint
 
 
 def _tree_fingerprint(path: Path) -> tuple[object, ...] | None:
@@ -702,7 +714,7 @@ def atomic_swap_generation(
     *,
     expected: tuple[object, ...] | None | object = _EXPECTED_UNSET,
     expected_check: Callable[[], bool] | None = None,
-) -> None:
+) -> tuple[object, ...] | None:
     """Publish a complete sibling generation with restart-recognizable recovery."""
     backup_prefix = f".{target.name}.old."
     _recover_swap_intents(target, backup_prefix)
@@ -752,6 +764,7 @@ def atomic_swap_generation(
             _restore_owned_backup(backup, target)
             _remove_target_path(intent)
             raise OSError(f"Hermes live generation changed during publication: {target}")
+    replacement_fingerprint = _tree_fingerprint(replacement)
     try:
         os.replace(replacement, target)
     except BaseException:
@@ -765,6 +778,7 @@ def atomic_swap_generation(
         _retire_owned_backup(backup, intent, operation="swap", token=token, digest=digest)
     else:
         _remove_target_path(intent)
+    return replacement_fingerprint
 
 
 def atomic_remove_generation(
@@ -903,7 +917,8 @@ def install_hermes_skills(
     *,
     hermes_dir: str | Path | None = None,
     prune: bool = False,
-) -> Path:
+    return_receipt: bool = False,
+) -> Path | HermesPublicationReceipt:
     """Install packaged Ouroboros skills into ~/.hermes/skills/autonomous-ai-agents/ouroboros/."""
     resolved_hermes_dir = (
         Path(hermes_dir).expanduser() if hermes_dir is not None else Path.home() / ".hermes"
@@ -968,10 +983,14 @@ def install_hermes_skills(
                     ):
                         _remove_target_path(existing_path)
 
-            atomic_swap_generation(target_dir, staging_dir, expected=source_generation)
+            published_fingerprint = atomic_swap_generation(
+                target_dir, staging_dir, expected=source_generation
+            )
             cleanup_staging_dir = None
         finally:
             if cleanup_staging_dir is not None:
                 _remove_target_path(cleanup_staging_dir)
 
+    if return_receipt:
+        return HermesPublicationReceipt(target_dir, published_fingerprint)
     return target_dir

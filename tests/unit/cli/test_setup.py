@@ -7774,6 +7774,53 @@ class TestHermesSetup:
         else:
             assert not target.exists()
 
+    def test_setup_hermes_preserves_edit_after_publication_before_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        from ouroboros.hermes.artifacts import install_hermes_skills
+
+        real_install = install_hermes_skills
+
+        def publish_then_operator_edit(**kwargs):
+            receipt = real_install(**kwargs)
+            target.joinpath("operator-after-publish.txt").write_text("preserve\n", encoding="utf-8")
+            return receipt
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.install_hermes_skills",
+                side_effect=publish_then_operator_edit,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("operator-after-publish.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+
     def test_setup_hermes_rollback_staging_failure_keeps_published_generation(
         self, tmp_path: Path
     ) -> None:

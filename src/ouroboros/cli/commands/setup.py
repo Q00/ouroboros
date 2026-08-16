@@ -2887,19 +2887,23 @@ def _setup_codex(
     return True
 
 
-def _install_hermes_artifacts() -> bool:
+def _install_hermes_artifacts() -> object | bool:
     """Install packaged Ouroboros skills into ~/.hermes/."""
     from ouroboros.hermes.artifacts import install_hermes_skills
 
     hermes_dir = Path.home() / ".hermes"
 
     try:
-        skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
-        print_success(f"Installed Hermes skills → {skill_path}")
+        publication = install_hermes_skills(
+            hermes_dir=hermes_dir,
+            prune=True,
+            return_receipt=True,
+        )
+        print_success(f"Installed Hermes skills → {publication.target}")
     except OSError as exc:
         print_error(f"Could not install packaged skills for Hermes: {exc}")
         return False
-    return True
+    return publication
 
 
 def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> bool:
@@ -3014,7 +3018,11 @@ def _setup_hermes(hermes_path: str) -> bool:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
-    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
+    from ouroboros.hermes.artifacts import (
+        HERMES_SKILL_CATEGORY,
+        HERMES_SKILL_NAME,
+        HermesPublicationReceipt,
+    )
 
     hermes_skill_target = (
         Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
@@ -3023,7 +3031,8 @@ def _setup_hermes(hermes_path: str) -> bool:
         print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
         return False
     hermes_skill_snapshot = _snapshot_path(hermes_skill_target, follow_links=False)
-    if not _install_hermes_artifacts():
+    hermes_publication = _install_hermes_artifacts()
+    if not hermes_publication:
         print_error("Hermes runtime activation incomplete: required skills were not installed.")
         return False
 
@@ -3031,6 +3040,11 @@ def _setup_hermes(hermes_path: str) -> bool:
 
     def rollback_hermes_skills() -> None:
         try:
+            if isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and not hermes_publication.matches(hermes_skill_target):
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+                return
             restored = restore_hermes(
                 hermes_skill_target, hermes_skill_snapshot, hermes_skill_published
             )
