@@ -117,6 +117,40 @@ async def test_ralph_deadline_checkpoint_projects_resumable_result_and_event(tmp
 
 
 @pytest.mark.asyncio
+async def test_expired_ralph_deadline_resume_reconciles_terminal_job(tmp_path) -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.RALPH_HANDOFF
+    state.ralph_job_id = "job_1"
+    state.deadline_at = time.monotonic() - 30.0
+    state.deadline_at_epoch = time.time() - 30.0
+    state.mark_blocked("pipeline timeout", tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+    calls: list[str] = []
+
+    async def poller(*, job_id: str, max_total_seconds: float) -> dict[str, object]:
+        assert max_total_seconds > 0
+        calls.append(job_id)
+        return {
+            "terminal_status": "completed",
+            "stop_reason": "acceptance_reached",
+            "current_generation": 3,
+        }
+
+    pipeline = AutoPipeline(
+        _NeverInterviewDriver(),
+        _unused_seed_generator,
+        ralph_resumer=poller,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_job_status == "completed"
+    assert state.ralph_current_generation == 3
+    assert calls == ["job_1"]
+
+
+@pytest.mark.asyncio
 async def test_deadline_trips_during_interview(tmp_path) -> None:
     """A 10s deadline against a 15s fake interview must produce a pipeline_timeout block.
 

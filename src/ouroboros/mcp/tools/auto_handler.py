@@ -19,6 +19,7 @@ import structlog
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerLateralThinker,
+    HandlerRalphPoller,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -577,6 +578,14 @@ class AutoHandler:
             controls=load_runtime_controls(None),
             event_appender=runtime_event_store,
         )
+        ralph_resumer = None
+        if state.ralph_job_id is not None and self.ralph_handler_factory is not None:
+            ralph_resumer = HandlerRalphPoller(
+                self.ralph_handler_factory(
+                    runtime_plan.execute.runtime_backend,
+                    runtime_plan.execute.opencode_mode,
+                )
+            )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -599,6 +608,7 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            ralph_resumer=ralph_resumer,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,

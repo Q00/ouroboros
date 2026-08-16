@@ -1627,6 +1627,51 @@ def test_negated_missing_program_is_still_blocked_with_shell_parity(tmp_path: Pa
     )
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "if false; then :; else ! ./missing-verifier; fi",
+        "if ! true; then :; else ! ./missing-verifier; fi",
+    ),
+)
+def test_negated_missing_program_in_guaranteed_else_branch_blocks_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="verify", verify_command=command),
+            ),
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "set -a; readonly FOO=bar; sh -uc 'test \"$FOO\" = bar'",
+        "set -a; read FOO <<'EOF'\nbar\nEOF\nsh -uc 'test \"$FOO\" = bar'",
+        "set -a; getopts x FOO -x; sh -uc 'test \"$FOO\" = x'",
+    ),
+)
+def test_allexport_special_builtin_bindings_match_posix_shell(tmp_path: Path, command: str) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="verify", verify_command=command),
+            ),
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+    assert not report.blocking_findings
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 

@@ -47,6 +47,7 @@ from ouroboros.auto.ledger_seed import (
 )
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
+from ouroboros.auto.ralph_resume import reconcile_ralph_checkpoint
 from ouroboros.auto.recovery_plan import (
     AutoRecoveryPlan,
     RecoveryPlanAction,
@@ -447,6 +448,7 @@ class AutoPipeline:
     )
     run_start_timeout_seconds: float = 60.0
     progress_callback: AutoProgressCallback | None = None
+    ralph_resumer: RalphStarter | None = None
     # Optional pre-run Seed QA gate backed by ``ouroboros_qa``. Deterministic
     # grading still owns cheap structural repair; this gate prevents a Seed
     # that fails the same QA contract users run manually from reaching RUN.
@@ -471,16 +473,9 @@ class AutoPipeline:
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
-    # L3-2 / #1176: per-``run()`` cache for the runtime probe evidence
-    # surfaced on ``AutoPipelineResult``. Populated on first invocation
-    # of the ``probe_runner`` callback so multiple ``_result()`` returns
-    # within a single run share the same evidence tuple.
     _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
-    # A2 / run-metaharness trace artifact. ``run()`` recurses (resume paths do
-    # ``return await self.run(state)``); the depth counter fires the finalize
-    # trace export exactly once, at the outermost terminal return.
-    # ``_active_ledger`` is the live ledger the deepest ``_run_pipeline`` frame
-    # actually mutated, so the export projects the freshest decisions/history.
+    # Recursive resume paths export the trace exactly once at the outermost
+    # terminal return.
     _run_depth: int = field(default=0, init=False, repr=False)
     _active_ledger: SeedDraftLedger | None = field(default=None, init=False, repr=False)
 
@@ -654,6 +649,11 @@ class AutoPipeline:
             # idempotent — non-legacy resumes are unaffected.
             state.arm_deadline()
             self._save(state)
+
+        if state.phase is AutoPhase.RALPH_HANDOFF and _has_reconciliable_ralph_resume_checkpoint(
+            state
+        ):
+            return await reconcile_ralph_checkpoint(self, state, ledger)
 
         review: SeedReview | None = None
         interview_result = await self._run_interview_phase(state, ledger)

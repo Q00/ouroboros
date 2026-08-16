@@ -680,6 +680,28 @@ def _nested_shell_scopes(
                         sequential_export_names.add(token)
                     else:
                         sequential_export_names.discard(token)
+        if persists and state_segment:
+            command_name = Path(state_segment[0]).name
+            builtin_bound_names: set[str] = set()
+            if command_name == "readonly":
+                builtin_bound_names.update(
+                    token.partition("=")[0]
+                    for token in state_segment[1:]
+                    if assignment.fullmatch(token)
+                )
+            elif command_name == "read":
+                builtin_bound_names.update(
+                    token
+                    for token in state_segment[1:]
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
+                )
+            elif command_name == "getopts" and len(state_segment) >= 3:
+                target = state_segment[2]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
+                    builtin_bound_names.add(target)
+            sequential_values.update(builtin_bound_names)
+            if allexport:
+                sequential_export_names.update(builtin_bound_names)
         if (
             persists
             and _shell_dialect == "bash"
@@ -837,7 +859,17 @@ def _program_flow_inconclusive(command: str, token_start: int, token_end: int) -
     if_matches = tuple(re.finditer(r"\bif\b", prefix))
     if len(if_matches) > sum(1 for _ in re.finditer(r"\bfi\b", prefix)):
         active_scope = prefix[if_matches[-1].start() :]
-        if re.match(r"if\s+(?:true|!\s*false)\s*;?\s*then\b", active_scope) is None:
+        static_condition = re.match(
+            r"if\s+(?P<negated>!\s*)?(?P<value>true|false)\s*;?\s*then\b",
+            active_scope,
+        )
+        if static_condition is None:
+            return True
+        condition_true = (static_condition.group("value") == "true") != bool(
+            static_condition.group("negated")
+        )
+        in_else_branch = bool(re.search(r"\belse\b", active_scope))
+        if condition_true == in_else_branch:
             return True
     if sum(1 for _ in re.finditer(r"\b(?:while|until|for)\b", prefix)) > sum(
         1 for _ in re.finditer(r"\bdone\b", prefix)
@@ -1562,7 +1594,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             else:
                 segments[-1].append(part)
         for segment in segments:
-            while segment and segment[0] in {"{", "(", "then", "do", "!"}:
+            while segment and segment[0] in {"{", "(", "then", "else", "do", "!"}:
                 segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
@@ -1570,7 +1602,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if segment and "/" in segment[0] and not is_runner(segment[0]):
                 programs.add(_normalize_workspace_path(segment[0]))
         for segment in segments:
-            while segment and segment[0] in {"{", "(", "then", "do", "!"}:
+            while segment and segment[0] in {"{", "(", "then", "else", "do", "!"}:
                 segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
