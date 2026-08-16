@@ -1273,6 +1273,120 @@ class TestInstallHermesSkills:
         assert replacement.joinpath("generation.txt").read_text(encoding="utf-8") == "fresh\n"
         assert not tuple(tmp_path.glob("*.intent"))
 
+    def test_fresh_publication_refuses_target_created_at_final_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _rename_no_replace,
+            atomic_swap_generation,
+        )
+
+        target = tmp_path / "ouroboros"
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("fresh\n", encoding="utf-8")
+
+        def create_target_before_publish(source: Path, destination: Path) -> None:
+            target.mkdir()
+            target.joinpath("operator.txt").write_text("preserve\n", encoding="utf-8")
+            _rename_no_replace(source, destination)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._rename_no_replace",
+            create_target_before_publish,
+        )
+        with pytest.raises(OSError):
+            atomic_swap_generation(target, replacement)
+
+        assert target.joinpath("operator.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert replacement.joinpath("generation.txt").read_text(encoding="utf-8") == "fresh\n"
+        assert not tuple(tmp_path.glob("*.intent"))
+
+    def test_reclamation_finish_preserves_manifest_replaced_at_detach_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        real_replace = os.replace
+        injected = False
+        operator_identity: tuple[int, int] | None = None
+
+        def replace_manifest_before_detach(src, dst):
+            nonlocal injected, operator_identity
+            source = Path(src)
+            destination = Path(dst)
+            if (
+                source.name.endswith(".reclaim.manifest.json")
+                and destination.name.endswith(".detached")
+                and not injected
+            ):
+                injected = True
+                operator = tmp_path / "operator-manifest"
+                operator.write_bytes(source.read_bytes())
+                real_replace(operator, source)
+                info = source.stat()
+                operator_identity = (info.st_dev, info.st_ino)
+            return real_replace(source, destination)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", replace_manifest_before_detach)
+        with pytest.raises(OSError, match="changed Hermes reclamation manifest"):
+            atomic_swap_generation(target, second)
+
+        manifest = next(tmp_path.glob("*.reclaim.manifest.json"))
+        info = manifest.stat()
+        assert (info.st_dev, info.st_ino) == operator_identity
+
+    def test_orphan_manifest_cleanup_preserves_replacement_at_detach_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _publish_reclamation_manifest,
+            _reclaim_retired_generations,
+        )
+
+        backup_prefix = ".ouroboros.old."
+        backup = tmp_path / f"{backup_prefix}{'a' * 32}"
+        token = "b" * 32
+        reclamation = tmp_path / f"{backup.name}.retired.{token}.reclaim"
+        source = tmp_path / "manifest-source"
+        source.mkdir()
+        source.joinpath("owned.txt").write_text("owned\n", encoding="utf-8")
+        manifest = _publish_reclamation_manifest(
+            reclamation,
+            source=source,
+            backup=backup,
+            operation="swap",
+            token=token,
+            digest="c" * 64,
+        )
+        real_replace = os.replace
+        injected = False
+
+        def replace_manifest_before_detach(src, dst):
+            nonlocal injected
+            if Path(src) == manifest and Path(dst).name.endswith(".detached") and not injected:
+                injected = True
+                operator = tmp_path / "operator-orphan-manifest"
+                operator.write_text("operator-owned\n", encoding="utf-8")
+                real_replace(operator, manifest)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", replace_manifest_before_detach)
+        with pytest.raises(OSError, match="changed Hermes reclamation manifest"):
+            _reclaim_retired_generations(tmp_path / "ouroboros", backup_prefix)
+
+        assert manifest.read_text(encoding="utf-8") == "operator-owned\n"
+
     def test_reclamation_manifest_publication_preserves_foreign_sibling(
         self, tmp_path: Path
     ) -> None:

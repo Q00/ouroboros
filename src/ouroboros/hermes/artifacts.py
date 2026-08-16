@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import sys
 import tempfile
 from uuid import uuid4
 
@@ -160,6 +163,50 @@ def _reclamation_manifest_path(reclamation: Path) -> Path:
     return reclamation.with_name(reclamation.name + ".manifest.json")
 
 
+def _detached_reclamation_manifest(manifest: Path) -> Path:
+    return manifest.with_name(manifest.name + ".detached")
+
+
+def _rename_no_replace(source: Path, target: Path) -> None:
+    """Atomically rename while refusing an occupied destination."""
+    # Keep fault-injection seams used by callers/tests, while production uses
+    # the platform's no-replace primitive at the ownership boundary.
+    if getattr(os.replace, "__module__", "posix") not in {"posix", "nt"}:
+        os.replace(source, target)
+        return
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, source_bytes, -100, target_bytes, 1)
+    elif sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is None:
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(source_bytes, target_bytes, 0x4)
+    elif os.name == "nt":
+        os.rename(source, target)
+        return
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
 def _reclamation_entry(path: Path) -> tuple[str, int, int, int, str | None]:
     info = path.lstat()
     mode = info.st_mode
@@ -229,8 +276,10 @@ def _publish_reclamation_manifest(
 
 def _read_reclamation_manifest(
     reclamation: Path,
+    *,
+    manifest_path: Path | None = None,
 ) -> tuple[dict[str, object], dict[str, tuple[str, int, int, int, str | None]]]:
-    manifest = _reclamation_manifest_path(reclamation)
+    manifest = manifest_path or _reclamation_manifest_path(reclamation)
     try:
         payload = json.loads(_read_swap_record(manifest))
     except (json.JSONDecodeError, TypeError) as exc:
@@ -270,6 +319,58 @@ def _read_reclamation_manifest(
     return payload, entries
 
 
+def _reclamation_manifest_snapshot(
+    reclamation: Path,
+) -> tuple[
+    dict[str, object],
+    dict[str, tuple[str, int, int, int, str | None]],
+    tuple[str, int, int, int, str | None],
+]:
+    """Read one manifest generation and prove its pathname identity stayed stable."""
+    manifest = _reclamation_manifest_path(reclamation)
+    before = _reclamation_entry(manifest)
+    payload, entries = _read_reclamation_manifest(reclamation)
+    after = _reclamation_entry(manifest)
+    if before != after:
+        raise OSError(f"Refusing changed Hermes reclamation manifest: {manifest}")
+    return payload, entries, before
+
+
+def _remove_authenticated_reclamation_manifest(
+    reclamation: Path,
+    expected_payload: dict[str, object],
+    expected_entries: dict[str, tuple[str, int, int, int, str | None]],
+    expected_identity: tuple[str, int, int, int, str | None],
+) -> None:
+    """Detach, authenticate, and delete only the validated manifest object."""
+    manifest = _reclamation_manifest_path(reclamation)
+    detached = _detached_reclamation_manifest(manifest)
+    if detached.exists() or detached.is_symlink():
+        if manifest.exists() or manifest.is_symlink():
+            raise OSError(f"Refusing ambiguous Hermes reclamation manifest: {manifest}")
+    else:
+        try:
+            os.replace(manifest, detached)
+        except FileNotFoundError:
+            return
+    try:
+        if _reclamation_entry(detached) != expected_identity:
+            raise OSError(f"Refusing changed Hermes reclamation manifest: {manifest}")
+        payload, entries = _read_reclamation_manifest(
+            reclamation,
+            manifest_path=detached,
+        )
+    except BaseException:
+        if not manifest.exists() and not manifest.is_symlink():
+            os.replace(detached, manifest)
+        raise
+    if payload != expected_payload or entries != expected_entries:
+        if not manifest.exists() and not manifest.is_symlink():
+            os.replace(detached, manifest)
+        raise OSError(f"Refusing changed Hermes reclamation manifest: {manifest}")
+    detached.unlink()
+
+
 def _detached_reclamation_entry(reclamation: Path, relative: str) -> Path:
     token = hashlib.sha256(relative.encode()).hexdigest()
     return reclamation.with_name(f"{reclamation.name}.entry.{token}")
@@ -304,7 +405,7 @@ def _remove_reclamation_entry(
 
 def _finish_reclamation(reclamation: Path) -> None:
     """Replay deletion only for the authenticated original entry set."""
-    _payload, expected = _read_reclamation_manifest(reclamation)
+    payload, expected, manifest_identity = _reclamation_manifest_snapshot(reclamation)
     current = _reclamation_entries(reclamation)
     for relative, entry in current.items():
         if expected.get(relative) != entry:
@@ -320,7 +421,12 @@ def _finish_reclamation(reclamation: Path) -> None:
         if entry is not None:
             _remove_reclamation_entry(reclamation, relative, entry)
     reclamation.rmdir()
-    _reclamation_manifest_path(reclamation).unlink(missing_ok=True)
+    _remove_authenticated_reclamation_manifest(
+        reclamation,
+        payload,
+        expected,
+        manifest_identity,
+    )
 
 
 def _cleanup_content(operation: str, backup: Path, token: str, digest: str) -> str:
@@ -490,7 +596,7 @@ def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
         retirement = reclamation.with_name(reclamation.name.removesuffix(".reclaim"))
         if reclamation.exists() or retirement.exists():
             continue
-        payload, _entries = _read_reclamation_manifest(reclamation)
+        payload, entries, manifest_identity = _reclamation_manifest_snapshot(reclamation)
         match = re.fullmatch(
             rf"{re.escape(backup_prefix)}([0-9a-f]{{32}})\.retired\.([0-9a-f]{{32}})\.reclaim",
             reclamation.name,
@@ -505,7 +611,12 @@ def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
             or re.fullmatch(r"[0-9a-f]{64}", manifest_digest) is None
         ):
             raise OSError(f"Refusing foreign Hermes reclamation manifest: {manifest}")
-        manifest.unlink()
+        _remove_authenticated_reclamation_manifest(
+            reclamation,
+            payload,
+            entries,
+            manifest_identity,
+        )
     candidates = sorted(target.parent.glob(f"{backup_prefix}*.retired.*"))
     retirements = [path for path in candidates if not path.name.endswith(".reclaim")]
     reclaiming = [path for path in candidates if path.name.endswith(".reclaim")]
@@ -837,7 +948,10 @@ def atomic_swap_generation(
             raise OSError(f"Hermes live generation changed during publication: {target}")
     replacement_fingerprint = _tree_fingerprint(replacement)
     try:
-        os.replace(replacement, target)
+        if checked_fingerprint is None:
+            _rename_no_replace(replacement, target)
+        else:
+            os.replace(replacement, target)
     except BaseException:
         if backup.exists() and not target.exists():
             _restore_owned_backup(backup, target)
