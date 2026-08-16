@@ -92,6 +92,26 @@ def _read_swap_record(path: Path) -> str:
         raise OSError(f"Refusing malformed Hermes swap record: {path}") from exc
 
 
+def _assert_owned_swap_backup(
+    backup: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> None:
+    """Revalidate exact backup ownership at a destructive boundary."""
+    marker = backup / _SWAP_MARKER
+    if (
+        backup.is_symlink()
+        or not backup.is_dir()
+        or marker.is_symlink()
+        or not marker.is_file()
+        or _read_swap_record(marker) != _ownership_content(operation, backup, token, digest)
+        or _fingerprint_digest(_owned_backup_fingerprint(backup)) != digest
+    ):
+        raise OSError(f"Refusing foreign Hermes swap backup: {backup}")
+
+
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
     """Recover every externally-marked rename window before touching live state."""
     if target.is_symlink():
@@ -112,31 +132,41 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
             raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
         operation, token, digest = match.groups()
         if backup.exists():
-            marker = backup / _SWAP_MARKER
-            if (
-                marker.is_symlink()
-                or not marker.is_file()
-                or _read_swap_record(marker) != _ownership_content(operation, backup, token, digest)
-                or _fingerprint_digest(_owned_backup_fingerprint(backup)) != digest
-            ):
-                raise OSError(f"Refusing foreign Hermes swap backup: {backup}")
+            _assert_owned_swap_backup(
+                backup,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
         records.append((intent, backup, operation, token, digest))
     if len(records) > 1:
         raise OSError("Refusing ambiguous Hermes recovery with multiple swap intents")
-    for intent, backup, operation, _token, _digest in records:
+    for intent, backup, operation, token, digest in records:
         if operation == "swap" and not target.exists() and backup.exists():
             _restore_owned_backup(backup, target)
         elif operation == "remove" and not target.exists() and backup.exists():
+            _assert_owned_swap_backup(
+                backup,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
             _remove_target_path(backup)
         elif target.exists() and backup.exists():
             if operation == "remove":
                 raise OSError("Refusing concurrent Hermes mutation during removal recovery")
+            _assert_owned_swap_backup(
+                backup,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
             _remove_target_path(backup)
         if not backup.exists():
             marker = target / _SWAP_MARKER
             if marker.is_file() and not marker.is_symlink():
                 if _read_swap_record(marker) == _ownership_content(
-                    operation, backup, _token, _digest
+                    operation, backup, token, digest
                 ):
                     _remove_target_path(marker)
             _remove_target_path(intent)
@@ -190,6 +220,12 @@ def atomic_swap_generation(
         _remove_target_path(intent)
         raise
     try:
+        _assert_owned_swap_backup(
+            backup,
+            operation="swap",
+            token=token,
+            digest=digest,
+        )
         _remove_target_path(backup)
     except OSError:
         # The canonical target is already a complete committed generation.
@@ -231,6 +267,12 @@ def atomic_remove_generation(
         _remove_target_path(intent)
         raise OSError(f"Hermes live generation changed during removal: {target}")
     try:
+        _assert_owned_swap_backup(
+            backup,
+            operation="remove",
+            token=token,
+            digest=digest,
+        )
         _remove_target_path(backup)
     except OSError:
         return

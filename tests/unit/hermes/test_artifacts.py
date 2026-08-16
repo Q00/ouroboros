@@ -761,6 +761,55 @@ class TestInstallHermesSkills:
         assert second.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
         assert len(tuple(tmp_path.glob(".ouroboros.old.*.intent"))) == 1
 
+    def test_recovery_preserves_backup_mutated_after_initial_validation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _assert_owned_swap_backup,
+            _recover_swap_intents,
+            atomic_swap_generation,
+        )
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def fail_backup_cleanup(path: Path) -> None:
+            if path.name.startswith(".ouroboros.old."):
+                raise OSError("synthetic cleanup interruption")
+            real_remove(path)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_backup_cleanup)
+        atomic_swap_generation(target, replacement)
+        backup = next(path for path in tmp_path.glob(".ouroboros.old.*") if path.is_dir())
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
+
+        validations = 0
+
+        def mutate_before_retirement(path: Path, **ownership: str) -> None:
+            nonlocal validations
+            validations += 1
+            if validations == 2:
+                path.joinpath("operator-after-check.txt").write_text("preserve\n", encoding="utf-8")
+            _assert_owned_swap_backup(path, **ownership)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._assert_owned_swap_backup",
+            mutate_before_retirement,
+        )
+
+        with pytest.raises(OSError, match="foreign Hermes swap backup"):
+            _recover_swap_intents(target, ".ouroboros.old.")
+
+        assert backup.joinpath("operator-after-check.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "new\n"
+
     def test_interrupted_generation_removal_replays_as_removal(
         self, tmp_path: Path, monkeypatch
     ) -> None:
