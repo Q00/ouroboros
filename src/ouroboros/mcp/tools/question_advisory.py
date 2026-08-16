@@ -325,10 +325,13 @@ as JSON, newest first:
 
 {listing}
 
-Each file holds answers in the same shape you must return, keyed by `lane_id`
-under `result.aggregated_outputs`. Read what looks relevant before you inspect
-code or take a measurement, use what helps, and investigate whatever you still
-need for yourself.
+Each file holds answers keyed by `lane_id` under `result.aggregated_outputs`.
+Read the `code_context` and `data_context` entries: those report what the system
+does and measures, which is what you are being asked for. Any other entry is
+reasoning about a different question — not evidence, and not yours to reuse.
+
+Read what looks relevant before you inspect code or take a measurement, use what
+helps, and investigate whatever you still need for yourself.
 
 These may come from other sessions, which chose their own repositories. Report
 only what is true of the repositories *this* question gave you; a claim about
