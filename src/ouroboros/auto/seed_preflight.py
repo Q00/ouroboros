@@ -26,9 +26,11 @@ neither claimed nor present yet, or two ACs sharing one verify command.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import shlex
+import sys
 
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed
 
@@ -38,8 +40,17 @@ __all__ = [
     "run_seed_preflight",
 ]
 
-# Variables any POSIX run host binds without the Seed's help.
-_HOST_BOUND_ENV_VARS = frozenset({"HOME", "PATH", "PWD", "SHELL", "TMPDIR", "USER"})
+# Variables `/bin/sh` establishes even when launched with an empty environment.
+_SHELL_INITIALIZED_ENV_VARS = frozenset(
+    {"PATH", "PWD", *({"SHELL"} if sys.platform == "darwin" else set())}
+)
+
+
+def _host_bound_env_vars() -> frozenset[str]:
+    """Return the bindings inherited by the production shell executor."""
+    return frozenset(os.environ) | _SHELL_INITIALIZED_ENV_VARS
+
+
 _ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 # Variables the command binds itself: shell assignments (``tmp=$(mktemp)``),
 # ``for x in ...`` loop variables, and parameter expansions that do not
@@ -190,7 +201,7 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             "typeset",
         }
         persists = (
-            separator_before not in subshell_separators
+            separator_before not in subshell_separators | {"&&", "||"}
             and separator_after not in subshell_separators
         )
         if assignment_only and persists:
@@ -249,11 +260,13 @@ def _is_subprocess_separator(separator: str | None) -> bool:
 
 def _nested_shell_scopes(
     command: str,
-    inherited: frozenset[str] = _HOST_BOUND_ENV_VARS,
+    inherited: frozenset[str] | None = None,
     *,
     _nested_payload: bool = False,
 ) -> tuple[tuple[str, frozenset[str]], ...]:
     """Return nested ``sh -c`` payloads with launcher-exported bindings."""
+    if inherited is None:
+        inherited = _host_bound_env_vars()
     if not _nested_payload:
         command = _mask_outer_double_quote_expansions(command)
     try:
@@ -388,7 +401,7 @@ def _nested_shell_scopes(
             and Path(segment[0]).name in {"sh", "bash"}
             and segment[1] in {"-c", "--command"}
         ):
-            scope = frozenset(launcher_bound)
+            scope = frozenset(launcher_bound | _SHELL_INITIALIZED_ENV_VARS)
             nested.append((segment[2], scope))
             nested.extend(_nested_shell_scopes(segment[2], scope, _nested_payload=True))
     return tuple(nested)
@@ -626,9 +639,10 @@ def _check_verify_commands(
             continue
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
-        nested_shell_scopes = _nested_shell_scopes(scannable)
+        host_bound = _host_bound_env_vars()
+        nested_shell_scopes = _nested_shell_scopes(scannable, host_bound)
         outer_shell_command = _outer_shell_scope(scannable)
-        shell_scopes = ((outer_shell_command, _HOST_BOUND_ENV_VARS), *nested_shell_scopes)
+        shell_scopes = ((outer_shell_command, host_bound), *nested_shell_scopes)
         for scope_index, (shell_command, inherited_bindings) in enumerate(shell_scopes):
             if scope_index == 0:
                 # A variable in a double-quoted ``sh -c`` payload is expanded

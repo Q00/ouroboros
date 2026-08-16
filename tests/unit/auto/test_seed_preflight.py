@@ -544,6 +544,85 @@ def test_ordered_shell_bind_and_unbind_effects_match_runtime(
     assert (runtime.returncode == 0) is passed
 
 
+@pytest.mark.parametrize("variable", ("TMPDIR", "SHELL", "USER"))
+def test_preflight_uses_actual_optional_host_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.delenv(variable, raising=False)
+    command = f'test -n "${variable}"'
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Host binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        check=False,
+    )
+
+    runtime_passed = runtime.returncode == 0
+    assert report.passed is runtime_passed
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'false && FOO=bar; test -n "$FOO"',
+        'true || FOO=bar; test -n "$FOO"',
+    ),
+)
+def test_conditional_assignments_are_not_guaranteed_bindings(tmp_path: Path, command: str) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Conditional binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is False
+    assert runtime.returncode != 0
+
+
+def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
+    command = "env -i /bin/sh -c 'test -n \"$PATH\"'"
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Shell default", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is True
+    assert runtime.returncode == 0
+
+
 @pytest.mark.parametrize(
     "command",
     (
