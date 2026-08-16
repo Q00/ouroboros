@@ -84,31 +84,6 @@ def _owned_backup_fingerprint(backup: Path) -> tuple[object, ...] | None:
     return (*fingerprint[:2], children)
 
 
-def _remove_fingerprinted_tree(path: Path, expected: tuple[object, ...]) -> None:
-    """Remove only the exact tree captured by the caller.
-
-    Unlike ``shutil.rmtree``, this refuses newly added or changed entries at
-    each directory boundary, so concurrent operator files are never swept up
-    by a broad recursive deletion.
-    """
-    if _tree_fingerprint(path) != expected:
-        raise OSError(f"Refusing changed Hermes retirement tree: {path}")
-    kind = expected[0]
-    if kind == "dir":
-        children = expected[2]
-        assert isinstance(children, tuple)
-        for name, child_fingerprint in children:
-            assert isinstance(name, str)
-            assert isinstance(child_fingerprint, tuple)
-            _remove_fingerprinted_tree(path / name, child_fingerprint)
-        path.rmdir()
-        return
-    if kind in {"file", "link"}:
-        path.unlink()
-        return
-    raise OSError(f"Refusing unsupported Hermes retirement entry: {path}")
-
-
 def _restore_owned_backup(backup: Path, target: Path) -> None:
     if target.exists() or target.is_symlink():
         raise OSError(f"Refusing to overwrite concurrent Hermes generation: {target}")
@@ -257,11 +232,10 @@ def _finish_owned_retirement(
         if retirement.exists() and not backup.exists():
             os.replace(retirement, backup)
         raise
-    # The active intent is gone before recursive deletion begins. A partial
-    # cleanup can therefore report failure without poisoning the next refresh.
-    retirement_fingerprint = _tree_fingerprint(retirement)
-    if retirement_fingerprint is None:
-        raise OSError(f"Hermes retirement disappeared before cleanup: {retirement}")
+    # POSIX has no portable compare-and-unlink operation: a pathname can be
+    # replaced after fingerprint validation but before unlink. Keep the exact,
+    # marker-owned retirement as a recoverable hidden generation instead of
+    # risking deletion of a concurrent operator replacement.
     _assert_owned_swap_backup(
         retirement,
         operation=operation,
@@ -269,7 +243,6 @@ def _finish_owned_retirement(
         digest=digest,
         backup_identity=backup,
     )
-    _remove_fingerprinted_tree(retirement, retirement_fingerprint)
 
 
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
