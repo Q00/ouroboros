@@ -727,7 +727,10 @@ _DETERMINISTIC_CWD_RE = re.compile(
     r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>[^\s;&|]+)"
 )
 _NESTED_SHELL_PAYLOAD_RE = re.compile(
-    r"\b(?:sh|bash)\s+(?:--command|-c)\s+(?P<quote>['\"])(?P<payload>.*?)"
+    r"\b(?:sh|bash)"
+    r"(?:\s+(?!(?:-c|--command)(?:\s|=|$)|-[A-Za-z]*c[A-Za-z]*(?:\s|$))\S+)*"
+    r"\s+(?:--command|-c|-[A-Za-z]*c[A-Za-z]*)\s+(?P<quote>['\"])"
+    r"(?P<payload>.*?)"
     r"(?P=quote)",
     re.DOTALL,
 )
