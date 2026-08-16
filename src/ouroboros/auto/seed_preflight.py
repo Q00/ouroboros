@@ -576,11 +576,19 @@ def _nested_shell_scopes(
         persists = not _is_subprocess_separator(separator_before) and not _is_subprocess_separator(
             separator_after
         )
+        state_segment = list(segment)
+        assignment_prefixes: list[str] = []
+        while state_segment and assignment.fullmatch(state_segment[0]):
+            assignment_prefixes.append(state_segment.pop(0))
         if persists and segment and all(assignment.fullmatch(token) for token in segment):
             sequential_values.update(token.partition("=")[0] for token in segment)
-        if persists and segment and Path(segment[0]).name == "export":
+        if persists and state_segment and Path(state_segment[0]).name == "export":
+            # Assignment prefixes on POSIX special builtins affect the current
+            # shell. Process them before ``export`` so a later nested shell
+            # inherits the newly bound and exported name.
+            sequential_values.update(token.partition("=")[0] for token in assignment_prefixes)
             export_names = True
-            for token in segment[1:]:
+            for token in state_segment[1:]:
                 if _shell_dialect == "bash" and token in {"-n", "--no-export"}:
                     export_names = False
                     continue
@@ -601,11 +609,11 @@ def _nested_shell_scopes(
         if (
             persists
             and _shell_dialect == "bash"
-            and segment
-            and Path(segment[0]).name in {"declare", "typeset"}
-            and "+x" in segment[1:]
+            and state_segment
+            and Path(state_segment[0]).name in {"declare", "typeset"}
+            and "+x" in state_segment[1:]
         ):
-            for token in segment[segment.index("+x") + 1 :]:
+            for token in state_segment[state_segment.index("+x") + 1 :]:
                 if assignment.fullmatch(token):
                     name = token.partition("=")[0]
                     sequential_values.add(name)
@@ -616,9 +624,9 @@ def _nested_shell_scopes(
                     continue
                 else:
                     break
-        if persists and segment and Path(segment[0]).name == "unset":
+        if persists and state_segment and Path(state_segment[0]).name == "unset":
             unset_variables = True
-            for token in segment[1:]:
+            for token in state_segment[1:]:
                 if token in {"--", "-v"}:
                     continue
                 if token == "-f":
@@ -628,9 +636,8 @@ def _nested_shell_scopes(
                     sequential_values.discard(token)
                     sequential_export_names.discard(token)
         launcher_bound = sequential_export_names & sequential_values
-        while segment and assignment.fullmatch(segment[0]):
-            launcher_bound.add(segment[0].partition("=")[0])
-            segment = segment[1:]
+        launcher_bound.update(token.partition("=")[0] for token in assignment_prefixes)
+        segment = state_segment
         segment = unwrap(segment, launcher_bound)
         shell_payload = _shell_command_payload(segment)
         if shell_payload is not None:
@@ -1464,7 +1471,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             else:
                 segments[-1].append(part)
         for segment in segments:
-            while segment and segment[0] in {"{", "(", "then", "do"}:
+            while segment and segment[0] in {"{", "(", "then", "do", "!"}:
                 segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
@@ -1472,7 +1479,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if segment and "/" in segment[0] and not is_runner(segment[0]):
                 programs.add(_normalize_workspace_path(segment[0]))
         for segment in segments:
-            while segment and segment[0] in {"{", "(", "then", "do"}:
+            while segment and segment[0] in {"{", "(", "then", "do", "!"}:
                 segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]

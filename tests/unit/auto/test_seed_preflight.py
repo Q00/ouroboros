@@ -695,6 +695,25 @@ def test_nested_shell_inherits_prior_sequential_export(tmp_path: Path) -> None:
     assert report.passed
 
 
+def test_nested_shell_inherits_prefixed_export_with_shell_parity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FOO", raising=False)
+    command = "FOO=bar export FOO; sh -uc 'test \"$FOO\" = bar'"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Prefixed export", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
 @pytest.mark.parametrize(
     ("command", "passed"),
     (
@@ -1392,6 +1411,21 @@ def test_missing_program_in_compound_command_is_blocked(tmp_path: Path, command:
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+def test_negated_missing_program_is_still_blocked_with_shell_parity(tmp_path: Path) -> None:
+    command = "! python missing.py"
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Negated verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
 @pytest.mark.parametrize(
