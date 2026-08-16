@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 
 import pytest
@@ -669,6 +670,40 @@ def test_complex_shell_state_and_comments_match_runtime(
 
 
 @pytest.mark.parametrize(
+    "payload",
+    (
+        'printf -v FOO x; set -u; test "$FOO" = x',
+        '((FOO = 1)); set -u; test "$FOO" = 1',
+        'let FOO=1; set -u; test "$FOO" = 1',
+    ),
+)
+def test_unsupported_bash_state_mutation_is_inconclusive(tmp_path: Path, payload: str) -> None:
+    command = f"bash -c {shlex.quote(payload)}"
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Bash mutation", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert (
+        subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "FOO=bar | printf '%s' \"$FOO\"",
@@ -806,6 +841,49 @@ def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
     )
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
+def test_root_artifact_does_not_satisfy_program_in_effective_directory(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Directory-aware generated verifier",
+                    verify_command="cd sub && python check.py",
+                    expected_artifacts=("check.py",),
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("cd missing; python check.py", "false && cd sub; python check.py"),
+)
+def test_failed_or_skipped_cd_is_inconclusive_for_later_verifier(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Conditional directory", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
 @pytest.mark.parametrize(

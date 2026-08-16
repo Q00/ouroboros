@@ -337,10 +337,20 @@ _UNSUPPORTED_SHELL_STATE_GRAMMAR = re.compile(
     re.MULTILINE,
 )
 
+_UNSUPPORTED_BASH_STATE_MUTATION = re.compile(
+    r"\bprintf\s+(?:(?:-[^\s]+|--[^\s]+)\s+)*-v(?:\s+|=)"
+    r"|(?:^|[;&|]\s*)let(?:\s|$)"
+    r"|\(\(",
+    re.MULTILINE,
+)
 
-def _has_unsupported_shell_state_grammar(command: str) -> bool:
+
+def _has_unsupported_shell_state_grammar(command: str, *, shell_dialect: str = "sh") -> bool:
     """Return whether state flow is too rich for authoritative blocking."""
-    return _UNSUPPORTED_SHELL_STATE_GRAMMAR.search(_strip_shell_comments(command)) is not None
+    stripped = _strip_shell_comments(command)
+    return _UNSUPPORTED_SHELL_STATE_GRAMMAR.search(stripped) is not None or (
+        shell_dialect == "bash" and _UNSUPPORTED_BASH_STATE_MUTATION.search(stripped) is not None
+    )
 
 
 def _is_shell_assignment_position(command: str, start: int) -> bool:
@@ -696,6 +706,8 @@ def _program_path_exists(
     workspace_root: Path | None,
     *,
     token_position: int,
+    artifacts: frozenset[str] = frozenset(),
+    claimed_files: frozenset[str] = frozenset(),
 ) -> bool | None:
     """Resolve verifier programs after deterministic shell directory changes.
 
@@ -714,10 +726,23 @@ def _program_path_exists(
         directory = match.group("cd")
         if directory is None:
             continue
+        # A plain/conditional ``cd`` does not establish the verifier's cwd:
+        # it may fail or be skipped while a later command after ``;`` still
+        # runs.  It is authoritative only while the verifier remains guarded
+        # by the same successful ``&&`` chain.
+        matched_prefix = match.group(0).lstrip()
+        suffix = command[match.end() : token_position]
+        if matched_prefix.startswith(("&&", "||")) or re.search(
+            r"(?:\|\||(?<!&)&(?!&)|(?<!\|)\|(?!\|))", suffix
+        ):
+            return None
         if any(character in directory for character in "'$\""):
             return None
         changed = Path(directory).expanduser()
-        effective_root = changed if changed.is_absolute() else effective_root / changed
+        changed_root = changed if changed.is_absolute() else effective_root / changed
+        if re.search(r"[;\n]", suffix) and not changed_root.is_dir():
+            return None
+        effective_root = changed_root
 
     segment_start = max(
         (command.rfind(separator, 0, token_position) for separator in (";", "\n", "&", "|")),
@@ -737,7 +762,14 @@ def _program_path_exists(
             return None
         changed = Path(directory).expanduser()
         effective_root = changed if changed.is_absolute() else effective_root / changed
-    return (effective_root / candidate).exists()
+    effective_path = effective_root / candidate
+    try:
+        effective_claim = _normalize_workspace_path(str(effective_path.relative_to(workspace_root)))
+    except ValueError:
+        effective_claim = ""
+    if effective_claim in artifacts or effective_claim in claimed_files:
+        return True
+    return effective_path.exists()
 
 
 def _check_context_references(seed: Seed, workspace_root: Path | None) -> list[PreflightFinding]:
@@ -819,7 +851,7 @@ def _check_verify_commands(
                 # event visible; the nested scope separately checks only what
                 # survives into the child.
                 shell_command = scannable
-            if _has_unsupported_shell_state_grammar(shell_command):
+            if _has_unsupported_shell_state_grammar(shell_command, shell_dialect=shell_dialect):
                 continue
             command_bound: set[str] = set(inherited_bindings)
             for _, event, variable in _shell_variable_events(
@@ -851,9 +883,9 @@ def _check_verify_commands(
         for token_match in _FILE_TOKEN_RE.finditer(scannable):
             token = token_match.group(0)
             normalized = _normalize_workspace_path(token)
-            if normalized in artifacts or normalized in claimed_files:
-                continue
             is_program = normalized in program_tokens
+            if not is_program and (normalized in artifacts or normalized in claimed_files):
+                continue
             if not is_program and normalized in seen_tokens:
                 continue
             seen_tokens.add(normalized)
@@ -863,6 +895,8 @@ def _check_verify_commands(
                     scannable,
                     workspace_root,
                     token_position=token_match.start(),
+                    artifacts=artifacts,
+                    claimed_files=claimed_files,
                 )
                 if is_program
                 else _path_exists(token, workspace_root)
