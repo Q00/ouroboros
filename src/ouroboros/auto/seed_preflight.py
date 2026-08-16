@@ -662,6 +662,18 @@ def _mask_statically_unreachable_program_clauses(command: str) -> str:
     return "".join(output)
 
 
+def _has_undecidable_program_flow(command: str) -> bool:
+    """Return whether program reachability depends on runtime shell state."""
+    stripped = _strip_shell_comments(command)
+    if re.search(r"\b(?:while|until|case)\b", stripped):
+        return True
+    if re.search(r"\bif\s+(?!true\b|false\b|!\s*(?:true|false)\b)", stripped):
+        return True
+    # A skipped ``||`` branch can still leave a successful verifier. A skipped
+    # ``&&`` branch matters similarly when a later command owns final status.
+    return "||" in stripped or bool(re.search(r"&&[^\n;]*[;\n]", stripped))
+
+
 # A standalone dependency entry that claims a workspace file. Requires a
 # directory separator so plain product names ("next.js", "Obsidian Vault")
 # are never treated as file claims.
@@ -1061,6 +1073,23 @@ def _check_verify_commands(
                     )
                 )
         program_scannable = _mask_statically_unreachable_program_clauses(scannable)
+        undecidable_program_flow = _has_undecidable_program_flow(scannable)
+        if undecidable_program_flow:
+            findings.append(
+                PreflightFinding(
+                    code="verify_program_reachability_inconclusive",
+                    blocking=False,
+                    subject=criterion.description[:80],
+                    detail=(
+                        "verify_command contains runtime-dependent shell control flow, so "
+                        "program existence cannot be proven statically"
+                    ),
+                    question=(
+                        "Can the verifier use an unconditional command or a deterministic "
+                        "wrapper whose reachability is explicit?"
+                    ),
+                )
+            )
         program_spans: list[tuple[int, int]] = []
         occurrences: list[tuple[str, int, int, bool]] = []
         for word_match in re.finditer(_STATIC_SHELL_WORD, program_scannable):
@@ -1124,6 +1153,8 @@ def _check_verify_commands(
                 else _path_exists(token, workspace_root)
             )
             if sourced_programs and normalized not in sourced_programs:
+                path_status = None
+            if undecidable_program_flow:
                 path_status = None
             if path_status is False:
                 finding_key = (normalized, is_program)

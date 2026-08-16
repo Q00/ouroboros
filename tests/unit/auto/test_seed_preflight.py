@@ -1386,6 +1386,33 @@ def test_statically_unreachable_programs_do_not_block_with_shell_parity(
 
 @pytest.mark.parametrize(
     "command",
+    (
+        "if test -f absent.marker; then ./missing; fi; true",
+        "test -f absent.marker && ./missing; true",
+        "while test -f absent.marker; do ./missing; done; true",
+    ),
+)
+def test_runtime_dependent_program_reachability_is_inconclusive_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Conditional verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert not report.blocking_findings
+    assert "verify_program_reachability_inconclusive" in {
+        finding.code for finding in report.findings
+    }
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
     ("python3 check.py && cd sub", "python3 check.py && env -C sub true"),
 )
 def test_later_directory_change_does_not_rebase_earlier_verifier(
