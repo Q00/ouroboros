@@ -382,6 +382,59 @@ def test_existing_source_and_interpreter_programs_pass_with_shell_parity(
 
 
 @pytest.mark.parametrize(
+    ("setup", "command"),
+    (
+        ("FOO=bar\n", '. ./setup.sh; set -u; test "$FOO" = bar'),
+        (
+            "mkdir -p sub\nprintf 'raise SystemExit(0)\\n' > sub/check.py\ncd sub\n",
+            ". ./setup.sh; python check.py",
+        ),
+    ),
+)
+def test_sourced_state_is_inconclusive_without_false_blockers(
+    tmp_path: Path, monkeypatch, setup: str, command: str
+) -> None:
+    monkeypatch.delenv("FOO", raising=False)
+    (tmp_path / "setup.sh").write_text(setup, encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Sourced verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert not report.blocking_findings
+    assert [finding.code for finding in report.findings if not finding.blocking] == [
+        "verify_shell_state_inconclusive"
+    ]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+def test_sourced_state_that_invalidates_host_bindings_remains_inconclusive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FOO", "bar")
+    (tmp_path / "setup.sh").write_text("unset FOO\n", encoding="utf-8")
+    command = '. ./setup.sh; test "$FOO" = bar'
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Sourced verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert not report.blocking_findings
+    assert "verify_shell_state_inconclusive" in {finding.code for finding in report.findings}
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "uv run python missing.py",
@@ -394,6 +447,34 @@ def test_uv_run_missing_verifier_blocks_with_shell_parity(tmp_path: Path, comman
         _seed(
             acceptance_criteria=(
                 AcceptanceCriterionSpec(description="UV verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "npm exec --offline -- ./missing.sh",
+        "npx --offline ./missing.sh",
+        "pnpm exec ./missing.sh",
+        "yarn exec ./missing.sh",
+        "bun run ./missing.ts",
+    ),
+)
+def test_package_runner_missing_verifier_blocks_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Package runner verifier", verify_command=command
+                ),
             )
         ),
         workspace_root=tmp_path,

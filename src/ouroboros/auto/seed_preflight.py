@@ -990,6 +990,23 @@ def _check_verify_commands(
         if not command:
             continue
         scannable = _URL_RE.sub(" ", command)
+        sourced_programs = _sourced_program_tokens(scannable)
+        if sourced_programs:
+            findings.append(
+                PreflightFinding(
+                    code="verify_shell_state_inconclusive",
+                    blocking=False,
+                    subject=", ".join(sorted(sourced_programs)),
+                    detail=(
+                        "verify_command sources code into the current shell, so its later "
+                        "environment and working-directory state cannot be proven statically"
+                    ),
+                    question=(
+                        "Can the sourced setup be folded into a deterministic verifier script "
+                        "or described as an explicit Seed dependency?"
+                    ),
+                )
+            )
         host_bound = _host_bound_env_vars()
         nested_shell_scopes = _nested_shell_scopes(scannable, host_bound)
         outer_shell_command = _outer_shell_scope(scannable)
@@ -1009,6 +1026,12 @@ def _check_verify_commands(
                 # survives into the child.
                 shell_command = scannable
             if _has_unsupported_shell_state_grammar(shell_command, shell_dialect=shell_dialect):
+                continue
+            # Dot/source executes arbitrary code in the current shell. Its
+            # environment and cwd effects make later static variable/path
+            # conclusions non-authoritative; the sourced file itself remains
+            # a decidable program dependency below.
+            if _sourced_program_tokens(shell_command):
                 continue
             command_bound: set[str] = set(inherited_bindings)
             for _, event, variable in _shell_variable_events(
@@ -1100,6 +1123,8 @@ def _check_verify_commands(
                 if is_program
                 else _path_exists(token, workspace_root)
             )
+            if sourced_programs and normalized not in sourced_programs:
+                path_status = None
             if path_status is False:
                 finding_key = (normalized, is_program)
                 if finding_key in reported_missing_tokens:
@@ -1230,6 +1255,38 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                         else remaining[1:]
                     )
                 continue
+            package_runner = (
+                command_name == "npx"
+                or command_name in {"npm", "pnpm", "yarn"}
+                and len(remaining) >= 2
+                and remaining[1] == "exec"
+                or command_name == "bun"
+                and len(remaining) >= 2
+                and remaining[1] == "run"
+            )
+            if package_runner:
+                remaining = remaining[1:] if command_name == "npx" else remaining[2:]
+                option_operands = {
+                    "--cache",
+                    "--call",
+                    "--package",
+                    "--package-manager",
+                    "--registry",
+                    "--shell",
+                    "-c",
+                    "-p",
+                }
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    remaining = (
+                        remaining[2:]
+                        if token in option_operands and len(remaining) >= 2
+                        else remaining[1:]
+                    )
+                continue
             if command_name == "nice":
                 remaining = remaining[1:]
                 if remaining and remaining[0] in {"-n", "--adjustment"}:
@@ -1336,6 +1393,51 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 cursor += 1
             if cursor < len(segment) and not segment[cursor].startswith("-"):
                 programs.add(_normalize_workspace_path(segment[cursor]))
+
+    try:
+        scan(shell_tokens(command))
+    except ValueError:
+        return frozenset()
+    return frozenset(programs)
+
+
+def _sourced_program_tokens(command: str) -> frozenset[str]:
+    """Return statically named files executed in the current shell."""
+
+    programs: set[str] = set()
+
+    def shell_tokens(value: str) -> list[str]:
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+
+    def scan(parts: list[str]) -> None:
+        segments: list[list[str]] = [[]]
+        for part in parts:
+            if re.fullmatch(r"[;&|\n]+", part):
+                segments.append([])
+            else:
+                segments[-1].append(part)
+        for segment in segments:
+            while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
+                segment = segment[1:]
+            if segment and Path(segment[0]).name == "command":
+                segment = segment[1:]
+                while segment and segment[0] in {"--", "-p", "-v", "-V"}:
+                    segment = segment[1:]
+            if not segment:
+                continue
+            if (segment[0] == "." or Path(segment[0]).name == "source") and len(segment) >= 2:
+                programs.add(_normalize_workspace_path(segment[1]))
+                continue
+            shell_payload = _shell_command_payload(segment)
+            if shell_payload is not None:
+                try:
+                    scan(shell_tokens(shell_payload[0]))
+                except ValueError:
+                    pass
 
     try:
         scan(shell_tokens(command))
