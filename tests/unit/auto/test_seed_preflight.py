@@ -631,6 +631,12 @@ def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
         ("{ FOO=bar; }; set -u; printf '%s' \"$FOO\"", True),
         ("set_foo() { FOO=bar; }; set_foo; set -u; printf '%s' \"$FOO\"", True),
         ("read FOO <<'EOF'\nbar\nEOF\nset -u; test \"$FOO\" = bar", True),
+        (
+            'unset FOO; printf %s "$(printf %s "${FOO:=bar}")"; set -u; test -n "$FOO"',
+            False,
+        ),
+        ('unset FOO; printf x | printf %s "${FOO:=bar}"; set -u; test -n "$FOO"', False),
+        ('unset FOO; set -u; test "${#FOO}" -eq 0', False),
         ("printf ok # $MISSING", True),
     ),
 )
@@ -695,6 +701,8 @@ def test_shell_subprocess_bindings_do_not_leak_or_precede_expansion(
         "nice --adjustment=5 ./missing-verify",
         "nice -- ./missing-verify",
         "nice -n 5 -- ./missing-verify",
+        "printf ok\n./missing-verifier.sh",
+        ". ./missing-verifier.sh",
     ),
 )
 def test_supported_wrapper_option_forms_preserve_program_position(

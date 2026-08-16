@@ -51,7 +51,9 @@ def _host_bound_env_vars() -> frozenset[str]:
     return frozenset(os.environ) | _SHELL_INITIALIZED_ENV_VARS
 
 
-_ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_ENV_VAR_RE = re.compile(
+    r"\$(?:\{#?(?P<braced>[A-Za-z_][A-Za-z0-9_]*)|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+)
 # Variables the command binds itself: shell assignments (``tmp=$(mktemp)``),
 # ``for x in ...`` loop variables, and parameter expansions that do not
 # require a pre-existing value (defaults, assignments, and optional alternates).
@@ -243,6 +245,43 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
     events: list[tuple[int, str, str]] = []
     events.extend((position, "bind", name) for position, name in persistent_bindings)
     events.extend((position, "unbind", name) for position, name in persistent_unbindings)
+
+    def in_command_substitution(position: int) -> bool:
+        depth = 0
+        quote: str | None = None
+        escaped = False
+        index = 0
+        while index < position:
+            character = command[index]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and quote != "'":
+                escaped = True
+                index += 1
+                continue
+            if character in {"'", '"'}:
+                if quote is None:
+                    quote = character
+                elif quote == character:
+                    quote = None
+                index += 1
+                continue
+            if quote != "'" and command[index : index + 2] == "$(":
+                depth += 1
+                index += 2
+                continue
+            if quote != "'" and character == ")" and depth:
+                depth -= 1
+            index += 1
+        return depth > 0
+
+    def in_subprocess_segment(position: int) -> bool:
+        boundary = max(command.rfind(";", 0, position), command.rfind("\n", 0, position))
+        subprocess_separator = max(command.rfind("|", 0, position), command.rfind("&", 0, position))
+        return subprocess_separator > boundary
+
     for match in _FOR_VAR_RE.finditer(command):
         items = match.group("items").strip()
         if unquoted[match.start()] and items and not re.search(r"[$`]", items):
@@ -250,12 +289,15 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
     for match in _ENV_VAR_RE.finditer(command):
         if not expandable[match.start()]:
             continue
+        variable = match.group("braced") or match.group("bare")
         if _OPTIONAL_VAR_RE.match(command, match.start()) is not None:
             assigning = _ASSIGNING_VAR_RE.match(command, match.start())
-            if assigning is not None:
-                events.append((assigning.end(), "bind", match.group(1)))
+            if assigning is not None and not (
+                in_command_substitution(match.start()) or in_subprocess_segment(match.start())
+            ):
+                events.append((assigning.end(), "bind", variable))
             continue
-        events.append((match.start(), "expand", match.group(1)))
+        events.append((match.start(), "expand", variable))
     return tuple(sorted(events))
 
 
@@ -875,7 +917,8 @@ def _command_program_tokens(command: str) -> frozenset[str]:
         return remaining
 
     def shell_tokens(value: str) -> list[str]:
-        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|")
+        lexer = shlex.shlex(value, posix=True, punctuation_chars=";&|\n")
+        lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         lexer.commenters = ""
         return list(lexer)
@@ -883,7 +926,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
     def scan(parts: list[str]) -> None:
         segments: list[list[str]] = [[]]
         for part in parts:
-            if re.fullmatch(r"[;&|]+", part):
+            if re.fullmatch(r"[;&|\n]+", part):
                 segments.append([])
             else:
                 segments[-1].append(part)
@@ -900,6 +943,9 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if not segment:
                 continue
             executable = Path(segment[0]).name
+            if segment[0] == "." and len(segment) >= 2:
+                programs.add(_normalize_workspace_path(segment[1]))
+                continue
             if (
                 executable in {"bash", "sh"}
                 and len(segment) >= 3
