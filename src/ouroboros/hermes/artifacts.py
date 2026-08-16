@@ -154,6 +154,26 @@ def _marker_staging_path(target: Path, token: str) -> Path:
     return target.with_name(f".{target.name}.marker.{token}")
 
 
+def _retirement_path(backup: Path, token: str) -> Path:
+    return backup.with_name(f".{backup.name.removeprefix('.')}.retired.{token}")
+
+
+def _ownership_marker_matches(
+    target: Path,
+    backup: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> bool:
+    marker = target / _SWAP_MARKER
+    return (
+        marker.is_file()
+        and not marker.is_symlink()
+        and _read_swap_record(marker) == _ownership_content(operation, backup, token, digest)
+    )
+
+
 def _publish_ownership_marker(
     target: Path,
     backup: Path,
@@ -182,10 +202,41 @@ def _retire_owned_backup(
 ) -> None:
     """Atomically detach an owned backup before fallible recursive cleanup."""
     _assert_owned_swap_backup(backup, operation=operation, token=token, digest=digest)
-    retirement = backup.with_name(f".{backup.name.removeprefix('.')}.retired.{token}")
+    retirement = _retirement_path(backup, token)
     if retirement.exists() or retirement.is_symlink():
         raise OSError(f"Refusing occupied Hermes retirement path: {retirement}")
-    os.replace(backup, retirement)
+    try:
+        os.replace(backup, retirement)
+    except BaseException:
+        if retirement.exists() and not backup.exists():
+            _assert_owned_swap_backup(
+                retirement,
+                operation=operation,
+                token=token,
+                digest=digest,
+                backup_identity=backup,
+            )
+        raise
+    _finish_owned_retirement(
+        retirement,
+        backup,
+        intent,
+        operation=operation,
+        token=token,
+        digest=digest,
+    )
+
+
+def _finish_owned_retirement(
+    retirement: Path,
+    backup: Path,
+    intent: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> None:
+    """Validate and finish a committed backup-to-retirement rename."""
     try:
         _assert_owned_swap_backup(
             retirement,
@@ -251,6 +302,19 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
     if len(records) > 1:
         raise OSError("Refusing ambiguous Hermes recovery with multiple swap intents")
     for intent, backup, operation, token, digest in records:
+        retirement = _retirement_path(backup, token)
+        if retirement.exists() or retirement.is_symlink():
+            if backup.exists():
+                raise OSError("Refusing ambiguous Hermes backup and retirement generations")
+            _finish_owned_retirement(
+                retirement,
+                backup,
+                intent,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
+            continue
         if operation == "swap" and not target.exists() and backup.exists():
             _restore_owned_backup(backup, target)
         elif operation == "remove" and not target.exists() and backup.exists():
@@ -313,7 +377,14 @@ def atomic_swap_generation(
                 digest=digest,
             )
         except BaseException:
-            _remove_target_path(intent)
+            if not _ownership_marker_matches(
+                target,
+                backup,
+                operation="swap",
+                token=token,
+                digest=digest,
+            ):
+                _remove_target_path(intent)
             raise
         try:
             os.replace(target, backup)
@@ -331,7 +402,9 @@ def atomic_swap_generation(
     except BaseException:
         if backup.exists() and not target.exists():
             _restore_owned_backup(backup, target)
-        _remove_target_path(intent)
+            _remove_target_path(intent)
+        elif not (backup.exists() and target.exists() and not replacement.exists()):
+            _remove_target_path(intent)
         raise
     if backup.exists():
         _retire_owned_backup(backup, intent, operation="swap", token=token, digest=digest)
@@ -366,7 +439,14 @@ def atomic_remove_generation(
             digest=digest,
         )
     except BaseException:
-        _remove_target_path(intent)
+        if not _ownership_marker_matches(
+            target,
+            backup,
+            operation="remove",
+            token=token,
+            digest=digest,
+        ):
+            _remove_target_path(intent)
         raise
     try:
         os.replace(target, backup)

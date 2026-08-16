@@ -864,6 +864,111 @@ class TestInstallHermesSkills:
             assert not target.exists()
 
     @pytest.mark.parametrize("operation", ("swap", "remove"))
+    def test_interruption_after_marker_commit_is_recoverable(
+        self, tmp_path: Path, monkeypatch, operation: str
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_remove_generation, atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_replace = os.replace
+        interrupted = False
+
+        def interrupt_after_marker_commit(src, dst):
+            nonlocal interrupted
+            result = real_replace(src, dst)
+            if Path(dst).name == _SWAP_MARKER and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_marker_commit)
+        with pytest.raises(KeyboardInterrupt):
+            if operation == "swap":
+                atomic_swap_generation(target, replacement)
+            else:
+                atomic_remove_generation(target)
+
+        assert target.joinpath(_SWAP_MARKER).is_file()
+        assert tuple(tmp_path.glob("*.intent"))
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        if operation == "swap":
+            atomic_swap_generation(target, replacement)
+            assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "new\n"
+        else:
+            atomic_remove_generation(target)
+            assert not target.exists()
+        assert not tuple(tmp_path.glob("*.intent"))
+
+    def test_interruption_after_replacement_commit_retires_backup_on_recovery(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import _recover_swap_intents, atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("operator-secret.txt").write_text("preserve\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def interrupt_after_replacement_commit(src, dst):
+            result = real_replace(src, dst)
+            if Path(src) == replacement and Path(dst) == target:
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts.os.replace", interrupt_after_replacement_commit
+        )
+        with pytest.raises(KeyboardInterrupt):
+            atomic_swap_generation(target, replacement)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "new\n"
+        assert tuple(tmp_path.glob("*.intent"))
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        _recover_swap_intents(target, ".ouroboros.old.")
+        assert not tuple(tmp_path.glob("*.intent"))
+        assert not tuple(tmp_path.glob(".ouroboros.old.*"))
+
+    def test_interruption_after_retirement_commit_resumes_cleanup(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import _recover_swap_intents, atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def interrupt_after_retirement_commit(src, dst):
+            result = real_replace(src, dst)
+            if ".retired." in Path(dst).name:
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts.os.replace", interrupt_after_retirement_commit
+        )
+        with pytest.raises(KeyboardInterrupt):
+            atomic_swap_generation(target, replacement)
+
+        assert tuple(tmp_path.glob("*.intent"))
+        assert tuple(tmp_path.glob("*.retired.*"))
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        _recover_swap_intents(target, ".ouroboros.old.")
+        assert not tuple(tmp_path.glob("*.intent"))
+        assert not tuple(tmp_path.glob("*.retired.*"))
+
+    @pytest.mark.parametrize("operation", ("swap", "remove"))
     def test_interrupted_intent_staging_is_retryable(
         self, tmp_path: Path, monkeypatch, operation: str
     ) -> None:
