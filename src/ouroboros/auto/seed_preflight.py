@@ -42,7 +42,40 @@ __all__ = [
 
 # Variables `/bin/sh` establishes even when launched with an empty environment.
 _SHELL_INITIALIZED_ENV_VARS = frozenset(
-    {"PATH", "PWD", *({"SHELL"} if sys.platform == "darwin" else set())}
+    {
+        "IFS",
+        "OPTIND",
+        "PATH",
+        "PPID",
+        "PS1",
+        "PS2",
+        "PS4",
+        "PWD",
+        *({"SHELL"} if sys.platform == "darwin" else set()),
+    }
+)
+_BASH_INITIALIZED_ENV_VARS = frozenset(
+    {
+        "BASH",
+        "BASHPID",
+        "BASHOPTS",
+        "BASH_VERSION",
+        "BASH_VERSINFO",
+        "DIRSTACK",
+        "EUID",
+        "GROUPS",
+        "HOSTNAME",
+        "HOSTTYPE",
+        "LINENO",
+        "MACHTYPE",
+        "OSTYPE",
+        "PIPESTATUS",
+        "RANDOM",
+        "SECONDS",
+        "SHELLOPTS",
+        "SHLVL",
+        "UID",
+    }
 )
 
 
@@ -1067,8 +1100,10 @@ def _check_verify_commands(
             # a decidable program dependency below.
             if _sourced_program_tokens(shell_command):
                 continue
-            command_bound: set[str] = set(inherited_bindings)
-            for _, event, variable in _shell_variable_events(
+            command_bound: set[str] = set(inherited_bindings) | set(_SHELL_INITIALIZED_ENV_VARS)
+            if shell_dialect == "bash":
+                command_bound.update(_BASH_INITIALIZED_ENV_VARS)
+            for position, event, variable in _shell_variable_events(
                 shell_command, shell_dialect=shell_dialect
             ):
                 if event == "bind":
@@ -1077,6 +1112,10 @@ def _check_verify_commands(
                 if event == "unbind":
                     command_bound.discard(variable)
                     continue
+                if variable == "OLDPWD" and re.search(
+                    r"(?:^|[;&|\n]\s*)cd(?:\s|$)", shell_command[:position]
+                ):
+                    command_bound.add(variable)
                 if variable in command_bound or variable in seen_vars:
                     continue
                 seen_vars.add(variable)

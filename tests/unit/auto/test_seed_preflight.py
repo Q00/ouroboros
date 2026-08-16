@@ -905,6 +905,39 @@ def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "command",
+    (
+        "env -i sh -c 'set -u; printf %s \"$PPID\"'",
+        "env -i sh -c 'cd /; set -u; printf %s \"$OLDPWD\"'",
+        "env -i bash -c 'set -u; printf %s \"$BASH_VERSION\"'",
+    ),
+)
+def test_shell_created_bindings_match_empty_environment_runtime(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Shell-created binding", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed
+    assert runtime.returncode == 0
+
+
+@pytest.mark.parametrize(
     ("command", "passed"),
     (
         ("for FOO in; do :; done; set -u; printf '%s' \"$FOO\"", False),
