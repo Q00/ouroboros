@@ -53,6 +53,17 @@ def _swap_intent_path(backup: Path) -> Path:
     return backup.with_name(backup.name + _SWAP_INTENT_SUFFIX)
 
 
+def _publish_swap_intent(intent: Path, content: str, token: str) -> None:
+    """Publish an intent atomically so recovery never sees partial bytes."""
+    staging = intent.with_name(intent.name + f".staging.{token}")
+    try:
+        staging.write_text(content, encoding="utf-8")
+        os.replace(staging, intent)
+    except BaseException:
+        _remove_target_path(staging)
+        raise
+
+
 def _fingerprint_digest(fingerprint: tuple[object, ...] | None) -> str:
     return hashlib.sha256(repr(fingerprint).encode()).hexdigest()
 
@@ -159,6 +170,13 @@ def _retire_owned_backup(
             backup_identity=backup,
         )
         intent.unlink(missing_ok=True)
+        _assert_owned_swap_backup(
+            retirement,
+            operation=operation,
+            token=token,
+            digest=digest,
+            backup_identity=backup,
+        )
     except BaseException:
         if retirement.exists() and not backup.exists():
             os.replace(retirement, backup)
@@ -215,8 +233,6 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
                 if _read_swap_record(marker) == _ownership_content(
                     operation, backup, token, digest
                 ):
-                    if _fingerprint_digest(_owned_backup_fingerprint(target)) != digest:
-                        raise OSError(f"Hermes live generation changed during recovery: {target}")
                     _remove_target_path(marker)
                 else:
                     raise OSError(f"Refusing foreign Hermes swap marker: {marker}")
@@ -242,7 +258,7 @@ def atomic_swap_generation(
     token = uuid4().hex
     checked_fingerprint = _tree_fingerprint(target)
     digest = _fingerprint_digest(checked_fingerprint)
-    intent.write_text(_intent_content("swap", backup, token, digest), encoding="utf-8")
+    _publish_swap_intent(intent, _intent_content("swap", backup, token, digest), token)
     if target.exists():
         if target.joinpath(_SWAP_MARKER).exists() or target.joinpath(_SWAP_MARKER).is_symlink():
             _remove_target_path(intent)
@@ -299,7 +315,7 @@ def atomic_remove_generation(
     token = uuid4().hex
     checked_fingerprint = _tree_fingerprint(target)
     digest = _fingerprint_digest(checked_fingerprint)
-    intent.write_text(_intent_content("remove", backup, token, digest), encoding="utf-8")
+    _publish_swap_intent(intent, _intent_content("remove", backup, token, digest), token)
     if target.joinpath(_SWAP_MARKER).exists() or target.joinpath(_SWAP_MARKER).is_symlink():
         _remove_target_path(intent)
         raise OSError(f"Refusing unowned Hermes swap marker: {target / _SWAP_MARKER}")
