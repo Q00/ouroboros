@@ -347,12 +347,27 @@ _UNSUPPORTED_BASH_STATE_MUTATION = re.compile(
     re.MULTILINE,
 )
 
+_DYNAMIC_SHELL_STATE_MUTATION = re.compile(
+    r"(?:^|(?:&&|\|\||[;&|\n])\s*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"(?:command(?:\s+(?:--|-p|-v|-V))*\s+)?eval(?:\s|$)",
+    re.MULTILINE,
+)
+
+
+def _has_dynamic_shell_state_mutation(command: str) -> bool:
+    """Return whether runtime text can mutate later shell state."""
+    return _DYNAMIC_SHELL_STATE_MUTATION.search(_strip_shell_comments(command)) is not None
+
 
 def _has_unsupported_shell_state_grammar(command: str, *, shell_dialect: str = "sh") -> bool:
     """Return whether state flow is too rich for authoritative blocking."""
     stripped = _strip_shell_comments(command)
-    return _UNSUPPORTED_SHELL_STATE_GRAMMAR.search(stripped) is not None or (
-        shell_dialect == "bash" and _UNSUPPORTED_BASH_STATE_MUTATION.search(stripped) is not None
+    return (
+        _UNSUPPORTED_SHELL_STATE_GRAMMAR.search(stripped) is not None
+        or _DYNAMIC_SHELL_STATE_MUTATION.search(stripped) is not None
+        or shell_dialect == "bash"
+        and _UNSUPPORTED_BASH_STATE_MUTATION.search(stripped) is not None
     )
 
 
@@ -954,6 +969,11 @@ def _check_verify_commands(
         nested_shell_scopes = _nested_shell_scopes(scannable, host_bound)
         outer_shell_command = _outer_shell_scope(scannable)
         shell_scopes = ((outer_shell_command, host_bound, "sh"), *nested_shell_scopes)
+        # ``eval`` can establish variables, directories, functions, aliases,
+        # and more from runtime text.  Until that payload is modeled exactly,
+        # neither environment nor verifier-path findings are authoritative.
+        if any(_has_dynamic_shell_state_mutation(scope[0]) for scope in shell_scopes):
+            continue
         for scope_index, (shell_command, inherited_bindings, shell_dialect) in enumerate(
             shell_scopes
         ):

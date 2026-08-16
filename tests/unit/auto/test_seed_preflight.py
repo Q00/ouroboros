@@ -370,6 +370,51 @@ def test_backquote_assignment_does_not_bind_outer_shell_variable(tmp_path: Path)
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
+def test_eval_established_variable_is_inconclusive_and_matches_shell_success(
+    tmp_path: Path,
+) -> None:
+    command = "eval 'FOO=bar'; set -u; test -n \"$FOO\""
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Eval variable", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert not report.blocking_findings
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(("program", "returncode"), (("check.py", 0), ("missing.py", 2)))
+def test_eval_established_directory_keeps_program_resolution_inconclusive(
+    tmp_path: Path, program: str, returncode: int
+) -> None:
+    subdirectory = tmp_path / "sub"
+    subdirectory.mkdir()
+    (subdirectory / "check.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    command = f"eval 'cd sub'; python {program}"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Eval directory", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert not report.blocking_findings
+    assert (
+        subprocess.run(
+            ["/bin/sh", "-c", command], cwd=tmp_path, capture_output=True, check=False
+        ).returncode
+        == returncode
+    )
+
+
 @pytest.mark.parametrize(
     ("command", "expected_blocking"),
     (
