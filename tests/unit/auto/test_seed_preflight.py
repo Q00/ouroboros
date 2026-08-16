@@ -763,6 +763,38 @@ def test_getopts_target_binding_matches_posix_shell(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "special_builtin",
+    (
+        ":",
+        "set -- x",
+        "shift",
+        "times",
+        "trap : 0",
+        "unset UNUSED",
+    ),
+)
+def test_assignment_prefix_on_posix_special_builtin_persists(
+    tmp_path: Path, special_builtin: str
+) -> None:
+    setup = "set -- x; " if special_builtin == "shift" else ""
+    command = f'{setup}unset PR1944_FOO; set -u; PR1944_FOO=bar {special_builtin}; test "$PR1944_FOO" = bar'
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="POSIX special builtin binding",
+                    verify_command=command,
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
     "set_commands",
     (
         "set -a",
@@ -1497,6 +1529,24 @@ def test_negated_missing_program_is_still_blocked_with_shell_parity(tmp_path: Pa
         _seed(
             acceptance_criteria=(
                 AcceptanceCriterionSpec(description="Negated verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+def test_negated_nohup_missing_program_is_blocked_with_shell_parity(tmp_path: Path) -> None:
+    command = "! nohup ./definitely-missing.sh >/dev/null 2>&1"
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Negated nohup verifier",
+                    verify_command=command,
+                ),
             )
         ),
         workspace_root=tmp_path,

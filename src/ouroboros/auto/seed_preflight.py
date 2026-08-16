@@ -239,10 +239,35 @@ def _shell_variable_events(
         assignment_builtin = command_name in {"export", "readonly"} or (
             shell_dialect == "bash" and command_name in {"declare", "local", "typeset"}
         )
+        special_builtin = command_name in {
+            ":",
+            "break",
+            "continue",
+            "eval",
+            "exec",
+            "exit",
+            "export",
+            "readonly",
+            "return",
+            "set",
+            "shift",
+            "times",
+            "trap",
+            "unset",
+        }
         persists = (
             separator_before not in subshell_separators | {"&&", "||"}
             and separator_after not in subshell_separators
         )
+        if special_builtin and persists:
+            # POSIX assignment prefixes on special builtins update the current
+            # shell environment, including builtins whose operands are not
+            # assignments themselves (for example ``FOO=bar :``).
+            persistent_bindings.extend(
+                (end, word.partition("=")[0])
+                for word in words[:command_index]
+                if assignment.fullmatch(word)
+            )
         if assignment_only and persists:
             persistent_bindings.extend(
                 (end, word.partition("=")[0]) for word in words if assignment.fullmatch(word)
@@ -569,6 +594,11 @@ def _nested_shell_scopes(
                     or remaining[0].startswith("--adjustment=")
                 ):
                     remaining = remaining[1:]
+                if remaining and remaining[0] == "--":
+                    remaining = remaining[1:]
+                continue
+            if command_name == "nohup":
+                remaining = remaining[1:]
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
@@ -1452,6 +1482,11 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     or remaining[0].startswith("--adjustment=")
                 ):
                     remaining = remaining[1:]
+                if remaining and remaining[0] == "--":
+                    remaining = remaining[1:]
+                continue
+            if command_name == "nohup":
+                remaining = remaining[1:]
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
