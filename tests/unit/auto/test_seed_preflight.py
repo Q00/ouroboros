@@ -453,7 +453,21 @@ def test_uv_run_missing_verifier_blocks_with_shell_parity(tmp_path: Path, comman
     )
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
-    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "uv"
+    shim.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+    shim.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    assert (
+        subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            check=False,
+        ).returncode
+        != 0
+    )
 
 
 @pytest.mark.parametrize(
@@ -481,7 +495,26 @@ def test_package_runner_missing_verifier_blocks_with_shell_parity(
     )
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
-    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+    # Do not invoke real package managers in the unit suite: even offline
+    # modes may consult user caches or start background daemons. A deterministic
+    # failing shim preserves the shell's command-dispatch assertion while the
+    # preflight above validates the actual runner grammar and missing operand.
+    runner = command.split(maxsplit=1)[0]
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / runner
+    shim.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+    shim.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    assert (
+        subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            check=False,
+        ).returncode
+        != 0
+    )
 
 
 @pytest.mark.parametrize(
