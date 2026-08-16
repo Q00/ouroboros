@@ -120,7 +120,7 @@ def _is_shell_assignment_position(command: str, start: int) -> bool:
 
 
 def _nested_shell_commands(command: str) -> tuple[str, ...]:
-    """Return command strings executed by command-position ``sh -c`` forms."""
+    """Return recursively wrapped command-position ``sh -c`` payloads."""
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
@@ -136,12 +136,103 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
             segments[-1].append(part)
     nested: list[str] = []
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+
+    def unwrap(segment: list[str]) -> list[str]:
+        remaining = list(segment)
+        while remaining:
+            command_name = Path(remaining[0]).name
+            if command_name == "env":
+                remaining = remaining[1:]
+                while remaining:
+                    token = remaining[0]
+                    if token in {"-S", "--split-string"} and len(remaining) >= 2:
+                        try:
+                            return shlex.split(remaining[1], posix=True) + remaining[2:]
+                        except ValueError:
+                            return []
+                    if token.startswith("--split-string="):
+                        try:
+                            return shlex.split(token.partition("=")[2], posix=True) + remaining[1:]
+                        except ValueError:
+                            return []
+                    if token in {"-u", "--unset", "-C", "--chdir"}:
+                        remaining = remaining[2:]
+                        continue
+                    if token.startswith("-") or assignment.fullmatch(token):
+                        remaining = remaining[1:]
+                        continue
+                    break
+                continue
+            if command_name == "timeout":
+                remaining = remaining[1:]
+                while remaining:
+                    token = remaining[0]
+                    if token in {"-s", "--signal", "-k", "--kill-after"}:
+                        remaining = remaining[2:]
+                        continue
+                    if token.startswith("-"):
+                        remaining = remaining[1:]
+                        continue
+                    break
+                if remaining:
+                    remaining = remaining[1:]
+                continue
+            if command_name == "nice":
+                remaining = remaining[1:]
+                if remaining and remaining[0] in {"-n", "--adjustment"}:
+                    remaining = remaining[2:]
+                elif remaining and (
+                    re.fullmatch(r"-n?\d+", remaining[0])
+                    or remaining[0].startswith("--adjustment=")
+                ):
+                    remaining = remaining[1:]
+                continue
+            if command_name == "command":
+                remaining = remaining[1:]
+                while remaining and remaining[0] in {"--", "-p", "-v", "-V"}:
+                    remaining = remaining[1:]
+                continue
+            break
+        return remaining
+
     for segment in segments:
         while segment and assignment.fullmatch(segment[0]):
             segment = segment[1:]
-        if len(segment) >= 3 and Path(segment[0]).name in {"sh", "bash"} and segment[1] == "-c":
+        segment = unwrap(segment)
+        if (
+            len(segment) >= 3
+            and Path(segment[0]).name in {"sh", "bash"}
+            and segment[1] in {"-c", "--command"}
+        ):
             nested.append(segment[2])
+            nested.extend(_nested_shell_commands(segment[2]))
     return tuple(nested)
+
+
+def _outer_shell_scope(command: str) -> str:
+    """Return top-level command segments, excluding nested-shell invocations."""
+    segments: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if quote is None and character in ";&|\n":
+            segments.append(command[start:index])
+            start = index + 1
+    segments.append(command[start:])
+    return ";".join(segment for segment in segments if not _nested_shell_commands(segment))
 
 
 # A standalone dependency entry that claims a workspace file. Requires a
@@ -311,7 +402,8 @@ def _check_verify_commands(
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
         nested_shell_commands = _nested_shell_commands(scannable)
-        shell_commands = nested_shell_commands or (scannable,)
+        outer_shell_command = _outer_shell_scope(scannable)
+        shell_commands = (outer_shell_command, *nested_shell_commands)
         for shell_command in shell_commands:
             command_bound: set[str] = set()
             for _, event, variable in _shell_variable_events(shell_command):

@@ -237,6 +237,12 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
+
+
+class _SeedQaRepairDeadlineExpired(Exception):
+    """Stop Seed QA immediately after its lateral repair consumes the deadline."""
+
+
 _TRANSIENT_TOOL_ATTEMPTS = 3
 _TRANSIENT_RETRY_BACKOFF_SECONDS = (1.0, 5.0)
 DETACHED_STATUS = "detached"
@@ -2117,6 +2123,8 @@ class AutoPipeline:
                     )
                     if self._enforce_deadline(state):
                         return deadline_result()
+                except _SeedQaRepairDeadlineExpired:
+                    return deadline_result()
                 except SeedQaRepairMappingError as exc:
                     # The repair mapper only understands a bounded vocabulary of
                     # QA findings. Unmapped feedback means "this pipeline cannot
@@ -2257,6 +2265,8 @@ class AutoPipeline:
                 )
             except Exception:  # noqa: BLE001 — bounded best-effort retry
                 candidate = None
+            if self._enforce_deadline(state):
+                raise _SeedQaRepairDeadlineExpired
             if candidate is not None and not candidate.error and candidate.text.strip():
                 lateral_result = candidate
                 break
@@ -2266,7 +2276,7 @@ class AutoPipeline:
                 ]
                 await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
                 if self._enforce_deadline(state):
-                    return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+                    raise _SeedQaRepairDeadlineExpired
         if lateral_result is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 

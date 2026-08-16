@@ -385,26 +385,44 @@ async def test_lateral_retry_backoff_cannot_outlive_pipeline_deadline(
         calls += 1
         raise RuntimeError("lateral backend unavailable")
 
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        return EvaluateResult(
+            passed=False,
+            score=0.5,
+            verdict="revise",
+            differences=("non_goals are missing from executable constraints",),
+        )
+
+    run_calls = 0
+
+    async def forbidden_run(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:
+        del seed, idempotency_key
+        nonlocal run_calls
+        run_calls += 1
+        return {"job_id": "must-not-run"}
+
     pipeline = AutoPipeline(
         _interview_driver(tmp_path),
         _generate_seed,
         lateral_thinker=lateral,
         store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+        run_starter=forbidden_run,
     )
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.deadline_at = time.monotonic() + 0.03
     state.deadline_at_epoch = time.time() + 0.03
-    qa_result = EvaluateResult(
-        passed=False,
-        score=0.5,
-        verdict="revise",
-        differences=("non_goals are missing from executable constraints",),
-    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
 
     started = time.monotonic()
-    repaired = await pipeline._repair_seed_after_qa(state, _build_seed(), qa_result, attempt=1)
+    result = await pipeline.run(state)
 
     assert time.monotonic() - started < 0.08
     assert calls == 1
+    assert result.status == "blocked"
     assert state.last_tool_name == "pipeline_deadline"
-    assert any("Non-goal:" in item for item in repaired.constraints)
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.run_start_attempted is False
+    assert run_calls == 0

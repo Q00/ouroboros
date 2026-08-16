@@ -328,6 +328,31 @@ def test_separate_nested_shells_do_not_share_variable_bindings(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    ("command", "variable"),
+    (
+        ("env sh -c 'echo $MISSING'", "$MISSING"),
+        ("timeout 1 sh -c 'echo $MISSING'", "$MISSING"),
+        ("nice command -- env bash --command 'echo $MISSING'", "$MISSING"),
+        ("echo $OUTER; sh -c 'echo ok'", "$OUTER"),
+        ("env -S \"timeout 1 sh -c 'echo $MISSING'\"", "$MISSING"),
+    ),
+)
+def test_wrapped_nested_and_outer_shell_scopes_are_all_scanned(
+    tmp_path: Path, command: str, variable: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Independent scopes", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert variable in {finding.subject for finding in report.blocking_findings}
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "command -- ./missing-verify",
