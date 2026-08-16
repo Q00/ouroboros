@@ -1127,6 +1127,41 @@ class TestInstallHermesSkills:
         assert not tuple(tmp_path.glob("*.retired.*"))
         assert not tuple(tmp_path.glob("*.cleanup.*"))
 
+    def test_recovery_preserves_generation_changed_after_cleanup_activation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import _recover_swap_intents, atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def interrupt_generation_removal(path: Path) -> None:
+            if path.name == "generation":
+                raise KeyboardInterrupt
+            real_remove(path)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_target_path", interrupt_generation_removal
+        )
+        with pytest.raises(KeyboardInterrupt):
+            atomic_swap_generation(target, replacement)
+
+        cleanup = next(tmp_path.glob("*.cleanup.*"))
+        operator_file = cleanup / "generation" / "operator-after-interruption.txt"
+        operator_file.write_text("preserve\n", encoding="utf-8")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
+
+        with pytest.raises(OSError, match="Refusing foreign Hermes swap backup"):
+            _recover_swap_intents(target, ".ouroboros.old.")
+
+        assert operator_file.read_text(encoding="utf-8") == "preserve\n"
+        assert tuple(tmp_path.glob("*.intent"))
+
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(
         self, tmp_path: Path, monkeypatch, target_exists: bool

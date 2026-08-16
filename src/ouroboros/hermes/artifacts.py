@@ -203,6 +203,13 @@ def _finish_owned_cleanup(
             or _read_swap_record(active) != _cleanup_content(operation, backup, token, digest)
         ):
             raise OSError(f"Refusing foreign Hermes cleanup state: {active}")
+        _assert_owned_swap_backup(
+            generation,
+            operation=operation,
+            token=token,
+            digest=digest,
+            backup_identity=backup,
+        )
         _remove_target_path(generation)
     _remove_target_path(active)
     _remove_target_path(cleanup / _CLEANUP_MARKER)
