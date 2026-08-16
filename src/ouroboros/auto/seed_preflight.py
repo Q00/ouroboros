@@ -266,6 +266,13 @@ def _shell_variable_events(
                 else:
                     # Unknown option/operand grammar is not authoritative.
                     break
+        elif command_name == "getopts" and persists:
+            # POSIX getopts assigns its second operand on every successful
+            # parse.  Bind the target conservatively when the option-string
+            # and variable operands are syntactically identifiable.
+            operands = [word for word in words[command_index + 1 :] if word != "--"]
+            if len(operands) >= 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", operands[1]):
+                persistent_bindings.append((end, operands[1]))
         elif command_name == "unset" and persists:
             unset_variables = True
             for word in words[command_index + 1 :]:
@@ -492,6 +499,7 @@ def _nested_shell_scopes(
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
     sequential_export_names = set(inherited)
     sequential_values = set(inherited)
+    allexport = False
 
     def unwrap(segment: list[str], bound: set[str]) -> list[str]:
         remaining = list(segment)
@@ -582,6 +590,17 @@ def _nested_shell_scopes(
             assignment_prefixes.append(state_segment.pop(0))
         if persists and segment and all(assignment.fullmatch(token) for token in segment):
             sequential_values.update(token.partition("=")[0] for token in segment)
+            if allexport:
+                sequential_export_names.update(token.partition("=")[0] for token in segment)
+        if persists and state_segment and Path(state_segment[0]).name == "set":
+            set_args = state_segment[1:]
+            if "-a" in set_args or "-o" in set_args and "allexport" in set_args:
+                allexport = True
+            elif "+a" in set_args or "+o" in set_args and "allexport" in set_args:
+                # Disabling allexport does not un-export variables already
+                # marked for export; only subsequent assignments stop being
+                # exported.
+                allexport = False
         if persists and state_segment and Path(state_segment[0]).name == "export":
             # Assignment prefixes on POSIX special builtins affect the current
             # shell. Process them before ``export`` so a later nested shell

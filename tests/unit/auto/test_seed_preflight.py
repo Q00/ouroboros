@@ -747,6 +747,51 @@ def test_nested_shell_inherits_prefixed_export_with_shell_parity(
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
+def test_getopts_target_binding_matches_posix_shell(tmp_path: Path) -> None:
+    command = 'unset OPT; set -u; getopts x OPT -x; test "$OPT" = x'
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="getopts binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "set_commands",
+    (
+        "set -a",
+        "set -o allexport",
+        "set -a; set +a",
+        "set -o allexport; set +o allexport",
+    ),
+)
+def test_allexport_assignment_reaches_nested_shell_with_posix_parity(
+    tmp_path: Path, set_commands: str
+) -> None:
+    if "+" in set_commands:
+        enable, disable = set_commands.split("; ")
+        command = f"unset FOO; {enable}; FOO=bar; {disable}; sh -uc 'test \"$FOO\" = bar'"
+    else:
+        command = f"unset FOO; {set_commands}; FOO=bar; sh -uc 'test \"$FOO\" = bar'"
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="allexport binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
 @pytest.mark.parametrize(
     ("command", "passed"),
     (
