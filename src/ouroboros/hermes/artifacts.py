@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tempfile
@@ -143,6 +144,127 @@ def _reclamation_path(retirement: Path) -> Path:
     return retirement.with_name(retirement.name + ".reclaim")
 
 
+def _reclamation_manifest_path(reclamation: Path) -> Path:
+    return reclamation.with_name(reclamation.name + ".manifest.json")
+
+
+def _reclamation_entry(path: Path) -> tuple[str, int, str | None]:
+    info = path.lstat()
+    mode = info.st_mode
+    if path.is_symlink():
+        return "link", mode, os.readlink(path)
+    if path.is_file():
+        return "file", mode, hashlib.sha256(path.read_bytes()).hexdigest()
+    if path.is_dir():
+        return "dir", mode, None
+    raise OSError(f"Refusing unsupported Hermes reclamation entry: {path}")
+
+
+def _reclamation_entries(root: Path) -> dict[str, tuple[str, int, str | None]]:
+    entries: dict[str, tuple[str, int, str | None]] = {".": _reclamation_entry(root)}
+
+    def visit(directory: Path) -> None:
+        for child in sorted(directory.iterdir(), key=lambda item: item.name):
+            relative = child.relative_to(root).as_posix()
+            entry = _reclamation_entry(child)
+            entries[relative] = entry
+            if entry[0] == "dir":
+                visit(child)
+
+    visit(root)
+    return entries
+
+
+def _publish_reclamation_manifest(
+    reclamation: Path,
+    *,
+    source: Path | None = None,
+    backup: Path,
+    operation: str,
+    token: str,
+    digest: str,
+) -> Path:
+    manifest = _reclamation_manifest_path(reclamation)
+    payload = {
+        "version": 1,
+        "backup": backup.name,
+        "operation": operation,
+        "token": token,
+        "digest": digest,
+        "entries": _reclamation_entries(source or reclamation),
+    }
+    _publish_swap_intent(
+        manifest,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        token,
+    )
+    return manifest
+
+
+def _read_reclamation_manifest(
+    reclamation: Path,
+) -> tuple[dict[str, object], dict[str, tuple[str, int, str | None]]]:
+    manifest = _reclamation_manifest_path(reclamation)
+    try:
+        payload = json.loads(_read_swap_record(manifest))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, dict):
+        raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
+    entries: dict[str, tuple[str, int, str | None]] = {}
+    for relative, raw_entry in raw_entries.items():
+        relative_path = PurePosixPath(relative) if isinstance(relative, str) else None
+        if (
+            not isinstance(relative, str)
+            or relative_path is None
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or relative != "."
+            and relative_path.as_posix() != relative
+            or not isinstance(raw_entry, list)
+            or len(raw_entry) != 3
+            or raw_entry[0] not in {"dir", "file", "link"}
+            or not isinstance(raw_entry[1], int)
+            or raw_entry[2] is not None
+            and not isinstance(raw_entry[2], str)
+        ):
+            raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
+        entries[relative] = (raw_entry[0], raw_entry[1], raw_entry[2])
+    return payload, entries
+
+
+def _finish_reclamation(reclamation: Path) -> None:
+    """Replay deletion only for the authenticated original entry set."""
+    _payload, expected = _read_reclamation_manifest(reclamation)
+    current = _reclamation_entries(reclamation)
+    for relative, entry in current.items():
+        if expected.get(relative) != entry:
+            raise OSError(f"Refusing changed Hermes reclamation entry: {reclamation / relative}")
+    marker_relative = _SWAP_MARKER
+    ordered = sorted(
+        (relative for relative in expected if relative not in {".", marker_relative}),
+        key=lambda relative: (relative.count("/"), relative),
+        reverse=True,
+    )
+    for relative in (*ordered, marker_relative):
+        path = reclamation / relative
+        try:
+            entry = _reclamation_entry(path)
+        except FileNotFoundError:
+            continue
+        if expected.get(relative) != entry:
+            raise OSError(f"Refusing changed Hermes reclamation entry: {path}")
+        if entry[0] == "dir":
+            path.rmdir()
+        else:
+            path.unlink()
+    reclamation.rmdir()
+    _reclamation_manifest_path(reclamation).unlink(missing_ok=True)
+
+
 def _cleanup_content(operation: str, backup: Path, token: str, digest: str) -> str:
     return f"ouroboros-hermes-cleanup-v1:{operation}:{backup.name}:{token}:{digest}\n"
 
@@ -241,6 +363,19 @@ def _retirement_record(path: Path, backup_prefix: str) -> tuple[Path, str, str, 
         raise OSError(f"Refusing foreign Hermes retirement: {path}")
     backup = path.with_name(f"{backup_prefix}{match.group(1)}")
     token = match.group(2)
+    if path.name.endswith(".reclaim") and _reclamation_manifest_path(path).is_file():
+        payload, _entries = _read_reclamation_manifest(path)
+        operation = payload.get("operation")
+        digest = payload.get("digest")
+        if (
+            payload.get("backup") != backup.name
+            or payload.get("token") != token
+            or operation not in {"swap", "remove"}
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise OSError(f"Refusing foreign Hermes retirement: {path}")
+        return backup, operation, token, digest
     marker = path / _SWAP_MARKER
     if marker.is_symlink() or not marker.is_file():
         raise OSError(f"Refusing foreign Hermes retirement: {path}")
@@ -278,10 +413,23 @@ def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
             continue
         backup, operation, token, digest = record
         reclamation = path if path.name.endswith(".reclaim") else _reclamation_path(path)
+        manifest = _reclamation_manifest_path(reclamation)
         if path != reclamation:
             if reclamation.exists() or reclamation.is_symlink():
                 raise OSError(f"Refusing occupied Hermes reclamation path: {reclamation}")
-            os.replace(path, reclamation)
+            manifest = _publish_reclamation_manifest(
+                reclamation,
+                source=path,
+                backup=backup,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
+            try:
+                os.replace(path, reclamation)
+            except BaseException:
+                _remove_target_path(manifest)
+                raise
             try:
                 _assert_owned_swap_backup(
                     reclamation,
@@ -293,8 +441,9 @@ def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
             except BaseException:
                 if reclamation.exists() and not path.exists():
                     os.replace(reclamation, path)
+                _remove_target_path(manifest)
                 raise
-        _remove_target_path(reclamation)
+        _finish_reclamation(reclamation)
 
 
 def _ownership_marker_matches(

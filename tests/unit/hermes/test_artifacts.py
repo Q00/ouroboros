@@ -677,6 +677,80 @@ class TestInstallHermesSkills:
         )
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
 
+    def test_reclamation_preserves_concurrent_addition_at_cleanup_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _finish_reclamation,
+            atomic_swap_generation,
+        )
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+
+        def inject_before_cleanup(reclamation: Path) -> None:
+            reclamation.joinpath("operator-concurrent.txt").write_text(
+                "preserve\n", encoding="utf-8"
+            )
+            _finish_reclamation(reclamation)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._finish_reclamation", inject_before_cleanup)
+        with pytest.raises(OSError, match="changed Hermes reclamation entry"):
+            atomic_swap_generation(target, second)
+
+        reclamation = next(tmp_path.glob("*.retired.*.reclaim"))
+        assert reclamation.joinpath("operator-concurrent.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
+
+    def test_interrupted_reclamation_resumes_from_manifest(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        real_unlink = Path.unlink
+        interrupted = False
+
+        def interrupt_after_one_delete(path: Path, *args, **kwargs):
+            nonlocal interrupted
+            result = real_unlink(path, *args, **kwargs)
+            if ".reclaim" in str(path.parent) and path.name == "generation.txt" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr(Path, "unlink", interrupt_after_one_delete)
+        with pytest.raises(KeyboardInterrupt):
+            atomic_swap_generation(target, second)
+
+        assert tuple(tmp_path.glob("*.retired.*.reclaim"))
+        assert tuple(tmp_path.glob("*.reclaim.manifest.json"))
+        monkeypatch.setattr(Path, "unlink", real_unlink)
+        atomic_swap_generation(target, second)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
+        assert not tuple(tmp_path.glob("*.reclaim"))
+        assert not tuple(tmp_path.glob("*.reclaim.manifest.json"))
+
     def test_live_mutation_after_staging_copy_aborts_publication(
         self, tmp_path: Path, monkeypatch
     ) -> None:
