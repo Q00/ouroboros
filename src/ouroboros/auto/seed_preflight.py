@@ -388,7 +388,7 @@ def _shell_command_payload(segment: list[str]) -> tuple[str, str] | None:
             return (segment[index + 1], dialect) if index + 1 < len(segment) else None
         if token.startswith("--command="):
             return token.partition("=")[2], dialect
-        if token in {"-o", "-O"}:
+        if token in {"-o", "-O", "--init-file", "--rcfile"}:
             index += 2
             continue
         if token.startswith("-") and not token.startswith("--"):

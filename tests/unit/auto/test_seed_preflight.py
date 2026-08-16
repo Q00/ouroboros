@@ -254,13 +254,37 @@ def test_missing_wrapped_verification_program_blocks(
         ("sh -eu -c 'python missing.py'", "verify_program_missing", "missing.py"),
         ("bash -euc 'test -n \"$MISSING\"'", "unbound_env_var", "$MISSING"),
         ("sh -euc 'python missing.py'", "verify_program_missing", "missing.py"),
+        (
+            "bash --rcfile /dev/null -c 'set -u; test -n \"$MISSING\"'",
+            "unbound_env_var",
+            "$MISSING",
+        ),
+        (
+            "bash --rcfile /dev/null -c 'python missing.py'",
+            "verify_program_missing",
+            "missing.py",
+        ),
+        (
+            "bash --init-file /dev/null -c 'set -u; test -n \"$MISSING\"'",
+            "unbound_env_var",
+            "$MISSING",
+        ),
+        (
+            "bash --init-file /dev/null -c 'python missing.py'",
+            "verify_program_missing",
+            "missing.py",
+        ),
     ),
 )
 def test_option_bearing_nested_shell_matches_bin_sh_failure(
-    tmp_path: Path, command: str, expected_code: str, expected_subject: str
+    tmp_path: Path,
+    monkeypatch,
+    command: str,
+    expected_code: str,
+    expected_subject: str,
 ) -> None:
+    monkeypatch.delenv("MISSING", raising=False)
     environment = os.environ.copy()
-    environment.pop("MISSING", None)
 
     report = run_seed_preflight(
         _seed(
