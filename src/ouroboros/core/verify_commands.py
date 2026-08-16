@@ -9,7 +9,6 @@ It is shared by SeedGenerator and persisted Seed validation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 
 
 def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
@@ -380,12 +379,13 @@ _STATUS_MASKING_REASON = (
     "the criterion is met"
 )
 
-# An always-succeeding word: the final status of the operator chain then comes
-# from the fallback, not the tested command.
-_ALWAYS_SUCCEEDS_WORD_RE = re.compile(r"(?:true|:|exit\s+0)(?=$|[\s;|&)}#])")
-# ``;``, single ``&``, and single ``|`` fallbacks only decide the verdict when
-# they end the command; an optional trailing comment is allowed.
-_MASKING_FALLBACK_TAIL_RE = re.compile(r"(?:\|\||;|&|\|)\s*(?:true|:|exit\s+0)\s*(?:#.*)?$")
+
+@dataclass(frozen=True)
+class _ShellToken:
+    """One outer-shell lexical token with its executable syntax role."""
+
+    kind: str
+    value: str
 
 
 def _contains_status_masking_fallback(command: str) -> bool:
@@ -400,100 +400,207 @@ def _contains_status_masking_fallback(command: str) -> bool:
     expansions are data. ``&&`` preserves a left-side failure and stays valid,
     and single-``|`` case-pattern alternatives mid-command are unaffected.
     """
-    body = command.strip()
-    tail = _MASKING_FALLBACK_TAIL_RE.search(body)
-    if tail is not None and _operator_position_is_unquoted(body, tail.start()):
-        return True
-    return _contains_unquoted_double_pipe_fallback(body)
+    tokens = _lex_posix_shell_tokens(command)
+    for index, token in enumerate(tokens):
+        if token.kind != "operator" or token.value not in {"||", ";", "&", "|"}:
+            continue
+        fallback_start = index + 1
+        command_index = _first_command_word_after(tokens, fallback_start)
+        assignment_only = _is_assignment_only_command(tokens, fallback_start)
+        always_succeeds = (
+            assignment_only
+            if command_index is None
+            else _is_always_successful_command(tokens, command_index)
+        )
+        if not always_succeeds:
+            continue
+        if token.value == "||" or _command_is_terminal(tokens, command_index or fallback_start):
+            return True
+    return False
 
 
-def _operator_position_is_unquoted(body: str, start: int) -> bool:
-    """Return whether ``body[:start]`` leaves the reader outside any quote."""
+def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
+    """Return outer-shell words and operators after quote removal and escaping.
+
+    This is deliberately a lexical classifier rather than a shell parser. The
+    status rule needs to distinguish executable operator tokens from quoted or
+    escaped lookalikes, while treating substitutions as dynamic word content.
+    """
+    tokens: list[_ShellToken] = []
+    word: list[str] = []
     quote: str | None = None
-    escaped = False
-    for char in body[:start]:
-        if escaped:
-            escaped = False
-            continue
-        if quote == "'":
-            if char == "'":
-                quote = None
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if quote == '"':
-            if char == '"':
-                quote = None
-            continue
-        if char in {"'", '"'}:
-            quote = char
-    return quote is None
-
-
-def _contains_unquoted_double_pipe_fallback(body: str) -> bool:
-    """Return whether an unquoted ``||`` is followed by an always-succeeding word."""
-    quote: str | None = None
-    escaped = False
     word_started = False
     index = 0
-    length = len(body)
-    while index < length:
-        char = body[index]
-        if escaped:
-            escaped = False
-            word_started = True
-            index += 1
-            continue
+
+    def flush_word() -> None:
+        nonlocal word_started
+        if word_started:
+            tokens.append(_ShellToken("word", "".join(word)))
+        word.clear()
+        word_started = False
+
+    while index < len(command):
+        char = command[index]
         if quote == "'":
             if char == "'":
                 quote = None
-            index += 1
-            continue
-        if char == "\\":
-            escaped = True
+            else:
+                word.append(char)
             index += 1
             continue
         if quote == '"':
             if char == '"':
                 quote = None
+                index += 1
+                continue
+            if char == "\\" and index + 1 < len(command):
+                escaped = command[index + 1]
+                if escaped in {"$", "`", '"', "\\", "\n"}:
+                    if escaped != "\n":
+                        word.append(escaped)
+                    index += 2
+                    continue
+            if char == "$" and index + 1 < len(command) and command[index + 1] in "({":
+                expansion_end = _posix_expansion_end(command, index)
+                if expansion_end is not None:
+                    word.append("\0")
+                    index = expansion_end
+                    continue
+            if char == "`":
+                expansion_end = _posix_backtick_substitution_end(command, index)
+                if expansion_end is not None:
+                    word.append("\0")
+                    index = expansion_end
+                    continue
+            word.append(char)
             index += 1
+            continue
+        if char == "\\":
+            word_started = True
+            if index + 1 < len(command):
+                word.append(command[index + 1])
+                index += 2
+            else:
+                word.append(char)
+                index += 1
             continue
         if char in {"'", '"'}:
             quote = char
             word_started = True
             index += 1
             continue
-        if char == "$" and index + 1 < length and body[index + 1] in "({":
-            expansion_end = _posix_expansion_end(body, index)
+        if char == "$" and index + 1 < len(command) and command[index + 1] in "({":
+            expansion_end = _posix_expansion_end(command, index)
             if expansion_end is not None:
-                index = expansion_end
+                word.append("\0")
                 word_started = True
+                index = expansion_end
                 continue
         if char == "`":
-            substitution_end = _posix_backtick_substitution_end(body, index)
-            if substitution_end is not None:
-                index = substitution_end
+            expansion_end = _posix_backtick_substitution_end(command, index)
+            if expansion_end is not None:
+                word.append("\0")
                 word_started = True
+                index = expansion_end
                 continue
         if char.isspace():
-            word_started = False
+            flush_word()
             index += 1
             continue
         if char == "#" and not word_started:
             break
-        if char == "|" and index + 1 < length and body[index + 1] == "|":
-            cursor = index + 2
-            while cursor < length and body[cursor].isspace():
-                cursor += 1
-            if _ALWAYS_SUCCEEDS_WORD_RE.match(body, cursor) is not None:
-                return True
-            index = cursor
-            word_started = False
+        if char in ";|&":
+            flush_word()
+            if char in "|&" and index + 1 < len(command) and command[index + 1] == char:
+                tokens.append(_ShellToken("operator", char * 2))
+                index += 2
+            else:
+                tokens.append(_ShellToken("operator", char))
+                index += 1
             continue
+        if char in "<>":
+            if word and "".join(word).isdigit():
+                word.clear()
+                word_started = False
+            else:
+                flush_word()
+            end = index + 1
+            if end < len(command) and command[end] in "<>&|-":
+                end += 1
+            tokens.append(_ShellToken("redirect", ""))
+            index = end
+            continue
+        if char in "(){}":
+            flush_word()
+            tokens.append(_ShellToken("group", char))
+            index += 1
+            continue
+        word.append(char)
         word_started = True
         index += 1
-    return False
+    flush_word()
+    return tokens
+
+
+def _first_command_word_after(tokens: list[_ShellToken], index: int) -> int | None:
+    """Return the next executable word, skipping redirections and assignments."""
+    while index < len(tokens):
+        token = tokens[index]
+        if token.kind in {"operator", "group"}:
+            return None
+        if token.kind == "redirect":
+            index += 2
+            continue
+        if _is_posix_assignment_word(token.value):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _is_posix_assignment_word(value: str) -> bool:
+    """Return whether a lexed word is a leading POSIX shell assignment."""
+    name, separator, _ = value.partition("=")
+    return bool(
+        separator
+        and name
+        and name.isascii()
+        and (name[0].isalpha() or name[0] == "_")
+        and all(character.isalnum() or character == "_" for character in name[1:])
+    )
+
+
+def _is_assignment_only_command(tokens: list[_ShellToken], index: int) -> bool:
+    """Return whether a simple command contains only assignments/redirections."""
+    found_assignment = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token.kind in {"operator", "group"}:
+            return False
+        if token.kind == "redirect":
+            index += 2
+            continue
+        if not _is_posix_assignment_word(token.value):
+            return False
+        found_assignment = True
+        index += 1
+    return found_assignment
+
+
+def _is_always_successful_command(tokens: list[_ShellToken], index: int) -> bool:
+    """Return whether the command beginning at ``index`` has a fixed success status."""
+    command = tokens[index].value
+    if command in {"true", ":"}:
+        return True
+    if command != "exit":
+        return False
+    status_index = _first_command_word_after(tokens, index + 1)
+    return status_index is not None and tokens[status_index].value == "0"
+
+
+def _command_is_terminal(tokens: list[_ShellToken], index: int) -> bool:
+    """Return whether no outer command-list operator follows this command."""
+    return all(token.kind != "operator" for token in tokens[index + 1 :])
 
 
 def _contains_posix_heredoc_operator(command: str) -> bool:

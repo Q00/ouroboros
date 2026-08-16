@@ -581,7 +581,20 @@ class TestSeed:
                 verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1),
             )
 
-    def test_success_contract_rejects_status_masking_at_persisted_schema_ingress(self) -> None:
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            'python -c "import sys; sys.exit(1)" 2>&1 || true',
+            'python -c "import sys; sys.exit(1)" || tr"ue"',
+            'python -c "import sys; sys.exit(1)" || true >/dev/null',
+            'python -c "import sys; sys.exit(1)" || VERIFY_MODE=ci true',
+            'python -c "import sys; sys.exit(1)" || VERIFY_MODE=ci',
+        ),
+    )
+    def test_success_contract_rejects_status_masking_at_persisted_schema_ingress(
+        self,
+        verify_command: str,
+    ) -> None:
         seed = Seed(
             goal="Preserve a saved widget",
             acceptance_criteria=(AcceptanceCriterionSpec(description="Widget state persists"),),
@@ -592,7 +605,7 @@ class TestSeed:
         persisted["acceptance_criteria"] = [
             {
                 "description": "Widget state persists",
-                "verify_command": 'python -c "import sys; sys.exit(1)" 2>&1 || true',
+                "verify_command": verify_command,
             }
         ]
 

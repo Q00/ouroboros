@@ -2541,6 +2541,8 @@ class TestSeedGeneratorExtraction:
             "pytest tests/test_app.py -q; true",
             "pytest tests/test_app.py -q | true",
             "python -c \"print('ok')\" || exit 0",
+            "pytest tests/test_app.py -q || VERIFY_MODE=ci true",
+            "pytest tests/test_app.py -q || VERIFY_MODE=ci",
         ),
     )
     async def test_generate_rejects_status_masking_on_initial_and_retry_extraction(
@@ -2919,6 +2921,16 @@ class TestSeedGeneratorRobustParsing:
             "pytest -q || exit 0",
             "pytest -q; true",
             "pytest -q | true",
+            # Shell quote removal and escaping construct the executable word,
+            # so raw-text matching would let these fallbacks mask the failure.
+            'pytest -q || tr"ue"',
+            r"pytest -q || tr\ue",
+            "pytest -q || t'r'ue",
+            "pytest -q || true >/dev/null",
+            "pytest -q || exit 0 2>/dev/null",
+            "pytest -q || VERIFY_MODE=ci true",
+            "pytest -q || VERIFY_MODE=ci",
+            "pytest -q; true 2>/dev/null",
         ),
     )
     def test_unsupported_verify_command_reason_rejects_status_masking_chains(
@@ -2944,6 +2956,12 @@ class TestSeedGeneratorRobustParsing:
             "pytest -q | tail -5",
             "pytest -q & wait",
             "true;# user's note",
+            # These look like a fallback in raw text, but their operators are
+            # arguments or comment text and do not alter the command status.
+            "false # do not append || true",
+            r"false \|\| true",
+            r"false \; true",
+            r"false \| true",
         ),
     )
     def test_unsupported_verify_command_reason_allows_status_preserving_forms(
