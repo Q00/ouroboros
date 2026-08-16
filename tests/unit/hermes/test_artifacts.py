@@ -733,7 +733,7 @@ class TestInstallHermesSkills:
         def interrupt_after_one_delete(path: Path, *args, **kwargs):
             nonlocal interrupted
             result = real_unlink(path, *args, **kwargs)
-            if ".reclaim" in str(path.parent) and path.name == "generation.txt" and not interrupted:
+            if ".reclaim.entry." in path.name and not interrupted:
                 interrupted = True
                 raise KeyboardInterrupt
             return result
@@ -750,6 +750,48 @@ class TestInstallHermesSkills:
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
         assert not tuple(tmp_path.glob("*.reclaim"))
         assert not tuple(tmp_path.glob("*.reclaim.manifest.json"))
+
+    def test_reclamation_preserves_replacement_at_final_delete_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("victim.txt").write_text("owned\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        real_replace = os.replace
+        injected = False
+
+        def replace_at_detach_boundary(src, dst):
+            nonlocal injected
+            source = Path(src)
+            destination = Path(dst)
+            if (
+                source.name == "victim.txt"
+                and ".reclaim" in source.parent.name
+                and ".reclaim.entry." in destination.name
+                and not injected
+            ):
+                injected = True
+                replacement = tmp_path / "operator-replacement"
+                replacement.write_text("preserve\n", encoding="utf-8")
+                real_replace(replacement, source)
+            return real_replace(source, destination)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", replace_at_detach_boundary)
+        with pytest.raises(OSError, match="changed Hermes reclamation entry"):
+            atomic_swap_generation(target, second)
+
+        reclamation = next(tmp_path.glob("*.retired.*.reclaim"))
+        assert reclamation.joinpath("victim.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
 
     def test_live_mutation_after_staging_copy_aborts_publication(
         self, tmp_path: Path, monkeypatch

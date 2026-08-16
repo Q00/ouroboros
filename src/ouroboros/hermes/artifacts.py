@@ -148,20 +148,20 @@ def _reclamation_manifest_path(reclamation: Path) -> Path:
     return reclamation.with_name(reclamation.name + ".manifest.json")
 
 
-def _reclamation_entry(path: Path) -> tuple[str, int, str | None]:
+def _reclamation_entry(path: Path) -> tuple[str, int, int, int, str | None]:
     info = path.lstat()
     mode = info.st_mode
     if path.is_symlink():
-        return "link", mode, os.readlink(path)
+        return "link", mode, info.st_dev, info.st_ino, os.readlink(path)
     if path.is_file():
-        return "file", mode, hashlib.sha256(path.read_bytes()).hexdigest()
+        return "file", mode, info.st_dev, info.st_ino, hashlib.sha256(path.read_bytes()).hexdigest()
     if path.is_dir():
-        return "dir", mode, None
+        return "dir", mode, info.st_dev, info.st_ino, None
     raise OSError(f"Refusing unsupported Hermes reclamation entry: {path}")
 
 
-def _reclamation_entries(root: Path) -> dict[str, tuple[str, int, str | None]]:
-    entries: dict[str, tuple[str, int, str | None]] = {".": _reclamation_entry(root)}
+def _reclamation_entries(root: Path) -> dict[str, tuple[str, int, int, int, str | None]]:
+    entries: dict[str, tuple[str, int, int, int, str | None]] = {".": _reclamation_entry(root)}
 
     def visit(directory: Path) -> None:
         for child in sorted(directory.iterdir(), key=lambda item: item.name):
@@ -186,7 +186,7 @@ def _publish_reclamation_manifest(
 ) -> Path:
     manifest = _reclamation_manifest_path(reclamation)
     payload = {
-        "version": 1,
+        "version": 2,
         "backup": backup.name,
         "operation": operation,
         "token": token,
@@ -203,18 +203,18 @@ def _publish_reclamation_manifest(
 
 def _read_reclamation_manifest(
     reclamation: Path,
-) -> tuple[dict[str, object], dict[str, tuple[str, int, str | None]]]:
+) -> tuple[dict[str, object], dict[str, tuple[str, int, int, int, str | None]]]:
     manifest = _reclamation_manifest_path(reclamation)
     try:
         payload = json.loads(_read_swap_record(manifest))
     except (json.JSONDecodeError, TypeError) as exc:
         raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}") from exc
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") != 2:
         raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, dict):
         raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
-    entries: dict[str, tuple[str, int, str | None]] = {}
+    entries: dict[str, tuple[str, int, int, int, str | None]] = {}
     for relative, raw_entry in raw_entries.items():
         relative_path = PurePosixPath(relative) if isinstance(relative, str) else None
         if (
@@ -225,15 +225,55 @@ def _read_reclamation_manifest(
             or relative != "."
             and relative_path.as_posix() != relative
             or not isinstance(raw_entry, list)
-            or len(raw_entry) != 3
+            or len(raw_entry) != 5
             or raw_entry[0] not in {"dir", "file", "link"}
             or not isinstance(raw_entry[1], int)
-            or raw_entry[2] is not None
-            and not isinstance(raw_entry[2], str)
+            or not isinstance(raw_entry[2], int)
+            or not isinstance(raw_entry[3], int)
+            or raw_entry[4] is not None
+            and not isinstance(raw_entry[4], str)
         ):
             raise OSError(f"Refusing malformed Hermes reclamation manifest: {manifest}")
-        entries[relative] = (raw_entry[0], raw_entry[1], raw_entry[2])
+        entries[relative] = (
+            raw_entry[0],
+            raw_entry[1],
+            raw_entry[2],
+            raw_entry[3],
+            raw_entry[4],
+        )
     return payload, entries
+
+
+def _detached_reclamation_entry(reclamation: Path, relative: str) -> Path:
+    token = hashlib.sha256(relative.encode()).hexdigest()
+    return reclamation.with_name(f"{reclamation.name}.entry.{token}")
+
+
+def _remove_reclamation_entry(
+    reclamation: Path,
+    relative: str,
+    expected: tuple[str, int, int, int, str | None],
+) -> None:
+    """Atomically detach one entry before validating and deleting that object."""
+    path = reclamation / relative
+    detached = _detached_reclamation_entry(reclamation, relative)
+    if detached.exists() or detached.is_symlink():
+        if path.exists() or path.is_symlink():
+            raise OSError(f"Refusing ambiguous Hermes reclamation entry: {path}")
+    else:
+        try:
+            os.replace(path, detached)
+        except FileNotFoundError:
+            return
+    entry = _reclamation_entry(detached)
+    if entry != expected:
+        if not path.exists() and not path.is_symlink():
+            os.replace(detached, path)
+        raise OSError(f"Refusing changed Hermes reclamation entry: {path}")
+    if entry[0] == "dir":
+        detached.rmdir()
+    else:
+        detached.unlink()
 
 
 def _finish_reclamation(reclamation: Path) -> None:
@@ -250,17 +290,9 @@ def _finish_reclamation(reclamation: Path) -> None:
         reverse=True,
     )
     for relative in (*ordered, marker_relative):
-        path = reclamation / relative
-        try:
-            entry = _reclamation_entry(path)
-        except FileNotFoundError:
-            continue
-        if expected.get(relative) != entry:
-            raise OSError(f"Refusing changed Hermes reclamation entry: {path}")
-        if entry[0] == "dir":
-            path.rmdir()
-        else:
-            path.unlink()
+        entry = expected.get(relative)
+        if entry is not None:
+            _remove_reclamation_entry(reclamation, relative, entry)
     reclamation.rmdir()
     _reclamation_manifest_path(reclamation).unlink(missing_ok=True)
 
