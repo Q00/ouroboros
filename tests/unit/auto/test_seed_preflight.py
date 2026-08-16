@@ -335,6 +335,55 @@ def test_inline_runner_source_is_not_classified_as_a_missing_program(
 @pytest.mark.parametrize(
     "command",
     (
+        "bash -c 'source missing.sh'",
+        "perl missing.pl",
+        "php missing.php",
+        "lua missing.lua",
+    ),
+)
+def test_missing_source_and_interpreter_programs_block_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Interpreter verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("command", "program", "content"),
+    (
+        ("bash -c 'source check.sh'", "check.sh", "exit 0\n"),
+        ("perl check.pl", "check.pl", "exit 0;\n"),
+    ),
+)
+def test_existing_source_and_interpreter_programs_pass_with_shell_parity(
+    tmp_path: Path, command: str, program: str, content: str
+) -> None:
+    (tmp_path / program).write_text(content, encoding="utf-8")
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Interpreter verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "python -c 'print(\"$LITERAL\")'",
         r"printf '%s' \$LITERAL",
     ),

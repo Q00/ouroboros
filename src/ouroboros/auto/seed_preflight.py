@@ -1106,12 +1106,27 @@ def _command_program_tokens(command: str) -> frozenset[str]:
     after ``python``/``bash``/``node`` or an explicit ``./program`` is a
     decidable fabrication; ordinary command arguments remain advisory.
     """
-    runners = frozenset({"bash", "sh", "node", "ruby"})
+    runners = frozenset(
+        {
+            "bash",
+            "lua",
+            "luajit",
+            "node",
+            "perl",
+            "php",
+            "ruby",
+            "sh",
+        }
+    )
     option_operands = {
         "bash": frozenset({"-O", "-o"}),
         "sh": frozenset({"-o"}),
         "node": frozenset({"-r", "--require", "--loader", "--import"}),
         "ruby": frozenset({"-I", "-r", "--require", "-C", "-E"}),
+        "perl": frozenset({"-I", "-M", "-m", "-F", "-i"}),
+        "php": frozenset({"-c", "-d"}),
+        "lua": frozenset({"-l"}),
+        "luajit": frozenset({"-l", "-j", "-O"}),
     }
 
     def is_runner(token: str) -> bool:
@@ -1230,7 +1245,7 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if not segment:
                 continue
             executable = Path(segment[0]).name
-            if segment[0] == "." and len(segment) >= 2:
+            if (segment[0] == "." or Path(segment[0]).name == "source") and len(segment) >= 2:
                 programs.add(_normalize_workspace_path(segment[1]))
                 continue
             shell_payload = _shell_command_payload(segment)
@@ -1248,7 +1263,12 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             cursor = 1
             while cursor < len(segment) and segment[cursor].startswith("-"):
                 option = segment[cursor]
-                if (runner in {"node", "ruby"} and option in {"-e", "--eval", "-p", "--print"}) or (
+                if (
+                    runner in {"node", "ruby", "perl", "lua", "luajit"}
+                    and option in {"-e", "-E", "--eval", "-p", "--print"}
+                    or runner == "php"
+                    and option in {"-r", "--run"}
+                ) or (
                     re.fullmatch(r"(?:python(?:\d+(?:\.\d+)*)?t?|pypy\d*)", runner)
                     and option in {"-c", "--command"}
                 ):
