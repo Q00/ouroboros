@@ -47,6 +47,7 @@ _ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
 _FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
 _OPTIONAL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=+]")
+_ASSIGNING_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?=")
 _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
@@ -174,6 +175,7 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
 
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
     persistent_bindings: list[tuple[int, str]] = []
+    persistent_unbindings: list[tuple[int, str]] = []
     subshell_separators = {"&", "|"}
     for start, end, separator_before, separator_after in segments:
         words = shell_words(command[start:end].strip())
@@ -199,9 +201,14 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             persistent_bindings.extend(
                 (end, word.partition("=")[0]) for word in words[1:] if assignment.fullmatch(word)
             )
+        elif Path(words[0]).name == "unset" and persists:
+            persistent_unbindings.extend(
+                (end, word) for word in words[1:] if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word)
+            )
 
     events: list[tuple[int, str, str]] = []
     events.extend((position, "bind", name) for position, name in persistent_bindings)
+    events.extend((position, "unbind", name) for position, name in persistent_unbindings)
     for match in _FOR_VAR_RE.finditer(command):
         if unquoted[match.start()]:
             events.append((match.start(), "bind", match.group(1)))
@@ -209,6 +216,9 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
         if not expandable[match.start()]:
             continue
         if _OPTIONAL_VAR_RE.match(command, match.start()) is not None:
+            assigning = _ASSIGNING_VAR_RE.match(command, match.start())
+            if assigning is not None:
+                events.append((assigning.end(), "bind", match.group(1)))
             continue
         events.append((match.start(), "expand", match.group(1)))
     return tuple(sorted(events))
@@ -239,7 +249,7 @@ def _is_subprocess_separator(separator: str | None) -> bool:
 
 def _nested_shell_scopes(
     command: str,
-    inherited: frozenset[str] = frozenset(),
+    inherited: frozenset[str] = _HOST_BOUND_ENV_VARS,
     *,
     _nested_payload: bool = False,
 ) -> tuple[tuple[str, frozenset[str]], ...]:
@@ -603,7 +613,7 @@ def _check_verify_commands(
         program_tokens = _command_program_tokens(command)
         nested_shell_scopes = _nested_shell_scopes(scannable)
         outer_shell_command = _outer_shell_scope(scannable)
-        shell_scopes = ((outer_shell_command, frozenset()), *nested_shell_scopes)
+        shell_scopes = ((outer_shell_command, _HOST_BOUND_ENV_VARS), *nested_shell_scopes)
         for scope_index, (shell_command, inherited_bindings) in enumerate(shell_scopes):
             if scope_index == 0:
                 # A variable in a double-quoted ``sh -c`` payload is expanded
@@ -616,11 +626,10 @@ def _check_verify_commands(
                 if event == "bind":
                     command_bound.add(variable)
                     continue
-                if (
-                    variable in _HOST_BOUND_ENV_VARS
-                    or variable in command_bound
-                    or variable in seen_vars
-                ):
+                if event == "unbind":
+                    command_bound.discard(variable)
+                    continue
+                if variable in command_bound or variable in seen_vars:
                     continue
                 seen_vars.add(variable)
                 findings.append(

@@ -10,7 +10,9 @@ class and phrases every finding as an open question, never a rewrite.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -433,6 +435,17 @@ def test_nested_shell_requires_concrete_value_for_bare_export(
     )
 
     assert report.passed is passed
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    environment.pop("HOME", None)
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+    assert (runtime.returncode == 0) is passed
     assert [finding.subject for finding in report.blocking_findings] == ([] if passed else ["$FOO"])
 
 
@@ -489,6 +502,31 @@ def test_optional_parameter_expansion_does_not_require_binding(
     )
 
     assert report.passed
+
+
+@pytest.mark.parametrize(
+    ("command", "passed"),
+    (
+        ('FOO=bar; unset FOO; test -n "$FOO"', False),
+        ('printf %s "${FOO:=default}"; test "$FOO" = default', True),
+        ('printf %s "${FOO=default}"; test "$FOO" = default', True),
+        ("env -u HOME sh -c 'test -n \"$HOME\"'", False),
+        ("env -u HOME sh -c 'HOME=/tmp; test -n \"$HOME\"'", True),
+    ),
+)
+def test_ordered_shell_bind_and_unbind_effects_match_runtime(
+    tmp_path: Path, command: str, passed: bool
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Ordered shell state", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed is passed
 
 
 @pytest.mark.parametrize(
