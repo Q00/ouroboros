@@ -742,7 +742,6 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
     if backend == "claude" and not candidates:
         return _health_row("Runtime backend", "ok", "claude: SDK default")
 
-    readiness_error: str | None = None
     for candidate in candidates:
         if not candidate:
             continue
@@ -758,8 +757,7 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
                     try:
                         resolve_zcode_command_prefix(expanded)
                     except RuntimeError as exc:
-                        readiness_error = str(exc)
-                        continue
+                        return _health_row("Runtime backend", "error", str(exc))
                 return _runtime_backend_health_row(backend, f"{backend}: {expanded}")
             continue
         resolved = shutil.which(candidate)
@@ -768,13 +766,10 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
                 try:
                     resolve_zcode_command_prefix(resolved)
                 except RuntimeError as exc:
-                    readiness_error = str(exc)
-                    continue
+                    return _health_row("Runtime backend", "error", str(exc))
             return _runtime_backend_health_row(backend, f"{backend}: {resolved}")
 
     expected = candidates[0] if candidates else (capability.cli_name if capability else backend)
-    if readiness_error is not None:
-        return _health_row("Runtime backend", "error", readiness_error)
     return _health_row("Runtime backend", "error", f"{backend} CLI not found: {expected}")
 
 

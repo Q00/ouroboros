@@ -151,3 +151,28 @@ def test_zcode_health_rejects_standalone_script_without_node(monkeypatch, tmp_pa
 
     assert row["status"] == "error"
     assert "requires Node on PATH" in row["detail"]
+
+
+def test_zcode_health_does_not_fallback_after_selected_override_is_unready(monkeypatch, tmp_path):
+    override = tmp_path / "override-zcode.cjs"
+    override.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    configured = tmp_path / "configured-zcode"
+    configured.write_text("#!/bin/sh\n", encoding="utf-8")
+    configured.chmod(0o755)
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(override))
+    monkeypatch.setattr("ouroboros.zcode_cli_launcher.shutil.which", lambda _name: None)
+
+    row = status_module._check_runtime_backend(
+        {
+            "orchestrator": {
+                "runtime_backend": "zcode",
+                "zcode_cli_path": str(configured),
+            },
+            "llm": {"backend": "zcode"},
+        }
+    )
+
+    assert row["status"] == "error"
+    assert "requires Node on PATH" in row["detail"]
+    assert str(override) in row["detail"]
+    assert str(configured) not in row["detail"]
