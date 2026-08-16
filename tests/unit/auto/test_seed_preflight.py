@@ -797,6 +797,7 @@ def test_optional_parameter_expansion_does_not_require_binding(
         ("env --ignore-environment sh -c 'test -n \"$HOME\"'", False),
         ("unset HOME; sh -c 'test -n \"$HOME\"'", False),
         ("unset HOME; export HOME=/tmp; sh -c 'test -n \"$HOME\"'", True),
+        ('unset -f HOME; set -u; test -n "$HOME"', True),
     ),
 )
 def test_ordered_shell_bind_and_unbind_effects_match_runtime(
@@ -1517,6 +1518,37 @@ def test_later_directory_change_cannot_hide_missing_earlier_verifier(
     assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
+@pytest.mark.parametrize(("program_location", "passed"), (("home", True), ("workspace", False)))
+def test_bare_cd_resolves_programs_from_home_like_bin_sh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program_location: str,
+    passed: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    home.mkdir()
+    (home if program_location == "home" else workspace).joinpath("check.py").write_text(
+        "print('ok')\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    command = "cd && python check.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Bare cd", verify_command=command),
+            )
+        ),
+        workspace_root=workspace,
+    )
+
+    assert report.passed is passed
+    runtime = subprocess.run(["sh", "-c", command], cwd=workspace, check=False)
+    assert (runtime.returncode == 0) is passed
+
+
 @pytest.mark.parametrize("builtin", ("declare", "local", "typeset"))
 def test_bash_assignment_builtins_do_not_bind_in_outer_posix_shell(
     tmp_path: Path, builtin: str
@@ -1556,6 +1588,24 @@ def test_bash_assignment_builtins_bind_inside_explicit_bash_payload(
 
     assert report.passed
     assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize("operation", ("export -n HOME", "declare +x HOME"))
+def test_bash_deexport_is_removed_from_nested_shell_scope(tmp_path: Path, operation: str) -> None:
+    payload = f"{operation}; sh -c 'set -u; test -n \"$HOME\"'"
+    command = shlex.join(("bash", "-c", payload))
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Bash de-export", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.subject for finding in report.blocking_findings] == ["$HOME"]
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
 def test_env_chdir_is_local_to_its_wrapped_command(tmp_path: Path) -> None:

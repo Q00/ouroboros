@@ -267,11 +267,17 @@ def _shell_variable_events(
                     # Unknown option/operand grammar is not authoritative.
                     break
         elif command_name == "unset" and persists:
-            persistent_unbindings.extend(
-                (end, word)
-                for word in words[command_index + 1 :]
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word)
-            )
+            unset_variables = True
+            for word in words[command_index + 1 :]:
+                if word in {"--", "-v"}:
+                    continue
+                if word == "-f":
+                    unset_variables = False
+                    continue
+                if word.startswith("-"):
+                    break
+                if unset_variables and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word):
+                    persistent_unbindings.append((end, word))
 
     events: list[tuple[int, str, str]] = []
     events.extend((position, "bind", name) for position, name in persistent_bindings)
@@ -460,6 +466,7 @@ def _nested_shell_scopes(
     inherited: frozenset[str] | None = None,
     *,
     _nested_payload: bool = False,
+    _shell_dialect: str = "sh",
 ) -> tuple[tuple[str, frozenset[str], str], ...]:
     """Return nested ``sh -c`` payloads with launcher-exported bindings."""
     if inherited is None:
@@ -572,13 +579,43 @@ def _nested_shell_scopes(
         if persists and segment and all(assignment.fullmatch(token) for token in segment):
             sequential_values.update(token.partition("=")[0] for token in segment)
         if persists and segment and Path(segment[0]).name == "export":
+            export_names = True
             for token in segment[1:]:
+                if _shell_dialect == "bash" and token in {"-n", "--no-export"}:
+                    export_names = False
+                    continue
+                if token == "--":
+                    continue
                 if assignment.fullmatch(token):
                     name = token.partition("=")[0]
                     sequential_values.add(name)
-                    sequential_export_names.add(name)
+                    if export_names:
+                        sequential_export_names.add(name)
+                    else:
+                        sequential_export_names.discard(name)
                 elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
-                    sequential_export_names.add(token)
+                    if export_names:
+                        sequential_export_names.add(token)
+                    else:
+                        sequential_export_names.discard(token)
+        if (
+            persists
+            and _shell_dialect == "bash"
+            and segment
+            and Path(segment[0]).name in {"declare", "typeset"}
+            and "+x" in segment[1:]
+        ):
+            for token in segment[segment.index("+x") + 1 :]:
+                if assignment.fullmatch(token):
+                    name = token.partition("=")[0]
+                    sequential_values.add(name)
+                    sequential_export_names.discard(name)
+                elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
+                    sequential_export_names.discard(token)
+                elif token.startswith("-") or token.startswith("+"):
+                    continue
+                else:
+                    break
         if persists and segment and Path(segment[0]).name == "unset":
             unset_variables = True
             for token in segment[1:]:
@@ -600,7 +637,14 @@ def _nested_shell_scopes(
             payload, dialect = shell_payload
             scope = frozenset(launcher_bound | _SHELL_INITIALIZED_ENV_VARS)
             nested.append((payload, scope, dialect))
-            nested.extend(_nested_shell_scopes(payload, scope, _nested_payload=True))
+            nested.extend(
+                _nested_shell_scopes(
+                    payload,
+                    scope,
+                    _nested_payload=True,
+                    _shell_dialect=dialect,
+                )
+            )
     return tuple(nested)
 
 
@@ -836,7 +880,9 @@ _CD_COMMAND_PREFIX = (
     r"(?:command(?:\s+(?:-p|--))*\s+)?"
 )
 _DETERMINISTIC_CWD_RE = re.compile(
-    rf"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{{\s*){_CD_COMMAND_PREFIX}cd\s+"
+    rf"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{{\s*){_CD_COMMAND_PREFIX}"
+    rf"cd(?P<cd_home>\s*)(?=(?:&&|\|\||[;&|\n]|$))"
+    rf"|(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{{\s*){_CD_COMMAND_PREFIX}cd\s+"
     rf"(?:(?:-L|-P|--)\s+)*(?P<cd>{_STATIC_SHELL_WORD})"
     rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)=(?P<env_eq>{_STATIC_SHELL_WORD})"
     rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>{_STATIC_SHELL_WORD})"
@@ -891,11 +937,14 @@ def _effective_program_root(
     ]
     for match in preceding:
         raw_directory = match.group("cd")
-        if raw_directory is None:
+        if match.group("cd_home") is not None:
+            directory = str(Path.home())
+        elif raw_directory is None:
             continue
-        directory = _decode_static_shell_word(raw_directory)
-        if directory is None:
-            return None
+        else:
+            directory = _decode_static_shell_word(raw_directory)
+            if directory is None:
+                return None
         # A plain/conditional ``cd`` does not establish the verifier's cwd:
         # it may fail or be skipped while a later command after ``;`` still
         # runs.  It is authoritative only while the verifier remains guarded
