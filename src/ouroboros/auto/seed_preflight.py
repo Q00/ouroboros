@@ -863,7 +863,6 @@ def _check_verify_commands(
         if not command:
             continue
         scannable = _URL_RE.sub(" ", command)
-        program_tokens = _command_program_tokens(command)
         host_bound = _host_bound_env_vars()
         nested_shell_scopes = _nested_shell_scopes(scannable, host_bound)
         outer_shell_command = _outer_shell_scope(scannable)
@@ -909,7 +908,18 @@ def _check_verify_commands(
         for token_match in _FILE_TOKEN_RE.finditer(scannable):
             token = token_match.group(0)
             normalized = _normalize_workspace_path(token)
-            is_program = normalized in program_tokens
+            segment_start = (
+                max(
+                    scannable.rfind(separator, 0, token_match.start())
+                    for separator in (";", "\n", "&", "|")
+                )
+                + 1
+            )
+            occurrence_command = scannable[segment_start : token_match.end()]
+            for quote in ("'", '"'):
+                if occurrence_command.count(quote) % 2:
+                    occurrence_command += quote
+            is_program = normalized in _command_program_tokens(occurrence_command)
             if not is_program and (normalized in artifacts or normalized in claimed_files):
                 continue
             if not is_program and normalized in seen_tokens:
@@ -1067,12 +1077,16 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             else:
                 segments[-1].append(part)
         for segment in segments:
+            while segment and segment[0] in {"{", "(", "then", "do"}:
+                segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
             segment = unwrap_command(segment)
             if segment and "/" in segment[0] and not is_runner(segment[0]):
                 programs.add(_normalize_workspace_path(segment[0]))
         for segment in segments:
+            while segment and segment[0] in {"{", "(", "then", "do"}:
+                segment = segment[1:]
             while segment and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0]):
                 segment = segment[1:]
             segment = unwrap_command(segment)

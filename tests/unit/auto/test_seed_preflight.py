@@ -911,6 +911,42 @@ def test_failed_or_skipped_cd_is_inconclusive_for_later_verifier(
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
+def test_program_classification_is_scoped_to_each_token_occurrence(tmp_path: Path) -> None:
+    command = "cd sub; printf check.py; cd ..; python check.py"
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Repeated filename", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("{ python missing.py; }", "if true; then python missing.py; fi", "( python missing.py )"),
+)
+def test_missing_program_in_compound_command_is_blocked(tmp_path: Path, command: str) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Compound verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
 @pytest.mark.parametrize(
     "command",
     ("python3 check.py && cd sub", "python3 check.py && env -C sub true"),
