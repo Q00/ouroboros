@@ -695,8 +695,15 @@ def _path_exists(path_text: str, workspace_root: Path | None) -> bool | None:
 
 
 _DETERMINISTIC_CWD_RE = re.compile(
-    r"(?:^|(?:&&|\|\||[;\n])\s*)cd\s+(?P<cd>[^\s;&|]+)"
+    r"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{\s*)cd\s+"
+    r"(?:(?:-L|-P|--)\s+)*(?P<cd>[^\s;&|]+)"
+    r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)=(?P<env_eq>[^\s;&|]+)"
     r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>[^\s;&|]+)"
+)
+_NESTED_SHELL_PAYLOAD_RE = re.compile(
+    r"\b(?:sh|bash)\s+(?:--command|-c)\s+(?P<quote>['\"])(?P<payload>.*?)"
+    r"(?P=quote)",
+    re.DOTALL,
 )
 
 
@@ -718,6 +725,18 @@ def _program_path_exists(
     candidate = Path(path_text).expanduser()
     if workspace_root is None or candidate.is_absolute():
         return _path_exists(path_text, workspace_root)
+    for nested in _NESTED_SHELL_PAYLOAD_RE.finditer(command):
+        payload_start, payload_end = nested.span("payload")
+        if payload_start <= token_position < payload_end:
+            payload = nested.group("payload")
+            return _program_path_exists(
+                path_text,
+                payload,
+                workspace_root,
+                token_position=token_position - payload_start,
+                artifacts=artifacts,
+                claimed_files=claimed_files,
+            )
     effective_root = workspace_root
     preceding = [
         match for match in _DETERMINISTIC_CWD_RE.finditer(command) if match.start() < token_position
@@ -732,10 +751,16 @@ def _program_path_exists(
         # by the same successful ``&&`` chain.
         matched_prefix = match.group(0).lstrip()
         suffix = command[match.end() : token_position]
-        if matched_prefix.startswith(("&&", "||")) or re.search(
+        if matched_prefix.startswith("||") or re.search(
             r"(?:\|\||(?<!&)&(?!&)|(?<!\|)\|(?!\|))", suffix
         ):
             return None
+        if matched_prefix.startswith("&&") and re.search(r"[;\n]", suffix):
+            return None
+        if matched_prefix.startswith("then"):
+            condition = command[: match.start()]
+            if re.search(r"\bif\s+(?:true|:)(?:\s*;)?\s*$", condition) is None:
+                return None
         if any(character in directory for character in "'$\""):
             return None
         changed = Path(directory).expanduser()
@@ -752,12 +777,13 @@ def _program_path_exists(
         (
             match
             for match in reversed(preceding)
-            if match.group("env") is not None and match.start() > segment_start
+            if (match.group("env") is not None or match.group("env_eq") is not None)
+            and match.start() > segment_start
         ),
         None,
     )
     if local_env is not None:
-        directory = local_env.group("env")
+        directory = local_env.group("env") or local_env.group("env_eq")
         if directory is None or any(character in directory for character in "'$\""):
             return None
         changed = Path(directory).expanduser()

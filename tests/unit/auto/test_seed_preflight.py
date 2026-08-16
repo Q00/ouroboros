@@ -799,7 +799,18 @@ def test_missing_extensionless_executable_blocks_unless_declared_artifact(
     assert declared.passed
 
 
-@pytest.mark.parametrize("command", ("cd sub && python check.py", "env -C sub python check.py"))
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd sub && python check.py",
+        "cd -- sub && python check.py",
+        "env -C sub python check.py",
+        "env --chdir=sub python check.py",
+        "sh -c 'cd sub && python check.py'",
+        "if true; then cd sub; fi; python check.py",
+        "{ cd sub; }; python check.py",
+    ),
+)
 def test_verifier_program_resolves_from_deterministic_shell_directory(
     tmp_path: Path, command: str
 ) -> None:
@@ -819,9 +830,22 @@ def test_verifier_program_resolves_from_deterministic_shell_directory(
     )
 
     assert report.passed
+    if "--chdir=" not in command or os.uname().sysname != "Darwin":
+        assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
-@pytest.mark.parametrize("command", ("cd sub && python check.py", "env -C sub python check.py"))
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd sub && python check.py",
+        "cd -- sub && python check.py",
+        "env -C sub python check.py",
+        "env --chdir=sub python check.py",
+        "sh -c 'cd sub && python check.py'",
+        "if true; then cd sub; fi; python check.py",
+        "{ cd sub; }; python check.py",
+    ),
+)
 def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
     tmp_path: Path, command: str
 ) -> None:
@@ -841,6 +865,7 @@ def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
     )
 
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
 def test_root_artifact_does_not_satisfy_program_in_effective_directory(tmp_path: Path) -> None:
