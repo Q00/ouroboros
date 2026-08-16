@@ -56,7 +56,7 @@ _ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 # ``for x in ...`` loop variables, and parameter expansions that do not
 # require a pre-existing value (defaults, assignments, and optional alternates).
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
-_FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
+_FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in(?P<items>[^;\n]*)[;\n]")
 _OPTIONAL_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=+]")
 _ASSIGNING_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?=")
 _URL_RE = re.compile(r"\S+://\S+")
@@ -72,6 +72,7 @@ _FILE_TOKEN_RE = re.compile(
 
 def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
     """Return ordered shell assignment/expansion events outside literal quoting."""
+    command = _strip_shell_comments(command)
     expandable = [True] * len(command)
     unquoted = [True] * len(command)
     quote: str | None = None
@@ -221,7 +222,8 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
     events.extend((position, "bind", name) for position, name in persistent_bindings)
     events.extend((position, "unbind", name) for position, name in persistent_unbindings)
     for match in _FOR_VAR_RE.finditer(command):
-        if unquoted[match.start()]:
+        items = match.group("items").strip()
+        if unquoted[match.start()] and items and not re.search(r"[$`]", items):
             events.append((match.start(), "bind", match.group(1)))
     for match in _ENV_VAR_RE.finditer(command):
         if not expandable[match.start()]:
@@ -233,6 +235,50 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             continue
         events.append((match.start(), "expand", match.group(1)))
     return tuple(sorted(events))
+
+
+def _strip_shell_comments(command: str) -> str:
+    """Mask unquoted POSIX comments while preserving source offsets."""
+    output = list(command)
+    quote: str | None = None
+    escaped = False
+    comment = False
+    for index, character in enumerate(command):
+        if comment:
+            if character == "\n":
+                comment = False
+            else:
+                output[index] = " "
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            continue
+        if character == "#" and quote is None and (index == 0 or command[index - 1].isspace()):
+            output[index] = " "
+            comment = True
+    return "".join(output)
+
+
+_UNSUPPORTED_SHELL_STATE_GRAMMAR = re.compile(
+    r"\b(?:if|then|elif|else|fi|case|esac|while|until|function)\b"
+    r"|(?:^|[;&|]\s*)\{(?:\s|$)"
+    r"|\b[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{",
+    re.MULTILINE,
+)
+
+
+def _has_unsupported_shell_state_grammar(command: str) -> bool:
+    """Return whether state flow is too rich for authoritative blocking."""
+    return _UNSUPPORTED_SHELL_STATE_GRAMMAR.search(_strip_shell_comments(command)) is not None
 
 
 def _is_shell_assignment_position(command: str, start: int) -> bool:
@@ -650,6 +696,8 @@ def _check_verify_commands(
                 # event visible; the nested scope separately checks only what
                 # survives into the child.
                 shell_command = scannable
+            if _has_unsupported_shell_state_grammar(shell_command):
+                continue
             command_bound: set[str] = set(inherited_bindings)
             for _, event, variable in _shell_variable_events(shell_command):
                 if event == "bind":

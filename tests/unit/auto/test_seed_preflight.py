@@ -624,6 +624,42 @@ def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("command", "passed"),
+    (
+        ("for FOO in; do :; done; set -u; printf '%s' \"$FOO\"", False),
+        ("if true; then FOO=bar; fi; set -u; printf '%s' \"$FOO\"", True),
+        ("{ FOO=bar; }; set -u; printf '%s' \"$FOO\"", True),
+        ("set_foo() { FOO=bar; }; set_foo; set -u; printf '%s' \"$FOO\"", True),
+        ("printf ok # $MISSING", True),
+    ),
+)
+def test_complex_shell_state_and_comments_match_runtime(
+    tmp_path: Path, command: str, passed: bool
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("FOO", None)
+    environment.pop("MISSING", None)
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Shell grammar", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert report.passed is passed
+    assert (runtime.returncode == 0) is passed
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "FOO=bar | printf '%s' \"$FOO\"",
