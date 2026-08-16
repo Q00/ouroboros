@@ -376,6 +376,34 @@ def _is_subprocess_separator(separator: str | None) -> bool:
     return separator == "&" or (separator is not None and "|" in separator and separator != "||")
 
 
+def _shell_command_payload(segment: list[str]) -> tuple[str, str] | None:
+    """Return an option-bearing ``sh``/``bash`` command-string invocation."""
+    if not segment or Path(segment[0]).name not in {"sh", "bash"}:
+        return None
+    dialect = Path(segment[0]).name
+    index = 1
+    while index < len(segment):
+        token = segment[index]
+        if token in {"-c", "--command"}:
+            return (segment[index + 1], dialect) if index + 1 < len(segment) else None
+        if token.startswith("--command="):
+            return token.partition("=")[2], dialect
+        if token in {"-o", "-O"}:
+            index += 2
+            continue
+        if token.startswith("-") and not token.startswith("--"):
+            flags = token[1:]
+            if "c" in flags:
+                return (segment[index + 1], dialect) if index + 1 < len(segment) else None
+            index += 1
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        return None
+    return None
+
+
 def _nested_shell_scopes(
     command: str,
     inherited: frozenset[str] | None = None,
@@ -516,14 +544,12 @@ def _nested_shell_scopes(
             launcher_bound.add(segment[0].partition("=")[0])
             segment = segment[1:]
         segment = unwrap(segment, launcher_bound)
-        if (
-            len(segment) >= 3
-            and Path(segment[0]).name in {"sh", "bash"}
-            and segment[1] in {"-c", "--command"}
-        ):
+        shell_payload = _shell_command_payload(segment)
+        if shell_payload is not None:
+            payload, dialect = shell_payload
             scope = frozenset(launcher_bound | _SHELL_INITIALIZED_ENV_VARS)
-            nested.append((segment[2], scope, Path(segment[0]).name))
-            nested.extend(_nested_shell_scopes(segment[2], scope, _nested_payload=True))
+            nested.append((payload, scope, dialect))
+            nested.extend(_nested_shell_scopes(payload, scope, _nested_payload=True))
     return tuple(nested)
 
 
@@ -1096,13 +1122,10 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if segment[0] == "." and len(segment) >= 2:
                 programs.add(_normalize_workspace_path(segment[1]))
                 continue
-            if (
-                executable in {"bash", "sh"}
-                and len(segment) >= 3
-                and segment[1] in {"-c", "--command"}
-            ):
+            shell_payload = _shell_command_payload(segment)
+            if shell_payload is not None:
                 try:
-                    scan(shell_tokens(segment[2]))
+                    scan(shell_tokens(shell_payload[0]))
                 except ValueError:
                     pass
                 continue

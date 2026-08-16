@@ -246,6 +246,46 @@ def test_missing_wrapped_verification_program_blocks(
 
 
 @pytest.mark.parametrize(
+    ("command", "expected_code", "expected_subject"),
+    (
+        ("bash -eu -c 'test -n \"$MISSING\"'", "unbound_env_var", "$MISSING"),
+        ("bash -eu -c 'python missing.py'", "verify_program_missing", "missing.py"),
+        ("sh -eu -c 'test -n \"$MISSING\"'", "unbound_env_var", "$MISSING"),
+        ("sh -eu -c 'python missing.py'", "verify_program_missing", "missing.py"),
+        ("bash -euc 'test -n \"$MISSING\"'", "unbound_env_var", "$MISSING"),
+        ("sh -euc 'python missing.py'", "verify_program_missing", "missing.py"),
+    ),
+)
+def test_option_bearing_nested_shell_matches_bin_sh_failure(
+    tmp_path: Path, command: str, expected_code: str, expected_subject: str
+) -> None:
+    environment = os.environ.copy()
+    environment.pop("MISSING", None)
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Nested verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [(finding.code, finding.subject) for finding in report.blocking_findings] == [
+        (expected_code, expected_subject)
+    ]
+    assert (
+        subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=tmp_path,
+            env=environment,
+            check=False,
+        ).returncode
+        != 0
+    )
+
+
+@pytest.mark.parametrize(
     "command",
     (
         "node -e missing.js",
