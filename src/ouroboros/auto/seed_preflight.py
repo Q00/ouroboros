@@ -985,21 +985,51 @@ def _check_verify_commands(
                         ),
                     )
                 )
-        for token_match in _FILE_TOKEN_RE.finditer(scannable):
-            token = token_match.group(0)
+        program_spans: list[tuple[int, int]] = []
+        occurrences: list[tuple[str, int, int, bool]] = []
+        for word_match in re.finditer(_STATIC_SHELL_WORD, scannable):
+            token = _decode_static_shell_word(word_match.group(0))
+            if token is None:
+                continue
             normalized = _normalize_workspace_path(token)
             segment_start = (
                 max(
-                    scannable.rfind(separator, 0, token_match.start())
+                    scannable.rfind(separator, 0, word_match.start())
                     for separator in (";", "\n", "&", "|")
                 )
                 + 1
             )
-            occurrence_command = scannable[segment_start : token_match.end()]
+            occurrence_command = scannable[segment_start : word_match.end()]
+            if _FILE_TOKEN_RE.search(token) is None or normalized not in _command_program_tokens(
+                occurrence_command
+            ):
+                continue
+            program_spans.append(word_match.span())
+            occurrences.append((token, word_match.start(), word_match.end(), True))
+        for token_match in _FILE_TOKEN_RE.finditer(scannable):
+            if any(
+                start <= token_match.start() and token_match.end() <= end
+                for start, end in program_spans
+            ):
+                continue
+            occurrences.append(
+                (token_match.group(0), token_match.start(), token_match.end(), False)
+            )
+        occurrences.sort(key=lambda item: item[1])
+        for token, token_start, token_end, known_program in occurrences:
+            normalized = _normalize_workspace_path(token)
+            segment_start = (
+                max(
+                    scannable.rfind(separator, 0, token_start)
+                    for separator in (";", "\n", "&", "|")
+                )
+                + 1
+            )
+            occurrence_command = scannable[segment_start:token_end]
             for quote in ("'", '"'):
                 if occurrence_command.count(quote) % 2:
                     occurrence_command += quote
-            is_program = normalized in _command_program_tokens(occurrence_command)
+            is_program = known_program or normalized in _command_program_tokens(occurrence_command)
             if not is_program and (normalized in artifacts or normalized in claimed_files):
                 continue
             if not is_program and normalized in seen_tokens:
@@ -1010,7 +1040,7 @@ def _check_verify_commands(
                     token,
                     scannable,
                     workspace_root,
-                    token_position=token_match.start(),
+                    token_position=token_start,
                     artifacts=artifacts,
                     claimed_files=claimed_files,
                 )

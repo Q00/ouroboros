@@ -1015,6 +1015,54 @@ def test_shell_decoded_missing_program_matches_production_shell(
         assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        'python "missing verifier.py"',
+        "python 'missing verifier.py'",
+        r"python missing\ verifier.py",
+    ),
+)
+def test_quoted_or_escaped_verifier_operand_is_blocked(tmp_path: Path, command: str) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Quoted verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'python "existing verifier.py"',
+        "python 'existing verifier.py'",
+        r"python existing\ verifier.py",
+    ),
+)
+def test_quoted_or_escaped_existing_verifier_operand_matches_shell(
+    tmp_path: Path, command: str
+) -> None:
+    verifier = tmp_path / "existing verifier.py"
+    verifier.write_text("print('ok')\n", encoding="utf-8")
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Quoted verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
 def test_root_artifact_does_not_satisfy_program_in_effective_directory(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     report = run_seed_preflight(
