@@ -140,14 +140,14 @@ def test_unbound_env_var_blocks(tmp_path: Path) -> None:
 
 
 def test_command_bound_variables_are_not_flagged(tmp_path: Path) -> None:
-    """Real-corpus false positive: ``sh -c "tmp=$(mktemp -d) && ... $tmp"``."""
+    """Nested-shell assignments bind later expansions in that same shell."""
     seed = _seed(
         acceptance_criteria=(
             AcceptanceCriterionSpec(
                 description="Pipeline runs in an isolated temp dir",
                 verify_command=(
-                    'sh -c "tmp=$(mktemp -d) && cp organize.py \\"$tmp\\"/ '
-                    '&& cd \\"$tmp\\" && python organize.py && echo OK"'
+                    'sh -c \'tmp=$(mktemp -d) && cp organize.py "$tmp"/ '
+                    '&& cd "$tmp" && python organize.py && echo OK\''
                 ),
             ),
             AcceptanceCriterionSpec(
@@ -404,6 +404,44 @@ def test_nested_shell_inherits_prior_sequential_export(tmp_path: Path) -> None:
         _seed(
             acceptance_criteria=(
                 AcceptanceCriterionSpec(description="Exported binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+
+
+@pytest.mark.parametrize(
+    ("command", "passed"),
+    (
+        ('FOO=bar; sh -c "printf %s $FOO"', True),
+        ('FOO=bar; sh -c "printf %s \\$FOO"', False),
+    ),
+)
+def test_nested_shell_preserves_outer_double_quote_expansion_ownership(
+    tmp_path: Path, command: str, passed: bool
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Nested expansion", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed is passed
+    assert [finding.subject for finding in report.blocking_findings] == ([] if passed else ["$FOO"])
+
+
+@pytest.mark.parametrize("operator", ("=", ":="))
+def test_assignment_default_parameter_expansion_is_bound(tmp_path: Path, operator: str) -> None:
+    command = f'printf %s "${{OUTPUT{operator}default}}"'
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Defaulted output", verify_command=command),
             )
         ),
         workspace_root=tmp_path,

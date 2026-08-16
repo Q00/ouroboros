@@ -45,7 +45,7 @@ _ENV_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 # ``for x in ...`` loop variables, and ``${VAR:-default}`` fallbacks.
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
 _FOR_VAR_RE = re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b")
-_DEFAULTED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?-")
+_DEFAULTED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=]")
 _URL_RE = re.compile(r"\S+://\S+")
 # A workspace-file token inside a command: at least one directory separator
 # and a short file extension, e.g. ``scripts/verify.py`` or ``./bin/run.sh``.
@@ -237,9 +237,14 @@ def _is_subprocess_separator(separator: str | None) -> bool:
 
 
 def _nested_shell_scopes(
-    command: str, inherited: frozenset[str] = frozenset()
+    command: str,
+    inherited: frozenset[str] = frozenset(),
+    *,
+    _nested_payload: bool = False,
 ) -> tuple[tuple[str, frozenset[str]], ...]:
     """Return nested ``sh -c`` payloads with launcher-exported bindings."""
+    if not _nested_payload:
+        command = _mask_outer_double_quote_expansions(command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
@@ -357,8 +362,48 @@ def _nested_shell_scopes(
         ):
             scope = frozenset(launcher_bound)
             nested.append((segment[2], scope))
-            nested.extend(_nested_shell_scopes(segment[2], scope))
+            nested.extend(_nested_shell_scopes(segment[2], scope, _nested_payload=True))
     return tuple(nested)
+
+
+def _mask_outer_double_quote_expansions(command: str) -> str:
+    """Keep nested payload ownership faithful to the outer shell.
+
+    In ``sh -c "echo $FOO"`` the outer shell expands ``$FOO`` before launching
+    the child; an escaped ``\\$FOO`` survives for the child instead. The token
+    parser cannot retain that distinction after removing the launcher's quotes,
+    so replace only these outer-owned expansions before tokenization.
+    """
+    output: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if character in {"'", '"'}:
+            if quote is None:
+                quote = character
+            elif quote == character:
+                quote = None
+            output.append(character)
+            index += 1
+            continue
+        if quote == '"' and character == "\\" and index + 1 < len(command):
+            if command[index + 1] == "$":
+                output.append("$")
+                index += 2
+                continue
+            output.extend((character, command[index + 1]))
+            index += 2
+            continue
+        if quote == '"' and character == "$":
+            match = re.match(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", command[index:])
+            if match is not None:
+                output.append("__outer_expansion_")
+                index += len(match.group(0))
+                continue
+        output.append(character)
+        index += 1
+    return "".join(output)
 
 
 def _outer_shell_scope(command: str) -> str:
@@ -556,7 +601,13 @@ def _check_verify_commands(
         nested_shell_scopes = _nested_shell_scopes(scannable)
         outer_shell_command = _outer_shell_scope(scannable)
         shell_scopes = ((outer_shell_command, frozenset()), *nested_shell_scopes)
-        for shell_command, inherited_bindings in shell_scopes:
+        for scope_index, (shell_command, inherited_bindings) in enumerate(shell_scopes):
+            if scope_index == 0:
+                # A variable in a double-quoted ``sh -c`` payload is expanded
+                # by this outer shell before the child starts. Keep that raw
+                # event visible; the nested scope separately checks only what
+                # survives into the child.
+                shell_command = scannable
             command_bound: set[str] = set(inherited_bindings)
             for _, event, variable in _shell_variable_events(shell_command):
                 if event == "bind":
