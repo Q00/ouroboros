@@ -139,6 +139,10 @@ def _cleanup_path(backup: Path, token: str) -> Path:
     return backup.with_name(f".{backup.name.removeprefix('.')}.cleanup.{token}")
 
 
+def _reclamation_path(retirement: Path) -> Path:
+    return retirement.with_name(retirement.name + ".reclaim")
+
+
 def _cleanup_content(operation: str, backup: Path, token: str, digest: str) -> str:
     return f"ouroboros-hermes-cleanup-v1:{operation}:{backup.name}:{token}:{digest}\n"
 
@@ -222,6 +226,75 @@ def _finish_owned_cleanup(
     _remove_target_path(cleanup / _CLEANUP_MARKER)
     cleanup.rmdir()
     intent.unlink(missing_ok=True)
+
+
+def _retirement_record(path: Path, backup_prefix: str) -> tuple[Path, str, str, str] | None:
+    """Parse and authenticate one detached generation's ownership record."""
+    match = re.fullmatch(
+        rf"{re.escape(backup_prefix)}([0-9a-f]{{32}})\.retired\.([0-9a-f]{{32}})"
+        r"(?:\.reclaim)?",
+        path.name,
+    )
+    if match is None:
+        return None
+    if path.is_symlink() or not path.is_dir():
+        raise OSError(f"Refusing foreign Hermes retirement: {path}")
+    backup = path.with_name(f"{backup_prefix}{match.group(1)}")
+    token = match.group(2)
+    marker = path / _SWAP_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        raise OSError(f"Refusing foreign Hermes retirement: {path}")
+    content = _read_swap_record(marker)
+    ownership = re.fullmatch(
+        rf"ouroboros-hermes-owned-v2:(swap|remove):{re.escape(backup.name)}:"
+        rf"{token}:([0-9a-f]{{64}})\n",
+        content,
+    )
+    if ownership is None:
+        raise OSError(f"Refusing foreign Hermes retirement: {path}")
+    operation, digest = ownership.groups()
+    _assert_owned_swap_backup(
+        path,
+        operation=operation,
+        token=token,
+        digest=digest,
+        backup_identity=backup,
+    )
+    return backup, operation, token, digest
+
+
+def _reclaim_retired_generations(target: Path, backup_prefix: str) -> None:
+    """Bound retained generations before publishing another replacement."""
+    candidates = sorted(target.parent.glob(f"{backup_prefix}*.retired.*"))
+    retirements = [path for path in candidates if not path.name.endswith(".reclaim")]
+    reclaiming = [path for path in candidates if path.name.endswith(".reclaim")]
+    by_base = {path.name.removesuffix(".reclaim"): path for path in reclaiming}
+    for retirement in retirements:
+        if retirement.name in by_base:
+            raise OSError("Refusing ambiguous Hermes retirement reclamation")
+    for path in (*reclaiming, *retirements):
+        record = _retirement_record(path, backup_prefix)
+        if record is None:
+            continue
+        backup, operation, token, digest = record
+        reclamation = path if path.name.endswith(".reclaim") else _reclamation_path(path)
+        if path != reclamation:
+            if reclamation.exists() or reclamation.is_symlink():
+                raise OSError(f"Refusing occupied Hermes reclamation path: {reclamation}")
+            os.replace(path, reclamation)
+            try:
+                _assert_owned_swap_backup(
+                    reclamation,
+                    operation=operation,
+                    token=token,
+                    digest=digest,
+                    backup_identity=backup,
+                )
+            except BaseException:
+                if reclamation.exists() and not path.exists():
+                    os.replace(reclamation, path)
+                raise
+        _remove_target_path(reclamation)
 
 
 def _ownership_marker_matches(
@@ -452,6 +525,7 @@ def atomic_swap_generation(
     """Publish a complete sibling generation with restart-recognizable recovery."""
     backup_prefix = f".{target.name}.old."
     _recover_swap_intents(target, backup_prefix)
+    _reclaim_retired_generations(target, backup_prefix)
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
     token = uuid4().hex
@@ -518,6 +592,7 @@ def atomic_remove_generation(
     """Remove a generation through a restart-recognizable backup rename."""
     backup_prefix = f".{target.name}.old."
     _recover_swap_intents(target, backup_prefix)
+    _reclaim_retired_generations(target, backup_prefix)
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
     token = uuid4().hex

@@ -614,7 +614,7 @@ class TestInstallHermesSkills:
         assert target.is_dir()
         assert foreign.joinpath("operator.txt").read_text(encoding="utf-8") == "foreign\n"
 
-    def test_repeated_refreshes_preserve_prior_generations(self, tmp_path: Path) -> None:
+    def test_repeated_refreshes_keep_only_one_prior_generation(self, tmp_path: Path) -> None:
         from ouroboros.hermes.artifacts import atomic_swap_generation
 
         target = tmp_path / "ouroboros"
@@ -634,15 +634,48 @@ class TestInstallHermesSkills:
         atomic_swap_generation(target, second)
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
         retirements = tuple(tmp_path.glob("*.retired.*"))
-        assert len(retirements) == 2
-        assert sorted(
-            path.joinpath("generation.txt").read_text(encoding="utf-8")
-            if path.joinpath("generation.txt").exists()
-            else path.joinpath("operator.txt").read_text(encoding="utf-8")
-            for path in retirements
-        ) == ["first\n", "old\n"]
+        assert len(retirements) == 1
+        assert retirements[0].joinpath("generation.txt").read_text(encoding="utf-8") == ("first\n")
         assert not tuple(tmp_path.glob("*.cleanup.*"))
+        assert not tuple(tmp_path.glob("*.reclaim"))
         assert not target.joinpath("operator.txt").exists()
+
+    def test_reclamation_preserves_generation_changed_after_private_rename(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("operator.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        atomic_swap_generation(target, first)
+        real_replace = os.replace
+
+        def mutate_after_reclamation_rename(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst).name.endswith(".reclaim"):
+                Path(dst).joinpath("operator-after-check.txt").write_text(
+                    "preserve\n", encoding="utf-8"
+                )
+            return result
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts.os.replace", mutate_after_reclamation_rename
+        )
+        with pytest.raises(OSError, match="foreign Hermes swap backup"):
+            atomic_swap_generation(target, second)
+
+        retirement = next(path for path in tmp_path.glob("*.retired.*") if path.is_dir())
+        assert retirement.joinpath("operator-after-check.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
 
     def test_live_mutation_after_staging_copy_aborts_publication(
         self, tmp_path: Path, monkeypatch
