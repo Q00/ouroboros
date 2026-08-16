@@ -900,6 +900,86 @@ def test_bash_assignment_builtins_bind_inside_explicit_bash_payload(
     assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
 
 
+def test_env_chdir_is_local_to_its_wrapped_command(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    command = "env -C sub true; python check.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Command-local env directory", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+def test_env_chdir_does_not_rebase_later_verifier(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    command = "env -C sub true; python check.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Command-local env directory", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
+def test_relative_cd_changes_accumulate_in_execution_order(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    command = "cd sub; cd ..; python check.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Cumulative directory state", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+def test_repeated_verifier_is_rechecked_after_directory_change(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    command = "python check.py; cd sub; python check.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Repeated verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
 def test_verify_reference_declared_as_artifact_is_clean(tmp_path: Path) -> None:
     (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
     seed = _seed(

@@ -706,18 +706,37 @@ def _program_path_exists(
     candidate = Path(path_text).expanduser()
     if workspace_root is None or candidate.is_absolute():
         return _path_exists(path_text, workspace_root)
-    matches = [
+    effective_root = workspace_root
+    preceding = [
         match for match in _DETERMINISTIC_CWD_RE.finditer(command) if match.start() < token_position
     ]
-    if not matches:
-        return _path_exists(path_text, workspace_root)
-    match = matches[-1]
-    directory = match.group("cd") or match.group("env")
-    if not directory or any(character in directory for character in "'$\""):
-        return None
-    effective_root = Path(directory).expanduser()
-    if not effective_root.is_absolute():
-        effective_root = workspace_root / effective_root
+    for match in preceding:
+        directory = match.group("cd")
+        if directory is None:
+            continue
+        if any(character in directory for character in "'$\""):
+            return None
+        changed = Path(directory).expanduser()
+        effective_root = changed if changed.is_absolute() else effective_root / changed
+
+    segment_start = max(
+        (command.rfind(separator, 0, token_position) for separator in (";", "\n", "&", "|")),
+        default=-1,
+    )
+    local_env = next(
+        (
+            match
+            for match in reversed(preceding)
+            if match.group("env") is not None and match.start() > segment_start
+        ),
+        None,
+    )
+    if local_env is not None:
+        directory = local_env.group("env")
+        if directory is None or any(character in directory for character in "'$\""):
+            return None
+        changed = Path(directory).expanduser()
+        effective_root = changed if changed.is_absolute() else effective_root / changed
     return (effective_root / candidate).exists()
 
 
@@ -780,6 +799,7 @@ def _check_verify_commands(
     findings: list[PreflightFinding] = []
     seen_vars: set[str] = set()
     seen_tokens: set[str] = set()
+    reported_missing_tokens: set[tuple[str, bool]] = set()
     for criterion in _specs(seed):
         command = criterion.verify_command
         if not command:
@@ -831,10 +851,12 @@ def _check_verify_commands(
         for token_match in _FILE_TOKEN_RE.finditer(scannable):
             token = token_match.group(0)
             normalized = _normalize_workspace_path(token)
-            if normalized in artifacts or normalized in claimed_files or normalized in seen_tokens:
+            if normalized in artifacts or normalized in claimed_files:
+                continue
+            is_program = normalized in program_tokens
+            if not is_program and normalized in seen_tokens:
                 continue
             seen_tokens.add(normalized)
-            is_program = normalized in program_tokens
             path_status = (
                 _program_path_exists(
                     token,
@@ -846,6 +868,10 @@ def _check_verify_commands(
                 else _path_exists(token, workspace_root)
             )
             if path_status is False:
+                finding_key = (normalized, is_program)
+                if finding_key in reported_missing_tokens:
+                    continue
+                reported_missing_tokens.add(finding_key)
                 findings.append(
                     PreflightFinding(
                         code=(
