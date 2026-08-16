@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -52,28 +53,66 @@ def _swap_intent_path(backup: Path) -> Path:
     return backup.with_name(backup.name + _SWAP_INTENT_SUFFIX)
 
 
-def _intent_content(operation: str, backup: Path) -> str:
-    return f"ouroboros-hermes-{operation}-v1:{backup.name}\n"
+def _fingerprint_digest(fingerprint: tuple[object, ...] | None) -> str:
+    return hashlib.sha256(repr(fingerprint).encode()).hexdigest()
+
+
+def _intent_content(operation: str, backup: Path, token: str, digest: str) -> str:
+    return f"ouroboros-hermes-{operation}-v2:{backup.name}:{token}:{digest}\n"
+
+
+def _ownership_content(operation: str, backup: Path, token: str, digest: str) -> str:
+    return f"ouroboros-hermes-owned-v2:{operation}:{backup.name}:{token}:{digest}\n"
+
+
+def _owned_backup_fingerprint(backup: Path) -> tuple[object, ...] | None:
+    fingerprint = _tree_fingerprint(backup)
+    if fingerprint is None or fingerprint[0] != "dir":
+        return fingerprint
+    children = tuple(child for child in fingerprint[2] if child[0] != _SWAP_MARKER)
+    return (*fingerprint[:2], children)
+
+
+def _restore_owned_backup(backup: Path, target: Path) -> None:
+    _remove_target_path(backup / _SWAP_MARKER)
+    if target.exists() or target.is_symlink():
+        raise OSError(f"Refusing to overwrite concurrent Hermes generation: {target}")
+    os.replace(backup, target)
 
 
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
     """Recover every externally-marked rename window before touching live state."""
-    records: list[tuple[Path, Path, str]] = []
+    records: list[tuple[Path, Path, str, str, str]] = []
     for intent in target.parent.glob(f"{backup_prefix}*{_SWAP_INTENT_SUFFIX}"):
         backup = intent.with_name(intent.name.removesuffix(_SWAP_INTENT_SUFFIX))
         suffix = backup.name.removeprefix(backup_prefix)
         if intent.is_symlink() or not intent.is_file() or not re.fullmatch(r"[0-9a-f]{32}", suffix):
             raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
         content = intent.read_text(encoding="utf-8")
-        operations = [op for op in ("swap", "remove") if content == _intent_content(op, backup)]
-        if len(operations) != 1 or backup.is_symlink() or backup.exists() and not backup.is_dir():
+        match = re.fullmatch(
+            rf"ouroboros-hermes-(swap|remove)-v2:{re.escape(backup.name)}:"
+            r"([0-9a-f]{32}):([0-9a-f]{64})\n",
+            content,
+        )
+        if match is None or backup.is_symlink() or backup.exists() and not backup.is_dir():
             raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
-        records.append((intent, backup, operations[0]))
+        operation, token, digest = match.groups()
+        if backup.exists():
+            marker = backup / _SWAP_MARKER
+            if (
+                marker.is_symlink()
+                or not marker.is_file()
+                or marker.read_text(encoding="utf-8")
+                != _ownership_content(operation, backup, token, digest)
+                or _fingerprint_digest(_owned_backup_fingerprint(backup)) != digest
+            ):
+                raise OSError(f"Refusing foreign Hermes swap backup: {backup}")
+        records.append((intent, backup, operation, token, digest))
     if len(records) > 1:
         raise OSError("Refusing ambiguous Hermes recovery with multiple swap intents")
-    for intent, backup, operation in records:
+    for intent, backup, operation, _token, _digest in records:
         if operation == "swap" and not target.exists() and backup.exists():
-            os.replace(backup, target)
+            _restore_owned_backup(backup, target)
         elif operation == "remove" and not target.exists() and backup.exists():
             _remove_target_path(backup)
         elif target.exists() and backup.exists():
@@ -81,6 +120,12 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
                 raise OSError("Refusing concurrent Hermes mutation during removal recovery")
             _remove_target_path(backup)
         if not backup.exists():
+            marker = target / _SWAP_MARKER
+            if marker.is_file() and not marker.is_symlink():
+                if marker.read_text(encoding="utf-8") == _ownership_content(
+                    operation, backup, _token, _digest
+                ):
+                    _remove_target_path(marker)
             _remove_target_path(intent)
 
 
@@ -92,22 +137,43 @@ def atomic_swap_generation(
     expected_check: Callable[[], bool] | None = None,
 ) -> None:
     """Publish a complete sibling generation with restart-recognizable recovery."""
+    backup_prefix = f".{target.name}.old."
+    _recover_swap_intents(target, backup_prefix)
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
-    intent.write_text(_intent_content("swap", backup), encoding="utf-8")
+    token = uuid4().hex
+    checked_fingerprint = _tree_fingerprint(target)
+    digest = _fingerprint_digest(checked_fingerprint)
+    intent.write_text(_intent_content("swap", backup, token, digest), encoding="utf-8")
     if target.exists():
+        if target.joinpath(_SWAP_MARKER).exists() or target.joinpath(_SWAP_MARKER).is_symlink():
+            _remove_target_path(intent)
+            raise OSError(f"Refusing unowned Hermes swap marker: {target / _SWAP_MARKER}")
         if expected_check is not None and not expected_check():
             _remove_target_path(intent)
             raise OSError(f"Hermes live generation changed during publication: {target}")
         if expected is not _EXPECTED_UNSET and _tree_fingerprint(target) != expected:
             _remove_target_path(intent)
             raise OSError(f"Hermes live generation changed during publication: {target}")
-        os.replace(target, backup)
+        target.joinpath(_SWAP_MARKER).write_text(
+            _ownership_content("swap", backup, token, digest), encoding="utf-8"
+        )
+        try:
+            os.replace(target, backup)
+        except BaseException:
+            if not backup.exists():
+                _remove_target_path(target / _SWAP_MARKER)
+                _remove_target_path(intent)
+            raise
+        if _owned_backup_fingerprint(backup) != checked_fingerprint:
+            _restore_owned_backup(backup, target)
+            _remove_target_path(intent)
+            raise OSError(f"Hermes live generation changed during publication: {target}")
     try:
         os.replace(replacement, target)
     except BaseException:
         if backup.exists() and not target.exists():
-            os.replace(backup, target)
+            _restore_owned_backup(backup, target)
         _remove_target_path(intent)
         raise
     try:
@@ -123,13 +189,34 @@ def atomic_remove_generation(
     target: Path, *, expected_check: Callable[[], bool] | None = None
 ) -> None:
     """Remove a generation through a restart-recognizable backup rename."""
+    backup_prefix = f".{target.name}.old."
+    _recover_swap_intents(target, backup_prefix)
     backup = target.with_name(f".{target.name}.old.{uuid4().hex}")
     intent = _swap_intent_path(backup)
-    intent.write_text(_intent_content("remove", backup), encoding="utf-8")
+    token = uuid4().hex
+    checked_fingerprint = _tree_fingerprint(target)
+    digest = _fingerprint_digest(checked_fingerprint)
+    intent.write_text(_intent_content("remove", backup, token, digest), encoding="utf-8")
+    if target.joinpath(_SWAP_MARKER).exists() or target.joinpath(_SWAP_MARKER).is_symlink():
+        _remove_target_path(intent)
+        raise OSError(f"Refusing unowned Hermes swap marker: {target / _SWAP_MARKER}")
     if expected_check is not None and not expected_check():
         _remove_target_path(intent)
         raise OSError(f"Hermes live generation changed during removal: {target}")
-    os.replace(target, backup)
+    target.joinpath(_SWAP_MARKER).write_text(
+        _ownership_content("remove", backup, token, digest), encoding="utf-8"
+    )
+    try:
+        os.replace(target, backup)
+    except BaseException:
+        if not backup.exists():
+            _remove_target_path(target / _SWAP_MARKER)
+            _remove_target_path(intent)
+        raise
+    if _owned_backup_fingerprint(backup) != checked_fingerprint:
+        _restore_owned_backup(backup, target)
+        _remove_target_path(intent)
+        raise OSError(f"Hermes live generation changed during removal: {target}")
     try:
         _remove_target_path(backup)
     except OSError:

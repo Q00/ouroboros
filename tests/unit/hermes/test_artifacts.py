@@ -605,6 +605,112 @@ class TestInstallHermesSkills:
             install_hermes_skills(hermes_dir=tmp_path / ".hermes")
         assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
 
+    def test_live_mutation_at_backup_rename_aborts_and_restores_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.mkdir(parents=True)
+        target.joinpath("original.txt").write_text("original\n", encoding="utf-8")
+        real_replace = os.replace
+        injected = False
+
+        def mutate_at_commit(src, dst):
+            nonlocal injected
+            if Path(src) == target and not injected:
+                injected = True
+                target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", mutate_at_commit)
+        with pytest.raises(OSError, match="changed during publication"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert target.joinpath("original.txt").read_text(encoding="utf-8") == "original\n"
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert not tuple(target.parent.glob(".ouroboros.old.*"))
+
+    def test_remove_mutation_at_backup_rename_aborts_and_restores_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("original.txt").write_text("original\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def mutate_at_commit(src, dst):
+            if Path(src) == target:
+                target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", mutate_at_commit)
+        with pytest.raises(OSError, match="changed during removal"):
+            atomic_remove_generation(target, expected_check=lambda: True)
+
+        assert target.joinpath("original.txt").read_text(encoding="utf-8") == "original\n"
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+
+    def test_valid_looking_foreign_intent_cannot_claim_unmarked_backup(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _fingerprint_digest,
+            _intent_content,
+            _tree_fingerprint,
+        )
+
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        target = parent / "ouroboros"
+        target.mkdir(parents=True)
+        backup = parent / f".ouroboros.old.{'b' * 32}"
+        backup.mkdir()
+        backup.joinpath("operator.txt").write_text("foreign\n", encoding="utf-8")
+        digest = _fingerprint_digest(_tree_fingerprint(backup))
+        backup.with_name(backup.name + ".intent").write_text(
+            _intent_content("swap", backup, "c" * 32, digest), encoding="utf-8"
+        )
+
+        with pytest.raises(OSError, match="foreign Hermes swap backup"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        assert backup.joinpath("operator.txt").read_text(encoding="utf-8") == "foreign\n"
+        assert target.is_dir()
+
+    def test_cleanup_failure_cannot_create_a_second_active_swap_intent(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        first = tmp_path / "first"
+        first.mkdir()
+        first.joinpath("generation.txt").write_text("first\n", encoding="utf-8")
+        second = tmp_path / "second"
+        second.mkdir()
+        second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
+        real_remove = _remove_target_path
+
+        def fail_backup_cleanup(path: Path) -> None:
+            if path.name.startswith(".ouroboros.old."):
+                raise OSError("persistent cleanup failure")
+            real_remove(path)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_backup_cleanup)
+        atomic_swap_generation(target, first)
+        with pytest.raises(OSError, match="persistent cleanup failure"):
+            atomic_swap_generation(target, second)
+
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
+        assert second.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
+        assert len(tuple(tmp_path.glob(".ouroboros.old.*.intent"))) == 1
+
     def test_interrupted_generation_removal_replays_as_removal(
         self, tmp_path: Path, monkeypatch
     ) -> None:
