@@ -642,8 +642,18 @@ def _mask_statically_unreachable_program_clauses(command: str) -> str:
     output = list(command)
     patterns = (
         re.compile(
-            r"(?:^|[;\n]\s*)if\s+(?:false|!)\s*;?\s*then\s*(?P<body>.*?)"
+            r"(?:^|[;\n]\s*)if\s+(?:false|!\s*true)\s*;?\s*then\s*(?P<body>.*?)"
             r"(?=\b(?:else|elif|fi)\b)",
+            re.DOTALL,
+        ),
+        re.compile(
+            r"(?:^|[;\n]\s*)for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s*;\s*do\s*"
+            r"(?P<body>.*?)(?=\bdone\b)",
+            re.DOTALL,
+        ),
+        re.compile(
+            r"(?:^|[;\n]\s*)(?:while\s+false|until\s+true)\s*;?\s*do\s*"
+            r"(?P<body>.*?)(?=\bdone\b)",
             re.DOTALL,
         ),
         re.compile(
@@ -662,16 +672,28 @@ def _mask_statically_unreachable_program_clauses(command: str) -> str:
     return "".join(output)
 
 
-def _has_undecidable_program_flow(command: str) -> bool:
-    """Return whether program reachability depends on runtime shell state."""
+def _program_flow_inconclusive(command: str, token_start: int, token_end: int) -> bool:
+    """Return whether one program occurrence depends on runtime shell state."""
     stripped = _strip_shell_comments(command)
-    if re.search(r"\b(?:while|until|case)\b", stripped):
+    prefix = stripped[:token_start]
+    if_matches = tuple(re.finditer(r"\bif\b", prefix))
+    if len(if_matches) > sum(1 for _ in re.finditer(r"\bfi\b", prefix)):
+        active_scope = prefix[if_matches[-1].start() :]
+        if re.match(r"if\s+(?:true|!\s*false)\s*;?\s*then\b", active_scope) is None:
+            return True
+    if sum(1 for _ in re.finditer(r"\b(?:while|until|for)\b", prefix)) > sum(
+        1 for _ in re.finditer(r"\bdone\b", prefix)
+    ):
         return True
-    if re.search(r"\bif\s+(?!true\b|false\b|!\s*(?:true|false)\b)", stripped):
+    if sum(1 for _ in re.finditer(r"\bcase\b", prefix)) > sum(
+        1 for _ in re.finditer(r"\besac\b", prefix)
+    ):
         return True
-    # A skipped ``||`` branch can still leave a successful verifier. A skipped
-    # ``&&`` branch matters similarly when a later command owns final status.
-    return "||" in stripped or bool(re.search(r"&&[^\n;]*[;\n]", stripped))
+    segment_start = max(stripped.rfind(separator, 0, token_start) for separator in (";", "\n")) + 1
+    segment = stripped[segment_start:token_end]
+    if "||" in segment:
+        return True
+    return "&&" in segment and bool(re.search(r"[;\n]", stripped[token_end:]))
 
 
 # A standalone dependency entry that claims a workspace file. Requires a
@@ -1073,23 +1095,6 @@ def _check_verify_commands(
                     )
                 )
         program_scannable = _mask_statically_unreachable_program_clauses(scannable)
-        undecidable_program_flow = _has_undecidable_program_flow(scannable)
-        if undecidable_program_flow:
-            findings.append(
-                PreflightFinding(
-                    code="verify_program_reachability_inconclusive",
-                    blocking=False,
-                    subject=criterion.description[:80],
-                    detail=(
-                        "verify_command contains runtime-dependent shell control flow, so "
-                        "program existence cannot be proven statically"
-                    ),
-                    question=(
-                        "Can the verifier use an unconditional command or a deterministic "
-                        "wrapper whose reachability is explicit?"
-                    ),
-                )
-            )
         program_spans: list[tuple[int, int]] = []
         occurrences: list[tuple[str, int, int, bool]] = []
         for word_match in re.finditer(_STATIC_SHELL_WORD, program_scannable):
@@ -1154,7 +1159,7 @@ def _check_verify_commands(
             )
             if sourced_programs and normalized not in sourced_programs:
                 path_status = None
-            if undecidable_program_flow:
+            if _program_flow_inconclusive(scannable, token_start, token_end):
                 path_status = None
             if path_status is False:
                 finding_key = (normalized, is_program)

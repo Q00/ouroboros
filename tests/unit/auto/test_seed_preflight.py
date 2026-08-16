@@ -1405,10 +1405,32 @@ def test_runtime_dependent_program_reachability_is_inconclusive_with_shell_parit
     )
 
     assert not report.blocking_findings
-    assert "verify_program_reachability_inconclusive" in {
-        finding.code for finding in report.findings
-    }
     assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("command", "blocked"),
+    (
+        ("if test -f absent.marker; then true; fi; python missing.py", True),
+        ("if ! true; then ./missing; fi; true", False),
+        ("for x in; do ./missing; done; true", False),
+    ),
+)
+def test_program_reachability_is_scoped_per_occurrence_with_shell_parity(
+    tmp_path: Path, command: str, blocked: bool
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Scoped verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert bool(report.blocking_findings) is blocked
+    result = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False)
+    assert (result.returncode != 0) is blocked
 
 
 @pytest.mark.parametrize(
