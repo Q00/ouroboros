@@ -542,7 +542,8 @@ class TestInstallHermesSkills:
 
         assert operator_note.read_text(encoding="utf-8") == "newest operator state"
         assert not tuple(target_dir.parent.glob(".ouroboros.old.*.intent"))
-        assert tuple(target_dir.parent.glob("*.retired.*"))
+        assert not tuple(target_dir.parent.glob("*.retired.*"))
+        assert not tuple(target_dir.parent.glob("*.cleanup.*"))
 
     def test_backup_cleanup_failure_keeps_complete_published_generation(
         self, tmp_path: Path, monkeypatch
@@ -613,7 +614,7 @@ class TestInstallHermesSkills:
         assert target.is_dir()
         assert foreign.joinpath("operator.txt").read_text(encoding="utf-8") == "foreign\n"
 
-    def test_retained_backups_never_replace_complete_live_tree(self, tmp_path: Path) -> None:
+    def test_repeated_refreshes_remove_prior_generations(self, tmp_path: Path) -> None:
         from ouroboros.hermes.artifacts import atomic_swap_generation
 
         target = tmp_path / "ouroboros"
@@ -632,9 +633,9 @@ class TestInstallHermesSkills:
 
         atomic_swap_generation(target, second)
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
-        retirements = tuple(tmp_path.glob("*.retired.*"))
-        assert len(retirements) == 2
-        assert any(path.joinpath("operator.txt").exists() for path in retirements)
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
+        assert not target.joinpath("operator.txt").exists()
 
     def test_live_mutation_after_staging_copy_aborts_publication(
         self, tmp_path: Path, monkeypatch
@@ -798,6 +799,39 @@ class TestInstallHermesSkills:
         )
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "new\n"
 
+    def test_cleanup_capture_revalidates_before_deleting_generation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def mutate_after_cleanup_capture(src, dst):
+            result = real_replace(src, dst)
+            if ".retired." in Path(src).name and Path(dst).name == "generation":
+                Path(dst).joinpath("operator-after-capture.txt").write_text(
+                    "preserve\n", encoding="utf-8"
+                )
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", mutate_after_cleanup_capture)
+
+        with pytest.raises(OSError, match="foreign Hermes swap backup"):
+            atomic_swap_generation(target, replacement)
+
+        cleanup = next(path for path in tmp_path.glob("*.cleanup.*") if path.is_dir())
+        assert (
+            cleanup.joinpath("generation", "operator-after-capture.txt").read_text(encoding="utf-8")
+            == "preserve\n"
+        )
+        assert tuple(tmp_path.glob("*.intent"))
+
     @pytest.mark.parametrize("operation", ("swap", "remove"))
     def test_interrupted_marker_staging_is_retryable(
         self, tmp_path: Path, monkeypatch, operation: str
@@ -909,11 +943,8 @@ class TestInstallHermesSkills:
         monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
         _recover_swap_intents(target, ".ouroboros.old.")
         assert not tuple(tmp_path.glob("*.intent"))
-        preserved = tuple(tmp_path.glob("*.retired.*"))
-        assert len(preserved) == 1
-        assert preserved[0].joinpath("operator-secret.txt").read_text(encoding="utf-8") == (
-            "preserve\n"
-        )
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
 
     def test_interruption_after_retirement_commit_resumes_cleanup(
         self, tmp_path: Path, monkeypatch
@@ -945,7 +976,8 @@ class TestInstallHermesSkills:
         monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
         _recover_swap_intents(target, ".ouroboros.old.")
         assert not tuple(tmp_path.glob("*.intent"))
-        assert len(tuple(tmp_path.glob("*.retired.*"))) == 1
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
 
     @pytest.mark.parametrize("operation", ("swap", "remove"))
     def test_interrupted_intent_staging_is_retryable(
@@ -1019,7 +1051,7 @@ class TestInstallHermesSkills:
         assert not target.joinpath(_SWAP_MARKER).exists()
         assert not tuple(tmp_path.glob("*.intent"))
 
-    def test_retirement_revalidates_after_intent_unlink(self, tmp_path: Path, monkeypatch) -> None:
+    def test_cleanup_finishes_before_intent_unlink(self, tmp_path: Path, monkeypatch) -> None:
         from ouroboros.hermes.artifacts import atomic_swap_generation
 
         target = tmp_path / "ouroboros"
@@ -1033,24 +1065,16 @@ class TestInstallHermesSkills:
         def mutate_after_intent_unlink(path: Path, *args, **kwargs):
             result = real_unlink(path, *args, **kwargs)
             if path.name.endswith(".intent"):
-                retirement = next(
-                    candidate for candidate in tmp_path.glob("*.retired.*") if candidate.is_dir()
-                )
-                retirement.joinpath("operator-after-unlink.txt").write_text(
-                    "preserve\n", encoding="utf-8"
-                )
+                assert not tuple(tmp_path.glob("*.retired.*"))
+                assert not tuple(tmp_path.glob("*.cleanup.*"))
             return result
 
         monkeypatch.setattr(Path, "unlink", mutate_after_intent_unlink)
-        with pytest.raises(OSError, match="foreign Hermes swap backup"):
-            atomic_swap_generation(target, replacement)
+        atomic_swap_generation(target, replacement)
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
 
-        preserved = next(path for path in tmp_path.glob(".ouroboros.old.*") if path.is_dir())
-        assert preserved.joinpath("operator-after-unlink.txt").read_text(encoding="utf-8") == (
-            "preserve\n"
-        )
-
-    def test_retirement_performs_no_recursive_unlink_after_validation(
+    def test_cleanup_does_not_leave_prior_generation_data(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         from ouroboros.hermes.artifacts import atomic_swap_generation
@@ -1065,15 +1089,13 @@ class TestInstallHermesSkills:
         real_unlink = Path.unlink
 
         def refuse_retirement_unlink(path: Path, *args, **kwargs):
-            if any(".retired." in parent.name for parent in (path, *path.parents)):
-                raise AssertionError("retirement data must not be unlinked")
             return real_unlink(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "unlink", refuse_retirement_unlink)
         atomic_swap_generation(target, replacement)
 
-        retirement = next(path for path in tmp_path.glob("*.retired.*") if path.is_dir())
-        assert retirement.joinpath("generation.txt").read_text(encoding="utf-8") == "old\n"
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
 
     def test_interrupted_generation_removal_replays_as_removal(
         self, tmp_path: Path, monkeypatch
@@ -1084,15 +1106,17 @@ class TestInstallHermesSkills:
         real_remove = _remove_target_path
 
         def interrupt_backup_removal(path: Path) -> None:
-            if path.name.startswith(".ouroboros.old."):
+            if path.name == "generation":
                 raise OSError("synthetic removal interruption")
             real_remove(path)
 
         monkeypatch.setattr(
             "ouroboros.hermes.artifacts._remove_target_path", interrupt_backup_removal
         )
-        atomic_remove_generation(target)
+        with pytest.raises(OSError, match="synthetic removal interruption"):
+            atomic_remove_generation(target)
         assert not target.exists()
+        assert tuple(tmp_path.glob("*.intent"))
 
         monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
         from ouroboros.hermes.artifacts import _recover_swap_intents
@@ -1100,7 +1124,8 @@ class TestInstallHermesSkills:
         _recover_swap_intents(target, ".ouroboros.old.")
         assert not target.exists()
         assert not tuple(tmp_path.glob(".ouroboros.old.*.intent"))
-        assert len(tuple(tmp_path.glob("*.retired.*"))) == 1
+        assert not tuple(tmp_path.glob("*.retired.*"))
+        assert not tuple(tmp_path.glob("*.cleanup.*"))
 
     @pytest.mark.parametrize("target_exists", (False, True))
     def test_foreign_fixed_backup_sibling_is_never_recovered_or_deleted(

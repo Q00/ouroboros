@@ -28,6 +28,8 @@ _LEGACY_PACKAGE_ARTIFACTS = ("__init__.py", "artifacts.py", "__pycache__")
 _SWAP_MARKER = ".ouroboros-managed-swap"
 _SWAP_MARKER_CONTENT = "ouroboros-hermes-swap-v1\n"
 _SWAP_INTENT_SUFFIX = ".intent"
+_CLEANUP_MARKER = ".ouroboros-managed-cleanup"
+_CLEANUP_ACTIVE = ".ouroboros-cleanup-active"
 _EXPECTED_UNSET = object()
 
 
@@ -133,6 +135,81 @@ def _retirement_path(backup: Path, token: str) -> Path:
     return backup.with_name(f".{backup.name.removeprefix('.')}.retired.{token}")
 
 
+def _cleanup_path(backup: Path, token: str) -> Path:
+    return backup.with_name(f".{backup.name.removeprefix('.')}.cleanup.{token}")
+
+
+def _cleanup_content(operation: str, backup: Path, token: str, digest: str) -> str:
+    return f"ouroboros-hermes-cleanup-v1:{operation}:{backup.name}:{token}:{digest}\n"
+
+
+def _assert_owned_cleanup(
+    cleanup: Path,
+    backup: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> None:
+    marker = cleanup / _CLEANUP_MARKER
+    if (
+        cleanup.is_symlink()
+        or not cleanup.is_dir()
+        or marker.is_symlink()
+        or not marker.is_file()
+        or _read_swap_record(marker) != _cleanup_content(operation, backup, token, digest)
+        or {child.name for child in cleanup.iterdir()}
+        - {_CLEANUP_MARKER, _CLEANUP_ACTIVE, "generation"}
+    ):
+        raise OSError(f"Refusing foreign Hermes cleanup container: {cleanup}")
+
+
+def _finish_owned_cleanup(
+    cleanup: Path,
+    backup: Path,
+    intent: Path,
+    *,
+    operation: str,
+    token: str,
+    digest: str,
+) -> None:
+    """Finish deletion only inside an authenticated private container."""
+    _assert_owned_cleanup(
+        cleanup,
+        backup,
+        operation=operation,
+        token=token,
+        digest=digest,
+    )
+    generation = cleanup / "generation"
+    active = cleanup / _CLEANUP_ACTIVE
+    if generation.exists() or generation.is_symlink():
+        if not active.exists():
+            _assert_owned_swap_backup(
+                generation,
+                operation=operation,
+                token=token,
+                digest=digest,
+                backup_identity=backup,
+            )
+            _publish_swap_intent(
+                active,
+                _cleanup_content(operation, backup, token, digest),
+                token,
+            )
+        elif (
+            active.is_symlink()
+            or not active.is_file()
+            or _read_swap_record(active) != _cleanup_content(operation, backup, token, digest)
+        ):
+            raise OSError(f"Refusing foreign Hermes cleanup state: {active}")
+        _remove_target_path(generation)
+    _remove_target_path(active)
+    _remove_target_path(cleanup / _CLEANUP_MARKER)
+    cleanup.rmdir()
+    intent.unlink(missing_ok=True)
+
+
 def _ownership_marker_matches(
     target: Path,
     backup: Path,
@@ -212,15 +289,20 @@ def _finish_owned_retirement(
     digest: str,
 ) -> None:
     """Validate and finish a committed backup-to-retirement rename."""
-    try:
-        _assert_owned_swap_backup(
-            retirement,
+    cleanup = _cleanup_path(backup, token)
+    if cleanup.exists() or cleanup.is_symlink():
+        if retirement.exists() or retirement.is_symlink():
+            raise OSError("Refusing ambiguous Hermes retirement and cleanup generations")
+        _finish_owned_cleanup(
+            cleanup,
+            backup,
+            intent,
             operation=operation,
             token=token,
             digest=digest,
-            backup_identity=backup,
         )
-        intent.unlink(missing_ok=True)
+        return
+    try:
         _assert_owned_swap_backup(
             retirement,
             operation=operation,
@@ -232,16 +314,34 @@ def _finish_owned_retirement(
         if retirement.exists() and not backup.exists():
             os.replace(retirement, backup)
         raise
-    # POSIX has no portable compare-and-unlink operation: a pathname can be
-    # replaced after fingerprint validation but before unlink. Keep the exact,
-    # marker-owned retirement as a recoverable hidden generation instead of
-    # risking deletion of a concurrent operator replacement.
-    _assert_owned_swap_backup(
-        retirement,
+    cleanup.mkdir(mode=0o700)
+    try:
+        _publish_swap_intent(
+            cleanup / _CLEANUP_MARKER,
+            _cleanup_content(operation, backup, token, digest),
+            token,
+        )
+        os.replace(retirement, cleanup / "generation")
+    except BaseException:
+        generation = cleanup / "generation"
+        if generation.exists() and not retirement.exists():
+            _assert_owned_swap_backup(
+                generation,
+                operation=operation,
+                token=token,
+                digest=digest,
+                backup_identity=backup,
+            )
+        elif not any(cleanup.iterdir()):
+            cleanup.rmdir()
+        raise
+    _finish_owned_cleanup(
+        cleanup,
+        backup,
+        intent,
         operation=operation,
         token=token,
         digest=digest,
-        backup_identity=backup,
     )
 
 
@@ -276,6 +376,19 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
         raise OSError("Refusing ambiguous Hermes recovery with multiple swap intents")
     for intent, backup, operation, token, digest in records:
         retirement = _retirement_path(backup, token)
+        cleanup = _cleanup_path(backup, token)
+        if cleanup.exists() or cleanup.is_symlink():
+            if backup.exists() or retirement.exists() or retirement.is_symlink():
+                raise OSError("Refusing ambiguous Hermes cleanup generations")
+            _finish_owned_cleanup(
+                cleanup,
+                backup,
+                intent,
+                operation=operation,
+                token=token,
+                digest=digest,
+            )
+            continue
         if retirement.exists() or retirement.is_symlink():
             if backup.exists():
                 raise OSError("Refusing ambiguous Hermes backup and retirement generations")
