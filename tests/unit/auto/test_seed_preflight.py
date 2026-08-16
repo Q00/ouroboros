@@ -630,6 +630,7 @@ def test_empty_environment_shell_initializes_path(tmp_path: Path) -> None:
         ("if true; then FOO=bar; fi; set -u; printf '%s' \"$FOO\"", True),
         ("{ FOO=bar; }; set -u; printf '%s' \"$FOO\"", True),
         ("set_foo() { FOO=bar; }; set_foo; set -u; printf '%s' \"$FOO\"", True),
+        ("read FOO <<'EOF'\nbar\nEOF\nset -u; test \"$FOO\" = bar", True),
         ("printf ok # $MISSING", True),
     ),
 )
@@ -692,6 +693,8 @@ def test_shell_subprocess_bindings_do_not_leak_or_precede_expansion(
         "command exec ./missing-verify",
         "nice -n5 ./missing-verify",
         "nice --adjustment=5 ./missing-verify",
+        "nice -- ./missing-verify",
+        "nice -n 5 -- ./missing-verify",
     ),
 )
 def test_supported_wrapper_option_forms_preserve_program_position(
@@ -706,6 +709,15 @@ def test_supported_wrapper_option_forms_preserve_program_position(
         workspace_root=tmp_path,
     )
     assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+    runtime = subprocess.run(
+        ["sh", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        check=False,
+    )
+    assert runtime.returncode != 0
 
 
 def test_environment_assignment_after_use_does_not_bind_earlier_expansion(tmp_path: Path) -> None:

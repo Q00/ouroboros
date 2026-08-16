@@ -194,7 +194,12 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
         if not words:
             continue
         assignment_only = all(assignment.fullmatch(word) for word in words)
-        assignment_builtin = Path(words[0]).name in {
+        command_index = next(
+            (index for index, word in enumerate(words) if assignment.fullmatch(word) is None),
+            len(words),
+        )
+        command_name = Path(words[command_index]).name if command_index < len(words) else ""
+        assignment_builtin = command_name in {
             "declare",
             "export",
             "local",
@@ -211,11 +216,28 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             )
         elif assignment_builtin and persists:
             persistent_bindings.extend(
-                (end, word.partition("=")[0]) for word in words[1:] if assignment.fullmatch(word)
+                (end, word.partition("=")[0])
+                for word in words[command_index + 1 :]
+                if assignment.fullmatch(word)
             )
-        elif Path(words[0]).name == "unset" and persists:
+        elif command_name == "read" and persists:
+            for word in words[command_index + 1 :]:
+                if word == "-r":
+                    continue
+                if word == "--":
+                    continue
+                if any(operator in word for operator in ("<", ">")):
+                    break
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word):
+                    persistent_bindings.append((end, word))
+                else:
+                    # Unknown option/operand grammar is not authoritative.
+                    break
+        elif command_name == "unset" and persists:
             persistent_unbindings.extend(
-                (end, word) for word in words[1:] if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word)
+                (end, word)
+                for word in words[command_index + 1 :]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word)
             )
 
     events: list[tuple[int, str, str]] = []
@@ -402,6 +424,8 @@ def _nested_shell_scopes(
                     re.fullmatch(r"-n?\d+", remaining[0])
                     or remaining[0].startswith("--adjustment=")
                 ):
+                    remaining = remaining[1:]
+                if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
             if command_name == "command":
@@ -826,6 +850,8 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                     re.fullmatch(r"-n?\d+", remaining[0])
                     or remaining[0].startswith("--adjustment=")
                 ):
+                    remaining = remaining[1:]
+                if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
             if command_name == "command":
