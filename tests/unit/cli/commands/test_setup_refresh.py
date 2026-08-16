@@ -136,6 +136,23 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert "Runtime artifact refresh incomplete: hermes" in result.output
         assert "No installed runtime artifacts found" not in result.output
 
+    def test_malformed_hermes_record_is_isolated_and_other_refreshes_continue(
+        self, tmp_path: Path
+    ) -> None:
+        skill_dir = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+        skill_dir.mkdir(parents=True)
+        intent = skill_dir.parent / f".ouroboros.old.{'e' * 32}.intent"
+        intent.write_bytes(b"\xff\xfe")
+        pi_bridge = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+        pi_bridge.parent.mkdir(parents=True)
+        pi_bridge.write_text("// stale bridge\n", encoding="utf-8")
+
+        result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 1
+        assert "Runtime artifact refresh incomplete: hermes" in result.output
+        assert pi_bridge.read_text(encoding="utf-8") != "// stale bridge\n"
+
     def test_refreshes_existing_pi_bridge(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".pi" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
         bridge.parent.mkdir(parents=True)

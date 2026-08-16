@@ -335,9 +335,7 @@ class TestInstallHermesSkills:
         assert backup_link.is_symlink()
         assert not target_dir.joinpath("operator-secret.txt").exists()
 
-    def test_malformed_managed_backup_marker_fails_as_controlled_oserror(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_unbound_legacy_backup_marker_is_ignored(self, tmp_path: Path, monkeypatch) -> None:
         source_skills_dir = tmp_path / "source-skills"
         self._write_skill(source_skills_dir, "run")
         monkeypatch.setattr(
@@ -349,8 +347,8 @@ class TestInstallHermesSkills:
         backup.mkdir(parents=True)
         backup.joinpath(_SWAP_MARKER).write_bytes(b"\xff\xfe")
 
-        with pytest.raises(OSError, match="malformed Hermes backup marker"):
-            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert backup.joinpath(_SWAP_MARKER).read_bytes() == b"\xff\xfe"
 
     def test_interrupted_swap_recovers_previous_generation_on_retry(
         self, tmp_path: Path, monkeypatch
@@ -403,7 +401,76 @@ class TestInstallHermesSkills:
         assert live_note.read_text(encoding="utf-8") == "keep across crash"
         assert target_dir.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "new skill\n"
 
-    def test_recovery_marker_cleanup_failure_leaves_retryable_backup(
+    def test_interrupted_owned_backup_restore_remains_recoverable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run", body="fresh\n")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        target = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / "ouroboros"
+        target.mkdir(parents=True)
+        target.joinpath("operator.txt").write_text("keep\n", encoding="utf-8")
+        real_replace = os.replace
+        first_interrupt = True
+
+        def interrupt_after_backup(src, dst):
+            nonlocal first_interrupt
+            result = real_replace(src, dst)
+            if Path(src) == target and first_interrupt:
+                first_interrupt = False
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_backup)
+        with pytest.raises(KeyboardInterrupt):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        def interrupt_after_restore(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst) == target and Path(src).name.startswith(".ouroboros.old."):
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", interrupt_after_restore)
+        with pytest.raises(KeyboardInterrupt):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts.os.replace", real_replace)
+        install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert target.joinpath("operator.txt").read_text(encoding="utf-8") == "keep\n"
+
+    def test_symlinked_canonical_target_is_rejected_without_following_marker(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_marker = outside / _SWAP_MARKER
+        outside_marker.write_text("operator marker\n", encoding="utf-8")
+        target = parent / "ouroboros"
+        parent.mkdir(parents=True)
+        target.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(OSError, match="symlinked"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+        assert outside_marker.read_text(encoding="utf-8") == "operator marker\n"
+
+    def test_invalid_utf8_intent_is_a_controlled_oserror(self, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "source-skills"
+        self._write_skill(source, "run")
+        monkeypatch.setattr("ouroboros.hermes.artifacts._repo_root_skills_dir", lambda: source)
+        parent = tmp_path / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+        parent.mkdir(parents=True)
+        intent = parent / f".ouroboros.old.{'d' * 32}.intent"
+        intent.write_bytes(b"\xff\xfe")
+
+        with pytest.raises(OSError, match="malformed Hermes swap record"):
+            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
+
+    def test_unbound_legacy_backup_is_preserved_during_refresh(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         source_skills_dir = tmp_path / "source-skills"
@@ -418,27 +485,10 @@ class TestInstallHermesSkills:
         backup.joinpath(_SWAP_MARKER).write_text(_SWAP_MARKER_CONTENT, encoding="utf-8")
         backup.joinpath("operator-note.txt").write_text("preserve\n", encoding="utf-8")
         target = parent / "ouroboros"
-        real_remove = _remove_target_path
-        failed = False
-
-        def fail_live_marker_cleanup(path: Path) -> None:
-            nonlocal failed
-            if path == target / _SWAP_MARKER and not failed:
-                failed = True
-                raise OSError("simulated marker cleanup failure")
-            real_remove(path)
-
-        monkeypatch.setattr(
-            "ouroboros.hermes.artifacts._remove_target_path", fail_live_marker_cleanup
-        )
-        with pytest.raises(OSError, match="marker cleanup failure"):
-            install_hermes_skills(hermes_dir=tmp_path / ".hermes")
-
-        assert not target.exists()
-        assert backup.joinpath(_SWAP_MARKER).is_file()
-        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", real_remove)
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
-        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert target.joinpath("run", "SKILL.md").is_file()
+        assert backup.joinpath(_SWAP_MARKER).is_file()
+        assert backup.joinpath("operator-note.txt").read_text(encoding="utf-8") == "preserve\n"
 
     def test_cleanup_failure_then_interruption_recovers_newest_generation(
         self, tmp_path: Path, monkeypatch

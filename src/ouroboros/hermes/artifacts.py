@@ -74,21 +74,35 @@ def _owned_backup_fingerprint(backup: Path) -> tuple[object, ...] | None:
 
 
 def _restore_owned_backup(backup: Path, target: Path) -> None:
-    _remove_target_path(backup / _SWAP_MARKER)
     if target.exists() or target.is_symlink():
         raise OSError(f"Refusing to overwrite concurrent Hermes generation: {target}")
     os.replace(backup, target)
+    try:
+        _remove_target_path(target / _SWAP_MARKER)
+    except BaseException:
+        if target.exists() and not backup.exists():
+            os.replace(target, backup)
+        raise
+
+
+def _read_swap_record(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        raise OSError(f"Refusing malformed Hermes swap record: {path}") from exc
 
 
 def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
     """Recover every externally-marked rename window before touching live state."""
+    if target.is_symlink():
+        raise OSError(f"Refusing Hermes recovery through symlinked directory target: {target}")
     records: list[tuple[Path, Path, str, str, str]] = []
     for intent in target.parent.glob(f"{backup_prefix}*{_SWAP_INTENT_SUFFIX}"):
         backup = intent.with_name(intent.name.removesuffix(_SWAP_INTENT_SUFFIX))
         suffix = backup.name.removeprefix(backup_prefix)
         if intent.is_symlink() or not intent.is_file() or not re.fullmatch(r"[0-9a-f]{32}", suffix):
             raise OSError(f"Refusing malformed Hermes swap intent: {intent}")
-        content = intent.read_text(encoding="utf-8")
+        content = _read_swap_record(intent)
         match = re.fullmatch(
             rf"ouroboros-hermes-(swap|remove)-v2:{re.escape(backup.name)}:"
             r"([0-9a-f]{32}):([0-9a-f]{64})\n",
@@ -102,8 +116,7 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
             if (
                 marker.is_symlink()
                 or not marker.is_file()
-                or marker.read_text(encoding="utf-8")
-                != _ownership_content(operation, backup, token, digest)
+                or _read_swap_record(marker) != _ownership_content(operation, backup, token, digest)
                 or _fingerprint_digest(_owned_backup_fingerprint(backup)) != digest
             ):
                 raise OSError(f"Refusing foreign Hermes swap backup: {backup}")
@@ -122,7 +135,7 @@ def _recover_swap_intents(target: Path, backup_prefix: str) -> None:
         if not backup.exists():
             marker = target / _SWAP_MARKER
             if marker.is_file() and not marker.is_symlink():
-                if marker.read_text(encoding="utf-8") == _ownership_content(
+                if _read_swap_record(marker) == _ownership_content(
                     operation, backup, _token, _digest
                 ):
                     _remove_target_path(marker)
@@ -305,20 +318,6 @@ def _refuse_symlinked_candidate_path_component(path: Path) -> None:
         raise OSError(msg)
 
 
-def _is_managed_backup(candidate: Path) -> bool:
-    """Validate one backup marker without trusting symlinks or corrupt text."""
-    marker = candidate / _SWAP_MARKER
-    if candidate.is_symlink() or not candidate.is_dir() or marker.is_symlink():
-        return False
-    if not marker.is_file():
-        return False
-    try:
-        return marker.read_text(encoding="utf-8") == _SWAP_MARKER_CONTENT
-    except UnicodeError as exc:
-        msg = f"Refusing malformed Hermes backup marker: {marker}"
-        raise OSError(msg) from exc
-
-
 def install_hermes_skills(
     *,
     hermes_dir: str | Path | None = None,
@@ -349,34 +348,6 @@ def install_hermes_skills(
     if target_dir.exists() and (live_marker.exists() or live_marker.is_symlink()):
         msg = f"Refusing to overwrite reserved Hermes swap marker: {live_marker}"
         raise OSError(msg)
-    managed_backups = [
-        candidate
-        for candidate in target_dir.parent.glob(f"{backup_prefix}*")
-        if _is_managed_backup(candidate)
-    ]
-    if managed_backups and not target_dir.exists():
-        if len(managed_backups) != 1:
-            msg = "Refusing ambiguous Hermes skill recovery with multiple managed backups"
-            raise OSError(msg)
-        recovered_backup = managed_backups[0]
-        os.replace(recovered_backup, target_dir)
-        # The marker proves ownership only while the generation is a backup.
-        # Once restored live, retaining it would make any later failed refresh
-        # poison every retry via the reserved-marker guard above.
-        try:
-            _remove_target_path(target_dir / _SWAP_MARKER)
-        except OSError:
-            # Restore the owned backup shape so the next refresh can retry the
-            # same recovery instead of finding a poisoned live marker.
-            os.replace(target_dir, recovered_backup)
-            raise
-    elif managed_backups:
-        # A previous publish may have succeeded before its old-generation
-        # cleanup failed.  Remove every stale managed backup before moving the
-        # current live generation so recovery can never choose by random UUID.
-        for managed_backup in managed_backups:
-            _remove_target_path(managed_backup)
-
     with _packaged_skills_dir() as source_root:
         source_skill_dirs = collect_skill_bundle_dirs(source_root)
         desired_skill_names = {skill_dir.name for skill_dir in source_skill_dirs}
