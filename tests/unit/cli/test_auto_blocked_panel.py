@@ -7,7 +7,7 @@ import io
 from rich.console import Console
 
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import AutoPipelineState, AutoResumeCapability
+from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability
 from ouroboros.cli.commands.auto import _render_blocked_panel
 
 
@@ -119,6 +119,26 @@ def test_blocked_panel_retry_carries_note_from_shared_helper() -> None:
 
     assert "resume     : ooo auto --resume auto_retry" in output
     assert "no prior session context" in output
+
+
+def test_blocked_panel_ralph_deadline_checkpoint_offers_resume() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.auto_session_id = "auto_ralph_deadline"
+    state.phase = AutoPhase.RALPH_HANDOFF
+    state.ralph_job_id = "job_1"
+    state.mark_blocked("pipeline timeout", tool_name="pipeline_deadline")
+    result = AutoPipelineResult(
+        status="blocked",
+        auto_session_id=state.auto_session_id,
+        phase="blocked",
+        blocker=state.last_error,
+        resume_capability=state.resume_capability(),
+    )
+
+    output = _capture(state, result)
+
+    assert "resume     : ooo auto --resume auto_ralph_deadline" in output
+    assert "not resumable" not in output
 
 
 def test_blocked_panel_truncates_long_blocker_and_collapses_whitespace() -> None:

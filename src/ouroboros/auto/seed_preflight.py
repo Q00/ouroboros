@@ -231,6 +231,11 @@ def _is_shell_assignment_position(command: str, start: int) -> bool:
     return False
 
 
+def _is_subprocess_separator(separator: str | None) -> bool:
+    """Return whether a separator isolates assignments in another process."""
+    return separator == "&" or (separator is not None and "|" in separator and separator != "||")
+
+
 def _nested_shell_scopes(
     command: str, inherited: frozenset[str] = frozenset()
 ) -> tuple[tuple[str, frozenset[str]], ...]:
@@ -242,14 +247,17 @@ def _nested_shell_scopes(
         parts = list(lexer)
     except ValueError:
         return ()
-    segments: list[list[str]] = [[]]
+    segments: list[tuple[list[str], str | None, str | None]] = [([], None, None)]
     for part in parts:
         if re.fullmatch(r"[;&|]+", part):
-            segments.append([])
+            current, before, _after = segments[-1]
+            segments[-1] = (current, before, part)
+            segments.append(([], part, None))
         else:
-            segments[-1].append(part)
+            segments[-1][0].append(part)
     nested: list[tuple[str, frozenset[str]]] = []
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+    sequential_exports = set(inherited)
 
     def unwrap(segment: list[str], bound: set[str]) -> list[str]:
         remaining = list(segment)
@@ -324,8 +332,20 @@ def _nested_shell_scopes(
             break
         return remaining
 
-    for segment in segments:
-        launcher_bound = set(inherited)
+    for segment, separator_before, separator_after in segments:
+        launcher_bound = set(sequential_exports)
+        if (
+            not _is_subprocess_separator(separator_before)
+            and not _is_subprocess_separator(separator_after)
+            and segment
+            and Path(segment[0]).name == "export"
+        ):
+            for token in segment[1:]:
+                if assignment.fullmatch(token):
+                    sequential_exports.add(token.partition("=")[0])
+                elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
+                    sequential_exports.add(token)
+            launcher_bound = set(sequential_exports)
         while segment and assignment.fullmatch(segment[0]):
             launcher_bound.add(segment[0].partition("=")[0])
             segment = segment[1:]

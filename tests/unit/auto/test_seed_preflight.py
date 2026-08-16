@@ -396,12 +396,29 @@ def test_nested_shell_inherits_launcher_environment_binding(tmp_path: Path, comm
     assert report.passed
 
 
+def test_nested_shell_inherits_prior_sequential_export(tmp_path: Path) -> None:
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+    command = "export VAULT_PATH=/tmp; sh -c 'python check.py --vault \"$VAULT_PATH\"'"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Exported binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+
+
 @pytest.mark.parametrize(
     "command",
     (
         "FOO=bar | printf '%s' \"$FOO\"",
         "FOO=bar & printf '%s' \"$FOO\"",
         "export FOO=bar | cat; printf '%s' \"$FOO\"",
+        "export FOO=bar |& cat; printf '%s' \"$FOO\"",
         "FOO=bar env -u FOO sh -c 'printf %s \"$FOO\"'",
     ),
 )
