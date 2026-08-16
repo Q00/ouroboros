@@ -18,7 +18,7 @@ def _capture(state: AutoPipelineState | None, result: AutoPipelineResult) -> str
     return buffer.getvalue()
 
 
-def test_blocked_panel_preflight_open_questions_and_resume() -> None:
+def test_blocked_panel_preflight_open_questions_and_start_new_session() -> None:
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
     state.auto_session_id = "auto_preflight"
     state.last_tool_name = "seed_preflight"
@@ -30,10 +30,10 @@ def test_blocked_panel_preflight_open_questions_and_resume() -> None:
         stop_reason_code="seed_preflight_unexecutable",
         blocker=(
             "Seed preflight found 2 unexecutable contract claim(s); answer "
-            "these open questions, revise the Seed, and resume: "
+            "these open questions, revise the Seed, and start a new session: "
             "does verify.sh exist? | what value binds $DEPLOY_TOKEN?"
         ),
-        resume_capability=AutoResumeCapability.RESUME,
+        resume_capability=AutoResumeCapability.NONE,
     )
 
     output = _capture(state, result)
@@ -42,7 +42,8 @@ def test_blocked_panel_preflight_open_questions_and_resume() -> None:
     assert "reason code: seed_preflight_unexecutable" in output
     assert "- does verify.sh exist?" in output
     assert "- what value binds $DEPLOY_TOKEN?" in output
-    assert "resume     : ooo auto --resume auto_preflight" in output
+    assert "resume     : not resumable — start a new session" in output
+    assert "--resume auto_preflight" not in output
 
 
 def test_blocked_panel_seed_qa_bullets_up_to_five() -> None:

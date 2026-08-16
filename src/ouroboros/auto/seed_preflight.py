@@ -85,8 +85,9 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
         if quote is not None:
             unquoted[index] = False
 
-    segment_spans: list[tuple[int, int]] = []
+    segments: list[tuple[int, int, str | None, str | None]] = []
     segment_start = 0
+    separator_before: str | None = None
     quote = None
     escaped = False
     substitution_depth = 0
@@ -110,9 +111,17 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             substitution_depth -= 1
             continue
         if quote is None and substitution_depth == 0 and character in ";&|\n":
-            segment_spans.append((segment_start, index))
-            segment_start = index + 1
-    segment_spans.append((segment_start, len(command)))
+            if index < segment_start:
+                continue
+            separator = character
+            if character in "&|" and command[index : index + 2] == character * 2:
+                separator = character * 2
+            if index > segment_start and command[index - 1] == character:
+                continue
+            segments.append((segment_start, index, separator_before, separator))
+            segment_start = index + len(separator)
+            separator_before = separator
+    segments.append((segment_start, len(command), separator_before, None))
 
     def shell_words(segment: str) -> tuple[str, ...]:
         words: list[str] = []
@@ -164,7 +173,8 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
 
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
     persistent_bindings: list[tuple[int, str]] = []
-    for start, end in segment_spans:
+    subshell_separators = {"&", "|"}
+    for start, end, separator_before, separator_after in segments:
         words = shell_words(command[start:end].strip())
         if not words:
             continue
@@ -176,11 +186,15 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
             "readonly",
             "typeset",
         }
-        if assignment_only:
+        persists = (
+            separator_before not in subshell_separators
+            and separator_after not in subshell_separators
+        )
+        if assignment_only and persists:
             persistent_bindings.extend(
                 (end, word.partition("=")[0]) for word in words if assignment.fullmatch(word)
             )
-        elif assignment_builtin:
+        elif assignment_builtin and persists:
             persistent_bindings.extend(
                 (end, word.partition("=")[0]) for word in words[1:] if assignment.fullmatch(word)
             )
@@ -217,8 +231,10 @@ def _is_shell_assignment_position(command: str, start: int) -> bool:
     return False
 
 
-def _nested_shell_commands(command: str) -> tuple[str, ...]:
-    """Return recursively wrapped command-position ``sh -c`` payloads."""
+def _nested_shell_scopes(
+    command: str, inherited: frozenset[str] = frozenset()
+) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Return nested ``sh -c`` payloads with launcher-exported bindings."""
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
@@ -232,10 +248,10 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
             segments.append([])
         else:
             segments[-1].append(part)
-    nested: list[str] = []
+    nested: list[tuple[str, frozenset[str]]] = []
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 
-    def unwrap(segment: list[str]) -> list[str]:
+    def unwrap(segment: list[str], bound: set[str]) -> list[str]:
         remaining = list(segment)
         while remaining:
             command_name = Path(remaining[0]).name
@@ -257,10 +273,21 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
                             continue
                         except ValueError:
                             return []
-                    if token in {"-u", "--unset", "-C", "--chdir"}:
+                    if token in {"-u", "--unset"}:
+                        if len(remaining) >= 2:
+                            bound.discard(remaining[1])
+                        remaining = remaining[2:]
+                        continue
+                    if token.startswith("--unset="):
+                        bound.discard(token.partition("=")[2])
+                        remaining = remaining[1:]
+                        continue
+                    if token in {"-C", "--chdir"}:
                         remaining = remaining[2:]
                         continue
                     if token.startswith("-") or assignment.fullmatch(token):
+                        if assignment.fullmatch(token):
+                            bound.add(token.partition("=")[0])
                         remaining = remaining[1:]
                         continue
                     break
@@ -298,16 +325,19 @@ def _nested_shell_commands(command: str) -> tuple[str, ...]:
         return remaining
 
     for segment in segments:
+        launcher_bound = set(inherited)
         while segment and assignment.fullmatch(segment[0]):
+            launcher_bound.add(segment[0].partition("=")[0])
             segment = segment[1:]
-        segment = unwrap(segment)
+        segment = unwrap(segment, launcher_bound)
         if (
             len(segment) >= 3
             and Path(segment[0]).name in {"sh", "bash"}
             and segment[1] in {"-c", "--command"}
         ):
-            nested.append(segment[2])
-            nested.extend(_nested_shell_commands(segment[2]))
+            scope = frozenset(launcher_bound)
+            nested.append((segment[2], scope))
+            nested.extend(_nested_shell_scopes(segment[2], scope))
     return tuple(nested)
 
 
@@ -503,11 +533,11 @@ def _check_verify_commands(
             continue
         scannable = _URL_RE.sub(" ", command)
         program_tokens = _command_program_tokens(command)
-        nested_shell_commands = _nested_shell_commands(scannable)
+        nested_shell_scopes = _nested_shell_scopes(scannable)
         outer_shell_command = _outer_shell_scope(scannable)
-        shell_commands = (outer_shell_command, *nested_shell_commands)
-        for shell_command in shell_commands:
-            command_bound: set[str] = set()
+        shell_scopes = ((outer_shell_command, frozenset()), *nested_shell_scopes)
+        for shell_command, inherited_bindings in shell_scopes:
+            command_bound: set[str] = set(inherited_bindings)
             for _, event, variable in _shell_variable_events(shell_command):
                 if event == "bind":
                     command_bound.add(variable)
@@ -642,6 +672,18 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 remaining = remaining[1:]
                 while remaining and remaining[0] in {"--", "-p", "-v", "-V"}:
                     remaining = remaining[1:]
+                continue
+            if command_name == "exec":
+                remaining = remaining[1:]
+                while remaining:
+                    token = remaining[0]
+                    if token == "-a" and len(remaining) >= 2:
+                        remaining = remaining[2:]
+                        continue
+                    if token in {"--", "-c", "-l"}:
+                        remaining = remaining[1:]
+                        continue
+                    break
                 continue
             break
         return remaining

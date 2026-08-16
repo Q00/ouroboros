@@ -19,7 +19,6 @@ _REVIEW_TOOLS = frozenset(
         "seed_loader",
         "seed_repairer",
         "seed_qa",
-        "seed_preflight",
         "seed_reviewer",
     }
 )

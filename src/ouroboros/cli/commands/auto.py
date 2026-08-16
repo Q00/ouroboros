@@ -1332,7 +1332,10 @@ def _render_blocked_panel(
     blocker_text = " ".join((result.blocker or "").split())[:400]
     open_items: list[str] = []
     if reason_code == "seed_preflight_unexecutable" and result.blocker:
-        _, _, tail = result.blocker.rpartition("resume: ")
+        marker = (
+            "start a new session: " if "start a new session: " in result.blocker else "resume: "
+        )
+        _, _, tail = result.blocker.rpartition(marker)
         if tail:
             open_items = [item.strip() for item in tail.split(" | ") if item.strip()]
     elif (result.last_qa_differences or result.last_qa_suggestions) and (

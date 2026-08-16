@@ -379,7 +379,53 @@ def test_shell_expansion_precedes_prefix_assignment_and_builtins_persist(
 @pytest.mark.parametrize(
     "command",
     (
+        "env FOO=bar sh -c 'printf %s \"$FOO\"'",
+        "FOO=bar sh -c 'printf %s \"$FOO\"'",
+    ),
+)
+def test_nested_shell_inherits_launcher_environment_binding(tmp_path: Path, command: str) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Nested binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "FOO=bar | printf '%s' \"$FOO\"",
+        "FOO=bar & printf '%s' \"$FOO\"",
+        "export FOO=bar | cat; printf '%s' \"$FOO\"",
+        "FOO=bar env -u FOO sh -c 'printf %s \"$FOO\"'",
+    ),
+)
+def test_shell_subprocess_bindings_do_not_leak_or_precede_expansion(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Scoped binding", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.subject for finding in report.blocking_findings] == ["$FOO"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "command -- ./missing-verify",
+        "exec ./missing-verify",
+        "command exec ./missing-verify",
         "nice -n5 ./missing-verify",
         "nice --adjustment=5 ./missing-verify",
     ),

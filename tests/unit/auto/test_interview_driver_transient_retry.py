@@ -97,7 +97,7 @@ async def _run_gap_closure_driver(tmp_path, answer_fn) -> tuple[object, object]:
 
 
 @pytest.mark.asyncio
-async def test_answer_round_raises_once_then_succeeds_not_blocked(tmp_path) -> None:
+async def test_answer_round_raises_once_then_blocks_without_receipt(tmp_path) -> None:
     """An answer failure fails closed without an idempotency receipt.
 
     Matching question text is not proof that a possibly committed answer is

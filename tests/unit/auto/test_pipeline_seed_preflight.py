@@ -2,8 +2,8 @@
 
 A Seed whose contract references fabricated facts (missing claimed scripts,
 unbound env vars, unresolvable brownfield paths) must block *before* the
-LLM Seed QA judge and before RUN, with the open questions in the blocker so
-the operator can answer them and ``--resume``.
+LLM Seed QA judge and before RUN, with open questions and truthful guidance
+to revise the Seed and start a replacement session.
 """
 
 from __future__ import annotations
@@ -149,7 +149,11 @@ def _driver(tmp_path, event_store: _RecordingEventStore | None = None) -> AutoIn
 
 @pytest.mark.asyncio
 async def test_pipeline_blocks_fabricated_seed_before_run(tmp_path) -> None:
+    generation_calls = 0
+
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        nonlocal generation_calls
+        generation_calls += 1
         return _fabricated_seed()
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
@@ -182,6 +186,8 @@ async def test_pipeline_blocks_fabricated_seed_before_run(tmp_path) -> None:
     assert "Obsidian Vault" in result.blocker
     assert "$VAULT_PATH" in result.blocker
     assert "verify_report.py" in result.blocker
+    assert "start a new session" in result.blocker
+    assert state.resume_capability().value == "none"
 
     # The gate announces itself: a preflight event with the open questions AND
     # a generic terminal-block event so attention-driven observers wake up.
@@ -198,6 +204,12 @@ async def test_pipeline_blocks_fabricated_seed_before_run(tmp_path) -> None:
     assert session_blocked[0].data["tool_name"] == "seed_preflight"
     assert session_blocked[0].data["blocker"] == "Auto session requires operator attention"
     assert "Obsidian Vault" not in session_blocked[0].data["blocker"]
+
+    persisted = AutoStore(tmp_path).load(state.auto_session_id)
+    repeated = await pipeline.run(persisted)
+    assert repeated.status == "blocked"
+    assert repeated.blocker == result.blocker
+    assert generation_calls == 1
 
 
 @pytest.mark.asyncio
@@ -225,8 +237,8 @@ async def test_pipeline_clean_seed_passes_preflight_and_runs(tmp_path) -> None:
     assert result.job_id == "job_preflight_clean"
 
 
-def test_seed_preflight_block_resumes_into_review() -> None:
-    assert _recoverable_phase_for_tool("seed_preflight") is AutoPhase.REVIEW
+def test_seed_preflight_block_requires_revised_seed_in_new_session() -> None:
+    assert _recoverable_phase_for_tool("seed_preflight") is None
 
 
 def test_seed_reviewer_timeout_block_resumes_into_review() -> None:

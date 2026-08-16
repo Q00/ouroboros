@@ -273,7 +273,7 @@ def test_auto_session_blocked_relays_blocker_evidence() -> None:
             "stop_reason_code": "seed_preflight_unexecutable",
             "tool_name": "seed_preflight",
             "blocker": "Seed preflight found 3 unexecutable contract claim(s); …",
-            "resume_capability": "resume",
+            "resume_capability": "none",
         },
     )
 
@@ -282,7 +282,7 @@ def test_auto_session_blocked_relays_blocker_evidence() -> None:
 
     assert relay["evidence"]["stop_reason_code"] == "seed_preflight_unexecutable"
     assert relay["evidence"]["blocker"].startswith("Seed preflight found")
-    assert relay["evidence"]["resume_capability"] == "resume"
+    assert relay["evidence"]["resume_capability"] == "none"
 
 
 def test_seed_preflight_blocked_relays_open_questions() -> None:

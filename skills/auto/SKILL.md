@@ -102,6 +102,19 @@ ask or send either argument; Auto restores the persisted contract.
 5. Starts execution only after A-grade.
 6. Auto reaches `COMPLETE` as soon as the run has a durable handle. The run keeps going as a background job, and that job carries its own `run → evaluate → ralph` chain governed by `execution.auto_evaluate` / `execution.auto_evolve` (both default `true`, Ralph bounded by `execution.auto_evolve_max_generations`). Auto does not evaluate the run itself; the chained evaluate job does.
 
+### Preflight blockers and recovery
+
+`seed_preflight_unexecutable` is a start-new-session boundary, not a plain
+`--resume` boundary. The persisted Seed artifact is immutable for that
+session, so answering an open question cannot silently replace the artifact.
+Use the displayed questions to revise the goal/Seed contract, then start a
+new `ooo auto` session; the blocked session remains available for audit.
+
+Transient interview, evaluator, and lateral-tool exhaustion is different: its
+resume capability is durable and can be retried with the same session after
+the external dependency or provider is healthy again. Do not treat a
+`seed_preflight_unexecutable` status as a retryable provider outage.
+
 ## Background monitoring UX
 
 When an auto start response includes `response.meta.job_id`:

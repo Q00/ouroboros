@@ -39,7 +39,8 @@ async def enforce_seed_preflight(
     )
     blocker = (
         f"Seed preflight found {len(report.blocking_findings)} unexecutable contract claim(s); "
-        "answer these open questions, revise the Seed, and resume: " + " | ".join(questions)
+        "answer these open questions, revise the Seed, and start a new session: "
+        + " | ".join(questions)
     )
     state.mark_blocked(
         blocker, tool_name="seed_preflight", error_code="seed_preflight_unexecutable"
