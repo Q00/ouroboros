@@ -119,7 +119,28 @@ def test_provider_entry_without_kind_or_base_url_is_rejected(tmp_path):
     status = inspect_zcode_model_config(tmp_path / "config.json")
 
     assert not status.ok
-    assert "neither kind nor options.baseURL" in status.detail
+    assert "no non-empty kind" in status.detail
+
+
+def test_provider_entry_requires_kind_base_url_and_api_key(tmp_path):
+    for entry in (
+        {"options": {"baseURL": "https://example.test", "apiKey": "key"}},
+        {"kind": "anthropic", "options": {"apiKey": "key"}},
+        {"kind": "anthropic", "options": {"baseURL": "https://example.test"}},
+        {
+            "kind": "anthropic",
+            "options": {"baseURL": "https://example.test", "apiKey": ""},
+        },
+    ):
+        _write_config(
+            tmp_path,
+            {
+                "model": {"main": "p/m"},
+                "provider": {"p": entry},
+            },
+        )
+        status = inspect_zcode_model_config(tmp_path / "config.json")
+        assert not status.ok
 
 
 def test_string_model_with_provider_entry_passes(tmp_path):

@@ -93,3 +93,31 @@ def test_runtime_backend_row_unchanged_for_other_backends(monkeypatch):
 
     assert row["status"] == "ok"
     assert row["detail"] == "codex: /bin/codex"
+
+
+def test_zcode_candidate_uses_runtime_environment_path(monkeypatch, tmp_path):
+    script = tmp_path / "custom-zcode.cjs"
+    script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(script))
+
+    candidates = status_module._candidate_cli_paths("zcode", {})
+
+    assert candidates[0] == str(script)
+
+
+def test_zcode_health_accepts_readable_script_path(monkeypatch, tmp_path):
+    script = tmp_path / "custom-zcode.cjs"
+    script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(script))
+    monkeypatch.setattr(
+        status_module,
+        "inspect_zcode_model_config",
+        lambda: _probe_result(True, "model.main -> p/m"),
+    )
+
+    row = status_module._check_runtime_backend(
+        {"orchestrator": {"runtime_backend": "zcode"}, "llm": {"backend": "zcode"}}
+    )
+
+    assert row["status"] == "ok"
+    assert str(script) in row["detail"]

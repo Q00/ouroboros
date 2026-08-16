@@ -34,7 +34,7 @@ from ouroboros.cli.formatters.tables import (
     create_table,
     print_table,
 )
-from ouroboros.config.loader import load_config
+from ouroboros.config.loader import get_zcode_cli_path, load_config
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.config.zcode_model_config import inspect_zcode_model_config
 from ouroboros.events.base import BaseEvent
@@ -693,6 +693,10 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
     """Return CLI path candidates using the same precedence as runtime launchers."""
     candidates: list[str] = []
+    if backend == "zcode":
+        zcode_path = get_zcode_cli_path()
+        if zcode_path:
+            candidates.append(zcode_path)
     env_key = _CLI_PATH_ENV_BY_BACKEND.get(backend)
     if env_key is not None:
         env_path = os.environ.get(env_key, "").strip()
@@ -742,7 +746,12 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
             continue
         expanded = Path(candidate).expanduser()
         if expanded.is_absolute() or len(expanded.parts) > 1:
-            if expanded.exists() and expanded.is_file() and os.access(expanded, os.X_OK):
+            script = backend == "zcode" and expanded.suffix.lower() in {".cjs", ".js", ".mjs"}
+            if (
+                expanded.exists()
+                and expanded.is_file()
+                and (os.access(expanded, os.R_OK) if script else os.access(expanded, os.X_OK))
+            ):
                 return _runtime_backend_health_row(backend, f"{backend}: {expanded}")
             continue
         resolved = shutil.which(candidate)

@@ -141,11 +141,25 @@ def inspect_zcode_model_config(
         )
 
     options = entry.get("options")
-    has_base_url = isinstance(options, dict) and bool(options.get("baseURL"))
-    if not entry.get("kind") and not has_base_url:
+    kind = entry.get("kind")
+    base_url = options.get("baseURL") if isinstance(options, dict) else None
+    api_key = options.get("apiKey") if isinstance(options, dict) else None
+    if not isinstance(kind, str) or not kind.strip():
         return ZcodeModelConfigStatus(
             ok=False,
-            detail=f"provider {provider_id!r} entry has neither kind nor options.baseURL",
+            detail=f"provider {provider_id!r} entry has no non-empty kind",
+            config_path=path,
+        )
+    if not isinstance(base_url, str) or not base_url.strip():
+        return ZcodeModelConfigStatus(
+            ok=False,
+            detail=f"provider {provider_id!r} entry has no non-empty options.baseURL",
+            config_path=path,
+        )
+    if not isinstance(api_key, str) or not api_key.strip():
+        return ZcodeModelConfigStatus(
+            ok=False,
+            detail=f"provider {provider_id!r} entry has no non-empty options.apiKey",
             config_path=path,
         )
 
