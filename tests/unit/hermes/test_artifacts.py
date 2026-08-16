@@ -626,20 +626,26 @@ class TestInstallHermesSkills:
         second = tmp_path / "second"
         second.mkdir()
         second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
-        real_rmtree = shutil.rmtree
+        from ouroboros.hermes.artifacts import _remove_fingerprinted_tree
 
-        def partially_delete_retirement(path: Path) -> None:
+        def partially_delete_retirement(path: Path, _fingerprint: tuple[object, ...]) -> None:
             path.joinpath("operator.txt").unlink(missing_ok=True)
             raise OSError("synthetic mid-delete failure")
 
-        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.rmtree", partially_delete_retirement)
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_fingerprinted_tree",
+            partially_delete_retirement,
+        )
         with pytest.raises(OSError, match="synthetic mid-delete failure"):
             atomic_swap_generation(target, first)
 
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
         assert not tuple(tmp_path.glob(".ouroboros.old.*.intent"))
 
-        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.rmtree", real_rmtree)
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_fingerprinted_tree",
+            _remove_fingerprinted_tree,
+        )
         atomic_swap_generation(target, second)
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
 
@@ -753,10 +759,13 @@ class TestInstallHermesSkills:
         second = tmp_path / "second"
         second.mkdir()
         second.joinpath("generation.txt").write_text("second\n", encoding="utf-8")
-        real_rmtree = shutil.rmtree
+        from ouroboros.hermes.artifacts import _remove_fingerprinted_tree
+
         monkeypatch.setattr(
-            "ouroboros.hermes.artifacts.shutil.rmtree",
-            lambda _path: (_ for _ in ()).throw(OSError("persistent cleanup failure")),
+            "ouroboros.hermes.artifacts._remove_fingerprinted_tree",
+            lambda _path, _fingerprint: (_ for _ in ()).throw(
+                OSError("persistent cleanup failure")
+            ),
         )
         with pytest.raises(OSError, match="persistent cleanup failure"):
             atomic_swap_generation(target, first)
@@ -764,7 +773,10 @@ class TestInstallHermesSkills:
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "first\n"
         assert not tuple(tmp_path.glob(".ouroboros.old.*.intent"))
 
-        monkeypatch.setattr("ouroboros.hermes.artifacts.shutil.rmtree", real_rmtree)
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_fingerprinted_tree",
+            _remove_fingerprinted_tree,
+        )
         atomic_swap_generation(target, second)
         assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "second\n"
 
@@ -951,6 +963,37 @@ class TestInstallHermesSkills:
 
         preserved = next(path for path in tmp_path.glob(".ouroboros.old.*") if path.is_dir())
         assert preserved.joinpath("operator-after-unlink.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+
+    def test_retirement_cleanup_preserves_mutation_at_delete_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import (
+            _remove_fingerprinted_tree,
+            atomic_swap_generation,
+        )
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+
+        def mutate_before_delete(path: Path, fingerprint: tuple[object, ...]) -> None:
+            path.joinpath("operator-at-delete.txt").write_text("preserve\n", encoding="utf-8")
+            _remove_fingerprinted_tree(path, fingerprint)
+
+        monkeypatch.setattr(
+            "ouroboros.hermes.artifacts._remove_fingerprinted_tree",
+            mutate_before_delete,
+        )
+        with pytest.raises(OSError, match="changed Hermes retirement tree"):
+            atomic_swap_generation(target, replacement)
+
+        retirement = next(path for path in tmp_path.glob("*.retired.*") if path.is_dir())
+        assert retirement.joinpath("operator-at-delete.txt").read_text(encoding="utf-8") == (
             "preserve\n"
         )
 
