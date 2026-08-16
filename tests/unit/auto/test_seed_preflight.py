@@ -360,6 +360,8 @@ def test_wrapped_nested_and_outer_shell_scopes_are_all_scanned(
         ('env TOKEN=$MISSING sh -c "echo ok"', {"$MISSING"}),
         ('FOO=bar printf "%s\\n" "$FOO"', {"$FOO"}),
         ('export FOO=bar; printf "%s\\n" "$FOO"', set()),
+        ('FOO=bar export FOO; printf "%s\\n" "$FOO"', set()),
+        ('FOO=bar readonly FOO; printf "%s\\n" "$FOO"', set()),
         ('FOO=bar; printf "%s\\n" "$FOO"', set()),
     ),
 )
@@ -760,6 +762,50 @@ def test_missing_extensionless_executable_blocks_unless_declared_artifact(
 
     assert [finding.code for finding in blocked.blocking_findings] == ["verify_program_missing"]
     assert declared.passed
+
+
+@pytest.mark.parametrize("command", ("cd sub && python check.py", "env -C sub python check.py"))
+def test_verifier_program_resolves_from_deterministic_shell_directory(
+    tmp_path: Path, command: str
+) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Directory-aware verifier", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+
+
+@pytest.mark.parametrize("command", ("cd sub && python check.py", "env -C sub python check.py"))
+def test_verifier_program_missing_in_effective_shell_directory_is_blocked(
+    tmp_path: Path, command: str
+) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Directory-aware verifier", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
 
 
 def test_verify_reference_declared_as_artifact_is_clean(tmp_path: Path) -> None:

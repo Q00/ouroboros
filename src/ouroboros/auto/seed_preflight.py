@@ -219,7 +219,7 @@ def _shell_variable_events(command: str) -> tuple[tuple[int, str, str], ...]:
         elif assignment_builtin and persists:
             persistent_bindings.extend(
                 (end, word.partition("=")[0])
-                for word in words[command_index + 1 :]
+                for word in (*words[:command_index], *words[command_index + 1 :])
                 if assignment.fullmatch(word)
             )
         elif command_name == "read" and persists:
@@ -686,6 +686,35 @@ def _path_exists(path_text: str, workspace_root: Path | None) -> bool | None:
     return (workspace_root / candidate).exists()
 
 
+_DETERMINISTIC_CWD_RE = re.compile(
+    r"(?:^|(?:&&|\|\||[;\n])\s*)cd\s+(?P<cd>[^\s;&|]+)"
+    r"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>[^\s;&|]+)"
+)
+
+
+def _program_path_exists(path_text: str, command: str, workspace_root: Path | None) -> bool | None:
+    """Resolve verifier programs after deterministic shell directory changes.
+
+    Dynamic directory changes are intentionally inconclusive: blocking on the
+    launcher's root in that case would reject a command that the real shell can
+    execute from its effective working directory.
+    """
+    candidate = Path(path_text).expanduser()
+    if workspace_root is None or candidate.is_absolute():
+        return _path_exists(path_text, workspace_root)
+    matches = list(_DETERMINISTIC_CWD_RE.finditer(command))
+    if not matches:
+        return _path_exists(path_text, workspace_root)
+    match = matches[-1]
+    directory = match.group("cd") or match.group("env")
+    if not directory or any(character in directory for character in "'$\""):
+        return None
+    effective_root = Path(directory).expanduser()
+    if not effective_root.is_absolute():
+        effective_root = workspace_root / effective_root
+    return (effective_root / candidate).exists()
+
+
 def _check_context_references(seed: Seed, workspace_root: Path | None) -> list[PreflightFinding]:
     findings: list[PreflightFinding] = []
     for reference in seed.brownfield_context.context_references:
@@ -794,8 +823,13 @@ def _check_verify_commands(
             if normalized in artifacts or normalized in claimed_files or normalized in seen_tokens:
                 continue
             seen_tokens.add(normalized)
-            if _path_exists(token, workspace_root) is False:
-                is_program = normalized in program_tokens
+            is_program = normalized in program_tokens
+            path_status = (
+                _program_path_exists(token, command, workspace_root)
+                if is_program
+                else _path_exists(token, workspace_root)
+            )
+            if path_status is False:
                 findings.append(
                     PreflightFinding(
                         code=(
