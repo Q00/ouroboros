@@ -57,8 +57,10 @@ Example: `[{"description":"Tasks can be created","verify":"python -m pytest test
 Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
-- Use exactly one single-line shell command.
+- Use exactly one single-line shell command that exits 0 only when the criterion is met; the exit code is the verdict.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
+- NEVER end the command with an always-succeeding fallback such as `|| true`, `; true`, `| true`, `|| :`, or `|| exit 0` — the final status must come from the tested command itself, not a no-op after it (`|| true` masks a failure on macOS/Linux and cannot run on Windows at all).
+- If the criterion is not checkable by one shell line (for example DOM interaction or cross-session persistence), write `verify: NONE` and rely on `artifacts:` instead of inventing a masked proxy.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
 
 `artifacts` / `expected_artifacts` semantics:

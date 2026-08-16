@@ -1479,7 +1479,132 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
         return "verify_command must be a single-line command"
     if _contains_posix_heredoc_operator(command):
         return "verify_command uses heredoc/multiline shell syntax; use python -c or pytest instead"
+    if _contains_status_masking_fallback(command):
+        return _STATUS_MASKING_REASON
     return None
+
+
+_STATUS_MASKING_REASON = (
+    "verify_command chains into an always-succeeding fallback such as `|| true`; "
+    "the exit code is the verdict, so a masked command verifies nothing (and "
+    "`|| true` cannot run on Windows); use one command that exits 0 only when "
+    "the criterion is met"
+)
+
+# An always-succeeding word: the final status of the operator chain then comes
+# from the fallback, not the tested command.
+_ALWAYS_SUCCEEDS_WORD_RE = re.compile(r"(?:true|:|exit\s+0)(?=$|[\s;|&)}#])")
+# ``;``, single ``&``, and single ``|`` fallbacks only decide the verdict when
+# they end the command; an optional trailing comment is allowed.
+_MASKING_FALLBACK_TAIL_RE = re.compile(r"(?:\|\||;|&|\|)\s*(?:true|:|exit\s+0)\s*(?:#.*)?$")
+
+
+def _contains_status_masking_fallback(command: str) -> bool:
+    """Return whether a no-op success can replace the tested command's status.
+
+    The verify contract is one command whose exit code is the verdict, so an
+    always-succeeding fallback after ``||``, ``|``, ``;``, or ``&`` makes the
+    final status independent of the tested command (#2155). ``|| true`` masks
+    wherever it appears, including mid-command chains such as
+    ``cmd || true; echo done`` whose tail looks legitimate; ``;``/``&``/pipe
+    fallbacks matter only at the end of the command. Quoted text and shell
+    expansions are data. ``&&`` preserves a left-side failure and stays valid,
+    and single-``|`` case-pattern alternatives mid-command are unaffected.
+    """
+    body = command.strip()
+    tail = _MASKING_FALLBACK_TAIL_RE.search(body)
+    if tail is not None and _operator_position_is_unquoted(body, tail.start()):
+        return True
+    return _contains_unquoted_double_pipe_fallback(body)
+
+
+def _operator_position_is_unquoted(body: str, start: int) -> bool:
+    """Return whether ``body[:start]`` leaves the reader outside any quote."""
+    quote: str | None = None
+    escaped = False
+    for char in body[:start]:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+    return quote is None
+
+
+def _contains_unquoted_double_pipe_fallback(body: str) -> bool:
+    """Return whether an unquoted ``||`` is followed by an always-succeeding word."""
+    quote: str | None = None
+    escaped = False
+    word_started = False
+    index = 0
+    length = len(body)
+    while index < length:
+        char = body[index]
+        if escaped:
+            escaped = False
+            word_started = True
+            index += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            word_started = True
+            index += 1
+            continue
+        if char == "$" and index + 1 < length and body[index + 1] in "({":
+            expansion_end = _posix_expansion_end(body, index)
+            if expansion_end is not None:
+                index = expansion_end
+                word_started = True
+                continue
+        if char == "`":
+            substitution_end = _posix_backtick_substitution_end(body, index)
+            if substitution_end is not None:
+                index = substitution_end
+                word_started = True
+                continue
+        if char.isspace():
+            word_started = False
+            index += 1
+            continue
+        if char == "#" and not word_started:
+            break
+        if char == "|" and index + 1 < length and body[index + 1] == "|":
+            cursor = index + 2
+            while cursor < length and body[cursor].isspace():
+                cursor += 1
+            if _ALWAYS_SUCCEEDS_WORD_RE.match(body, cursor) is not None:
+                return True
+            index = cursor
+            word_started = False
+            continue
+        word_started = True
+        index += 1
+    return False
 
 
 def _contains_posix_heredoc_operator(command: str) -> bool:
@@ -2108,7 +2233,7 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
 ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
-ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command that exits 0 only when the criterion is met; the exit code is the verdict. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead. Never end the command with an always-succeeding fallback such as `|| true`, `; true`, `| true`, `|| :`, or `|| exit 0` — the final status must come from the tested command itself, not a no-op after it (`|| true` also cannot run on Windows at all). If the criterion is not checkable by one shell line, emit `verify: NONE` and rely on `artifacts:` instead of inventing a masked proxy.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
@@ -2221,7 +2346,7 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
 ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
-ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command that exits 0 only when the criterion is met; the exit code is the verdict. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead. Never end the command with an always-succeeding fallback such as `|| true`, `; true`, `| true`, `|| :`, or `|| exit 0` — the final status must come from the tested command itself, not a no-op after it (`|| true` also cannot run on Windows at all). If the criterion is not checkable by one shell line, emit `verify: NONE` and rely on `artifacts:` instead of inventing a masked proxy.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 

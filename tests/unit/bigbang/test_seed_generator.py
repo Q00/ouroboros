@@ -31,6 +31,7 @@ from ouroboros.bigbang.seed_generator import (
     _parse_exit_conditions,
     _parse_ontology_fields,
     _parse_string_array_values,
+    _unsupported_verify_command_reason,
     load_seed,
     save_seed_sync,
 )
@@ -2475,6 +2476,107 @@ class TestSeedGeneratorExtraction:
         assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_generate_retries_when_verify_command_masks_status(self) -> None:
+        """A masked verify_command must be rejected before Seed build (#2155).
+
+        The generated command from the report raises TimeoutExpired inside
+        ``python -c`` and then chains ``2>&1 || true``, so it can never exit 0
+        on Windows and always exits 0 on POSIX without verifying anything.
+        """
+        masked_command = (
+            'python -c "import subprocess, sys; r = subprocess.run([sys.executable, '
+            "'-m', 'http.server', '8000'], timeout=1, capture_output=True); "
+            "print('server ok')\" 2>&1 || true"
+        )
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad_response = create_valid_extraction_response(
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "Widget data survives a refresh",
+                        "verify": masked_command,
+                        "artifacts": ["app/widgets/weekly-review.js"],
+                        "expect": "NONE",
+                    }
+                ]
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Widget data survives a refresh | verify: NONE | "
+                "artifacts: app/widgets/weekly-review.js | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command is None
+        assert criterion.expected_artifacts == ("app/widgets/weekly-review.js",)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "masked_command",
+        (
+            "pytest tests/test_app.py -q || true",
+            "pytest tests/test_app.py -q; true",
+            "pytest tests/test_app.py -q | true",
+            "python -c \"print('ok')\" || exit 0",
+        ),
+    )
+    async def test_generate_rejects_status_masking_on_initial_and_retry_extraction(
+        self, masked_command: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        bad_responses = [
+            create_valid_extraction_response(
+                acceptance_criteria=json.dumps(
+                    [
+                        {
+                            "description": "Tests pass",
+                            "verify": masked_command,
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                        }
+                    ]
+                )
+            )
+            for masked_command in (masked_command, masked_command + " # retry")
+        ]
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(response)) for response in bad_responses
+            ]
+        )
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(
+            create_interview_state_with_rounds(), create_low_ambiguity_score()
+        )
+
+        assert result.is_err
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_generate_extracts_ontology_schema(self) -> None:
         """SeedGenerator extracts ontology schema with fields."""
         mock_adapter = AsyncMock()
@@ -2801,6 +2903,53 @@ class TestSeedGeneratorRobustParsing:
             assert result.is_err
             assert "after 2 attempts" in str(result.error)
             assert mock_adapter.complete.call_count == 2
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "python -c \"print('ok')\" || true",
+            "python -c \"print('ok')\" 2>&1 || true",
+            "python -c \"import subprocess; subprocess.run(['true'], timeout=1)\" || true",
+            # a fallback anywhere in the chain masks, even when the tail looks
+            # legitimate (#2155 review: the masked failure still exits 0)
+            'python -c "import sys; sys.exit(1)" || true; echo verifier-complete',
+            "pytest -q || :; echo done",
+            "pytest -q || exit 0 && echo done",
+            "pytest -q || :",
+            "pytest -q || exit 0",
+            "pytest -q; true",
+            "pytest -q | true",
+        ),
+    )
+    def test_unsupported_verify_command_reason_rejects_status_masking_chains(
+        self, command: str
+    ) -> None:
+        reason = _unsupported_verify_command_reason(command)
+        assert reason is not None
+        assert "always-succeeding fallback" in reason
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "pytest -q",
+            "python -m pytest tests/test_tasks.py -q && echo OK",
+            "python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"",
+            "python -c \"print('server ok')\" 2>&1",
+            "pytest -q > results.txt 2>&1",
+            "python -m http.server 8000 < port.txt",
+            "python -c \"print('a || true')\"",
+            "python -c \"print('x; y | z & w')\"",
+            # a pipe to a real command reports the pipeline's own status, and
+            # ``wait`` after ``&`` reports the background job's real status
+            "pytest -q | tail -5",
+            "pytest -q & wait",
+            "true;# user's note",
+        ),
+    )
+    def test_unsupported_verify_command_reason_allows_status_preserving_forms(
+        self, command: str
+    ) -> None:
+        assert _unsupported_verify_command_reason(command) is None
 
 
 class TestSeedGeneratorSaveAndLoad:
