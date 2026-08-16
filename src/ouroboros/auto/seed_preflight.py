@@ -246,6 +246,7 @@ def _shell_variable_events(
 
     def in_command_substitution(position: int) -> bool:
         depth = 0
+        backquote = False
         quote: str | None = None
         escaped = False
         index = 0
@@ -272,8 +273,10 @@ def _shell_variable_events(
                 continue
             if quote != "'" and character == ")" and depth:
                 depth -= 1
+            elif quote != "'" and character == "`":
+                backquote = not backquote
             index += 1
-        return depth > 0
+        return depth > 0 or backquote
 
     def in_subprocess_segment(position: int) -> bool:
         boundary = max(command.rfind(";", 0, position), command.rfind("\n", 0, position))
@@ -721,8 +724,12 @@ def _path_exists(path_text: str, workspace_root: Path | None) -> bool | None:
 
 
 _STATIC_SHELL_WORD = r"""(?:[^\s;&|\\'\"]+|\\.|'[^']*'|\"(?:\\.|[^\"])*\")+"""
+_CD_COMMAND_PREFIX = (
+    rf"(?:[A-Za-z_][A-Za-z0-9_]*=(?:{_STATIC_SHELL_WORD})?\s+)*"
+    r"(?:command(?:\s+(?:-p|--))*\s+)?"
+)
 _DETERMINISTIC_CWD_RE = re.compile(
-    r"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{\s*)cd\s+"
+    rf"(?:^|(?:&&|\|\||[;\n])\s*|then\s+|\{{\s*){_CD_COMMAND_PREFIX}cd\s+"
     rf"(?:(?:-L|-P|--)\s+)*(?P<cd>{_STATIC_SHELL_WORD})"
     rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)=(?P<env_eq>{_STATIC_SHELL_WORD})"
     rf"|\benv\s+(?:[^;&|]*?\s)?(?:-C|--chdir)\s+(?P<env>{_STATIC_SHELL_WORD})"

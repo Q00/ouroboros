@@ -353,6 +353,23 @@ def test_literal_or_escaped_dollar_is_not_an_environment_expansion(
     assert all(finding.code != "unbound_env_var" for finding in report.findings)
 
 
+def test_backquote_assignment_does_not_bind_outer_shell_variable(tmp_path: Path) -> None:
+    command = ': `${FOO:=true}`; set -u; test -n "$FOO"'
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Backquote scope verifier", verify_command=command
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.subject for finding in report.blocking_findings] == ["$FOO"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
 @pytest.mark.parametrize(
     ("command", "expected_blocking"),
     (
@@ -868,6 +885,8 @@ def test_missing_extensionless_executable_blocks_unless_declared_artifact(
     (
         "cd sub && python check.py",
         "cd -- sub && python check.py",
+        "CDPATH= cd sub && python check.py",
+        "CDPATH= command cd sub && python check.py",
         "env -C sub python check.py",
         "env --chdir=sub python check.py",
         "sh -c 'cd sub && python check.py'",
@@ -908,6 +927,8 @@ def test_verifier_program_resolves_from_deterministic_shell_directory(
     (
         "cd sub && python check.py",
         "cd -- sub && python check.py",
+        "CDPATH= cd sub && python check.py",
+        "CDPATH= command cd sub && python check.py",
         "env -C sub python check.py",
         "env --chdir=sub python check.py",
         "sh -c 'cd sub && python check.py'",
