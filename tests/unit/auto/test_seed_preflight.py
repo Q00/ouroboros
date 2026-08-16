@@ -1467,6 +1467,22 @@ def test_program_reachability_is_scoped_per_occurrence_with_shell_parity(
     assert (result.returncode != 0) is blocked
 
 
+def test_prior_cd_failure_exit_does_not_hide_later_missing_verifier(tmp_path: Path) -> None:
+    command = "cd . || exit 1; python3 missing.py"
+
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Guarded cd", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode != 0
+
+
 @pytest.mark.parametrize(
     "command",
     ("python3 check.py && cd sub", "python3 check.py && env -C sub true"),

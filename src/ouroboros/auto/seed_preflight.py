@@ -951,9 +951,15 @@ def _effective_program_root(
         # by the same successful ``&&`` chain.
         matched_prefix = match.group(0).lstrip()
         suffix = command[match.end() : token_position]
+        cwd_guard_scope = re.split(r"[;\n]", suffix, maxsplit=1)[0]
+        conditional_failure_exits = (
+            re.fullmatch(r"\s*\|\|\s*(?:exit|return)(?:\s+\d+)?\s*", cwd_guard_scope) is not None
+        )
         if matched_prefix.startswith("||") or re.search(
-            r"(?:\|\||(?<!&)&(?!&)|(?<!\|)\|(?!\|))", suffix
+            r"(?<!&)&(?!&)|(?<!\|)\|(?!\|)", cwd_guard_scope
         ):
+            return None
+        if "||" in cwd_guard_scope and not conditional_failure_exits:
             return None
         if matched_prefix.startswith("&&") and re.search(r"[;\n]", suffix):
             return None
