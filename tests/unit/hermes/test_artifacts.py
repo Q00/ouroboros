@@ -508,12 +508,12 @@ class TestInstallHermesSkills:
         real_remove = _remove_target_path
         failed_cleanup = False
 
-        def fail_first_backup_cleanup(path: Path) -> None:
+        def fail_first_backup_cleanup(path: Path, *args, **kwargs) -> None:
             nonlocal failed_cleanup
             if path.name.startswith(".ouroboros.old.") and not failed_cleanup:
                 failed_cleanup = True
                 raise OSError("simulated backup cleanup failure")
-            real_remove(path)
+            real_remove(path, *args, **kwargs)
 
         monkeypatch.setattr(
             "ouroboros.hermes.artifacts._remove_target_path", fail_first_backup_cleanup
@@ -556,10 +556,10 @@ class TestInstallHermesSkills:
         target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
         real_remove = _remove_target_path
 
-        def fail_backup_cleanup(path: Path) -> None:
+        def fail_backup_cleanup(path: Path, *args, **kwargs) -> None:
             if path.name.startswith(".ouroboros.old."):
                 raise OSError("synthetic backup cleanup failure")
-            real_remove(path)
+            real_remove(path, *args, **kwargs)
 
         monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", fail_backup_cleanup)
         install_hermes_skills(hermes_dir=tmp_path / ".hermes")
@@ -830,6 +830,40 @@ class TestInstallHermesSkills:
             cleanup.joinpath("generation", "operator-after-capture.txt").read_text(encoding="utf-8")
             == "preserve\n"
         )
+        assert tuple(tmp_path.glob("*.intent"))
+
+    def test_cleanup_preserves_file_inserted_at_recursive_delete_boundary(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from ouroboros.hermes.artifacts import atomic_swap_generation
+
+        target = tmp_path / "ouroboros"
+        target.mkdir()
+        target.joinpath("generation.txt").write_text("old\n", encoding="utf-8")
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
+        real_remove = _remove_target_path
+        injected = False
+
+        def inject_at_delete(path: Path, *args, **kwargs) -> None:
+            nonlocal injected
+            if path.name == "generation" and not injected:
+                injected = True
+                path.joinpath("operator-at-delete.txt").write_text("preserve\n", encoding="utf-8")
+            real_remove(path, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.hermes.artifacts._remove_target_path", inject_at_delete)
+
+        with pytest.raises(OSError, match="changed at deletion boundary"):
+            atomic_swap_generation(target, replacement)
+
+        cleanup = next(path for path in tmp_path.glob("*.cleanup.*") if path.is_dir())
+        assert (
+            cleanup.joinpath("generation", "operator-at-delete.txt").read_text(encoding="utf-8")
+            == "preserve\n"
+        )
+        assert target.joinpath("generation.txt").read_text(encoding="utf-8") == "new\n"
         assert tuple(tmp_path.glob("*.intent"))
 
     @pytest.mark.parametrize("operation", ("swap", "remove"))
@@ -1105,10 +1139,10 @@ class TestInstallHermesSkills:
         target.joinpath("SKILL.md").write_text("published\n", encoding="utf-8")
         real_remove = _remove_target_path
 
-        def interrupt_backup_removal(path: Path) -> None:
+        def interrupt_backup_removal(path: Path, *args, **kwargs) -> None:
             if path.name == "generation":
                 raise OSError("synthetic removal interruption")
-            real_remove(path)
+            real_remove(path, *args, **kwargs)
 
         monkeypatch.setattr(
             "ouroboros.hermes.artifacts._remove_target_path", interrupt_backup_removal
@@ -1140,10 +1174,10 @@ class TestInstallHermesSkills:
         replacement.joinpath("generation.txt").write_text("new\n", encoding="utf-8")
         real_remove = _remove_target_path
 
-        def interrupt_generation_removal(path: Path) -> None:
+        def interrupt_generation_removal(path: Path, *args, **kwargs) -> None:
             if path.name == "generation":
                 raise KeyboardInterrupt
-            real_remove(path)
+            real_remove(path, *args, **kwargs)
 
         monkeypatch.setattr(
             "ouroboros.hermes.artifacts._remove_target_path", interrupt_generation_removal

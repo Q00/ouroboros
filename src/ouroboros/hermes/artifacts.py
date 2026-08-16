@@ -210,7 +210,8 @@ def _finish_owned_cleanup(
             digest=digest,
             backup_identity=backup,
         )
-        _remove_target_path(generation)
+        deletion_fingerprint = _tree_fingerprint(generation)
+        _remove_target_path(generation, expected_fingerprint=deletion_fingerprint)
     _remove_target_path(active)
     _remove_target_path(cleanup / _CLEANUP_MARKER)
     cleanup.rmdir()
@@ -577,8 +578,39 @@ def _packaged_skills_dir() -> Iterator[Path]:
         yield resolved_dir
 
 
-def _remove_target_path(path: Path) -> None:
+def _remove_exact_path(path: Path, fingerprint: tuple[object, ...] | None) -> None:
+    """Delete only the exact snapshotted tree, refusing added descendants."""
+    if _tree_fingerprint(path) != fingerprint:
+        raise OSError(f"Hermes cleanup generation changed at deletion boundary: {path}")
+    if fingerprint is None:
+        return
+    kind = fingerprint[0]
+    if kind in {"link", "file"}:
+        path.unlink()
+        return
+    if kind != "dir":
+        raise OSError(f"Refusing unsupported Hermes cleanup path: {path}")
+    expected_children = dict(fingerprint[2])
+    actual_children = {child.name: child for child in path.iterdir()}
+    if actual_children.keys() != expected_children.keys():
+        raise OSError(f"Hermes cleanup generation changed at deletion boundary: {path}")
+    for name, child_fingerprint in expected_children.items():
+        _remove_exact_path(actual_children[name], child_fingerprint)
+    # A concurrent insertion after enumeration makes ``rmdir`` fail without
+    # deleting the newly introduced entry.
+    path.rmdir()
+
+
+def _remove_target_path(
+    path: Path,
+    *,
+    expected_fingerprint: tuple[object, ...] | None | object = _EXPECTED_UNSET,
+) -> None:
     """Remove a file, directory, or symlink path."""
+    if expected_fingerprint is not _EXPECTED_UNSET:
+        assert expected_fingerprint is None or isinstance(expected_fingerprint, tuple)
+        _remove_exact_path(path, expected_fingerprint)
+        return
     if not path.exists() and not path.is_symlink():
         return
     if path.is_symlink() or path.is_file():
