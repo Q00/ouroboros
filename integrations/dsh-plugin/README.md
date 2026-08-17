@@ -65,8 +65,9 @@ unless it is given a composition to load. To use it:
 
 1. Build DeepSeek Harness from source (`pnpm install && pnpm run build`,
    Node.js >= 22) and make its `dsh-acp-demo` bin reachable — on `PATH`, or
-   named by `OUROBOROS_DSH_CLI_PATH`. The published npm install path for that
-   bin is currently broken upstream.
+   named by `OUROBOROS_DSH_CLI_PATH`. A source build is the working path today:
+   installing the published `@deepseek-ai/dsh-acp-demo` still fails on a
+   peer-dependency conflict inside its own `dsh-tool-bash` chain.
 2. Point `OUROBOROS_DSH_CONFIG_PATH` at an **absolute** composition file.
    Relative paths are rejected on purpose (they would resolve against the
    untrusted project cwd). The file must sit where dsh's `node_modules` (or
