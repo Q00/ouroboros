@@ -2543,6 +2543,27 @@ class TestSeedGeneratorExtraction:
             "python -c \"print('ok')\" || exit 0",
             "pytest tests/test_app.py -q || VERIFY_MODE=ci true",
             "pytest tests/test_app.py -q || VERIFY_MODE=ci",
+            "pytest tests/test_app.py -q || { true; }",
+            "pytest tests/test_app.py -q || ( : )",
+            "pytest tests/test_app.py -q || { :; true; }",
+            "pytest tests/test_app.py -q || ( true && true )",
+            "pytest tests/test_app.py -q || { true && false; true; }",
+            "pytest tests/test_app.py -q || { false & }",
+            "pytest tests/test_app.py -q || ( false & )",
+            "pytest tests/test_app.py -q & wait",
+            "pytest tests/test_app.py -q &",
+            'pytest tests/test_app.py -q || { true & wait "$!"; }',
+            "pytest tests/test_app.py -q || ! false",
+            "pytest tests/test_app.py -q || { ! false; }",
+            "pytest tests/test_app.py -q || ! ( ! true )",
+            "pytest tests/test_app.py -q || { ! ( ! true ); }",
+            "pytest tests/test_app.py -q || $(false) true",
+            "pytest tests/test_app.py -q || $(false) :",
+            "pytest tests/test_app.py -q || $(false) 2>/dev/null true",
+            "pytest tests/test_app.py -q || command true",
+            "pytest tests/test_app.py -q || command :",
+            "pytest tests/test_app.py -q || command exit 0",
+            "pytest tests/test_app.py -q || command -p true",
         ),
     )
     async def test_generate_rejects_status_masking_on_initial_and_retry_extraction(
@@ -2931,6 +2952,30 @@ class TestSeedGeneratorRobustParsing:
             "pytest -q || VERIFY_MODE=ci true",
             "pytest -q || VERIFY_MODE=ci",
             "pytest -q; true 2>/dev/null",
+            # A shell group can preserve an unconditionally-successful
+            # fallback while avoiding the direct command spelling.
+            "pytest -q || { true; }",
+            "pytest -q || ( : )",
+            "pytest -q; { true; }",
+            "pytest -q || { :; true; }",
+            "pytest -q || ( true && true )",
+            "pytest -q || { true && false; true; }",
+            "pytest -q || { false & }",
+            "pytest -q || ( false & )",
+            "pytest -q & wait",
+            "pytest -q &",
+            'pytest -q || { true & wait "$!"; }',
+            "pytest -q || ! false",
+            "pytest -q || { ! false; }",
+            "pytest -q || ! ( ! true )",
+            "pytest -q || { ! ( ! true ); }",
+            "pytest -q || $(false) true",
+            "pytest -q || $(false) :",
+            "pytest -q || $(false) 2>/dev/null true",
+            "pytest -q || command true",
+            "pytest -q || command :",
+            "pytest -q || command exit 0",
+            "pytest -q || command -p true",
         ),
     )
     def test_unsupported_verify_command_reason_rejects_status_masking_chains(
@@ -2951,10 +2996,9 @@ class TestSeedGeneratorRobustParsing:
             "python -m http.server 8000 < port.txt",
             "python -c \"print('a || true')\"",
             "python -c \"print('x; y | z & w')\"",
-            # a pipe to a real command reports the pipeline's own status, and
-            # ``wait`` after ``&`` reports the background job's real status
+            # A pipe to a real command reports the pipeline's own status.
             "pytest -q | tail -5",
-            "pytest -q & wait",
+            'pytest -q & wait "$!"',
             "true;# user's note",
             # These look like a fallback in raw text, but their operators are
             # arguments or comment text and do not alter the command status.
@@ -2962,6 +3006,9 @@ class TestSeedGeneratorRobustParsing:
             r"false \|\| true",
             r"false \; true",
             r"false \| true",
+            # Assignment-only commands inherit a command substitution's exit
+            # status rather than always succeeding.
+            "false || VALUE=$(false)",
         ),
     )
     def test_unsupported_verify_command_reason_allows_status_preserving_forms(

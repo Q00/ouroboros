@@ -388,6 +388,24 @@ class _ShellToken:
     value: str
 
 
+@dataclass(frozen=True)
+class _ShellStatus:
+    """The success/failure outcomes still possible for a shell fragment."""
+
+    can_succeed: bool
+    can_fail: bool
+
+    @property
+    def is_fixed_success(self) -> bool:
+        """Return whether the fragment can only return a zero status."""
+        return self.can_succeed and not self.can_fail
+
+
+_SHELL_FIXED_SUCCESS = _ShellStatus(can_succeed=True, can_fail=False)
+_SHELL_FIXED_FAILURE = _ShellStatus(can_succeed=False, can_fail=True)
+_SHELL_UNKNOWN_STATUS = _ShellStatus(can_succeed=True, can_fail=True)
+
+
 def _contains_status_masking_fallback(command: str) -> bool:
     """Return whether a no-op success can replace the tested command's status.
 
@@ -401,20 +419,24 @@ def _contains_status_masking_fallback(command: str) -> bool:
     and single-``|`` case-pattern alternatives mid-command are unaffected.
     """
     tokens = _lex_posix_shell_tokens(command)
+    if tokens and tokens[-1] == _ShellToken("operator", "&"):
+        return True
     for index, token in enumerate(tokens):
         if token.kind != "operator" or token.value not in {"||", ";", "&", "|"}:
             continue
         fallback_start = index + 1
+        grouped_fallback_end = _always_successful_group_end(tokens, fallback_start)
         command_index = _first_command_word_after(tokens, fallback_start)
         assignment_only = _is_assignment_only_command(tokens, fallback_start)
-        always_succeeds = (
+        always_succeeds = grouped_fallback_end is not None or (
             assignment_only
             if command_index is None
             else _is_always_successful_command(tokens, command_index)
         )
         if not always_succeeds:
             continue
-        if token.value == "||" or _command_is_terminal(tokens, command_index or fallback_start):
+        fallback_end = grouped_fallback_end or command_index or fallback_start
+        if token.value == "||" or _command_is_terminal(tokens, fallback_end):
             return True
     return False
 
@@ -558,6 +580,179 @@ def _first_command_word_after(tokens: list[_ShellToken], index: int) -> int | No
     return None
 
 
+def _always_successful_group_end(tokens: list[_ShellToken], index: int) -> int | None:
+    """Return a simple group's closing token when its status is fixed at success."""
+    if (
+        index >= len(tokens)
+        or tokens[index].kind != "group"
+        or tokens[index].value not in {"{", "("}
+    ):
+        return None
+    group_end = _matching_group_end(tokens, index)
+    if group_end is None:
+        return None
+    return (
+        group_end if _shell_fragment_status(tokens, index + 1, group_end).is_fixed_success else None
+    )
+
+
+def _shell_fragment_status(tokens: list[_ShellToken], start: int, end: int) -> _ShellStatus:
+    """Return the possible status outcomes for a compact shell command list."""
+    if end > start and tokens[end - 1] == _ShellToken("operator", ";"):
+        end -= 1
+    if end > start and tokens[end - 1] == _ShellToken("operator", "&"):
+        return _SHELL_FIXED_SUCCESS
+    if start >= end:
+        return _SHELL_UNKNOWN_STATUS
+    operators = _outer_shell_operators(tokens, start, end)
+    if operators is None:
+        return _SHELL_UNKNOWN_STATUS
+    background_operators = [index for index, operator in operators if operator == "&"]
+    if background_operators and _is_targeted_background_wait(
+        tokens, background_operators[-1] + 1, end
+    ):
+        return _shell_fragment_status(tokens, start, background_operators[-1])
+    list_starts = [index + 1 for index, operator in operators if operator in {";", "&"}]
+    return _shell_and_or_status(tokens, list_starts[-1] if list_starts else start, end)
+
+
+def _shell_and_or_status(tokens: list[_ShellToken], start: int, end: int) -> _ShellStatus:
+    """Return possible outcomes for an ``&&``/``||`` chain."""
+    operators = _outer_shell_operators(tokens, start, end)
+    if operators is None or any(operator in {";", "&"} for _, operator in operators):
+        return _SHELL_UNKNOWN_STATUS
+    logical_operators = [
+        (index, operator) for index, operator in operators if operator in {"&&", "||"}
+    ]
+    if not logical_operators:
+        return _shell_pipeline_status(tokens, start, end)
+    status = _shell_pipeline_status(tokens, start, logical_operators[0][0])
+    for operator_index, operator in logical_operators:
+        next_operator_index = next(
+            (index for index, _ in logical_operators if index > operator_index), end
+        )
+        right = _shell_pipeline_status(tokens, operator_index + 1, next_operator_index)
+        status = (
+            _and_shell_status(status, right)
+            if operator == "&&"
+            else _or_shell_status(status, right)
+        )
+    return status
+
+
+def _shell_pipeline_status(tokens: list[_ShellToken], start: int, end: int) -> _ShellStatus:
+    """Return possible outcomes for a pipeline, which reports its final command."""
+    operators = _outer_shell_operators(tokens, start, end)
+    if operators is None or any(operator != "|" for _, operator in operators):
+        return _SHELL_UNKNOWN_STATUS
+    pipeline_starts = [index + 1 for index, _ in operators]
+    return _shell_command_status(tokens, pipeline_starts[-1] if pipeline_starts else start, end)
+
+
+def _shell_command_status(tokens: list[_ShellToken], start: int, end: int) -> _ShellStatus:
+    """Return possible outcomes for one simple command or nested group."""
+    if start >= end:
+        return _SHELL_UNKNOWN_STATUS
+    if tokens[start].kind == "group" and tokens[start].value in {"{", "("}:
+        group_end = _matching_group_end(tokens, start)
+        if group_end is not None and group_end == end - 1:
+            return _shell_fragment_status(tokens, start + 1, group_end)
+        return _SHELL_UNKNOWN_STATUS
+    if tokens[start].kind == "word" and tokens[start].value == "!":
+        inverted = _shell_command_status(tokens, start + 1, end)
+        return _ShellStatus(can_succeed=inverted.can_fail, can_fail=inverted.can_succeed)
+    if any(token.kind == "group" for token in tokens[start:end]):
+        return _SHELL_UNKNOWN_STATUS
+    command_index = _first_command_word_after(tokens, start)
+    if command_index is None:
+        return (
+            _SHELL_FIXED_SUCCESS
+            if _is_assignment_only_command(tokens, start, end=end)
+            else _SHELL_UNKNOWN_STATUS
+        )
+    if tokens[command_index].value == "!":
+        inverted = _shell_command_status(tokens, command_index + 1, end)
+        return _ShellStatus(can_succeed=inverted.can_fail, can_fail=inverted.can_succeed)
+    return (
+        _SHELL_FIXED_SUCCESS
+        if _is_always_successful_command(tokens, command_index)
+        else _SHELL_FIXED_FAILURE
+        if _is_always_failing_command(tokens, command_index)
+        else _SHELL_UNKNOWN_STATUS
+    )
+
+
+def _is_targeted_background_wait(tokens: list[_ShellToken], start: int, end: int) -> bool:
+    """Return whether a list tail waits for the immediately preceding background PID."""
+    command_index = _first_command_word_after(tokens, start)
+    if command_index is None or tokens[command_index].value != "wait":
+        return False
+    argument_index = _first_command_word_after(tokens, command_index + 1)
+    if argument_index is None or tokens[argument_index].value != "$!":
+        return False
+    return not any(token.kind == "word" for token in tokens[argument_index + 1 : end])
+
+
+def _outer_shell_operators(
+    tokens: list[_ShellToken], start: int, end: int
+) -> list[tuple[int, str]] | None:
+    """Return operators outside nested groups, or ``None`` for malformed grouping."""
+    operators: list[tuple[int, str]] = []
+    index = start
+    while index < end:
+        token = tokens[index]
+        if token.kind == "group" and token.value in {"{", "("}:
+            group_end = _matching_group_end(tokens, index)
+            if group_end is None or group_end >= end:
+                return None
+            index = group_end + 1
+            continue
+        if token.kind == "group":
+            return None
+        if token.kind == "operator":
+            operators.append((index, token.value))
+        index += 1
+    return operators
+
+
+def _and_shell_status(left: _ShellStatus, right: _ShellStatus) -> _ShellStatus:
+    """Combine possible statuses for a shell ``&&`` expression."""
+    return _ShellStatus(
+        can_succeed=left.can_succeed and right.can_succeed,
+        can_fail=left.can_fail or left.can_succeed and right.can_fail,
+    )
+
+
+def _or_shell_status(left: _ShellStatus, right: _ShellStatus) -> _ShellStatus:
+    """Combine possible statuses for a shell ``||`` expression."""
+    return _ShellStatus(
+        can_succeed=left.can_succeed or left.can_fail and right.can_succeed,
+        can_fail=left.can_fail and right.can_fail,
+    )
+
+
+def _matching_group_end(tokens: list[_ShellToken], index: int) -> int | None:
+    """Return the matching closing token for a lexed shell group."""
+    expected_closings = {"{": "}", "(": ")"}
+    opening = tokens[index].value
+    if opening not in expected_closings:
+        return None
+    stack = [expected_closings[opening]]
+    for candidate_index in range(index + 1, len(tokens)):
+        token = tokens[candidate_index]
+        if token.kind != "group":
+            continue
+        if token.value in expected_closings:
+            stack.append(expected_closings[token.value])
+        elif token.value == stack[-1]:
+            stack.pop()
+            if not stack:
+                return candidate_index
+        else:
+            return None
+    return None
+
+
 def _is_posix_assignment_word(value: str) -> bool:
     """Return whether a lexed word is a leading POSIX shell assignment."""
     name, separator, _ = value.partition("=")
@@ -570,17 +765,20 @@ def _is_posix_assignment_word(value: str) -> bool:
     )
 
 
-def _is_assignment_only_command(tokens: list[_ShellToken], index: int) -> bool:
+def _is_assignment_only_command(
+    tokens: list[_ShellToken], index: int, *, end: int | None = None
+) -> bool:
     """Return whether a simple command contains only assignments/redirections."""
     found_assignment = False
-    while index < len(tokens):
+    command_end = len(tokens) if end is None else end
+    while index < command_end:
         token = tokens[index]
         if token.kind in {"operator", "group"}:
             return False
         if token.kind == "redirect":
             index += 2
             continue
-        if not _is_posix_assignment_word(token.value):
+        if "\0" in token.value or not _is_posix_assignment_word(token.value):
             return False
         found_assignment = True
         index += 1
@@ -592,10 +790,43 @@ def _is_always_successful_command(tokens: list[_ShellToken], index: int) -> bool
     command = tokens[index].value
     if command in {"true", ":"}:
         return True
+    if command == "command":
+        wrapped_index = _first_command_word_after(tokens, index + 1)
+        while wrapped_index is not None and tokens[wrapped_index].value == "-p":
+            wrapped_index = _first_command_word_after(tokens, wrapped_index + 1)
+        return wrapped_index is not None and _is_always_successful_command(tokens, wrapped_index)
+    if command == "\0":
+        next_index = _first_command_word_after(tokens, index + 1)
+        return next_index is not None and _is_always_successful_command(tokens, next_index)
+    if command == "!":
+        if index + 1 < len(tokens) and tokens[index + 1].kind == "group":
+            group_end = _matching_group_end(tokens, index + 1)
+            if group_end is not None:
+                status = _shell_fragment_status(tokens, index + 2, group_end)
+                return status.can_fail and not status.can_succeed
+        inverted_index = _first_command_word_after(tokens, index + 1)
+        return inverted_index is not None and _is_always_failing_command(tokens, inverted_index)
+    if command == "wait":
+        return _first_command_word_after(tokens, index + 1) is None
     if command != "exit":
         return False
     status_index = _first_command_word_after(tokens, index + 1)
     return status_index is not None and tokens[status_index].value == "0"
+
+
+def _is_always_failing_command(tokens: list[_ShellToken], index: int) -> bool:
+    """Return whether a command has a fixed nonzero status for ``!`` inversion."""
+    command = tokens[index].value
+    if command == "false":
+        return True
+    if command != "exit":
+        return False
+    status_index = _first_command_word_after(tokens, index + 1)
+    return (
+        status_index is not None
+        and tokens[status_index].value.isdecimal()
+        and tokens[status_index].value != "0"
+    )
 
 
 def _command_is_terminal(tokens: list[_ShellToken], index: int) -> bool:
