@@ -131,10 +131,15 @@ about which backend it is).
 ### 4. Select the backend
 
 ```sh
-ouroboros mcp serve --llm-backend dsh
+ouroboros mcp serve --runtime claude-cli --llm-backend dsh
 # or
 export OUROBOROS_LLM_BACKEND=dsh
 ```
+
+`--runtime` is not optional here. `dsh` answers only the LLM-only calls, so the
+execution runtime is still a separate choice — and an MCP 2 server rejects the
+SDK-backed `claude` / `claude-sdk` default, so name an executable one
+(`claude-cli`, `codex`, `opencode`, …).
 
 Or persist it in `~/.ouroboros/config.yaml`:
 
