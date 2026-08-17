@@ -634,9 +634,8 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     ``status`` and the fields it implies; a complete one answers with the
     disposable-memory envelope, which has no ``status`` of its own -- its
     ``result.status`` is that subsystem's word for its own run, and the envelope
-    is ``extra="forbid"`` because ``artifact_validation`` re-parses the same
-    model out of the manifest event. So the tool cannot add a discriminator
-    without making the reply stop being that model.
+    is ``extra="forbid"``. So the tool cannot add a discriminator without making
+    the reply stop being that model.
 
     ``contract_id`` is the discriminator it already has: only the completed
     reply carries one. The PM and interview skills both read it, and the PM
