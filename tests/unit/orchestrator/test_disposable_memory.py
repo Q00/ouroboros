@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
+from datetime import timedelta
+import hashlib
 import json
 import multiprocessing
 import os
 from pathlib import Path
+import sqlite3
 import threading
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -25,8 +29,9 @@ from ouroboros.orchestrator.agent_process import AgentProcessHandle
 import ouroboros.orchestrator.disposable_memory as disposable_memory_module
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
-    ArtifactManifestError,
     ArtifactNotFoundError,
+    ArtifactStoreError,
+    ArtifactTombstonedError,
     ContentAddressedArtifactStore,
     canonical_artifact_bytes,
 )
@@ -278,7 +283,7 @@ async def test_reference_event_is_idempotent_when_same_contract_is_recovered(
         contract_id="01K1DISPOSABLEMEMORY00005",
     )
 
-    assert first.artifact_ref == second.artifact_ref
+    assert first == second
     references = [event for event in event_store.appended if event.type == "artifact.referenced"]
     assert len(references) == 1
 
@@ -298,13 +303,18 @@ async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_pat
         duration_ms=1,
         events_emitted_count=0,
     )
-    # The id this row carried before the derivation dropped artifact_ref. A
-    # ledger written by the older code holds exactly this, and the guarantee has
-    # to survive reading it back.
+    # The id this row carried before the derivation dropped the content
+    # address.  Envelopes no longer name that address, so the old formula is
+    # reconstructed here exactly as the older code computed it: a ledger
+    # written back then holds precisely this row, and the guarantee has to
+    # survive reading it back.
+    legacy_artifact_ref = (
+        "sha256:" + hashlib.sha256(canonical_artifact_bytes({"stable": True})).hexdigest()
+    )
     legacy_id = str(
         uuid5(
             NAMESPACE_URL,
-            f"ouroboros:artifact:{contract_id}:{envelope.artifact_ref}:referenced",
+            f"ouroboros:artifact:{contract_id}:{legacy_artifact_ref}:referenced",
         )
     )
     assert legacy_id != create_artifact_referenced_event(envelope).id
@@ -314,7 +324,7 @@ async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_pat
             type="artifact.referenced",
             aggregate_type="contract",
             aggregate_id=contract_id,
-            data=envelope.model_dump(mode="json"),
+            data={**envelope.model_dump(mode="json"), "artifact_ref": legacy_artifact_ref},
         )
     )
 
@@ -419,11 +429,9 @@ def test_overlapping_processes_converge_on_one_published_contract(tmp_path: Path
     executions = len(counter_path.read_text(encoding="utf-8").splitlines())
     assert 1 <= executions <= 2
 
+    # Convergence at the store: whichever process won the contract key, one
+    # row holds the one body, and a fresh reader is handed exactly it.
     store = ContentAddressedArtifactStore(artifact_root)
-    manifest = json.loads(
-        store._manifest_path(_OVERLAP_CONTRACT_ID).read_text(encoding="utf-8"),
-    )
-    assert [event["type"] for event in manifest["events"]] == ["artifact.referenced"]
     assert store.fetch(_OVERLAP_CONTRACT_ID).body == {"stable": True}
 
 
@@ -498,7 +506,7 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
     service, _ = _service(tmp_path)
     commit_entered = threading.Event()
     release_commit = threading.Event()
-    original_write = service.artifact_store._write_blob_locked
+    original_put = service.artifact_store.put_for_contract
     original_settle = disposable_memory_module._settle_committed_publication
     timeout_settlement_entered = asyncio.Event()
     child_calls = 0
@@ -515,17 +523,22 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
         observe_timeout_settlement,
     )
 
-    def pause_after_commit_gate(
-        digest: str,
-        payload: bytes,
-        *,
-        authority_check: Any = None,
-    ) -> None:
-        commit_entered.set()
-        release_commit.wait()
-        original_write(digest, payload, authority_check=authority_check)
+    def pause_after_commit_gate(**kwargs: Any) -> DisposableResultEnvelope:
+        # The caller's commit gate is wrapped rather than replaced, so the
+        # pause begins only after that gate has irrevocably opened.  That is
+        # the window this test is about: commitment declared, durability not
+        # yet reached, and the caller's timeout landing in between.
+        inner_commit_check = kwargs.get("commit_check")
 
-    monkeypatch.setattr(service.artifact_store, "_write_blob_locked", pause_after_commit_gate)
+        def gated_commit_check() -> None:
+            if inner_commit_check is not None:
+                inner_commit_check()
+            commit_entered.set()
+            release_commit.wait()
+
+        return original_put(**{**kwargs, "commit_check": gated_commit_check})
+
+    monkeypatch.setattr(service.artifact_store, "put_for_contract", pause_after_commit_gate)
 
     async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
         nonlocal child_calls
@@ -634,9 +647,20 @@ async def test_retry_repairs_reference_without_reexecuting_durable_contract(
 
 
 @pytest.mark.asyncio
-async def test_retry_rejects_cross_contract_manifest_substitution_without_execution(
+async def test_external_body_corruption_is_refused_before_any_reader_meets_it(
     tmp_path: Path,
 ) -> None:
+    """Tampered storage must not become silent re-execution or a served body.
+
+    The filesystem store held a manifest that could be pointed at another
+    contract's blob, and refused the substituted binding on retry.  The SQLite
+    row has no binding left to redirect -- the contract id is the body's only
+    address -- and a rewrite of the stored bytes into non-JSON is refused by
+    the database itself, because the generated ``kind`` column cannot be
+    derived from a body that is not JSON.  The corrupt state the old test
+    planted and detected is now unrepresentable, so the retry and fetch that
+    follow still see only the original publication.
+    """
     service, _ = _service(tmp_path)
     calls = 0
 
@@ -645,42 +669,42 @@ async def test_retry_rejects_cross_contract_manifest_substitution_without_execut
         calls += 1
         return {"owner": "a"}
 
-    victim = "01K1DISPOSABLEMEMORY00021"
-    source = "01K1DISPOSABLEMEMORY00022"
-    await service.run(
+    contract_id = "01K1DISPOSABLEMEMORY00021"
+    first = await service.run(
         intent="victim",
         runtime_id="fixture-runtime",
         work_fn=child_work,
-        contract_id=victim,
+        contract_id=contract_id,
     )
-    source_envelope = service.artifact_store.put_for_contract(
-        contract_id=source,
-        body={"owner": "b", "different": "payload"},
-        runtime_id="fixture-runtime",
-        duration_ms=1,
-        events_emitted_count=0,
-    )
-    manifest_path = service.artifact_store._manifest_path(victim)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_path = service.artifact_store._manifest_path(source)
-    source_event = json.loads(source_path.read_text(encoding="utf-8"))["events"][0]
-    manifest["events"][0]["artifact_ref"] = source_envelope.artifact_ref
-    manifest["events"][0]["size_bytes"] = source_event["size_bytes"]
-    manifest["events"][0]["envelope"]["artifact_ref"] = source_envelope.artifact_ref
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    connection = sqlite3.connect(tmp_path / "artifacts" / "artifacts.db")
+    with closing(connection), connection:
+        with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+            connection.execute(
+                "UPDATE artifacts SET body = ? WHERE contract_id = ?",
+                ("{corrupted, not json", contract_id),
+            )
 
-    with pytest.raises(ArtifactManifestError, match="binding"):
-        await service.run(
-            intent="victim-retry",
-            runtime_id="fixture-runtime",
-            work_fn=child_work,
-            contract_id=victim,
-        )
+    recovered = await service.run(
+        intent="victim-retry",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    assert recovered == first
     assert calls == 1
+    assert service.fetch(contract_id).body == {"owner": "a"}
 
 
 @pytest.mark.asyncio
-async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path: Path) -> None:
+async def test_run_refuses_tombstoned_contract_without_reexecuting(tmp_path: Path) -> None:
+    """An applied prune is terminal: rerunning the contract stops at the stone.
+
+    Half-destroyed store state stopped being representable with the manifest
+    that used to dangle; the one deliberate way a contract loses its body now
+    is pruning, and that must keep refusing silent re-execution the way a
+    missing manifest used to.
+    """
     service, _ = _service(tmp_path)
     calls = 0
 
@@ -696,10 +720,14 @@ async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path
         work_fn=child_work,
         contract_id=contract_id,
     )
-    manifest_path = service.artifact_store._manifest_path(contract_id)
-    manifest_path.unlink()
+    report = service.artifact_store.prune(
+        ttl=timedelta(0),
+        apply=True,
+        allow_replay_tombstone=True,
+    )
+    assert report.removed_contract_ids == (contract_id,)
 
-    with pytest.raises(ArtifactManifestError, match="binding"):
+    with pytest.raises(ArtifactTombstonedError, match="force-rerun"):
         await service.run(
             intent="crash-window-retry",
             runtime_id="fixture-runtime",
@@ -707,48 +735,64 @@ async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path
             contract_id=contract_id,
         )
     assert calls == 1
+    with pytest.raises(ArtifactTombstonedError):
+        service.replay(contract_id)
 
 
 @pytest.mark.asyncio
-async def test_retry_recovers_binding_first_manifest_failure_without_execution(
+async def test_retry_publishes_after_failed_publication_leaves_nothing_behind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A publication failure surfaces, strands nothing, and the retry succeeds.
+
+    The filesystem store could fail between its blob and its manifest, leaving
+    a partial publication for the retry to recover without re-executing.  A
+    publication is one row insert now, so a failure leaves no partial state at
+    all -- and the retry therefore legitimately runs the child again before
+    publishing, instead of finding half a publication to finish.
+    """
     service, _ = _service(tmp_path)
     calls = 0
-    writes = 0
-    original_write = service.artifact_store._write_manifest_locked
+    attempts = 0
+    original_put = service.artifact_store.put_for_contract
 
     async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
         nonlocal calls
         calls += 1
         return {"recoverable": True}
 
-    def fail_first_manifest(*args: Any, **kwargs: Any) -> None:
-        nonlocal writes
-        writes += 1
-        if writes == 1:
-            raise OSError("simulated manifest publication failure")
-        original_write(*args, **kwargs)
+    def fail_first_publication(**kwargs: Any) -> DisposableResultEnvelope:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ArtifactStoreError(
+                "simulated artifact publication failure",
+                operation="write",
+            )
+        return original_put(**kwargs)
 
-    monkeypatch.setattr(service.artifact_store, "_write_manifest_locked", fail_first_manifest)
+    monkeypatch.setattr(service.artifact_store, "put_for_contract", fail_first_publication)
     contract_id = "01K1DISPOSABLEMEMORY00024"
-    with pytest.raises(OSError, match="manifest publication failure"):
+    with pytest.raises(ArtifactStoreError, match="publication failure"):
         await service.run(
-            intent="partial-publication",
+            intent="failed-publication",
             runtime_id="fixture-runtime",
             work_fn=child_work,
             contract_id=contract_id,
         )
 
+    with pytest.raises(ArtifactNotFoundError):
+        service.fetch(contract_id)
+
     recovered = await service.run(
-        intent="partial-publication-retry",
+        intent="failed-publication-retry",
         runtime_id="fixture-runtime",
         work_fn=child_work,
         contract_id=contract_id,
     )
     assert recovered.contract_id == contract_id
-    assert calls == 1
+    assert calls == 2
     assert service.fetch(contract_id).body == {"recoverable": True}
 
 
@@ -775,10 +819,31 @@ async def test_large_retry_recovers_envelope_without_reading_body(
         contract_id=contract_id,
     )
 
-    def fail_body_read(_artifact_ref: str) -> bytes:
-        raise AssertionError("ordinary retry must not materialize the artifact body")
+    # The observation seam is SQLite's own authorizer rather than a store
+    # private: every column the retry reads off the artifacts table is
+    # recorded, and the megabyte body must never be among them.  A metadata
+    # read that stays metadata-only is the retry's whole cost model.
+    columns_read: set[str] = set()
+    original_connect = sqlite3.connect
 
-    monkeypatch.setattr(service.artifact_store, "_read_blob_locked", fail_body_read)
+    def observing_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        connection = original_connect(*args, **kwargs)
+
+        def record_artifact_reads(
+            action: int,
+            table: str | None,
+            column: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_READ and table == "artifacts" and column:
+                columns_read.add(column)
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(record_artifact_reads)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", observing_connect)
     recovered = await service.run(
         intent="large-retry",
         runtime_id="fixture-runtime",
@@ -788,6 +853,8 @@ async def test_large_retry_recovers_envelope_without_reading_body(
 
     assert recovered == first
     assert calls == 1
+    assert columns_read, "the retry never consulted the contract row"
+    assert "body" not in columns_read
 
 
 @pytest.mark.asyncio

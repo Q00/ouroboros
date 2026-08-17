@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import pytest
@@ -321,8 +322,16 @@ def test_a_publication_stamped_ahead_of_now_is_not_offered(
         runtime_id="test:publish",
         duration_ms=1,
         events_emitted_count=0,
-        now=ahead,
     )
+    # Stamped by moving the row's own clock rather than by asking the store to
+    # publish at a chosen moment: publication time is what the row records, and
+    # a machine that ran ahead leaves exactly this — a stored timestamp in the
+    # future, with nothing about the write itself to distinguish it.
+    with sqlite3.connect(Path(store.root) / "artifacts.db") as connection:
+        connection.execute(
+            "UPDATE artifacts SET created_at = ? WHERE contract_id = ?",
+            (ahead.isoformat(), "fanout:stamped-ahead"),
+        )
 
     assert recent_findings_entries(store) == []
     # Still excluded well after publication, since it is the interval that

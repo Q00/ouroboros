@@ -129,12 +129,7 @@ def get_privacy_mode() -> PrivacyMode:
 
 
 def content_hash(payload: bytes | str) -> str:
-    """Return a ``sha256:<hex>`` hash of *payload* using the journal family.
-
-    The same hashing family is used for ``artifact_ref`` in
-    ``docs/rfc/disposable-memory.md`` so projections can correlate the
-    journal with the artifact store without a second hashing scheme.
-    """
+    """Return a ``sha256:<hex>`` hash of *payload* using the journal family."""
     if isinstance(payload, str):
         encoded = payload.encode("utf-8")
     else:

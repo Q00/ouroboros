@@ -289,7 +289,6 @@ class FetchArtifactHandler:
 
         payload = {
             "contract_id": fetched.envelope.contract_id,
-            "artifact_ref": fetched.envelope.artifact_ref,
             "body": fetched.body,
         }
         return Result.ok(

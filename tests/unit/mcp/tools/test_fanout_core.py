@@ -575,11 +575,12 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert submit_result.is_ok, submit_result
     envelope = submit_result.unwrap().meta
     contract_id = envelope["contract_id"]
-    contract_component = disposable.artifact_store._manifest_path(contract_id).parent.name
+    # The colon-carrying fanout id is stored and fetched verbatim below; the
+    # store has no filesystem layout left for the id's characters to violate.
     assert contract_id.startswith("fanout:")
-    assert contract_id not in str(disposable.artifact_store._manifest_path(contract_id))
-    assert len(contract_component) == 64
-    assert set(contract_component) <= set("0123456789abcdef")
+    digest_component = contract_id.removeprefix("fanout:")
+    assert len(digest_component) == 64
+    assert set(digest_component) <= set("0123456789abcdef")
     out = disposable.fetch(envelope["contract_id"]).body
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
