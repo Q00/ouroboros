@@ -151,7 +151,12 @@ orchestrator:
   dsh_config_path: /absolute/path/to/cordis.yml
 ```
 
-`deepseek_harness` is accepted as an alias for `dsh`.
+`deepseek_harness` is accepted as an alias for `dsh` only where backend names
+are resolved at runtime — `OUROBOROS_LLM_BACKEND=deepseek_harness` and
+programmatic `create_llm_adapter(backend="deepseek_harness")`. The typed
+surfaces reject it: `--llm-backend deepseek_harness` fails argument validation,
+and `llm.backend: deepseek_harness` fails config validation. Write `dsh` in the
+CLI and in `config.yaml`.
 
 ### Model selection
 
