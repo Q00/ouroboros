@@ -1480,7 +1480,8 @@ if [ "$HAS_DSH" = true ]; then
   if [ -n "$_dsh_json_python" ] && [ -d "$DSH_PROFILE_ROOT" ]; then
     for _dsh_profile_dir in "$DSH_PROFILE_ROOT"/*/; do
       [ -d "$_dsh_profile_dir" ] || continue
-      _dsh_profile=$(basename "$_dsh_profile_dir")
+      _dsh_profile=${_dsh_profile_dir#"$DSH_PROFILE_ROOT"/}
+      _dsh_profile=${_dsh_profile%/}
       [ "$_dsh_profile" = "web" ] && continue
       # Only profiles that already opted in. Adding Ouroboros tools to an
       # unrelated profile because the installer ran is not an upgrade.
@@ -1491,11 +1492,12 @@ if [ "$HAS_DSH" = true ]; then
   fi
 
   for _dsh_profile in "${DSH_TARGET_PROFILES[@]}"; do
+    LC_ALL=C printf -v _dsh_profile_q '%q' "$_dsh_profile"
     if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
-      _ok "dsh profile '$_dsh_profile': Ouroboros tools installed"
+      _ok "dsh profile $_dsh_profile_q: Ouroboros tools installed"
     else
-      _warn "dsh profile '$_dsh_profile': install skipped"
-      _info "Manual install: dsh plugin --profile $_dsh_profile add \"$DSH_PLUGIN_SPEC\""
+      _warn "dsh profile $_dsh_profile_q: install skipped"
+      _info "Manual install: dsh plugin --profile $_dsh_profile_q add \"$DSH_PLUGIN_SPEC\""
     fi
   done
   _info "Type 'ooo interview <goal>' in a dsh chat to use them."

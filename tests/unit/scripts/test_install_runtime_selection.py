@@ -2530,6 +2530,97 @@ exit 0
     assert profiles_called == ["web", "team alpha"]
 
 
+@pytest.mark.parametrize(
+    "profile_name",
+    [
+        "team alpha",
+        "team's alpha",
+        "team$alpha*",
+        "team$(printf PWNED)",
+        "team`printf PWNED`",
+        "team;printf PWNED",
+        "team\nalpha",
+        "team\n",
+        "team\ralpha",
+        "team\x1b[31mred",
+        "team\u202etxt",
+        "team\u200btxt",
+        "팀 alpha",
+    ],
+)
+def test_installer_quotes_profile_in_manual_recovery_command(
+    tmp_path: Path, profile_name: str
+) -> None:
+    """The printed fallback command must preserve a profile name as one shell argument."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 1\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manual_commands = [
+        line.split("Manual install: ", 1)[1]
+        for line in result.stdout.splitlines()
+        if "Manual install: " in line
+    ]
+    quoted_profile = subprocess.run(
+        ["bash", "-c", "printf '%q' \"$1\"", "_", profile_name],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    ).stdout
+    assert manual_commands == [
+        'dsh plugin --profile web add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+        f'dsh plugin --profile {quoted_profile} add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+    ]
+    expected_warning = f"dsh profile {quoted_profile}: install skipped"
+    assert sum(line.endswith(expected_warning) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    ["team\n", "team\x1b[31mred", "team\u202etxt", "team\u200btxt", "팀 alpha"],
+)
+def test_installer_quotes_profile_in_success_log(tmp_path: Path, profile_name: str) -> None:
+    """Successful installs must not emit raw profile control characters."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 0\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    quoted_profile = subprocess.run(
+        ["bash", "-c", "printf '%q' \"$1\"", "_", profile_name],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    ).stdout
+    expected_status = f"dsh profile {quoted_profile}: Ouroboros tools installed"
+    assert sum(line.endswith(expected_status) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
 def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
     """A broken host cannot fail an install that already put Ouroboros on disk."""
     result = _run_installer(
