@@ -8,14 +8,19 @@ from ouroboros.core.disposable_memory import DisposableResultEnvelope
 from ouroboros.events.base import BaseEvent
 
 ARTIFACT_REFERENCED_EVENT = "artifact.referenced"
-ARTIFACT_TOMBSTONED_EVENT = "artifact.tombstoned"
 
 
 def create_artifact_referenced_event(envelope: DisposableResultEnvelope) -> BaseEvent:
     """Create the small main-ledger row; artifact content is never accepted."""
+    # The id is derived from the contract id alone.  A contract publishes at most
+    # one artifact, so the contract already names the row; folding the content
+    # address in would tie the identity to a storage detail that is on its way
+    # out.  Idempotency does not depend on this derivation — the appender matches
+    # on the event type within the contract aggregate, so rows written under the
+    # older contract-plus-ref formula are still recognized.
     event_id = uuid5(
         NAMESPACE_URL,
-        f"ouroboros:artifact:{envelope.contract_id}:{envelope.artifact_ref}:referenced",
+        f"ouroboros:artifact:{envelope.contract_id}:referenced",
     )
     return BaseEvent(
         id=str(event_id),
@@ -26,33 +31,7 @@ def create_artifact_referenced_event(envelope: DisposableResultEnvelope) -> Base
     )
 
 
-def create_artifact_tombstoned_event(
-    *,
-    contract_id: str,
-    artifact_ref: str,
-    reason: str,
-) -> BaseEvent:
-    """Create an optional EventStore tombstone projection for manifest GC."""
-    event_id = uuid5(
-        NAMESPACE_URL,
-        f"ouroboros:artifact:{contract_id}:{artifact_ref}:tombstoned",
-    )
-    return BaseEvent(
-        id=str(event_id),
-        type=ARTIFACT_TOMBSTONED_EVENT,
-        aggregate_type="contract",
-        aggregate_id=contract_id,
-        data={
-            "contract_id": contract_id,
-            "artifact_ref": artifact_ref,
-            "reason": reason,
-        },
-    )
-
-
 __all__ = [
     "ARTIFACT_REFERENCED_EVENT",
-    "ARTIFACT_TOMBSTONED_EVENT",
     "create_artifact_referenced_event",
-    "create_artifact_tombstoned_event",
 ]

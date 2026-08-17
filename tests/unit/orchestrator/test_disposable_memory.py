@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import threading
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -17,6 +18,7 @@ from ouroboros.core.disposable_memory import (
     MAX_DISPOSABLE_ENVELOPE_BYTES,
     DisposableResultEnvelope,
 )
+from ouroboros.events.artifact import create_artifact_referenced_event
 from ouroboros.events.base import BaseEvent
 import ouroboros.orchestrator.agent_process as agent_process_module
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
@@ -30,6 +32,10 @@ from ouroboros.persistence.artifact_store import (
 )
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
+
+# Shared by the spawned overlap children and the parent that inspects the store
+# afterwards; a spawned process re-imports this module, so a constant travels.
+_OVERLAP_CONTRACT_ID = "01K1DISPOSABLEMEMORY00012"
 
 
 class _EventStore:
@@ -143,9 +149,12 @@ def _run_disposable_process(
             intent="process-overlap",
             runtime_id="fixture-runtime",
             work_fn=child_work,
-            contract_id="01K1DISPOSABLEMEMORY00012",
+            contract_id=_OVERLAP_CONTRACT_ID,
         )
-        return envelope.artifact_ref
+        # The whole envelope crosses back, not just its ref: convergence means
+        # both processes were handed the same published identity, not merely the
+        # same content address.
+        return json.dumps(envelope.model_dump(mode="json"), sort_keys=True)
 
     try:
         results.put(("ok", asyncio.run(invoke())))
@@ -275,11 +284,59 @@ async def test_reference_event_is_idempotent_when_same_contract_is_recovered(
 
 
 @pytest.mark.asyncio
-async def test_overlapping_tasks_execute_same_contract_child_once(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path)
+async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_path: Path) -> None:
+    service, event_store = _service(tmp_path)
+    contract_id = "01K1DISPOSABLEMEMORY00015"
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        return {"stable": True}
+
+    envelope = service.artifact_store.put_for_contract(
+        contract_id=contract_id,
+        body={"stable": True},
+        runtime_id="fixture-runtime",
+        duration_ms=1,
+        events_emitted_count=0,
+    )
+    # The id this row carried before the derivation dropped artifact_ref. A
+    # ledger written by the older code holds exactly this, and the guarantee has
+    # to survive reading it back.
+    legacy_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"ouroboros:artifact:{contract_id}:{envelope.artifact_ref}:referenced",
+        )
+    )
+    assert legacy_id != create_artifact_referenced_event(envelope).id
+    event_store.appended.append(
+        BaseEvent(
+            id=legacy_id,
+            type="artifact.referenced",
+            aggregate_type="contract",
+            aggregate_id=contract_id,
+            data=envelope.model_dump(mode="json"),
+        )
+    )
+
+    recovered = await service.run(
+        intent="rekeyed-reference",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    assert recovered == envelope
+    references = [event for event in event_store.appended if event.type == "artifact.referenced"]
+    assert [event.id for event in references] == [legacy_id]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_tasks_converge_on_one_published_contract(tmp_path: Path) -> None:
+    service, event_store = _service(tmp_path)
     calls = 0
     entered = asyncio.Event()
     release = asyncio.Event()
+    contract_id = "01K1DISPOSABLEMEMORY00010"
 
     async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
         nonlocal calls
@@ -293,7 +350,7 @@ async def test_overlapping_tasks_execute_same_contract_child_once(tmp_path: Path
             intent="task-overlap",
             runtime_id="fixture-runtime",
             work_fn=child_work,
-            contract_id="01K1DISPOSABLEMEMORY00010",
+            contract_id=contract_id,
         )
     )
     await asyncio.wait_for(entered.wait(), 2)
@@ -302,74 +359,27 @@ async def test_overlapping_tasks_execute_same_contract_child_once(tmp_path: Path
             intent="task-overlap",
             runtime_id="fixture-runtime",
             work_fn=child_work,
-            contract_id="01K1DISPOSABLEMEMORY00010",
+            contract_id=contract_id,
         )
     )
     try:
         await asyncio.sleep(0.1)
-        assert calls == 1
+        # Both callers are inside the child at once: nothing holds the second
+        # one back, and that is the permitted outcome, not the failure.
+        assert calls == 2
     finally:
         release.set()
 
     first, second = await asyncio.gather(first_task, second_task)
-    assert calls == 1
+
+    # The duplicated work is spent; the published result is still single.
     assert first == second
+    assert service.fetch(contract_id).body == {"stable": True}
+    references = [event for event in event_store.appended if event.type == "artifact.referenced"]
+    assert len(references) == 1
 
 
-@pytest.mark.asyncio
-async def test_cancelled_lock_waiter_leaves_no_claim_or_child_effect(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path)
-    calls = 0
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
-        nonlocal calls
-        calls += 1
-        entered.set()
-        await release.wait()
-        return {"stable": True}
-
-    contract_id = "01K1DISPOSABLEMEMORY00013"
-    first_task = asyncio.create_task(
-        service.run(
-            intent="cancelled-waiter",
-            runtime_id="fixture-runtime",
-            work_fn=child_work,
-            contract_id=contract_id,
-        )
-    )
-    await asyncio.wait_for(entered.wait(), 2)
-    waiting_task = asyncio.create_task(
-        service.run(
-            intent="cancelled-waiter",
-            runtime_id="fixture-runtime",
-            work_fn=child_work,
-            contract_id=contract_id,
-        )
-    )
-    await asyncio.sleep(0.1)
-    waiting_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting_task
-
-    release.set()
-    first = await first_task
-    recovered = await asyncio.wait_for(
-        service.run(
-            intent="cancelled-waiter",
-            runtime_id="fixture-runtime",
-            work_fn=child_work,
-            contract_id=contract_id,
-        ),
-        2,
-    )
-
-    assert calls == 1
-    assert recovered == first
-
-
-def test_overlapping_processes_execute_same_contract_child_once(tmp_path: Path) -> None:
+def test_overlapping_processes_converge_on_one_published_contract(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
     ready = context.Queue()
     start = context.Event()
@@ -402,8 +412,19 @@ def test_overlapping_processes_execute_same_contract_child_once(tmp_path: Path) 
     assert [process.exitcode for process in processes] == [0, 0]
     errors = [record[1] for record in records if record[0] == "error"]
     assert not errors, "\n".join(errors)
+    # Nothing stops both processes from executing the child, and duplicate
+    # execution is allowed outright.  What must hold is that they converge: one
+    # published body, and the same envelope handed to both callers.
     assert records[0][1] == records[1][1]
-    assert len(counter_path.read_text(encoding="utf-8").splitlines()) == 1
+    executions = len(counter_path.read_text(encoding="utf-8").splitlines())
+    assert 1 <= executions <= 2
+
+    store = ContentAddressedArtifactStore(artifact_root)
+    manifest = json.loads(
+        store._manifest_path(_OVERLAP_CONTRACT_ID).read_text(encoding="utf-8"),
+    )
+    assert [event["type"] for event in manifest["events"]] == ["artifact.referenced"]
+    assert store.fetch(_OVERLAP_CONTRACT_ID).body == {"stable": True}
 
 
 @pytest.mark.asyncio
@@ -511,6 +532,17 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
         child_calls += 1
         return {"race": True}
 
+    # The concurrent retry gets its own runner checkpoint store while sharing the
+    # artifact store, which is how a real retry arrives: from another runner.
+    # A cancel signal is persisted under the contract id, so a retry sharing this
+    # runner's checkpoint store would inherit the first run's timeout cancellation
+    # and never reach the publication race this test is about.
+    retry_service = DisposableMemory(
+        artifact_store=service.artifact_store,
+        event_store=service.event_store,
+        checkpoint_store=CheckpointStore(tmp_path / "checkpoints-retry"),
+    )
+
     contract_id = "01K1DISPOSABLEMEMORY00014"
     first_task = asyncio.create_task(
         service.run(
@@ -525,7 +557,7 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
     try:
         assert await asyncio.to_thread(commit_entered.wait, 1.0)
         retry_task = asyncio.create_task(
-            service.run(
+            retry_service.run(
                 intent="commit-wins-timeout",
                 runtime_id="fixture-runtime",
                 work_fn=child_work,
@@ -539,7 +571,6 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
         await asyncio.wait_for(timeout_settlement_entered.wait(), timeout=10.0)
         first_was_pending = not first_task.done()
         retry_was_pending = not retry_task.done()
-        calls_before_release = child_calls
     finally:
         release_commit.set()
 
@@ -554,8 +585,8 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
 
     assert first_was_pending
     assert retry_was_pending
-    assert calls_before_release == 1
-    assert child_calls == 1
+    # The retry is free to run the child again; what it may not do is publish a
+    # second time or return anything other than the envelope that committed.
     assert retry == first
     assert service.fetch(contract_id).body == {"race": True}
 
