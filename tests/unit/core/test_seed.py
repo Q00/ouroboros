@@ -606,6 +606,13 @@ class TestSeed:
             'python -c "import sys; sys.exit(1)" || $(false) true',
             'python -c "import sys; sys.exit(1)" || $(false) :',
             'python -c "import sys; sys.exit(1)" || $(false) 2>/dev/null true',
+            'python -c "import sys; sys.exit(1)" || $(true)',
+            'python -c "import sys; sys.exit(1)" || `true`',
+            'python -c "import sys; sys.exit(1)" || VERIFY_MODE=$(true)',
+            'python -c "import sys; sys.exit(1)" || VERIFY_MODE=`true`',
+            'python -c "import sys; sys.exit(1)" || FIRST=$(false) LAST=$(true)',
+            'python -c "import sys; sys.exit(1)" || FIRST=plain LAST=$(true)',
+            'python -c "import sys; sys.exit(1)" || VERIFY_MODE=ci >/dev/null',
             'python -c "import sys; sys.exit(1)" || command true',
             'python -c "import sys; sys.exit(1)" || command :',
             'python -c "import sys; sys.exit(1)" || command exit 0',
@@ -632,6 +639,37 @@ class TestSeed:
 
         with pytest.raises(PydanticValidationError, match="always-succeeding fallback"):
             Seed.from_dict(persisted)
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            'python -c "import sys; sys.exit(1)" || $(false)',
+            'python -c "import sys; sys.exit(1)" || $(true) false',
+            'python -c "import sys; sys.exit(1)" || "$(true)"',
+            'python -c "import sys; sys.exit(1)" || FIRST=$(true) LAST=$(false)',
+            'python -c "import sys; sys.exit(1)" || FIRST=$(false) LAST=plain',
+        ),
+    )
+    def test_success_contract_allows_status_preserving_forms_at_persisted_schema_ingress(
+        self,
+        verify_command: str,
+    ) -> None:
+        seed = Seed(
+            goal="Preserve a saved widget",
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Widget state persists"),),
+            ontology_schema=OntologySchema(name="Widget", description="Saved widget state"),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+        persisted = seed.to_dict()
+        persisted["acceptance_criteria"] = [
+            {
+                "description": "Widget state persists",
+                "verify_command": verify_command,
+            }
+        ]
+
+        loaded = Seed.from_dict(persisted)
+        assert loaded.acceptance_criteria[0].verify_command == verify_command
 
     @pytest.mark.parametrize(
         "artifact",

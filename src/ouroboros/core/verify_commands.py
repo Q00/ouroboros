@@ -208,6 +208,16 @@ class _PosixCaseTracker:
             self.function_name_candidate = False
 
 
+def _is_posix_command_substitution(value: str, index: int) -> bool:
+    """Return whether ``index`` starts a ``$(...)`` command substitution.
+
+    Arithmetic ``$((...))`` and parameter ``${...}`` also begin with ``$`` plus
+    a grouping character, but they do not contribute a command-substitution
+    status.
+    """
+    return value.startswith("$(", index) and not value.startswith("$((", index)
+
+
 def _posix_expansion_end(value: str, index: int) -> int | None:
     """Return the end of one balanced ``$()``/``${}`` shell expansion.
 
@@ -386,6 +396,8 @@ class _ShellToken:
 
     kind: str
     value: str
+    substitution_status: _ShellStatus | None = None
+    unquoted_substitution_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -427,9 +439,9 @@ def _contains_status_masking_fallback(command: str) -> bool:
         fallback_start = index + 1
         grouped_fallback_end = _always_successful_group_end(tokens, fallback_start)
         command_index = _first_command_word_after(tokens, fallback_start)
-        assignment_only = _is_assignment_only_command(tokens, fallback_start)
+        assignment_status = _assignment_only_command_status(tokens, fallback_start)
         always_succeeds = grouped_fallback_end is not None or (
-            assignment_only
+            assignment_status is not None and assignment_status.is_fixed_success
             if command_index is None
             else _is_always_successful_command(tokens, command_index)
         )
@@ -452,14 +464,34 @@ def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
     word: list[str] = []
     quote: str | None = None
     word_started = False
+    word_substitution_status: _ShellStatus | None = None
+    unquoted_substitution_only = False
     index = 0
 
     def flush_word() -> None:
-        nonlocal word_started
+        nonlocal word_started, word_substitution_status, unquoted_substitution_only
         if word_started:
-            tokens.append(_ShellToken("word", "".join(word)))
+            tokens.append(
+                _ShellToken(
+                    "word",
+                    "".join(word),
+                    substitution_status=word_substitution_status,
+                    unquoted_substitution_only=unquoted_substitution_only,
+                )
+            )
         word.clear()
         word_started = False
+        word_substitution_status = None
+        unquoted_substitution_only = False
+
+    def append_expansion(inner: str, *, unquoted: bool, command_substitution: bool) -> None:
+        nonlocal word_substitution_status, unquoted_substitution_only
+        if command_substitution:
+            unquoted_substitution_only = unquoted and not word and not word_started
+            word_substitution_status = _command_substitution_status(inner)
+        else:
+            unquoted_substitution_only = False
+        word.append("\0")
 
     while index < len(command):
         char = command[index]
@@ -468,6 +500,7 @@ def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
                 quote = None
             else:
                 word.append(char)
+                unquoted_substitution_only = False
             index += 1
             continue
         if quote == '"':
@@ -480,25 +513,36 @@ def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
                 if escaped in {"$", "`", '"', "\\", "\n"}:
                     if escaped != "\n":
                         word.append(escaped)
+                        unquoted_substitution_only = False
                     index += 2
                     continue
             if char == "$" and index + 1 < len(command) and command[index + 1] in "({":
                 expansion_end = _posix_expansion_end(command, index)
                 if expansion_end is not None:
-                    word.append("\0")
+                    append_expansion(
+                        command[index + 2 : expansion_end - 1],
+                        unquoted=False,
+                        command_substitution=_is_posix_command_substitution(command, index),
+                    )
                     index = expansion_end
                     continue
             if char == "`":
                 expansion_end = _posix_backtick_substitution_end(command, index)
                 if expansion_end is not None:
-                    word.append("\0")
+                    append_expansion(
+                        command[index + 1 : expansion_end - 1],
+                        unquoted=False,
+                        command_substitution=True,
+                    )
                     index = expansion_end
                     continue
             word.append(char)
+            unquoted_substitution_only = False
             index += 1
             continue
         if char == "\\":
             word_started = True
+            unquoted_substitution_only = False
             if index + 1 < len(command):
                 word.append(command[index + 1])
                 index += 2
@@ -509,19 +553,28 @@ def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
         if char in {"'", '"'}:
             quote = char
             word_started = True
+            unquoted_substitution_only = False
             index += 1
             continue
         if char == "$" and index + 1 < len(command) and command[index + 1] in "({":
             expansion_end = _posix_expansion_end(command, index)
             if expansion_end is not None:
-                word.append("\0")
+                append_expansion(
+                    command[index + 2 : expansion_end - 1],
+                    unquoted=True,
+                    command_substitution=_is_posix_command_substitution(command, index),
+                )
                 word_started = True
                 index = expansion_end
                 continue
         if char == "`":
             expansion_end = _posix_backtick_substitution_end(command, index)
             if expansion_end is not None:
-                word.append("\0")
+                append_expansion(
+                    command[index + 1 : expansion_end - 1],
+                    unquoted=True,
+                    command_substitution=True,
+                )
                 word_started = True
                 index = expansion_end
                 continue
@@ -559,6 +612,7 @@ def _lex_posix_shell_tokens(command: str) -> list[_ShellToken]:
             continue
         word.append(char)
         word_started = True
+        unquoted_substitution_only = False
         index += 1
     flush_word()
     return tokens
@@ -665,11 +719,7 @@ def _shell_command_status(tokens: list[_ShellToken], start: int, end: int) -> _S
         return _SHELL_UNKNOWN_STATUS
     command_index = _first_command_word_after(tokens, start)
     if command_index is None:
-        return (
-            _SHELL_FIXED_SUCCESS
-            if _is_assignment_only_command(tokens, start, end=end)
-            else _SHELL_UNKNOWN_STATUS
-        )
+        return _assignment_only_command_status(tokens, start, end=end) or _SHELL_UNKNOWN_STATUS
     if tokens[command_index].value == "!":
         inverted = _shell_command_status(tokens, command_index + 1, end)
         return _ShellStatus(can_succeed=inverted.can_fail, can_fail=inverted.can_succeed)
@@ -765,24 +815,37 @@ def _is_posix_assignment_word(value: str) -> bool:
     )
 
 
-def _is_assignment_only_command(
+def _command_substitution_status(command: str) -> _ShellStatus:
+    """Return the status outcomes of executable command-substitution contents."""
+    tokens = _lex_posix_shell_tokens(command)
+    return _shell_fragment_status(tokens, 0, len(tokens))
+
+
+def _assignment_only_command_status(
     tokens: list[_ShellToken], index: int, *, end: int | None = None
-) -> bool:
-    """Return whether a simple command contains only assignments/redirections."""
+) -> _ShellStatus | None:
+    """Return an assignment-only command's status, including substitutions.
+
+    POSIX uses the last command substitution's status when one is present,
+    otherwise zero. Redirections stay allowed on assignment-only commands.
+    """
     found_assignment = False
+    status = _SHELL_FIXED_SUCCESS
     command_end = len(tokens) if end is None else end
     while index < command_end:
         token = tokens[index]
         if token.kind in {"operator", "group"}:
-            return False
+            return None
         if token.kind == "redirect":
             index += 2
             continue
-        if "\0" in token.value or not _is_posix_assignment_word(token.value):
-            return False
+        if not _is_posix_assignment_word(token.value):
+            return None
         found_assignment = True
+        if token.substitution_status is not None:
+            status = token.substitution_status
         index += 1
-    return found_assignment
+    return status if found_assignment else None
 
 
 def _is_always_successful_command(tokens: list[_ShellToken], index: int) -> bool:
@@ -797,6 +860,13 @@ def _is_always_successful_command(tokens: list[_ShellToken], index: int) -> bool
         return wrapped_index is not None and _is_always_successful_command(tokens, wrapped_index)
     if command == "\0":
         next_index = _first_command_word_after(tokens, index + 1)
+        if next_index is None:
+            substitution_status = tokens[index].substitution_status
+            return bool(
+                tokens[index].unquoted_substitution_only
+                and substitution_status is not None
+                and substitution_status.is_fixed_success
+            )
         return next_index is not None and _is_always_successful_command(tokens, next_index)
     if command == "!":
         if index + 1 < len(tokens) and tokens[index + 1].kind == "group":
