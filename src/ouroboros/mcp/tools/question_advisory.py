@@ -317,12 +317,21 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     paths = [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
     if not paths:
         return ""
-    listing = "\n".join(f"- {path}" for path in paths)
+    # Rendered as JSON strings rather than as a Markdown list. A path is an
+    # opaque byte string that may legitimately contain a newline, and a raw one
+    # splits its own list item -- the tail then reads as a new heading, so the
+    # child receives neither a usable path nor the framing this block intended.
+    # Escaping makes a path survive as exactly one value whatever it contains.
+    listing = json.dumps(paths, ensure_ascii=False, indent=2)
     return f"""## Recently Found Here
 Advisory lanes have run in this project recently and their results were stored
-as JSON, newest first:
+as JSON. These are their paths, newest first, as JSON strings — read them as
+JSON, since a path may contain characters that would not survive being written
+plainly:
 
+```json
 {listing}
+```
 
 Each file holds answers keyed by `lane_id` under `result.aggregated_outputs`.
 Read the `code_context` and `data_context` entries: those report what the system

@@ -1057,6 +1057,20 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minLength": 1,
                 "description": "The already user-visible MCP interview question.",
             },
+            "recent_findings": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "description": (
+                    "Absolute paths to findings this project published recently, "
+                    "newest first, for a lane to read before investigating. Paths "
+                    "only -- what they contain stays the child's to weigh, and "
+                    "nothing a child wrote travels on this request "
+                    "(RFC Q00/ouroboros#2153). Absent when the project has "
+                    "published nothing recent, so a lane is never sent to an "
+                    "empty place."
+                ),
+            },
             "last_question": {
                 "type": "string",
                 "description": "Previously asked question text, when available.",
