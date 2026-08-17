@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.fanout_handler import (
     FetchArtifactHandler,
@@ -44,11 +45,18 @@ def create_fanout_wiring(
     event_store: Any = None,
     state_dir: Path | None = None,
     handler_event_store: Any = None,
+    interview_engine: Any = None,
+    suppress_tool_use_prompt_cues: bool = False,
     llm_backend: str | None = None,
     agent_runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     ensure_ready: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[SubmitFanoutResultsHandler, FetchArtifactHandler, PMInterviewHandler]:
+) -> tuple[
+    SubmitFanoutResultsHandler,
+    FetchArtifactHandler,
+    InterviewHandler,
+    PMInterviewHandler,
+]:
     """Return the submit, fetch and PM handlers for one workspace.
 
     ``workspace`` of ``None`` is a root that stores nothing: the submit side is
@@ -57,8 +65,14 @@ def create_fanout_wiring(
     nothing published to point a lane at, and a lane sent looking would spend a
     tool call learning that.
 
+    Both producers are built here rather than only the PM one: what may be
+    reused is a fact about the system, and a fact is the same fact whichever
+    interview needed it (RFC #2153). Building them together is also what keeps
+    a root from wiring one and forgetting the other, which is how this shipped
+    dead the first time.
+
     ``event_store`` reaches artifact publication; ``handler_event_store``
-    reaches the PM handler. They are separate because the two composition roots
+    reaches the two handlers. They are separate because the two composition roots
     differ there today, and collapsing them would hand one root an event store
     its PM handler has never had.
     """
@@ -75,6 +89,16 @@ def create_fanout_wiring(
             event_store,
             ensure_ready=ensure_ready,
         )
+    interview = InterviewHandler(
+        interview_engine=interview_engine,
+        event_store=handler_event_store,
+        llm_backend=llm_backend,
+        agent_runtime_backend=agent_runtime_backend,
+        opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
+        suppress_tool_use_prompt_cues=suppress_tool_use_prompt_cues,
+        findings_store=submit.artifact_store,
+    )
     pm_interview = PMInterviewHandler(
         data_dir=state_dir,
         event_store=handler_event_store,
@@ -82,9 +106,9 @@ def create_fanout_wiring(
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
         fanout_registry=fanout_registry,
-        findings_root=submit.artifact_root,
+        findings_store=submit.artifact_store,
     )
-    return submit, fetch, pm_interview
+    return submit, fetch, interview, pm_interview
 
 
 __all__ = ["create_fanout_wiring"]

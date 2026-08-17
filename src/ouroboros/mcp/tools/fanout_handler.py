@@ -7,8 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import hashlib
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -31,6 +30,9 @@ from ouroboros.mcp.types import (
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
 
 log = structlog.get_logger(__name__)
 
@@ -67,20 +69,24 @@ class SubmitFanoutResultsHandler:
         self._registry = self.fanout_registry or FanoutRegistry()
 
     @property
-    def artifact_root(self) -> Path | None:
-        """Return where this handler publishes, or ``None`` if it cannot.
+    def artifact_store(self) -> ContentAddressedArtifactStore | None:
+        """Return the store this handler publishes into, or ``None`` if it cannot.
 
-        Read by the composition roots so an advisory producer is told where
-        results land **by taking this value**, rather than by deriving the same
-        path from the same workspace a second time. This side resolves when it
-        is constructed and a producer would resolve when a question is asked, so
-        a relative workspace and a change of process directory in between would
-        put the reader and the writer in different stores. Handing over the
-        resolved value leaves nothing for a later moment to resolve differently.
+        Handed to advisory producers so a reader asks the same store that wrote,
+        rather than deriving a path from the workspace both were built from.
+        Two derivations are not one address: this side resolves when it is
+        constructed and a producer would resolve when a question is asked, so a
+        relative workspace and a change of process directory in between would
+        put the reader and the writer in different places.
+
+        The store rather than its root, because what a reader needs from it is
+        not only where to look: publication time, membership and bounded reads
+        are all things the store already answers, and re-deriving them beside it
+        is what produced the review round this replaced.
         """
         if self.disposable_memory is None:
             return None
-        return Path(self.disposable_memory.artifact_store.root)
+        return self.disposable_memory.artifact_store
 
     @property
     def definition(self) -> MCPToolDefinition:

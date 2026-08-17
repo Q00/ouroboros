@@ -63,14 +63,16 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     echo_carries_dispatch,
     strip_bridge_notice,
 )
+from ouroboros.mcp.tools.interview_advisory import (
+    _attach_question_assist_requests,
+    _milestone_for_score,
+)
 from ouroboros.mcp.tools.question_advisory import (
-    attach_question_advisory,
     build_question_advisory_request,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
-    SubagentDispatchMode,
     build_generate_seed_subagent,
     build_interview_subagent,
     dispatch_plugin_terminal,
@@ -85,11 +87,6 @@ from ouroboros.mcp.types import (
     MCPToolParameter,
     MCPToolResult,
     ToolInputType,
-)
-from ouroboros.orchestrator.capabilities import (
-    interview_code_investigation_answer_contract,
-    ouroboros_tool_capability_metadata,
-    stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.capabilities.question_text import (
     format_question_with_ambiguity as _format_question_with_ambiguity,
@@ -395,14 +392,6 @@ def _completion_gate_reason(
     return "requirements are not stable enough to close yet"
 
 
-def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
-    """Return the milestone label for an ambiguity score, or None."""
-    if score is None:
-        return None
-    milestone, _ = get_milestone(score.overall_score)
-    return milestone.value
-
-
 _MILESTONE_RANKS = {
     "initial": 0,
     "progress": 1,
@@ -612,60 +601,6 @@ def _compute_transcript_chars(state: InterviewState) -> int:
     return total
 
 
-def _build_code_investigation_request(
-    *,
-    session_id: str,
-    question: str,
-    last_question: str | None = None,
-) -> dict[str, Any]:
-    """Build stable metadata for caller-side code-fact investigation.
-
-    The interview MCP tool is only the question generator; repo inspection runs
-    in the parent runtime. This metadata gives that runtime a concrete request
-    envelope keyed to the exact question text, so investigation results can be
-    correlated even when the user-facing display has an ambiguity prefix.
-    """
-    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
-    code_investigation = mcp_tool_capability["orchestration"]["code_investigation"]
-    request: dict[str, Any] = {
-        "session_id": session_id,
-        "question_identity": stable_code_investigation_question_identity(question),
-        "question": question,
-        "investigation_goal": "describe_current_state_from_code",
-        "investigation_targets": [{"target_type": "workspace", "scope": "active"}],
-        "fact_categories": [
-            "tech_stack",
-            "frameworks",
-            "dependencies",
-            "current_patterns",
-            "architecture",
-            "file_structure",
-            "configuration",
-        ],
-        "allowed_capabilities": ["inspect_code"],
-        "repo_inspection_tool_capabilities": list(
-            code_investigation["repo_inspection_tool_capabilities"]
-        ),
-        "confidence_policy": {
-            "auto_confirm_when": ["exact manifest or config match with a single clear answer"],
-            "confirmation_required_when": [
-                "multiple code paths or configuration sources disagree",
-                "the answer implies a product or architecture decision",
-            ],
-            "human_judgment_when": [
-                "desired future behavior",
-                "priority, scope, ownership, rollout, or acceptance criteria",
-            ],
-        },
-        "answer_prefixes": ["[from-code]", "[from-code][auto-confirmed]"],
-        "answer_contract": interview_code_investigation_answer_contract(),
-        "mcp_tool_capability": mcp_tool_capability,
-    }
-    if last_question:
-        request["last_question"] = last_question
-    return request
-
-
 def _build_question_advisory_request(
     *,
     session_id: str,
@@ -690,50 +625,6 @@ def _build_question_advisory_request(
         milestone=_milestone_for_score(score),
         code_investigation_request=code_investigation_request,
         last_question=last_question,
-    )
-
-
-def _attach_question_assist_requests(
-    meta: dict[str, Any],
-    *,
-    session_id: str,
-    question: str,
-    phase: str,
-    score: AmbiguityScore | None,
-    last_question: str | None = None,
-    dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
-    runtime_backend: str | None = None,
-    opencode_mode: str | None = None,
-    fanout_registry: FanoutRegistry | None = None,
-) -> None:
-    """Attach the interview's code-fact request and its advisory fan-out.
-
-    The fan-out itself lives in ``question_advisory``, which serves every tool
-    that declares a catalog — one implementation, so the interview and the PM
-    interview cannot drift apart in the places where being identical matters.
-    What stays here is the part that is only the interview's: the code-fact
-    investigation request, which exists because in this interview a code fact
-    may become the answer.
-    """
-    code_request = _build_code_investigation_request(
-        session_id=session_id,
-        question=question,
-        last_question=last_question,
-    )
-    attach_question_advisory(
-        meta,
-        tool_name="ouroboros_interview",
-        session_id=session_id,
-        question=question,
-        phase=phase,
-        ambiguity_score=score.overall_score if score is not None else None,
-        milestone=_milestone_for_score(score),
-        code_investigation_request=code_request,
-        last_question=last_question,
-        dispatch_mode=dispatch_mode,
-        runtime_backend=runtime_backend,
-        opencode_mode=opencode_mode,
-        fanout_registry=fanout_registry,
     )
 
 
@@ -1657,6 +1548,7 @@ class InterviewHandler:
     data_dir: Path | None = field(default=None, repr=False)
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     suppress_tool_use_prompt_cues: bool = False
+    findings_store: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -2766,6 +2658,7 @@ class InterviewHandler:
                             runtime_backend=self.agent_runtime_backend,
                             opencode_mode=self.opencode_mode,
                             fanout_registry=self._resolved_fanout_registry(),
+                            findings_store=self.findings_store,
                         )
                     finally:
                         advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
@@ -3373,6 +3266,7 @@ class InterviewHandler:
                             runtime_backend=self.agent_runtime_backend,
                             opencode_mode=self.opencode_mode,
                             fanout_registry=self._resolved_fanout_registry(),
+                            findings_store=self.findings_store,
                         )
                     finally:
                         advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
@@ -3651,6 +3545,7 @@ class InterviewHandler:
                     runtime_backend=self.agent_runtime_backend,
                     opencode_mode=self.opencode_mode,
                     fanout_registry=self._resolved_fanout_registry(),
+                    findings_store=self.findings_store,
                 )
             except Exception as error:
                 advisory_build_error = error

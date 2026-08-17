@@ -2474,15 +2474,6 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(event_store=event_store),
-        InterviewHandler(
-            interview_engine=interview_engine,
-            event_store=event_store,
-            llm_backend=interview_llm_backend,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-            suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
@@ -2492,9 +2483,11 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        # One store, and the producer is handed its resolved root rather than
-        # deriving the same path again when a question is asked (RFC #2153).
+        # One store, and both producers are handed it rather than deriving a
+        # path from the workspace when a question is asked (RFC #2153).
         *create_fanout_wiring(
+            interview_engine=interview_engine,
+            suppress_tool_use_prompt_cues=interview_envelope_sealed,
             fanout_registry=fanout_registry,
             workspace=effective_cwd,
             event_store=event_store,

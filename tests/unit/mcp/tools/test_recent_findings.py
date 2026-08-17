@@ -4,15 +4,19 @@ The decision these hold is that a lane may answer from a finding another lane
 produced recently, whichever session produced it — so what is asserted here is
 mostly the *absence* of a session, and absences have no failing behaviour to
 point at later if a guard is quietly restored.
+
+Every fixture publishes **through the store**, because that is the change these
+tests exist to protect. A fixture writing bodies into the directory by hand
+would assert against the shape this feature deliberately stopped trusting.
 """
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
-import os
 from pathlib import Path
-import time
 from typing import Any
 
 import pytest
@@ -22,10 +26,12 @@ from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_subagents,
 )
 from ouroboros.mcp.tools.recent_findings import (
-    RECENT_FINDINGS_WINDOW_SECONDS,
+    RECENT_FINDINGS_WINDOW,
     recent_finding_paths,
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
+from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
 
@@ -35,40 +41,52 @@ def roster() -> list[dict[str, str]]:
     return pm_repository_roster([{"path": "/repo/api", "name": "api"}])
 
 
+@pytest.fixture
+def store(tmp_path: Path) -> ContentAddressedArtifactStore:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    built = ContentAddressedArtifactStore.for_project(workspace)
+    built.initialize()
+    return built
+
+
 def _publish(
-    root: Path,
+    store: ContentAddressedArtifactStore,
     *,
-    age_seconds: float = 0.0,
     kind: str = "question_advisory",
     lanes: tuple[str, ...] = ("code_context", "data_context"),
     claim: str = "access continues to period end",
-) -> Path:
-    """Publish one body the way the artifact store does: named by its own digest.
+) -> str:
+    """Publish one body the way a completed fan-out does, and return its path.
 
-    Written through the same rule the store writes by, rather than by hand,
-    because content addressing is what the lookup checks a file against — a
-    fixture that named files freely would pass a test the store's own files
-    would fail.
+    Through ``DisposableMemory`` rather than by writing a file, so what these
+    tests read back is a publication the store recorded making — which is the
+    thing the lookup asks about.
     """
-    body = json.dumps(
-        {
-            "kind": kind,
-            "result": {
-                "aggregated_outputs": [
-                    {"lane_id": lane, "output": {"claim": claim}} for lane in lanes
-                ]
-            },
-        }
-    ).encode("utf-8")
-    digest = hashlib.sha256(body).hexdigest()
-    shard = root / digest[:2]
-    shard.mkdir(parents=True, exist_ok=True)
-    path = shard / f"{digest}.json"
-    path.write_bytes(body)
-    if age_seconds:
-        written = time.time() - age_seconds
-        os.utime(path, (written, written))
-    return path
+    body = {
+        "kind": kind,
+        "result": {
+            "aggregated_outputs": [{"lane_id": lane, "output": {"claim": claim}} for lane in lanes]
+        },
+    }
+    canonical = json.dumps(body, sort_keys=True).encode("utf-8")
+    contract_id = f"fanout:{hashlib.sha256(canonical).hexdigest()}"
+    memory = DisposableMemory(artifact_store=store)
+
+    async def _run() -> Any:
+        async def work(_handle: Any) -> Any:
+            return body
+
+        return await memory.run(
+            intent="publish a finding",
+            runtime_id="test:publish",
+            work_fn=work,
+            contract_id=contract_id,
+        )
+
+    asyncio.run(_run())
+    digest = store.fetch(contract_id).envelope.artifact_ref.split(":", 1)[1]
+    return str(store.root / digest[:2] / f"{digest}.json")
 
 
 def _lane_prompts(meta: dict[str, Any]) -> dict[str, str]:
@@ -78,68 +96,83 @@ def _lane_prompts(meta: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _attach(roster: list[dict[str, str]], root: Path | None, **kwargs: Any) -> dict[str, Any]:
+def _attach(
+    roster: list[dict[str, str]],
+    store: ContentAddressedArtifactStore | None,
+    *,
+    tool_name: str = "ouroboros_pm_interview",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    pm = tool_name == "ouroboros_pm_interview"
     meta: dict[str, Any] = {}
     attach_question_advisory(
         meta,
-        tool_name="ouroboros_pm_interview",
+        tool_name=tool_name,
         session_id=kwargs.pop("session_id", "pm-1"),
         question=kwargs.pop("question", QUESTION),
-        repository_roster=roster,
-        findings_root=root,
+        repository_roster=roster if pm else None,
+        code_investigation_request=None
+        if pm
+        else {"question": QUESTION, "reason": "policy", "repository_path": "/repo/api"},
+        findings_store=store,
         **kwargs,
     )
     return meta
 
 
 def test_a_finding_from_another_session_is_offered(
-    roster: list[dict[str, str]], tmp_path: Path
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
 ) -> None:
     """The decision, stated as the thing that used to be filtered out.
 
-    Nothing about the session reaches this lookup, which is the point: a
-    finding describes the system, and the system does not change at session
-    granularity. Asserted on both lanes because both report on the system.
+    Nothing about the session reaches this lookup: a finding describes the
+    system, and the system does not change at session granularity.
     """
-    published = _publish(tmp_path)
+    published = _publish(store)
 
-    prompts = _lane_prompts(_attach(roster, tmp_path))
+    prompts = _lane_prompts(_attach(roster, store))
 
     assert set(prompts) == {"code_context", "data_context"}
     for prompt in prompts.values():
         assert "## Recently Found Here" in prompt
-        assert str(published) in prompt
+        assert published in prompt
+
+
+def test_the_ordinary_interview_reads_the_same_findings(
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+) -> None:
+    """Which tool asks does not enter into it (RFC #2153).
+
+    A fact about the system is the same fact whichever interview needed it, so
+    both producers read from one place. Held because the first implementation
+    wired only PM and nothing noticed.
+    """
+    published = _publish(store)
+
+    prompts = _lane_prompts(_attach(roster, store, tool_name="ouroboros_interview"))
+
+    assert "code_context" in prompts
+    for prompt in prompts.values():
+        assert published in prompt
 
 
 def test_a_finding_older_than_the_window_is_not_offered(
-    roster: list[dict[str, str]], tmp_path: Path
+    store: ContentAddressedArtifactStore,
 ) -> None:
-    """Recency is the boundary, so something has to fall outside it."""
-    fresh = _publish(tmp_path, claim="fresh")
-    stale = _publish(tmp_path, claim="stale", age_seconds=RECENT_FINDINGS_WINDOW_SECONDS + 60)
+    """Recency is the boundary, so something has to fall outside it.
 
-    prompt = _lane_prompts(_attach(roster, tmp_path))["code_context"]
-
-    assert str(fresh) in prompt
-    assert str(stale) not in prompt
-
-
-def test_a_project_with_nothing_recent_is_told_nothing(
-    roster: list[dict[str, str]], tmp_path: Path
-) -> None:
-    """An empty place is worse than no place: looking there costs a tool call."""
-    _publish(tmp_path, age_seconds=RECENT_FINDINGS_WINDOW_SECONDS * 3)
-
-    for prompt in _lane_prompts(_attach(roster, tmp_path)).values():
-        assert "## Recently Found Here" not in prompt
-
-
-def test_a_caller_with_no_root_still_gets_its_lanes(roster: list[dict[str, str]]) -> None:
-    """Advisory: losing the shortcut costs a child a place to look, not a turn.
-
-    This is also what keeps every other tool sharing this producer untouched —
-    a caller that passes no root pays nothing and reads nothing.
+    Time is moved rather than the file touched: publication time is what the
+    window is read against, and the body's own timestamp is not consulted.
     """
+    published = _publish(store)
+    later = datetime.now(UTC) + RECENT_FINDINGS_WINDOW + timedelta(minutes=1)
+
+    assert recent_finding_paths(store) == [published]
+    assert recent_finding_paths(store, now=later) == []
+
+
+def test_a_caller_with_no_store_still_gets_its_lanes(roster: list[dict[str, str]]) -> None:
+    """Advisory: losing the shortcut costs a child a place to look, not a turn."""
     prompts = _lane_prompts(_attach(roster, None))
 
     assert set(prompts) == {"code_context", "data_context"}
@@ -148,160 +181,100 @@ def test_a_caller_with_no_root_still_gets_its_lanes(roster: list[dict[str, str]]
 
 
 def test_the_lane_is_told_the_roster_does_not_travel_with_the_findings(
-    roster: list[dict[str, str]], tmp_path: Path
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
 ) -> None:
-    """The one thing that does not carry across sessions.
+    """The one thing that does not carry across sessions."""
+    _publish(store)
 
-    A session chooses which repositories it is asking about, and a claim about
-    any other is rejected at submission. The child is told where it is deciding
-    what to read, rather than discovering it when its answer is refused.
-    """
-    _publish(tmp_path)
-
-    prompt = _lane_prompts(_attach(roster, tmp_path))["code_context"]
+    prompt = _lane_prompts(_attach(roster, store))["code_context"]
 
     assert "other sessions" in prompt
     assert "rejected" in prompt
 
 
 def test_the_producer_hands_over_paths_and_never_what_a_child_found(
-    roster: list[dict[str, str]], tmp_path: Path
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
 ) -> None:
-    """The prompt cannot grow with what was found, only with how many files.
-
-    Inlining findings would make every
-    round pay for every earlier round and would make this server pick which of
-    them matter without having read the question; it would also put
-    child-authored text on the producing side, which this fan-out keeps free of
-    it independently of this feature.
-    """
+    """The prompt cannot grow with what was found, only with how many files."""
     claim = "a sentence only a child could have written"
-    _publish(tmp_path, claim=claim)
+    _publish(store, claim=claim)
 
-    meta = _attach(roster, tmp_path)
+    meta = _attach(roster, store)
 
     assert claim not in json.dumps(meta["question_advisory_request"])
     assert claim not in _lane_prompts(meta)["code_context"]
 
 
-def test_the_store_s_own_bookkeeping_is_not_a_finding(
-    roster: list[dict[str, str]], tmp_path: Path
-) -> None:
-    """``contracts`` and ``bindings`` are how the store tracks itself.
-
-    Excluded by the shape of the walk rather than by naming them, so a
-    directory the store adds later does not have to be remembered here.
-    """
-    _publish(tmp_path)
-    for bookkeeping in ("contracts", "bindings"):
-        directory = tmp_path / bookkeeping
-        directory.mkdir()
-        (directory / "events.json").write_text("{}", encoding="utf-8")
-
-    paths = recent_finding_paths(tmp_path)
-
-    assert len(paths) == 1
-    assert "contracts" not in paths[0]
-    assert "bindings" not in paths[0]
-
-
-def test_an_unreadable_root_returns_nothing_rather_than_raising(tmp_path: Path) -> None:
-    """The turn belongs to the question; a missing shortcut must not take it."""
-    assert recent_finding_paths(tmp_path / "absent") == []
-    assert recent_finding_paths(None) == []
-
-
-# ── What a listing offers is checked, because a listing is not authority ──
-
-
-def test_a_body_that_is_not_what_its_name_says_is_not_offered(tmp_path: Path) -> None:
-    """Content addressing is the store's naming rule, so it is the integrity test.
-
-    A body planted by hand carries whatever claims its author wanted, and those
-    reach the user through a confirmation prompt that says the code says so. It
-    cannot pass here without finding a preimage for the name it sits under.
-    """
-    published = _publish(tmp_path)
-    published.write_bytes(published.read_bytes().replace(b"period end", b"never ends"))
-
-    assert recent_finding_paths(tmp_path) == []
-
-
-def test_a_symlink_out_of_the_project_is_not_offered(tmp_path: Path) -> None:
-    """The one thing this lookup could newly expose, and the RFC forbids it.
-
-    A lane is otherwise bounded to the repositories the question named. A link
-    handing back an absolute path elsewhere would put a file this project does
-    not own into a child's prompt — which is cross-project reuse by another
-    name. It fails the same test a forged body fails: what it resolves to does
-    not hash to the name it was found under.
-    """
-    # Another project's store, holding a body that is entirely valid there: it
-    # hashes to its own name and carries an eligible lane. Only where it lives
-    # makes it not this project's, so integrity cannot be what excludes it.
-    elsewhere = tmp_path / "other-project"
-    elsewhere.mkdir()
-    theirs = _publish(elsewhere, claim="another project's policy")
-
-    root = tmp_path / "artifacts"
-    shard = root / theirs.stem[:2]
-    shard.mkdir(parents=True)
-    link = shard / theirs.name
-    link.symlink_to(theirs)
-
-    offered = recent_finding_paths(root)
-
-    assert offered == []
-    assert all(str(elsewhere) not in path for path in offered)
-
-
-def test_another_fanout_kind_is_not_offered(tmp_path: Path) -> None:
-    """Persona panels publish into the same namespace and are not findings.
-
-    Recency alone cannot establish that a file is an eligible finding, because
-    every kind shares one content-addressed directory.
-    """
-    _publish(tmp_path, kind="lateral_persona_panel")
-
-    assert recent_finding_paths(tmp_path) == []
-
-
-def test_a_body_with_no_eligible_lane_is_not_offered(tmp_path: Path) -> None:
-    """The RFC closes the list at two lanes, and an interview turn runs six.
-
-    A contrarian's challenge or a drafted set of answer options is reasoning
-    about one question. Reused as evidence it is an answer to a question nobody
-    asked — and for PM, answer options are the one thing a lane must never hand
-    the user.
-    """
-    _publish(tmp_path, lanes=("ambiguity_contrarian", "answer_simplifier", "web_context"))
-
-    assert recent_finding_paths(tmp_path) == []
-
-
-def test_a_mixed_body_is_offered_for_the_lanes_it_does_carry(tmp_path: Path) -> None:
-    """An interview body holds eligible and ineligible lanes in one file.
-
-    The file is offered because it carries something eligible, and the boundary
-    inside it is the lane the child is told to read. Splitting the file server
-    side would mean this server deciding what is relevant without having read
-    the question, which is what handing over paths exists to avoid.
-    """
-    published = _publish(
-        tmp_path,
-        lanes=("code_context", "ambiguity_contrarian", "answer_simplifier"),
-    )
-
-    assert recent_finding_paths(tmp_path) == [str(published)]
-
-
 def test_the_prompt_names_which_entries_may_be_read(
-    roster: list[dict[str, str]], tmp_path: Path
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
 ) -> None:
-    """Because the boundary inside a file cannot be enforced by the listing."""
-    _publish(tmp_path, lanes=("code_context", "answer_simplifier"))
+    """A body can hold both, so the boundary inside it is named to the child."""
+    _publish(store, lanes=("code_context", "answer_simplifier"))
 
-    prompt = _lane_prompts(_attach(roster, tmp_path))["code_context"]
+    prompt = _lane_prompts(_attach(roster, store))["code_context"]
 
     assert "`code_context` and `data_context`" in prompt
     assert "reasoning about a different question" in prompt
+
+
+# ── What may be read is what the store published, and what the RFC admits ──
+
+
+def test_a_body_the_store_never_published_is_not_offered(
+    store: ContentAddressedArtifactStore,
+) -> None:
+    """Membership comes from the publication record, not from the directory.
+
+    A project can choose any bytes and name the file by their own digest, so
+    content addressing cannot tell a chosen body from a written one. Nothing
+    vouches for this file — it has no way in rather than being recognised.
+    """
+    body = json.dumps(
+        {
+            "kind": "question_advisory",
+            "result": {"aggregated_outputs": [{"lane_id": "code_context", "output": {}}]},
+        }
+    ).encode("utf-8")
+    digest = hashlib.sha256(body).hexdigest()
+    shard = store.root / digest[:2]
+    shard.mkdir(parents=True, exist_ok=True)
+    (shard / f"{digest}.json").write_bytes(body)
+
+    assert recent_finding_paths(store) == []
+
+
+def test_another_fanout_kind_is_not_offered(store: ContentAddressedArtifactStore) -> None:
+    """Persona panels publish through the same store and are not findings."""
+    _publish(store, kind="lateral_persona_panel")
+
+    assert recent_finding_paths(store) == []
+
+
+def test_a_body_with_no_eligible_lane_is_not_offered(
+    store: ContentAddressedArtifactStore,
+) -> None:
+    """The RFC closes the list at two lanes, and an interview turn runs six.
+
+    A contrarian's challenge or a drafted set of answer options is reasoning
+    about one question; reused as evidence it answers a question nobody asked.
+    """
+    _publish(store, lanes=("ambiguity_contrarian", "answer_simplifier", "web_context"))
+
+    assert recent_finding_paths(store) == []
+
+
+def test_a_mixed_body_is_offered_for_the_lanes_it_does_carry(
+    store: ContentAddressedArtifactStore,
+) -> None:
+    """Splitting it server-side would decide relevance without the question."""
+    published = _publish(store, lanes=("code_context", "ambiguity_contrarian"))
+
+    assert recent_finding_paths(store) == [published]
+
+
+def test_an_unreadable_store_returns_nothing_rather_than_raising(tmp_path: Path) -> None:
+    """The turn belongs to the question; a missing shortcut must not take it."""
+    absent = ContentAddressedArtifactStore.for_project(tmp_path / "gone")
+
+    assert recent_finding_paths(absent) == []
+    assert recent_finding_paths(None) == []

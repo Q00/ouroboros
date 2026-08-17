@@ -20,33 +20,37 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.mcp.server.adapter import create_ouroboros_server
+from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.definitions import get_ouroboros_tools
 from ouroboros.mcp.tools.fanout_handler import SubmitFanoutResultsHandler
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 
 
-def _publishes_into(handlers: Any) -> Path | None:
-    """Return the root the submit side would publish into, if it can publish."""
+def _publishes_into(handlers: Any) -> Any:
+    """Return the store the submit side would publish into, if it can publish."""
     submit = next(
         (handler for handler in handlers if isinstance(handler, SubmitFanoutResultsHandler)),
         None,
     )
-    return None if submit is None else submit.artifact_root
+    return None if submit is None else submit.artifact_store
 
 
-def _reads_from(handlers: Any) -> Path | None:
-    """Return the root the advisory producer would send a lane to.
+def _readers(handlers: Any) -> dict[str, Any]:
+    """Return what each advisory producer would read from, keyed by class.
 
-    Read, not recomputed. The producer carries the address itself, so this reads
-    what it holds rather than repeating a derivation from the workspace — which
-    is the thing the wiring must not do either (RFC #2153, second trap).
+    **Both** producers, deliberately. The previous version of this helper looked
+    only for the PM one, and that is exactly how a root wiring PM and forgetting
+    the interview passed — a helper that searches for one thing cannot report
+    the other missing (RFC #2153).
     """
-    producer = next(
-        (handler for handler in handlers if isinstance(handler, PMInterviewHandler)),
-        None,
+    found: dict[str, Any] = {}
+    for handler in handlers:
+        if isinstance(handler, PMInterviewHandler | InterviewHandler):
+            found[type(handler).__name__] = handler.findings_store
+    assert set(found) == {"PMInterviewHandler", "InterviewHandler"}, (
+        f"both producers must be registered; found {sorted(found)}"
     )
-    assert producer is not None, "no advisory producer registered"
-    return producer.findings_root
+    return found
 
 
 def test_the_server_points_the_producer_at_the_store_it_writes_to(tmp_path: Path) -> None:
@@ -67,7 +71,7 @@ def test_the_server_points_the_producer_at_the_store_it_writes_to(tmp_path: Path
 
     publishes = _publishes_into(handlers)
     assert publishes is not None, "the server can always publish; this cannot be absent"
-    assert _reads_from(handlers) == publishes
+    assert all(reader is publishes for reader in _readers(handlers).values())
 
 
 def test_the_runtime_tool_set_points_the_producer_at_the_store_it_writes_to(
@@ -80,7 +84,7 @@ def test_the_runtime_tool_set_points_the_producer_at_the_store_it_writes_to(
 
     publishes = _publishes_into(handlers)
     assert publishes is not None, "a workspace was given, so publication is configured"
-    assert _reads_from(handlers) == publishes
+    assert all(reader is publishes for reader in _readers(handlers).values())
 
 
 def test_a_root_that_cannot_store_findings_is_not_asked_to_carry_an_address() -> None:
@@ -92,7 +96,7 @@ def test_a_root_that_cannot_store_findings_is_not_asked_to_carry_an_address() ->
     handlers = list(get_ouroboros_tools())
 
     assert _publishes_into(handlers) is None
-    assert _reads_from(handlers) is None
+    assert all(reader is None for reader in _readers(handlers).values())
 
 
 def test_a_relative_workspace_survives_a_change_of_working_directory(
@@ -119,5 +123,6 @@ def test_a_relative_workspace_survives_a_change_of_working_directory(
     assert publishes is not None
 
     monkeypatch.chdir(elsewhere)
-    assert _reads_from(handlers) == publishes
-    assert _reads_from(handlers) == workspace / ".ouroboros" / "artifacts"
+    for reader in _readers(handlers).values():
+        assert reader is publishes
+        assert reader.root == workspace / ".ouroboros" / "artifacts"

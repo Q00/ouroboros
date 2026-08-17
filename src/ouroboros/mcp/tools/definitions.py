@@ -520,9 +520,10 @@ def get_ouroboros_tools(
     fanout_registry = FanoutRegistry()
     from ouroboros.persistence.event_store import EventStore
 
-    # The PM producer takes the store's own resolved root, through the one
-    # factory the server's composition root also calls (RFC #2153).
-    submit_fanout, fetch_artifact, pm_interview = create_fanout_wiring(
+    # Both producers take the store from the side that publishes into it,
+    # through the one factory the server's composition root also calls
+    # (RFC #2153).
+    submit_fanout, fetch_artifact, interview, pm_interview = create_fanout_wiring(
         fanout_registry=fanout_registry,
         workspace=project_dir,
         event_store=context.event_store if context is not None else EventStore(),
@@ -542,12 +543,6 @@ def get_ouroboros_tools(
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
     job_result = JobResultHandler()
-    interview = InterviewHandler(
-        llm_backend=llm_backend,
-        agent_runtime_backend=runtime_backend,
-        opencode_mode=opencode_mode,
-        fanout_registry=fanout_registry,
-    )
     generate_seed = GenerateSeedHandler(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,

@@ -26,7 +26,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -548,7 +547,7 @@ def attach_question_advisory(
     runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     fanout_registry: FanoutRegistry | None = None,
-    findings_root: Path | str | None = None,
+    findings_store: Any | None = None,
 ) -> None:
     """Attach the advisory fan-out to a turn that shows a question to the user.
 
@@ -561,10 +560,9 @@ def attach_question_advisory(
     user needs; losing the lanes costs them evidence, while raising here would
     cost them the question.
 
-    ``findings_root`` is where this project's completed fan-outs were published.
-    It is the store's own resolved root, taken rather than re-derived, so no
-    later moment can resolve the same workspace into a different directory. A
-    caller without one still gets its lanes, and they investigate the way they
+    ``findings_store`` is the store this project's completed fan-outs were
+    published into, taken from the side that publishes rather than rebuilt here.
+    A caller without one still gets its lanes, and they investigate the way they
     always did.
     """
     if not question:
@@ -579,7 +577,7 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
-        recent_findings=recent_finding_paths(findings_root),
+        recent_findings=recent_finding_paths(findings_store),
     )
     try:
         payloads = build_question_advisory_subagents(request)
