@@ -1457,21 +1457,40 @@ if [ "$HAS_DSH" = true ]; then
   _say "${BLUE}◆${RESET} ${BOLD}DeepSeek Harness plugin${RESET}"
 
   DSH_PROFILE_ROOT="${DSH_HOME:-$HOME/.dsh}/profiles"
-  DSH_TARGET_PROFILES="web"
-  if [ -d "$DSH_PROFILE_ROOT" ]; then
+  DSH_TARGET_PROFILES=("web")
+  _dsh_json_python="${PYTHON:-}"
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_json_python=$(command -v python3 2>/dev/null || true)
+  fi
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+    if [ -n "$_dsh_ouroboros_cmd" ] && [ -r "$_dsh_ouroboros_cmd" ]; then
+      _dsh_shebang=$(head -n 1 "$_dsh_ouroboros_cmd" 2>/dev/null || true)
+      case "$_dsh_shebang" in
+        '#!'/*)
+          _dsh_json_python=${_dsh_shebang#'#!'}
+          case "$_dsh_json_python" in
+            *' '*) _dsh_json_python="" ;;
+          esac
+          [ -x "$_dsh_json_python" ] || _dsh_json_python=""
+          ;;
+      esac
+    fi
+  fi
+  if [ -n "$_dsh_json_python" ] && [ -d "$DSH_PROFILE_ROOT" ]; then
     for _dsh_profile_dir in "$DSH_PROFILE_ROOT"/*/; do
       [ -d "$_dsh_profile_dir" ] || continue
       _dsh_profile=$(basename "$_dsh_profile_dir")
       [ "$_dsh_profile" = "web" ] && continue
       # Only profiles that already opted in. Adding Ouroboros tools to an
       # unrelated profile because the installer ran is not an upgrade.
-      if grep -q "dsh-ouroboros" "$_dsh_profile_dir/package.json" 2>/dev/null; then
-        DSH_TARGET_PROFILES="$DSH_TARGET_PROFILES $_dsh_profile"
+      if "$_dsh_json_python" -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); dependencies = data.get("dependencies", {}) if isinstance(data, dict) else {}; sys.exit(0 if isinstance(dependencies, dict) and "dsh-ouroboros" in dependencies else 1)' "$_dsh_profile_dir/package.json" 2>/dev/null; then
+        DSH_TARGET_PROFILES+=("$_dsh_profile")
       fi
     done
   fi
 
-  for _dsh_profile in $DSH_TARGET_PROFILES; do
+  for _dsh_profile in "${DSH_TARGET_PROFILES[@]}"; do
     if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
       _ok "dsh profile '$_dsh_profile': Ouroboros tools installed"
     else

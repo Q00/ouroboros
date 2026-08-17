@@ -2473,16 +2473,61 @@ def test_installer_refreshes_profiles_that_already_opted_in(tmp_path: Path) -> N
     )
     (profiles / "unrelated").mkdir(parents=True)
     (profiles / "unrelated" / "package.json").write_text(
-        '{"dependencies": {"something-else": "1.0.0"}}', encoding="utf-8"
+        json.dumps(
+            {
+                "dependencies": {"not-dsh-ouroboros": "1.0.0"},
+                "description": "mentions dsh-ouroboros without installing it",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (profiles / "malformed").mkdir(parents=True)
+    (profiles / "malformed" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros":', encoding="utf-8"
     )
 
-    result = _run_installer(tmp_path, fake_commands={"dsh": _DSH_STUB})
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": _DSH_STUB,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
 
     assert result.returncode == 0, result.stderr
     profiles_called = sorted(
         line.split("--profile ")[1].split()[0] for line in _dsh_calls(tmp_path)
     )
     assert profiles_called == ["tui", "web"]
+
+
+def test_installer_preserves_an_opted_in_profile_name_as_one_argument(tmp_path: Path) -> None:
+    """Profile discovery must not split or expand user-owned directory names."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / "team alpha"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    dsh_stub = f"""#!/bin/sh
+printf 'dsh-profile:%s\\n' "$3" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": dsh_stub,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = [
+        line.removeprefix("dsh-profile:")
+        for line in (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+        if line.startswith("dsh-profile:")
+    ]
+    assert profiles_called == ["web", "team alpha"]
 
 
 def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
