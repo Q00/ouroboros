@@ -500,8 +500,12 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
 
     There is no ``observed_at``. It was required here for two rounds and is
     removed by RFC #1754's second revision: ageing is accepted unconditionally,
-    and the interview session is the measurement's time envelope, so a field
-    restating it bought nothing a consumer read. It also asked an LLM child with
+    so a field restating it bought nothing a consumer read. The envelope that
+    reasoning named was the interview session; RFC #2153 supersedes that with
+    recency, on the reasoning that a measurement moves on the system's clock
+    rather than on the clock of whoever is being interviewed. What is unchanged
+    is why no field is needed: the aggregate is shown beside the question and
+    the user answers in their own words, so its age is theirs to weigh. It also asked an LLM child with
     no clock to testify about time, which cost three rounds of validators —
     digits, then component ranges, then a wall clock with a skew allowance. The
     close is structural rather than another validator: a field that does not
@@ -1052,6 +1056,20 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "description": "The already user-visible MCP interview question.",
+            },
+            "recent_findings": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "description": (
+                    "Absolute paths to findings this project published recently, "
+                    "newest first, for a lane to read before investigating. Paths "
+                    "only -- what they contain stays the child's to weigh, and "
+                    "nothing a child wrote travels on this request "
+                    "(RFC Q00/ouroboros#2153). Absent when the project has "
+                    "published nothing recent, so a lane is never sent to an "
+                    "empty place."
+                ),
             },
             "last_question": {
                 "type": "string",

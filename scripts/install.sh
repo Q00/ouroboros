@@ -939,6 +939,8 @@ HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
 HAS_GJC=false
+HAS_DSH=false
+DSH_PLUGIN_SPEC="github:Q00/ouroboros#main&path:integrations/dsh-plugin"
 if command -v codex &>/dev/null; then
   _ok "Codex found: $(which codex)"
   HAS_CODEX=true
@@ -978,6 +980,10 @@ fi
 if command -v gjc &>/dev/null; then
   _ok "GJC found: $(which gjc)"
   HAS_GJC=true
+fi
+if command -v dsh &>/dev/null; then
+  _ok "DeepSeek Harness found: $(which dsh)"
+  HAS_DSH=true
 fi
 
 RUNTIME_COUNT=0
@@ -1439,6 +1445,62 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       _info '  in a terminal:    ouroboros config'
       ;;
   esac
+fi
+
+# 6. DeepSeek Harness integration. Unlike the other hosts, dsh keeps its plugins
+# per profile, and `dsh plugin` requires --profile, so there is no single global
+# install to run. Cover the profile a dsh user actually boots (`web`, which
+# `dsh web` scaffolds) and refresh any other profile that already carries the
+# bundle, which is how an existing install picks up a new release.
+if [ "$HAS_DSH" = true ]; then
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}DeepSeek Harness plugin${RESET}"
+
+  DSH_PROFILE_ROOT="${DSH_HOME:-$HOME/.dsh}/profiles"
+  DSH_TARGET_PROFILES=("web")
+  _dsh_json_python="${PYTHON:-}"
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_json_python=$(command -v python3 2>/dev/null || true)
+  fi
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+    if [ -n "$_dsh_ouroboros_cmd" ] && [ -r "$_dsh_ouroboros_cmd" ]; then
+      _dsh_shebang=$(head -n 1 "$_dsh_ouroboros_cmd" 2>/dev/null || true)
+      case "$_dsh_shebang" in
+        '#!'/*)
+          _dsh_json_python=${_dsh_shebang#'#!'}
+          case "$_dsh_json_python" in
+            *' '*) _dsh_json_python="" ;;
+          esac
+          [ -x "$_dsh_json_python" ] || _dsh_json_python=""
+          ;;
+      esac
+    fi
+  fi
+  if [ -n "$_dsh_json_python" ] && [ -d "$DSH_PROFILE_ROOT" ]; then
+    for _dsh_profile_dir in "$DSH_PROFILE_ROOT"/*/; do
+      [ -d "$_dsh_profile_dir" ] || continue
+      _dsh_profile=${_dsh_profile_dir#"$DSH_PROFILE_ROOT"/}
+      _dsh_profile=${_dsh_profile%/}
+      [ "$_dsh_profile" = "web" ] && continue
+      # Only profiles that already opted in. Adding Ouroboros tools to an
+      # unrelated profile because the installer ran is not an upgrade.
+      if "$_dsh_json_python" -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); dependencies = data.get("dependencies", {}) if isinstance(data, dict) else {}; sys.exit(0 if isinstance(dependencies, dict) and "dsh-ouroboros" in dependencies else 1)' "$_dsh_profile_dir/package.json" 2>/dev/null; then
+        DSH_TARGET_PROFILES+=("$_dsh_profile")
+      fi
+    done
+  fi
+
+  for _dsh_profile in "${DSH_TARGET_PROFILES[@]}"; do
+    LC_ALL=C printf -v _dsh_profile_q '%q' "$_dsh_profile"
+    if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
+      _ok "dsh profile $_dsh_profile_q: Ouroboros tools installed"
+    else
+      _warn "dsh profile $_dsh_profile_q: install skipped"
+      _info "Manual install: dsh plugin --profile $_dsh_profile_q add \"$DSH_PLUGIN_SPEC\""
+    fi
+  done
+  _info "Type 'ooo interview <goal>' in a dsh chat to use them."
 fi
 
 _blank

@@ -57,6 +57,7 @@ replayable execution contract on your choice of runtime backend.
 - [Hidden-Checklist Convergence](./hidden-checklist-convergence/architecture.md) - Run → evaluation → bounded Ralph chaining with hidden harness grading inputs
 - [Hidden-Checklist Convergence (简体中文)](./hidden-checklist-convergence/README.zh-CN.md) - 同一设计的中文说明
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
+- [DeepSeek Harness Integration](./guides/deepseek-harness.md) - Both directions: the installable `dsh` plugin, and the `dsh` LLM backend
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
