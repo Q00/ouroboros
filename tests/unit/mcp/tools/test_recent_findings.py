@@ -278,3 +278,47 @@ def test_an_unreadable_store_returns_nothing_rather_than_raising(tmp_path: Path)
 
     assert recent_finding_paths(absent) == []
     assert recent_finding_paths(None) == []
+
+
+# ── A malformed record must cost the shortcut, never the question ──
+
+
+@pytest.mark.parametrize(
+    ("name", "manifest"),
+    [
+        ("empty object", "{}"),
+        ("events not a list", '{"contract_id": "c", "events": "nope"}'),
+        ("event not an object", '{"contract_id": "c", "events": ["nope"]}'),
+        ("not json at all", "{"),
+        (
+            "naive timestamp",
+            '{"contract_id": "c", "events": [{"type": "artifact.referenced",'
+            ' "artifact_ref": "sha256:' + "0" * 64 + '", "timestamp": "2026-08-16T03:43:29"}]}',
+        ),
+    ],
+)
+def test_a_malformed_manifest_costs_the_shortcut_and_not_the_question(
+    roster: list[dict[str, str]],
+    store: ContentAddressedArtifactStore,
+    name: str,
+    manifest: str,
+) -> None:
+    """The helpers here read manifests this store wrote; this directory is not.
+
+    A contract record is a file inside a project, so it is project-controlled
+    input, and the helpers that parse it assume the shape the store writes.
+    ``{}`` raised ``KeyError`` and a naive timestamp raised ``TypeError`` — and
+    because the producer calls this outside its own guard, either one took the
+    user's question rather than the shortcut. The docstring promised otherwise,
+    which is the failure: a guarantee declared and not made true.
+
+    Both directions are pinned. The malformed record is skipped, and a good one
+    published beside it is still offered — degrading must not become blanking.
+    """
+    published = _publish(store)
+    broken = store.root / "contracts" / f"broken-{abs(hash(name))}"
+    broken.mkdir(parents=True)
+    (broken / "events.json").write_text(manifest, encoding="utf-8")
+
+    assert recent_finding_paths(store) == [published]
+    assert published in _lane_prompts(_attach(roster, store))["code_context"]

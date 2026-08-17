@@ -109,22 +109,29 @@ def _published_since(root: Path, since: datetime) -> list[tuple[datetime, str, s
         return []
     for contract_dir in contract_dirs:
         path = contract_dir / _MANIFEST_FILENAME
+        # One try around the whole record, because every step below reads a file
+        # this process does not own. Naming the exceptions one clause at a time
+        # is how a malformed manifest reached the caller: the parse was guarded
+        # and the parsing of what it produced was not, and the helpers that read
+        # a manifest are written for manifests this store wrote.
         try:
             if path.is_symlink() or path.stat().st_size > _MANIFEST_MAX_BYTES:
                 continue
             manifest = json.loads(path.read_bytes())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(manifest, dict):
-            continue
-        contract_id = str(manifest.get("contract_id") or "")
-        latest = latest_artifact_event(manifest)
-        if not contract_id or latest is None or latest.get("type") != "artifact.referenced":
-            continue
-        try:
+            if not isinstance(manifest, dict):
+                continue
+            contract_id = str(manifest.get("contract_id") or "")
+            latest = latest_artifact_event(manifest)
+            if not contract_id or latest is None or latest.get("type") != "artifact.referenced":
+                continue
             published_at = datetime.fromisoformat(str(latest.get("timestamp")))
             artifact_ref = event_artifact_ref(latest, contract_id=contract_id)
-        except (KeyError, TypeError, ValueError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            continue
+        # A record the store wrote carries an offset; one that does not cannot be
+        # compared against an aware cutoff at all, so it is read as no answer
+        # rather than as an answer at an unknown offset.
+        if published_at.tzinfo is None:
             continue
         if published_at >= since:
             found.append((published_at, contract_id, artifact_ref))
