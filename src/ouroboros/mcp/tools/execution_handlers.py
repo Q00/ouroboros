@@ -679,6 +679,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     session_signal_hub: Any | None = field(default=None, repr=False)
+    # HostDispatchBridge from the MCP composition root; bound onto the runtime
+    # when the ``host`` backend is selected (no-op for every other backend).
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
     seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _process_local_resume_owners: dict[str, OrchestratorRunner] = field(
@@ -1523,6 +1526,20 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # same-process continuation into a foreign-adapter path.
                     runner = retained_owner
                     agent_adapter = runner._adapter
+                    # A resumed host-dispatch runtime keeps its bridge but must
+                    # re-scope to this run's identity so fresh dispatch records
+                    # correlate under the resuming session/execution. No-op for
+                    # every other backend.
+                    from ouroboros.orchestrator.host_dispatch import (
+                        bind_host_dispatch_bridge as _rebind_host_bridge,
+                    )
+
+                    _rebind_host_bridge(
+                        agent_adapter,
+                        self.host_dispatch_bridge,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     if event_store is not runner._event_store:
                         # A handler without an injected store opened this
                         # short-lived observer connection solely to reconstruct
@@ -1553,6 +1570,20 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             if delegated_permission_mode
                             else {}
                         ),
+                    )
+                    # Host-driven execution: attach the composed bridge and the
+                    # job identity its dispatch records correlate under. A
+                    # retained-owner resume keeps the adapter this already
+                    # bound to.
+                    from ouroboros.orchestrator.host_dispatch import (
+                        bind_host_dispatch_bridge,
+                    )
+
+                    bind_host_dispatch_bridge(
+                        agent_adapter,
+                        self.host_dispatch_bridge,
+                        session_id=session_id,
+                        execution_id=execution_id,
                     )
 
                     # Create checkpoint store for execution state persistence

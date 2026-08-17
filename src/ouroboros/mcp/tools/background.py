@@ -119,6 +119,22 @@ def make_cancelled_result(text: str) -> MCPToolResult:
     )
 
 
+def _runtime_requires_in_process_job(runtime_backend: str | None) -> bool:
+    """Return whether this runtime's jobs must stay in the serving process.
+
+    Capability-driven, not a name check: a runtime with ``supports_runtime``
+    and no CLI spawns nothing — its execution parks in-process waiters (the
+    host-dispatch bridge) that only this server's tool handlers can redeem.
+    """
+    candidate = (runtime_backend or "").strip().lower()
+    if not candidate:
+        return False
+    from ouroboros.backends import get_backend_capability
+
+    capability = get_backend_capability(candidate)
+    return capability is not None and capability.supports_runtime and capability.cli_name is None
+
+
 async def start_background_tool_job(
     *,
     job_manager: JobManager,
@@ -199,6 +215,12 @@ async def start_background_tool_job(
         getattr(job_manager, "durable_jobs_enabled", False) is True
         and getattr(event_store, "supports_cross_process_workers", False) is True
     )
+    if durable_jobs_enabled and _runtime_requires_in_process_job(runtime_backend):
+        # Host-driven dispatch runtimes park in-process waiters that the MCP
+        # host redeems through THIS server's bridge. A detached worker would
+        # park them in its own process, invisible to every job_wait/submit
+        # call the host can make — so the job must run where the host talks.
+        durable_jobs_enabled = False
 
     if durable_jobs_enabled and not forced_inline:
         if detached_tool_name is None or detached_arguments is None:

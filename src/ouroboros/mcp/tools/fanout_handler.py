@@ -14,6 +14,7 @@ import structlog
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.fanout import (
+    FANOUT_KIND_HOST_EXECUTION,
     FanoutRegistry,
     PreparedFanoutSynthesis,
     prepare_fanout_results,
@@ -64,6 +65,10 @@ class SubmitFanoutResultsHandler:
 
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     disposable_memory: DisposableMemory | None = field(default=None, repr=False)
+    # HostDispatchBridge from the MCP composition root. Execution-kind
+    # submissions wake the parked runtime waiter through it instead of running
+    # advisory synthesis; ``None`` (a root with no bridge) fails them closed.
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._registry = self.fanout_registry or FanoutRegistry()
@@ -200,6 +205,18 @@ class SubmitFanoutResultsHandler:
     ) -> dict[str, Any] | MCPToolError:
         if not isinstance(prepared, PreparedFanoutSynthesis):
             return prepared
+        if prepared.record.kind == FANOUT_KIND_HOST_EXECUTION:
+            # Execution submissions are transport, not synthesis: deliver the
+            # validated lane to the parked HostDispatchRuntime waiter. The
+            # server-side verify gate — not this reply — judges the work.
+            if self.host_dispatch_bridge is None:
+                return MCPToolError(
+                    "execution dispatch submission requires a composed "
+                    "host-dispatch bridge (start the run through the MCP "
+                    "server that issued this dispatch)",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            return self.host_dispatch_bridge.submit(fanout_id, prepared.provided)
         if self.disposable_memory is None:
             return MCPToolError(
                 "terminal fan-out synthesis requires a configured disposable artifact service",

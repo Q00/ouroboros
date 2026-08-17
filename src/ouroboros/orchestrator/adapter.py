@@ -338,6 +338,10 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "antigravity_cli": "antigravity_cli",
     "zcode": "zcode_cli",
     "zcode_cli": "zcode_cli",
+    # Host-driven dispatch runtime: non-resumable handles, but the executor
+    # normalizes the backend selector for every runtime identity it stamps.
+    "host": "host",
+    "host_dispatch": "host",
 }
 
 
