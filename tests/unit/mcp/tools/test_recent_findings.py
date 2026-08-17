@@ -25,6 +25,7 @@ from ouroboros.mcp.tools.question_advisory import (
     attach_question_advisory,
     build_question_advisory_subagents,
 )
+import ouroboros.mcp.tools.recent_findings as recent_findings_module
 from ouroboros.mcp.tools.recent_findings import (
     RECENT_FINDINGS_WINDOW,
     recent_finding_paths,
@@ -217,17 +218,19 @@ def test_the_prompt_names_which_entries_may_be_read(
     assert "reasoning about a different question" in prompt
 
 
-# ── What may be read is what the store published, and what the RFC admits ──
+# ── What is listed follows the record, and what the RFC admits ──
 
 
-def test_a_body_the_store_never_published_is_not_offered(
+def test_a_body_no_publication_record_refers_to_is_not_listed(
     store: ContentAddressedArtifactStore,
 ) -> None:
-    """Membership comes from the publication record, not from the directory.
+    """A body no record refers to is not listed — a consequence, not a promise.
 
-    A project can choose any bytes and name the file by their own digest, so
-    content addressing cannot tell a chosen body from a written one. Nothing
-    vouches for this file — it has no way in rather than being recognised.
+    The lookup reads publication records because that is where publication time
+    lives, and a body nothing refers to is simply never reached along that path.
+    Worth pinning because it is the behaviour, but it is not a defence: RFC
+    #2153 puts the project workspace inside the trust boundary, and anything
+    able to write here can more easily edit the source a lane would cite.
     """
     body = json.dumps(
         {
@@ -322,3 +325,43 @@ def test_a_malformed_manifest_costs_the_shortcut_and_not_the_question(
 
     assert recent_finding_paths(store) == [published]
     assert published in _lane_prompts(_attach(roster, store))["code_context"]
+
+
+def test_the_offered_path_names_the_body_that_was_verified(
+    store: ContentAddressedArtifactStore,
+) -> None:
+    """One value, one source. The shortlist's reference is not the second one.
+
+    The shortlist reads a reference out of a record; the fetch resolves the
+    contract itself and verifies what it returns. In every ordinary case those
+    agree — which is exactly why holding both is a defect rather than a
+    redundancy: if they ever diverge, the code would check one body and hand
+    over the path of another, and nothing downstream could tell.
+
+    Pinned by making them diverge: the shortlist is fed a reference to a
+    different published body, and what comes back must still be the digest the
+    fetch verified.
+    """
+    published = _publish(store, claim="the one that is actually verified")
+    other = _publish(store, claim="a different body entirely")
+    assert published != other
+
+    real = recent_findings_module._published_since
+
+    def _shortlist_with_a_stale_reference(root: Path, since: datetime) -> Any:
+        return [
+            (published_at, contract_id, "sha256:" + Path(other).stem)
+            for published_at, contract_id, _ref in real(root, since)
+        ]
+
+    recent_findings_module._published_since = _shortlist_with_a_stale_reference
+    try:
+        offered = recent_finding_paths(store)
+    finally:
+        recent_findings_module._published_since = real
+
+    # Each publication is offered as the body its own fetch verified. Reading
+    # the substituted reference instead would emit one digest for both, so the
+    # set is what distinguishes the two behaviours: {published, other} when the
+    # path follows the verification, {other} when it follows the shortlist.
+    assert set(offered) == {published, other}

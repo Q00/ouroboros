@@ -6,24 +6,27 @@ system's clock -- a commit lands, data flows -- not on the clock of whoever is
 being interviewed, so the boundary that matters is recency, and the session was
 a proxy for it that happened to be exact and expensive.
 
-**The store's record is asked, not the directory.** A completed fan-out is
+**The store's record is asked for one thing: when.** A completed fan-out is
 published into the project's artifact store, and the store keeps a manifest of
-having published it. Reading those manifests rather than listing the blob
-directory is what makes three questions stop being questions --
+having published it. That manifest is read because publication time exists
+nowhere else -- a content-addressed store reuses a body when the same result is
+published again, so the body's modified time reports when those bytes first
+appeared rather than when the finding was last established. Blob metadata
+answers the wrong question.
 
-* *When was this found?* The manifest's publication time, not the body's
-  modified time. In a content-addressed store those differ: an identical result
-  republished under a new contract reuses the existing body and leaves its
-  timestamp untouched, and the modified time is also the one a project can
-  rewrite.
-* *Is this ours?* A body is reachable because a manifest says this store wrote
-  it. Something placed in the blob directory by hand is not excluded by being
-  recognised -- nothing refers to it, so it never enters. Content addressing
-  alone could not answer this: a chosen body can always be named by its own
-  digest.
-* *How is it read?* Through the store's own ``fetch``, which is bounded,
-  containment-checked and verifies the body against its address. Nothing here
-  opens a blob.
+**It is not read to establish provenance, and this module claims none.** The
+store lives inside the project, and a lane's whole job is to read that project's
+code and report what it says -- so anything able to write here can more easily
+edit the source a lane would cite. Defending stored findings against that writer
+would lock a side door while the front one stands open, and RFC #2153 says so
+outright. What the guards below are for is accident: a half-written record, a
+body that cannot be parsed, a file that is not what this expects. They cost the
+shortcut, never the user's question.
+
+Bodies are read through the store's own ``fetch``, which is bounded, contained
+and verified against its address -- not as a boundary against a project, but
+because re-implementing a read the store already does correctly is how the
+first two attempts at this went wrong.
 
 The manifest reading uses the same public helpers the store parses its own
 manifests with, so this module holds no second copy of what a manifest means.
@@ -174,15 +177,22 @@ def recent_finding_paths(
     since = (now or datetime.now(UTC)) - RECENT_FINDINGS_WINDOW
     root = Path(findings_store.root)
     offered: list[str] = []
-    for _published_at, contract_id, artifact_ref in _published_since(root, since):
+    for _published_at, contract_id, _shortlisted_ref in _published_since(root, since):
         if len(offered) >= _RECENT_FINDINGS_MAX_PATHS:
             break
         try:
-            body = findings_store.fetch(contract_id).body
-            digest = digest_from_ref(artifact_ref)
+            fetched = findings_store.fetch(contract_id)
+            # The path names the body that was just verified, not the reference
+            # the shortlist happened to carry. Those are the same value in every
+            # ordinary case, and having two of them is the defect: the shortlist
+            # is read from a record and the fetch resolves the contract itself,
+            # so if they ever disagree this would check one body and hand over
+            # another. One source, and the question of which to trust does not
+            # arise.
+            digest = digest_from_ref(fetched.envelope.artifact_ref)
         except Exception:
             continue
-        if _carries_an_eligible_lane(body):
+        if _carries_an_eligible_lane(fetched.body):
             offered.append(str(root / digest[:2] / f"{digest}.json"))
     return offered
 
