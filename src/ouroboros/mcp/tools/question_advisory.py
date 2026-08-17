@@ -307,14 +307,10 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     outside this session's roster is rejected at submission. The child is told
     so here, where it is deciding what to read.
 
-    **The shape is stated exactly, because it was not.** This said the answers
-    were "keyed by ``lane_id``", which reads as a mapping; they are a list of
-    entries carrying a ``lane_id``. Two subagents made the same wrong move on
-    it -- ``"code_context" in aggregated_outputs`` against a list is ``False``
-    -- and one of them concluded the files held nothing and went back to
-    searching the repositories. Nothing failed loudly: the paths were right, the
-    files opened, and the lane simply reported finding nothing to reuse, which
-    is indistinguishable from there being nothing.
+    **The shape is stated, not summarised.** "Keyed by ``lane_id``" read as a
+    mapping, so a lane tested ``"code_context" in aggregated_outputs`` against a
+    list, found nothing and re-investigated -- silently, since a lane with
+    nothing to reuse looks like a project with nothing to reuse.
 
     What this must not become is a second set of rules. There is nothing here
     about proving a stored finding sufficient, reporting what a reuse left
