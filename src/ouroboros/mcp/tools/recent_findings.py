@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
 #: How far back a finding still counts as describing the system as it is now.
 #:
@@ -98,7 +98,7 @@ def _eligible_lane_outputs(body: Any) -> list[tuple[str, Any]]:
 
 
 def recent_findings_entries(
-    findings_store: ContentAddressedArtifactStore | None,
+    findings_store: ArtifactStore | None,
     *,
     now: datetime | None = None,
 ) -> list[dict]:

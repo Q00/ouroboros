@@ -115,7 +115,7 @@ class ArtifactPruneReport:
     removed_bytes: int = 0
 
 
-class ContentAddressedArtifactStore:
+class ArtifactStore:
     """Project-local SQLite store with explicit replay and tombstoned GC."""
 
     def __init__(
@@ -140,7 +140,7 @@ class ContentAddressedArtifactStore:
         project_dir: Path,
         *,
         max_artifact_bytes: int = MAX_DISPOSABLE_ARTIFACT_BYTES,
-    ) -> ContentAddressedArtifactStore:
+    ) -> ArtifactStore:
         """Build the RFC-standard store below one project root."""
         return cls(
             project_dir.expanduser().resolve() / ".ouroboros" / "artifacts",
@@ -542,7 +542,7 @@ __all__ = [
     "ArtifactStoreError",
     "ArtifactTombstonedError",
     "ArtifactTooLargeError",
-    "ContentAddressedArtifactStore",
+    "ArtifactStore",
     "FetchedArtifact",
     "PublishedContract",
     "canonical_artifact_bytes",

@@ -151,10 +151,10 @@ Emitted when a background MCP job is cancelled.
 
 ### artifact.referenced
 
-Bounded Disposable Memory projection emitted only after the content-addressed
-body and its per-contract manifest are durable. The aggregate is
-`contract/<contract_id>`. Raw child output and transcripts are forbidden from
-this event; consumers must call the explicit artifact fetch/replay API.
+Bounded Disposable Memory projection emitted only after the body is durable.
+The aggregate is `contract/<contract_id>`. Raw child output and transcripts are
+forbidden from this event; consumers must call the explicit artifact
+fetch/replay API.
 
 The event id is a UUIDv5 over the contract id alone, because a contract
 publishes at most one artifact. Rows written before the derivation dropped the
@@ -165,7 +165,6 @@ the event type within the contract aggregate rather than on the id.
 |-------|------|-------------|
 | `schema_version` | `int` | Disposable envelope schema, currently `1` |
 | `contract_id` | `string` | Contract owning this result |
-| `artifact_ref` | `string` | `sha256:<64 lowercase hex>` content address |
 | `result.status` | `string` | `completed` or `failed` |
 | `runtime_id` | `string` | Runtime that produced the artifact |
 | `duration_ms` | `int` | Non-negative child duration |

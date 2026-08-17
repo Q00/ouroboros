@@ -20,22 +20,22 @@ from ouroboros.core.disposable_memory import MAX_DISPOSABLE_ARTIFACT_BYTES
 from ouroboros.persistence.artifact_store import (
     ArtifactContractConflictError,
     ArtifactNotFoundError,
+    ArtifactStore,
     ArtifactStoreError,
     ArtifactTombstonedError,
     ArtifactTooLargeError,
-    ContentAddressedArtifactStore,
     canonical_artifact_bytes,
 )
 
 NOW = datetime(2026, 8, 3, 12, tzinfo=UTC)
 
 
-def _store(tmp_path: Path) -> ContentAddressedArtifactStore:
-    return ContentAddressedArtifactStore(tmp_path / "artifacts")
+def _store(tmp_path: Path) -> ArtifactStore:
+    return ArtifactStore(tmp_path / "artifacts")
 
 
 def _put(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
     contract_id: str,
     body: object,
     *,
@@ -54,11 +54,11 @@ def _put(
     )
 
 
-def _database_path(store: ContentAddressedArtifactStore) -> Path:
+def _database_path(store: ArtifactStore) -> Path:
     return store.root / "artifacts.db"
 
 
-def _row(store: ContentAddressedArtifactStore, contract_id: str) -> tuple[Any, ...] | None:
+def _row(store: ArtifactStore, contract_id: str) -> tuple[Any, ...] | None:
     """Read one raw row so a test can assert what a call did or did not write."""
     with closing(sqlite3.connect(_database_path(store))) as connection:
         return connection.execute(
@@ -68,7 +68,7 @@ def _row(store: ContentAddressedArtifactStore, contract_id: str) -> tuple[Any, .
         ).fetchone()
 
 
-def _age(store: ContentAddressedArtifactStore, contract_id: str, *, days: int) -> None:
+def _age(store: ArtifactStore, contract_id: str, *, days: int) -> None:
     """Backdate one publication relative to ``NOW``.
 
     The store trusts its own ``created_at`` column, so aging a contract for
@@ -175,14 +175,14 @@ def test_exact_one_mib_encoded_body_is_allowed_and_one_byte_more_is_rejected(
     assert not untouched.root.exists()
 
     with pytest.raises(ValueError, match="1 MiB hard cap"):
-        ContentAddressedArtifactStore(
+        ArtifactStore(
             tmp_path / "too-large-cap",
             max_artifact_bytes=MAX_DISPOSABLE_ARTIFACT_BYTES + 1,
         )
 
 
 def test_missing_contract_reads_do_not_create_store_state(tmp_path: Path) -> None:
-    store = ContentAddressedArtifactStore.for_project(tmp_path)
+    store = ArtifactStore.for_project(tmp_path)
 
     assert store.envelope_if_exists("MISSING1") is None
     assert store.fetch_if_exists("MISSING1") is None

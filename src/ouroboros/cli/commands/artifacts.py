@@ -11,8 +11,8 @@ from typing import Annotated
 import typer
 
 from ouroboros.persistence.artifact_store import (
+    ArtifactStore,
     ArtifactStoreError,
-    ContentAddressedArtifactStore,
 )
 
 app = typer.Typer(
@@ -43,8 +43,8 @@ def parse_ttl(value: str) -> timedelta:
         raise ValueError("ttl is too large") from exc
 
 
-def _store(project_dir: Path) -> ContentAddressedArtifactStore:
-    return ContentAddressedArtifactStore.for_project(project_dir)
+def _store(project_dir: Path) -> ArtifactStore:
+    return ArtifactStore.for_project(project_dir)
 
 
 @app.command("prune")

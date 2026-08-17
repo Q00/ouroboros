@@ -8,7 +8,7 @@ class ArtifactStoreError(PersistenceError):
 
 
 class ArtifactNotFoundError(ArtifactStoreError):
-    """Raised when a contract or content-addressed body does not exist."""
+    """Raised when a contract or its published body does not exist."""
 
 
 class ArtifactTombstonedError(ArtifactStoreError):

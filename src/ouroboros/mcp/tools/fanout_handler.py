@@ -32,7 +32,7 @@ from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
 log = structlog.get_logger(__name__)
 
@@ -69,7 +69,7 @@ class SubmitFanoutResultsHandler:
         self._registry = self.fanout_registry or FanoutRegistry()
 
     @property
-    def artifact_store(self) -> ContentAddressedArtifactStore | None:
+    def artifact_store(self) -> ArtifactStore | None:
         """Return the store this handler publishes into, or ``None`` if it cannot.
 
         Handed to advisory producers so a reader asks the same store that wrote,
@@ -313,12 +313,12 @@ def create_fanout_handler(
     ensure_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> SubmitFanoutResultsHandler:
     """Build the production fan-out boundary for a resolved workspace."""
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
     return SubmitFanoutResultsHandler(
         fanout_registry=fanout_registry,
         disposable_memory=DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+            artifact_store=ArtifactStore.for_project(project_dir),
             event_store=event_store,
             ensure_ready=ensure_ready,
         ),
@@ -327,11 +327,11 @@ def create_fanout_handler(
 
 def create_artifact_fetch_handler(project_dir: Any) -> FetchArtifactHandler:
     """Build the production explicit-fetch boundary for a resolved workspace."""
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
     return FetchArtifactHandler(
         disposable_memory=DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+            artifact_store=ArtifactStore.for_project(project_dir),
         )
     )
 

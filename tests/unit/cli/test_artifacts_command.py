@@ -11,15 +11,15 @@ from typer.testing import CliRunner
 from ouroboros.cli.commands.artifacts import parse_ttl
 from ouroboros.cli.main import app
 from ouroboros.persistence.artifact_store import (
+    ArtifactStore,
     ArtifactTombstonedError,
-    ContentAddressedArtifactStore,
 )
 
 runner = CliRunner()
 
 
 def _put(project_dir: Path):
-    store = ContentAddressedArtifactStore.for_project(project_dir)
+    store = ArtifactStore.for_project(project_dir)
     envelope = store.put_for_contract(
         contract_id="CONTRACT1",
         body={"answer": 42},

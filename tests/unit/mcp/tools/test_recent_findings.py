@@ -37,7 +37,7 @@ from ouroboros.mcp.tools.recent_findings import (
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import ArtifactStore
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
 
@@ -48,16 +48,16 @@ def roster() -> list[dict[str, str]]:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> ContentAddressedArtifactStore:
+def store(tmp_path: Path) -> ArtifactStore:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    built = ContentAddressedArtifactStore.for_project(workspace)
+    built = ArtifactStore.for_project(workspace)
     built.initialize()
     return built
 
 
 def _publish(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
     *,
     kind: str = "question_advisory",
     lanes: tuple[str, ...] = ("code_context", "data_context"),
@@ -103,7 +103,7 @@ def _lane_prompts(meta: dict[str, Any]) -> dict[str, str]:
 
 def _attach(
     roster: list[dict[str, str]],
-    store: ContentAddressedArtifactStore | None,
+    store: ArtifactStore | None,
     *,
     tool_name: str = "ouroboros_pm_interview",
     **kwargs: Any,
@@ -126,7 +126,7 @@ def _attach(
 
 
 def test_a_finding_from_another_session_is_offered(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """The decision, stated as the thing that used to be filtered out.
 
@@ -145,7 +145,7 @@ def test_a_finding_from_another_session_is_offered(
 
 
 def test_the_ordinary_interview_reads_the_same_findings(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """Which tool asks does not enter into it (RFC #2153).
 
@@ -164,7 +164,7 @@ def test_the_ordinary_interview_reads_the_same_findings(
 
 
 def test_the_lane_is_handed_the_finding_and_not_an_instruction_for_finding_it(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """The bug this narrowing removes, stated from the child's side.
 
@@ -189,7 +189,7 @@ def test_the_lane_is_handed_the_finding_and_not_an_instruction_for_finding_it(
 
 
 def test_a_finding_older_than_the_window_is_not_offered(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
 ) -> None:
     """Recency is the boundary, so something has to fall outside it.
 
@@ -216,7 +216,7 @@ def test_a_caller_with_no_store_still_gets_its_lanes(roster: list[dict[str, str]
 
 
 def test_the_lane_is_told_the_roster_does_not_travel_with_the_findings(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """The one thing that does not carry across sessions."""
     _publish(store)
@@ -230,7 +230,7 @@ def test_the_lane_is_told_the_roster_does_not_travel_with_the_findings(
 # ── What is offered follows the record, and what the RFC admits ──
 
 
-def test_another_fanout_kind_is_not_offered(store: ContentAddressedArtifactStore) -> None:
+def test_another_fanout_kind_is_not_offered(store: ArtifactStore) -> None:
     """Persona panels publish through the same store and are not findings."""
     _publish(store, kind="lateral_persona_panel")
 
@@ -238,7 +238,7 @@ def test_another_fanout_kind_is_not_offered(store: ContentAddressedArtifactStore
 
 
 def test_a_body_with_no_eligible_lane_is_not_offered(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
 ) -> None:
     """The RFC closes the list at two lanes, and an interview turn runs six.
 
@@ -251,7 +251,7 @@ def test_a_body_with_no_eligible_lane_is_not_offered(
 
 
 def test_a_mixed_body_is_offered_for_the_lanes_it_does_carry(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
 ) -> None:
     """A body holds both, and only the admitted half of it leaves the store.
 
@@ -269,14 +269,14 @@ def test_a_mixed_body_is_offered_for_the_lanes_it_does_carry(
 
 def test_an_unreadable_store_returns_nothing_rather_than_raising(tmp_path: Path) -> None:
     """The turn belongs to the question; a missing shortcut must not take it."""
-    absent = ContentAddressedArtifactStore.for_project(tmp_path / "gone")
+    absent = ArtifactStore.for_project(tmp_path / "gone")
 
     assert recent_findings_entries(absent) == []
     assert recent_findings_entries(None) == []
 
 
 def test_a_malformed_record_costs_the_shortcut_and_not_the_question(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """A contract record is a file inside a project, so it is project-controlled.
 
@@ -299,7 +299,7 @@ def test_a_malformed_record_costs_the_shortcut_and_not_the_question(
 
 
 def test_a_publication_stamped_ahead_of_now_is_not_offered(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
 ) -> None:
     """A window has two ends, and only the older one used to be checked.
 
@@ -342,7 +342,7 @@ def test_a_publication_stamped_ahead_of_now_is_not_offered(
 
 
 def test_a_request_carrying_findings_satisfies_the_advertised_schema(
-    store: ContentAddressedArtifactStore,
+    store: ArtifactStore,
 ) -> None:
     """The request schema is closed, so a field the request carries must be in it.
 
@@ -371,7 +371,7 @@ def test_a_request_carrying_findings_satisfies_the_advertised_schema(
 
 
 def test_a_finding_survives_characters_that_markdown_would_eat(
-    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+    roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
     """A finding is whatever a child wrote, and a newline in one used to split its line.
 

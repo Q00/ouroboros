@@ -30,9 +30,9 @@ import ouroboros.orchestrator.disposable_memory as disposable_memory_module
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
     ArtifactNotFoundError,
+    ArtifactStore,
     ArtifactStoreError,
     ArtifactTombstonedError,
-    ContentAddressedArtifactStore,
     canonical_artifact_bytes,
 )
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -78,7 +78,7 @@ class _FailReferenceOnceEventStore(_EventStore):
 def _service(tmp_path: Path) -> tuple[DisposableMemory, _EventStore]:
     event_store = _EventStore()
     service = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
         event_store=event_store,
         checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
     )
@@ -138,7 +138,7 @@ def _run_disposable_process(
 
     async def invoke() -> str:
         service = DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore(Path(artifact_root)),
+            artifact_store=ArtifactStore(Path(artifact_root)),
             checkpoint_store=CheckpointStore(
                 Path(artifact_root).parent / f"checkpoints-{os.getpid()}"
             ),
@@ -431,7 +431,7 @@ def test_overlapping_processes_converge_on_one_published_contract(tmp_path: Path
 
     # Convergence at the store: whichever process won the contract key, one
     # row holds the one body, and a fresh reader is handed exactly it.
-    store = ContentAddressedArtifactStore(artifact_root)
+    store = ArtifactStore(artifact_root)
     assert store.fetch(_OVERLAP_CONTRACT_ID).body == {"stable": True}
 
 
@@ -610,7 +610,7 @@ async def test_retry_repairs_reference_without_reexecuting_durable_contract(
 ) -> None:
     event_store = _FailReferenceOnceEventStore()
     service = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
         event_store=event_store,
         checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
     )
@@ -868,7 +868,7 @@ async def test_persisted_cancel_prevents_child_execution_and_publication(tmp_pat
         reason="cancelled before restart",
     )
     service = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
         event_store=_EventStore(),
         checkpoint_store=checkpoint_store,
     )
@@ -919,7 +919,7 @@ async def test_bounded_reference_round_trips_through_real_event_store(tmp_path: 
     event_store = EventStore("sqlite+aiosqlite:///:memory:")
     await event_store.initialize()
     service = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
         event_store=event_store,
         checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
     )

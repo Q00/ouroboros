@@ -17,7 +17,7 @@ from ouroboros.events.artifact import (
 from ouroboros.events.io import new_call_id
 from ouroboros.orchestrator.agent_process import AgentProcessHandle, run_with_agent_process
 from ouroboros.persistence.artifact_store import (
-    ContentAddressedArtifactStore,
+    ArtifactStore,
     FetchedArtifact,
 )
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -27,7 +27,7 @@ from ouroboros.persistence.checkpoint import CheckpointStore
 class DisposableMemory:
     """Run child work without returning its large body to the parent caller."""
 
-    artifact_store: ContentAddressedArtifactStore
+    artifact_store: ArtifactStore
     event_store: Any | None = None
     checkpoint_store: CheckpointStore | None = None
     ensure_ready: Callable[[], Awaitable[None]] | None = None

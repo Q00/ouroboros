@@ -46,16 +46,14 @@ from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import ArtifactStore
 
 
 def _bounded_submit(
     registry: FanoutRegistry,
     project_dir: Any,
 ) -> tuple[SubmitFanoutResultsHandler, DisposableMemory]:
-    disposable = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore.for_project(project_dir)
-    )
+    disposable = DisposableMemory(artifact_store=ArtifactStore.for_project(project_dir))
     return (
         SubmitFanoutResultsHandler(
             fanout_registry=registry,
