@@ -1,4 +1,4 @@
-"""Recent fan-out findings for one project, as the store recorded publishing them.
+"""Recent fan-out findings for one project, narrowed to what a lane may reuse.
 
 RFC Q00/ouroboros#2153: a lane may answer from a finding another lane produced
 recently, whichever session produced it. What these lanes report changes on the
@@ -6,38 +6,35 @@ system's clock -- a commit lands, data flows -- not on the clock of whoever is
 being interviewed, so the boundary that matters is recency, and the session was
 a proxy for it that happened to be exact and expensive.
 
-**The store's record is asked for one thing: when.** A completed fan-out is
-published into the project's artifact store, and the store keeps a manifest of
-having published it. That manifest is read because publication time exists
-nowhere else -- a content-addressed store reuses a body when the same result is
-published again, so the body's modified time reports when those bytes first
-appeared rather than when the finding was last established. Blob metadata
-answers the wrong question.
+**The store is asked for one thing: when.** A completed fan-out is published
+into the project's artifact store, and the store keeps a record of having
+published it. ``published_contracts`` answers from that record because
+publication time exists nowhere else -- a content-addressed store reuses a body
+when the same result is published again, so the body's modified time reports
+when those bytes first appeared rather than when the finding was last
+established. Blob metadata answers the wrong question.
 
-**It is not read to establish provenance, and this module claims none.** The
-store lives inside the project, and a lane's whole job is to read that project's
-code and report what it says -- so anything able to write here can more easily
-edit the source a lane would cite. Defending stored findings against that writer
-would lock a side door while the front one stands open, and RFC #2153 says so
-outright. What the guards below are for is accident: a half-written record, a
-body that cannot be parsed, a file that is not what this expects. They cost the
-shortcut, never the user's question.
-
-Bodies are read through the store's own ``fetch``, which is bounded, contained
-and verified against its address -- not as a boundary against a project, but
-because re-implementing a read the store already does correctly is how the
-first two attempts at this went wrong.
-
-The manifest reading uses the same public helpers the store parses its own
-manifests with, so this module holds no second copy of what a manifest means.
-It lives here rather than on the store because the store is one line under the
-module-size cap that #1797 keeps; if it ever has room, this belongs there.
+**Nothing here reads storage directly.** Publication times come from the store's
+own query and bodies from its ``fetch``, which is bounded, contained and
+verified against its address. That is not a boundary against a project -- RFC
+#2153 puts the project workspace inside the trust boundary, and anything able to
+write there can more easily edit the source a lane would cite. It is ownership:
+this module knew the on-disk shape of a contract record, and a store that stops
+being a directory would have broken it silently.
 
 What is left for this module is the one question the store has no opinion about:
 which publications this decision admits. The RFC closes that at ``code_context``
 and ``data_context`` -- the lanes reporting on the system -- and since one
-submission can carry six lanes, eligibility is read per lane and a body carrying
-none of them is not offered.
+submission can carry six lanes, eligibility is read per lane and only the
+eligible lanes of a body travel onward.
+
+What travels is the finding itself, one flat entry per eligible lane. The
+narrowing happens here, where the eligible-lane rule already lives, so the child
+is handed evidence rather than a place to look and a rule for looking. Handing
+over the place cost a lane its findings once: told to select from a body it had
+to open, it selected against the wrong shape, found nothing, and re-investigated
+-- silently, since a lane with nothing to reuse looks exactly like a project
+with nothing to reuse.
 
 Freshness is the window and nothing else. Nothing here re-establishes at read
 time that a finding still holds: drift inside the window is not a gap left open,
@@ -47,15 +44,7 @@ it is what the RFC decided.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from ouroboros.persistence.artifact_schema import digest_from_ref
-from ouroboros.persistence.artifact_validation import (
-    event_artifact_ref,
-    latest_artifact_event,
-)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
@@ -73,15 +62,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: found here", which is the one failure this mechanism keeps producing.
 RECENT_FINDINGS_WINDOW = timedelta(days=1)
 
-#: Where the store keeps what it published, and what each record is called.
-#: Named here because this module reads them; the store owns writing them.
-_CONTRACTS_DIRNAME = "contracts"
-_MANIFEST_FILENAME = "events.json"
-
-#: A manifest is a small JSON record. Sized before it is opened so a planted
-#: file cannot make a question turn read something arbitrarily large.
-_MANIFEST_MAX_BYTES = 1 << 20
-
 #: The kind of fan-out whose results these lanes may read. Persona panels and
 #: code investigations publish through the same store and are not this.
 _ELIGIBLE_FANOUT_KIND = "question_advisory"
@@ -91,125 +71,74 @@ _ELIGIBLE_FANOUT_KIND = "question_advisory"
 #: nothing about this project bounds how fast an external fact turns over.
 _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 
-#: How many paths a lane is handed. A bound on the prompt, not on the search:
-#: the child reads this list, and a project that ran all day should not spend
-#: its attention on the morning. Newest first, so what is cut is the oldest.
-_RECENT_FINDINGS_MAX_PATHS = 20
+#: How many findings a lane is handed. A bound on the prompt, not on the search:
+#: the child reads these, and a project that ran all day should not spend its
+#: attention on the morning. Newest first, so what is cut is the oldest.
+_RECENT_FINDINGS_MAX_ENTRIES = 20
 
 
-def _published_between(
-    root: Path, since: datetime, now_utc: datetime
-) -> list[tuple[datetime, str, str]]:
-    """Return ``(published_at, contract_id, artifact_ref)`` for publications in the window.
+def _eligible_lane_outputs(body: Any) -> list[tuple[str, Any]]:
+    """Return ``(lane_id, output)`` for the lanes of one body this decision admits.
 
-    Newest first, and nothing outside the window is looked at further. A
-    manifest that cannot be read is skipped rather than raised on: this is a
-    reader building a shortlist, and one unreadable record should not cost the
-    user their question.
+    Empty for a body of another fan-out kind, and empty for a body whose lanes
+    are all ineligible -- an interview turn runs six lanes, and a contrarian's
+    challenge reused as evidence answers a question nobody asked.
     """
-    found: list[tuple[datetime, str, str]] = []
-    try:
-        contract_dirs = list((root / _CONTRACTS_DIRNAME).iterdir())
-    except OSError:
-        return []
-    for contract_dir in contract_dirs:
-        path = contract_dir / _MANIFEST_FILENAME
-        # One try around the whole record, because every step below reads a file
-        # this process does not own. Naming the exceptions one clause at a time
-        # is how a malformed manifest reached the caller: the parse was guarded
-        # and the parsing of what it produced was not, and the helpers that read
-        # a manifest are written for manifests this store wrote.
-        try:
-            if path.is_symlink() or path.stat().st_size > _MANIFEST_MAX_BYTES:
-                continue
-            manifest = json.loads(path.read_bytes())
-            if not isinstance(manifest, dict):
-                continue
-            contract_id = str(manifest.get("contract_id") or "")
-            latest = latest_artifact_event(manifest)
-            if not contract_id or latest is None or latest.get("type") != "artifact.referenced":
-                continue
-            published_at = datetime.fromisoformat(str(latest.get("timestamp")))
-            artifact_ref = event_artifact_ref(latest, contract_id=contract_id)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
-            continue
-        # A record the store wrote carries an offset; one that does not cannot be
-        # compared against an aware cutoff at all, so it is read as no answer
-        # rather than as an answer at an unknown offset.
-        if published_at.tzinfo is None:
-            continue
-        # A window has two ends. Only the older one was checked, which made the
-        # decision "a day" into "a day ago and onwards": a record stamped ahead
-        # of now stayed eligible for as long as its clock lead lasted. Records
-        # carry whatever the clock read when they were written, so a machine
-        # that was ahead and later corrected leaves them behind -- and a record
-        # that claims not to have happened yet is skipped rather than trusted,
-        # which costs the shortcut instead of widening the window.
-        if since <= published_at <= now_utc:
-            found.append((published_at, contract_id, artifact_ref))
-    # The reference breaks a same-timestamp tie, so two publications written in
-    # one clock tick order the same way on every call rather than by whatever
-    # order the directory happened to be read in.
-    found.sort(key=lambda item: (item[0], item[2]), reverse=True)
-    return found
-
-
-def _carries_an_eligible_lane(body: Any) -> bool:
-    """Return whether this published result holds a lane this decision admits."""
     if not isinstance(body, dict) or body.get("kind") != _ELIGIBLE_FANOUT_KIND:
-        return False
+        return []
     outputs = body.get("result", {}).get("aggregated_outputs")
     if not isinstance(outputs, list):
-        return False
-    return any(
-        isinstance(entry, dict) and entry.get("lane_id") in _ELIGIBLE_LANE_IDS for entry in outputs
-    )
+        return []
+    return [
+        (entry["lane_id"], entry.get("output"))
+        for entry in outputs
+        if isinstance(entry, dict) and entry.get("lane_id") in _ELIGIBLE_LANE_IDS
+    ]
 
 
-def recent_finding_paths(
+def recent_findings_entries(
     findings_store: ContentAddressedArtifactStore | None,
     *,
     now: datetime | None = None,
-) -> list[str]:
+) -> list[dict]:
     """Return this project's recently published eligible findings, newest first.
 
-    A publication is read only to answer whether it carries an eligible lane;
-    what it *says* stays the child's to weigh, and none of it travels back with
-    the path.
+    One entry per eligible lane -- ``contract_id``, ``published_at``, ``lane_id``
+    and ``output`` -- so what reaches the child is the finding and not a rule for
+    extracting it.
 
-    A store that cannot be read returns nothing. This is advisory: a lane that
-    is handed no paths investigates the way it always did, and raising here
-    would cost the user their question to save the child a shortcut.
+    A store that cannot be read returns nothing, and so does a single record that
+    cannot be read: the rest of the store still answers. This is advisory -- a
+    lane that is handed no findings investigates the way it always did, and
+    raising here would cost the user their question to save the child a shortcut.
     """
     if findings_store is None:
         return []
     effective_now = now or datetime.now(UTC)
-    since = effective_now - RECENT_FINDINGS_WINDOW
-    root = Path(findings_store.root)
-    offered: list[str] = []
-    for _published_at, contract_id, _shortlisted_ref in _published_between(
-        root, since, effective_now
+    entries: list[dict] = []
+    for published in findings_store.published_contracts(
+        since=effective_now - RECENT_FINDINGS_WINDOW,
+        until=effective_now,
     ):
-        if len(offered) >= _RECENT_FINDINGS_MAX_PATHS:
+        if len(entries) >= _RECENT_FINDINGS_MAX_ENTRIES:
             break
         try:
-            fetched = findings_store.fetch(contract_id)
-            # The path names the body that was just verified, not the reference
-            # the shortlist happened to carry. Those are the same value in every
-            # ordinary case, and having two of them is the defect: the shortlist
-            # is read from a record and the fetch resolves the contract itself,
-            # so if they ever disagree this would check one body and hand over
-            # another. One source, and the question of which to trust does not
-            # arise.
-            digest = digest_from_ref(fetched.envelope.artifact_ref)
+            fetched = findings_store.fetch(published.contract_id)
         except Exception:
             continue
-        if _carries_an_eligible_lane(fetched.body):
-            offered.append(str(root / digest[:2] / f"{digest}.json"))
-    return offered
+        for lane_id, output in _eligible_lane_outputs(fetched.body):
+            entries.append(
+                {
+                    "contract_id": published.contract_id,
+                    "published_at": published.published_at.isoformat(),
+                    "lane_id": lane_id,
+                    "output": output,
+                }
+            )
+    return entries[:_RECENT_FINDINGS_MAX_ENTRIES]
 
 
 __all__ = [
     "RECENT_FINDINGS_WINDOW",
-    "recent_finding_paths",
+    "recent_findings_entries",
 ]

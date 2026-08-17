@@ -1060,15 +1060,24 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
             "recent_findings": {
                 "type": "array",
                 "maxItems": 20,
-                "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["contract_id", "published_at", "lane_id", "output"],
+                    "properties": {
+                        "contract_id": {"type": "string", "minLength": 1},
+                        "published_at": {"type": "string", "minLength": 1},
+                        "lane_id": {"type": "string", "enum": ["code_context", "data_context"]},
+                        "output": {},
+                    },
+                },
                 "description": (
-                    "Absolute paths to findings this project published recently, "
-                    "newest first, for a lane to read before investigating. Paths "
-                    "only -- what they contain stays the child's to weigh, and "
-                    "nothing a child wrote travels on this request "
-                    "(RFC Q00/ouroboros#2153). Absent when the project has "
-                    "published nothing recent, so a lane is never sent to an "
-                    "empty place."
+                    "Findings this project published recently, newest first, one "
+                    "entry per eligible lane, for a lane to read before "
+                    "investigating. Already narrowed to the lanes RFC "
+                    "Q00/ouroboros#2153 admits, so the reader has nothing left to "
+                    "select. Absent when the project has published nothing recent, "
+                    "so a lane is never sent to an empty place."
                 ),
             },
             "last_question": {

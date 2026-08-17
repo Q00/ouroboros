@@ -124,6 +124,21 @@ class FetchedArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class PublishedContract:
+    """One contract and when this store recorded publishing it.
+
+    Publication time exists nowhere else: a content-addressed store reuses a
+    body when the same result is published again, so the body's modified time
+    reports when those bytes first appeared rather than when this contract was
+    published. Blob metadata answers the wrong question, and the record is the
+    only place the right one is answered.
+    """
+
+    contract_id: str
+    published_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactPruneCandidate:
     """One immutable prune decision produced under the store lock."""
 
@@ -473,6 +488,66 @@ class ContentAddressedArtifactStore:
     def replay(self, contract_id: str) -> FetchedArtifact:
         """Deterministically replay from storage without executing any work."""
         return self.fetch(contract_id)
+
+    def published_contracts(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        limit: int | None = None,
+    ) -> list[PublishedContract]:
+        """Return the contracts published inside ``[since, until]``, newest first.
+
+        The window has two ends because a record carries whatever the clock read
+        when it was written: a machine that ran ahead and was later corrected
+        leaves records stamped in the future, and one of those is skipped rather
+        than counted as published for as long as its lead lasts.
+
+        Ties are broken by contract id descending, so two publications written in
+        one clock tick order the same way on every call rather than by whatever
+        order the directory happened to be read in.
+
+        A record that cannot be read is skipped rather than raised on. This walks
+        every contract in the store to answer a question about most of them, and
+        one half-written or unparseable record must not cost a caller the whole
+        answer -- unlike ``fetch``, which is asked about one contract and has
+        nothing to return but the failure.
+        """
+        found: list[PublishedContract] = []
+        try:
+            contract_dirs = list(self._contracts_root.iterdir())
+        except OSError:
+            return []
+        for contract_dir in contract_dirs:
+            path = contract_dir / _MANIFEST_FILENAME
+            # One try around the whole record, because every step below reads a
+            # file this process does not own. Naming the exceptions one clause at
+            # a time is how a malformed manifest once reached a caller: the parse
+            # was guarded and the parsing of what it produced was not, and the
+            # helpers that read a manifest are written for manifests this store
+            # wrote.
+            try:
+                if path.is_symlink() or path.stat().st_size > MANIFEST_MAX_BYTES:
+                    continue
+                manifest = json.loads(path.read_bytes())
+                if not isinstance(manifest, dict):
+                    continue
+                contract_id = str(manifest.get("contract_id") or "")
+                latest = _latest_artifact_event(manifest)
+                if not contract_id or latest is None or latest.get("type") != "artifact.referenced":
+                    continue
+                published_at = datetime.fromisoformat(str(latest.get("timestamp")))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+            # A record this store wrote carries an offset; one that does not
+            # cannot be compared against an aware bound at all, so it is read as
+            # no answer rather than as an answer at an unknown offset.
+            if published_at.tzinfo is None:
+                continue
+            if since <= published_at <= until:
+                found.append(PublishedContract(contract_id=contract_id, published_at=published_at))
+        found.sort(key=lambda item: (item.published_at, item.contract_id), reverse=True)
+        return found if limit is None else found[:limit]
 
     def set_contract_retention(
         self,
@@ -1995,5 +2070,6 @@ __all__ = [
     "ArtifactTooLargeError",
     "ContentAddressedArtifactStore",
     "FetchedArtifact",
+    "PublishedContract",
     "canonical_artifact_bytes",
 ]

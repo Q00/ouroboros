@@ -39,7 +39,7 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_task,
 )
 from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
-from ouroboros.mcp.tools.recent_findings import recent_finding_paths
+from ouroboros.mcp.tools.recent_findings import recent_findings_entries
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -287,17 +287,20 @@ def _lane_agent(raw_lane: Mapping[str, Any], persona: str, capability: str) -> s
 
 
 def _recent_findings_section(request: Mapping[str, Any]) -> str:
-    """Return the block naming what has already been found in this project.
+    """Return the block carrying what has already been found in this project.
 
     Rendered by presence, like the scores above it: a project with nothing
     recent carries no key and its children are handed no line about it.
 
-    **Paths, not findings.** Inlining what was found would grow the prompt with
-    every round and would make this server choose, without having read the
-    question, which of them matter. The child has read the question, so the
-    child chooses -- and pays for reading only what it chose. It also keeps the
-    producing side free of anything a child wrote, which is an obligation this
-    fan-out has independently of this feature.
+    **The findings, not a place to find them.** Each entry is one eligible
+    lane's output, already selected server side by the rule that decides
+    eligibility. This block used to hand over file paths and then explain how to
+    arrange what was inside them -- which lanes to select, and against which
+    shape. A lane read that explanation, selected against the wrong shape, found
+    nothing and re-investigated; nothing failed loudly, because a lane reporting
+    no reusable findings looks exactly like a project having none. There is no
+    arrangement left to describe here, and that is the point: the child is
+    handed evidence rather than an instruction it can carry out incorrectly.
 
     **They may not be this session's.** A finding describes the system, and the
     system does not change at session granularity -- so the boundary is recency
@@ -305,12 +308,7 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     (RFC Q00/ouroboros#2153). What does not carry across is the roster: a
     session chooses which repositories it is asking about, and evidence from
     outside this session's roster is rejected at submission. The child is told
-    so here, where it is deciding what to read.
-
-    **The shape is stated, not summarised.** "Keyed by ``lane_id``" read as a
-    mapping, so a lane tested ``"code_context" in aggregated_outputs`` against a
-    list, found nothing and re-investigated -- silently, since a lane with
-    nothing to reuse looks like a project with nothing to reuse.
+    so here, where it is deciding what to trust.
 
     What this must not become is a second set of rules. There is nothing here
     about proving a stored finding sufficient, reporting what a reuse left
@@ -319,33 +317,27 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     lie about its sources -- which holds whatever the child read.
     """
     raw = request.get("recent_findings")
-    paths = [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
-    if not paths:
+    entries = list(raw) if isinstance(raw, (list, tuple)) else []
+    if not entries:
         return ""
-    # Rendered as JSON strings rather than as a Markdown list. A path is an
-    # opaque byte string that may legitimately contain a newline, and a raw one
-    # splits its own list item -- the tail then reads as a new heading, so the
-    # child receives neither a usable path nor the framing this block intended.
-    # Escaping makes a path survive as exactly one value whatever it contains.
-    listing = json.dumps(paths, ensure_ascii=False, indent=2)
+    # Rendered as JSON rather than as prose or a Markdown list. A finding is
+    # whatever a child wrote, so it may legitimately contain a newline or a line
+    # that reads as a heading -- written plainly, the tail of one would become
+    # structure in this prompt, and the reader would receive neither a usable
+    # finding nor the framing this block intended. Encoding makes each value
+    # survive as exactly one value whatever it contains.
+    listing = json.dumps(entries, ensure_ascii=False, indent=2)
     return f"""## Recently Found Here
-Advisory lanes have run in this project recently and their results were stored
-as JSON. These are their paths, newest first, as JSON strings — read them as
-JSON, since a path may contain characters that would not survive being written
-plainly:
+Advisory lanes have run in this project recently. These are what they found,
+newest first, as JSON — encoded rather than written out, since a finding may
+contain characters that would not survive being written plainly:
 
 ```json
 {listing}
 ```
 
-In each file, `result.aggregated_outputs` is a **list** of entries shaped
-`{{"lane_id": ..., "output": ...}}` — not a mapping. Select the entries whose
-`lane_id` is `code_context` or `data_context`: those report what the system does
-and measures, which is what you are being asked for. Any other entry is
-reasoning about a different question — not evidence, and not yours to reuse.
-
-Read what looks relevant before you inspect code or take a measurement, use what
-helps, and investigate whatever you still need for yourself.
+Read these before you inspect code or take a measurement, use what helps, and
+investigate whatever you still need for yourself.
 
 These may come from other sessions, which chose their own repositories. Report
 only what is true of the repositories *this* question gave you; a claim about
@@ -499,7 +491,7 @@ def build_question_advisory_request(
     code_investigation_request: Mapping[str, Any] | None = None,
     repository_roster: list[dict[str, str]] | None = None,
     last_question: str | None = None,
-    recent_findings: list[str] | None = None,
+    recent_findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the per-question advisory request for one tool's question turn.
 
@@ -538,9 +530,9 @@ def build_question_advisory_request(
         request["code_investigation_request"] = dict(code_investigation_request)
     if repository_roster is not None:
         request["repository_roster"] = repository_roster
-    # Attached only when it points at something. A project with nothing recent
-    # carries no key, and a child is not handed a line about an empty place --
-    # looking there would cost it a tool call to learn nothing.
+    # Attached only when there is something to attach. A project with nothing
+    # recent carries no key, and a child is not handed a block that says nothing
+    # has been found here -- that is a sentence it would have to reason about.
     if recent_findings:
         request["recent_findings"] = list(recent_findings)
     return request
@@ -592,7 +584,7 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
-        recent_findings=recent_finding_paths(findings_store),
+        recent_findings=recent_findings_entries(findings_store),
     )
     try:
         payloads = build_question_advisory_subagents(request)
