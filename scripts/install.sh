@@ -939,6 +939,8 @@ HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
 HAS_GJC=false
+HAS_DSH=false
+DSH_PLUGIN_SPEC="github:Q00/ouroboros#main&path:integrations/dsh-plugin"
 if command -v codex &>/dev/null; then
   _ok "Codex found: $(which codex)"
   HAS_CODEX=true
@@ -978,6 +980,10 @@ fi
 if command -v gjc &>/dev/null; then
   _ok "GJC found: $(which gjc)"
   HAS_GJC=true
+fi
+if command -v dsh &>/dev/null; then
+  _ok "DeepSeek Harness found: $(which dsh)"
+  HAS_DSH=true
 fi
 
 RUNTIME_COUNT=0
@@ -1439,6 +1445,41 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       _info '  in a terminal:    ouroboros config'
       ;;
   esac
+fi
+
+# 6. DeepSeek Harness integration. Unlike the other hosts, dsh keeps its plugins
+# per profile, and `dsh plugin` requires --profile, so there is no single global
+# install to run. Cover the profile a dsh user actually boots (`web`, which
+# `dsh web` scaffolds) and refresh any other profile that already carries the
+# bundle, which is how an existing install picks up a new release.
+if [ "$HAS_DSH" = true ]; then
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}DeepSeek Harness plugin${RESET}"
+
+  DSH_PROFILE_ROOT="${DSH_HOME:-$HOME/.dsh}/profiles"
+  DSH_TARGET_PROFILES="web"
+  if [ -d "$DSH_PROFILE_ROOT" ]; then
+    for _dsh_profile_dir in "$DSH_PROFILE_ROOT"/*/; do
+      [ -d "$_dsh_profile_dir" ] || continue
+      _dsh_profile=$(basename "$_dsh_profile_dir")
+      [ "$_dsh_profile" = "web" ] && continue
+      # Only profiles that already opted in. Adding Ouroboros tools to an
+      # unrelated profile because the installer ran is not an upgrade.
+      if grep -q "dsh-ouroboros" "$_dsh_profile_dir/package.json" 2>/dev/null; then
+        DSH_TARGET_PROFILES="$DSH_TARGET_PROFILES $_dsh_profile"
+      fi
+    done
+  fi
+
+  for _dsh_profile in $DSH_TARGET_PROFILES; do
+    if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
+      _ok "dsh profile '$_dsh_profile': Ouroboros tools installed"
+    else
+      _warn "dsh profile '$_dsh_profile': install skipped"
+      _info "Manual install: dsh plugin --profile $_dsh_profile add \"$DSH_PLUGIN_SPEC\""
+    fi
+  done
+  _info "Type 'ooo interview <goal>' in a dsh chat to use them."
 fi
 
 _blank

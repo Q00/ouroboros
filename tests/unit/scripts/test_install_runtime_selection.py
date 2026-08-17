@@ -2432,3 +2432,66 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     assert "--with mcp==" not in calls
     assert "--with claude-agent-sdk==0.2.128" in calls
     assert "--with anthropic==0.120.2" in calls
+
+
+_DSH_STUB = f"""#!/bin/sh
+printf 'dsh %s\\n' "$*" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+
+def _dsh_calls(tmp_path: Path) -> list[str]:
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    return [line for line in calls if line.startswith("dsh ")]
+
+
+def test_installer_without_dsh_touches_no_profile(tmp_path: Path) -> None:
+    """The bundle install is conditional on the host actually being installed."""
+    result = _run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not _dsh_calls(tmp_path)
+    assert "DeepSeek Harness plugin" not in result.stdout
+
+
+def test_installer_covers_the_profile_a_dsh_user_boots(tmp_path: Path) -> None:
+    """`dsh web` scaffolds `web`, so that is the profile worth covering blind."""
+    result = _run_installer(tmp_path, fake_commands={"dsh": _DSH_STUB})
+
+    assert result.returncode == 0, result.stderr
+    assert _dsh_calls(tmp_path) == [
+        "dsh plugin --profile web add github:Q00/ouroboros#main&path:integrations/dsh-plugin"
+    ]
+
+
+def test_installer_refreshes_profiles_that_already_opted_in(tmp_path: Path) -> None:
+    """An existing install picks up a release; an unrelated profile is left alone."""
+    profiles = tmp_path / "home" / ".dsh" / "profiles"
+    (profiles / "tui").mkdir(parents=True)
+    (profiles / "tui" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    (profiles / "unrelated").mkdir(parents=True)
+    (profiles / "unrelated" / "package.json").write_text(
+        '{"dependencies": {"something-else": "1.0.0"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(tmp_path, fake_commands={"dsh": _DSH_STUB})
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = sorted(
+        line.split("--profile ")[1].split()[0] for line in _dsh_calls(tmp_path)
+    )
+    assert profiles_called == ["tui", "web"]
+
+
+def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
+    """A broken host cannot fail an install that already put Ouroboros on disk."""
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"dsh": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "install skipped" in result.stdout
+    assert "Manual install: dsh plugin --profile web add" in result.stdout
