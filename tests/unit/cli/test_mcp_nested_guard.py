@@ -311,6 +311,17 @@ def _clear_runtime_selection(monkeypatch) -> None:
     monkeypatch.delenv("OUROBOROS_AGENT_RUNTIME", raising=False)
     monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    # An inherited SDK default now looks for an installed CLI to serve with, so
+    # what is on the developer's PATH would otherwise decide these outcomes.
+    _installed_clis(monkeypatch)
+
+
+def _installed_clis(monkeypatch, *available: str) -> None:
+    """Pin which runtime CLIs the stand-in search can find."""
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp.shutil.which",
+        lambda command: f"/usr/local/bin/{command}" if command in available else None,
+    )
 
 
 def _assert_rejected_before_start(result, run_mcp_server: AsyncMock, home) -> None:
@@ -395,3 +406,96 @@ def test_bare_serve_allows_configured_cli_worker(monkeypatch, tmp_path) -> None:
         allowed_origins=(),
         workspace_roots=(),
     )
+
+
+def test_inherited_sdk_default_serves_with_an_installed_cli(monkeypatch, tmp_path) -> None:
+    """A dead server is worse than a runtime nobody typed.
+
+    The SDK-backed ``claude`` runtime cannot run in this process, so inheriting
+    it from config used to mean an MCP host booted with zero Ouroboros tools and
+    three lines of stderr. With a CLI installed, serve that instead and say so.
+    """
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "claude", "codex")
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+        encoding="utf-8",
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    assert run_mcp_server.await_args.args[4] == "claude_mcp"
+    # The substitution has to be visible, or the tool list silently belongs to a
+    # runtime the user never picked.
+    assert "claude-cli" in result.output
+    assert "--runtime" in result.output
+
+
+def test_stand_in_prefers_the_same_engine_out_of_process(monkeypatch, tmp_path) -> None:
+    """Without the Claude CLI, the next installed runtime still beats failing."""
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "codex", "opencode")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    assert run_mcp_server.await_args.args[4] == "codex"
+
+
+def test_explicit_sdk_runtime_still_fails(monkeypatch, tmp_path) -> None:
+    """Substituting for a runtime the caller just named would be worse."""
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "claude", "codex")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve", "--runtime", "claude"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
+def test_env_selected_sdk_runtime_still_fails(monkeypatch, tmp_path) -> None:
+    """The environment is an explicit choice too, so it is not overridden."""
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "claude", "codex")
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "claude")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
+def test_no_installed_cli_keeps_the_original_refusal(monkeypatch, tmp_path) -> None:
+    """With nothing to serve with, the actionable error is still the answer."""
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch)
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)

@@ -11,6 +11,7 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from ouroboros.orchestrator.heartbeat import (
     process_start_time,
 )
 from ouroboros.package_profiles import (
+    CLAUDE_CLI_RUNTIME_BACKEND,
     SDK_RUNTIME_IN_MCP_SERVER_MESSAGE,
     UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
     has_unsupported_claude_sdk_mcp_mix,
@@ -513,6 +515,43 @@ def _effective_mcp_server_runtime(runtime: AgentRuntimeBackend | None) -> str:
     if normalized is None:  # Defensive: the configured/default resolver always returns text.
         normalized = "claude"
     return resolve_runtime_backend_name(normalized)
+
+
+# Executable stand-ins for the in-process ``claude`` SDK runtime, in preference
+# order. ``claude-cli`` is first because it is the same engine out of process,
+# so a user who inherited the SDK default gets the runtime they meant.
+# Each row is (CLI on PATH, canonical backend, the spelling a user would type).
+# The public spelling is carried rather than derived: ``public_runtime_backend``
+# maps public names onto canonical ones, and telling a user to pass the internal
+# ``claude_mcp`` would name a value the ``--runtime`` option rejects.
+_SDK_RUNTIME_STANDINS: tuple[tuple[str, str, str], ...] = (
+    ("claude", CLAUDE_CLI_RUNTIME_BACKEND, AgentRuntimeBackend.CLAUDE_CLI.value),
+    ("codex", "codex", AgentRuntimeBackend.CODEX.value),
+    ("opencode", "opencode", AgentRuntimeBackend.OPENCODE.value),
+)
+
+
+def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str] | None:
+    """Return an executable runtime to use in place of an inherited SDK default.
+
+    The SDK-backed ``claude`` runtime cannot run inside this process, so a host
+    that reaches serve with it gets no tools at all. When nobody asked for that
+    runtime here — it arrived from config or from the shipped default — an
+    installed CLI is a better answer than a dead server, and the substitution is
+    announced rather than silent.
+
+    An explicit ``--runtime claude`` or ``OUROBOROS_AGENT_RUNTIME=claude`` is
+    left to fail: overriding what the caller just said would be worse than the
+    error.
+    """
+    if runtime is not None:
+        return None
+    if os.environ.get("OUROBOROS_AGENT_RUNTIME", "").strip():
+        return None
+    for command, backend, public_name in _SDK_RUNTIME_STANDINS:
+        if shutil.which(command):
+            return backend, public_name
+    return None
 
 
 def _require_mcp_dependency() -> None:
@@ -1220,8 +1259,23 @@ def serve(
         _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
         raise typer.Exit(1)
     if selected_runtime == "claude":
-        _stderr_console.print(Text(SDK_RUNTIME_IN_MCP_SERVER_MESSAGE, style="red"))
-        raise typer.Exit(1)
+        standin = _sdk_runtime_standin(runtime)
+        if standin is None:
+            _stderr_console.print(Text(SDK_RUNTIME_IN_MCP_SERVER_MESSAGE, style="red"))
+            raise typer.Exit(1)
+        # Say which runtime is actually serving. A host that swallows stderr
+        # would otherwise show a working tool list backed by a runtime the user
+        # never picked.
+        standin_backend, standin_name = standin
+        _stderr_console.print(
+            Text(
+                "Inherited the 'claude' SDK runtime, which cannot run inside the MCP "
+                f"server; serving with '{standin_name}' instead. Pass --runtime or set "
+                "OUROBOROS_AGENT_RUNTIME to choose.",
+                style="yellow",
+            )
+        )
+        selected_runtime = standin_backend
 
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
