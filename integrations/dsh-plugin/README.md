@@ -27,7 +27,8 @@ row that mounts dsh's existing `@deepseek-ai/dsh-mcp-client` against
 
 This bundle lives inside the main [Ouroboros](https://github.com/Q00/ouroboros)
 repository as a subdirectory (it has no independent release cadence or code of
-its own), so install it straight from GitHub with pnpm's subdirectory syntax:
+its own), so install it straight from GitHub with pnpm's subdirectory syntax.
+`--profile` is required by `dsh plugin` and names the profile to install into:
 
 ```sh
 dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"
@@ -39,23 +40,76 @@ the `# == dsh-ouroboros` layer once it's composed.
 
 ## Configuration
 
-Set these as environment variables before launching `dsh` (they pass straight
-through to the spawned `ouroboros mcp serve` process):
+Set these as environment variables before launching `dsh`. They are read from
+the dsh host environment and passed through to the spawned
+`ouroboros mcp serve` process:
 
 | Variable | Purpose |
 |---|---|
 | `OUROBOROS_AGENT_RUNTIME` | Agent runtime for `ooo auto`'s execution step (`claude-cli`, `codex`, `opencode`, ...). Leave unset if you've already run `ouroboros setup` and picked a default. |
-| `OUROBOROS_LLM_BACKEND` | LLM backend for interview/Seed/QA. Set to `dsh` to route those calls back through this same DeepSeek Harness install instead of whatever Ouroboros defaults to. |
+| `OUROBOROS_LLM_BACKEND` | LLM backend for interview/Seed/QA. Leave unset to keep your `ouroboros setup` default. `dsh` routes those calls through DeepSeek Harness — read the next section first, it needs two more variables. |
+| `OUROBOROS_DSH_CONFIG_PATH` | Absolute path to the trusted Cordis composition the `dsh` LLM backend loads. Required whenever `OUROBOROS_LLM_BACKEND=dsh`. |
+| `OUROBOROS_DSH_CLI_PATH` | Path to the `dsh-acp-demo` bin, when it isn't on `PATH`. |
 
 Override any field — timeout, args, a pinned Ouroboros version — from your own
 profile's `cordis.patch.yml` by targeting the `mcp-ouroboros` row id; see
 ["Package and install a plugin"](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)
 for the override mechanics.
 
-By default, connection failures are non-fatal (`failOnStartupError: false`):
-a machine without `uv` on `PATH` yet still boots dsh normally, just without
-the Ouroboros tools, and retries on reconnect per dsh's usual mcp-client
-backoff.
+### Routing interview/Seed/QA back through DeepSeek Harness
+
+`OUROBOROS_LLM_BACKEND=dsh` is not a one-variable switch, and it does not reuse
+the dsh process you're already running. Ouroboros spawns **its own**
+`dsh-acp-demo` ACP child, and that child fails closed with `invalid_config`
+unless it is given a composition to load. To use it:
+
+1. Build DeepSeek Harness from source (`pnpm install && pnpm run build`,
+   Node.js >= 22) and make its `dsh-acp-demo` bin reachable — on `PATH`, or
+   named by `OUROBOROS_DSH_CLI_PATH`. The published npm install path for that
+   bin is currently broken upstream.
+2. Point `OUROBOROS_DSH_CONFIG_PATH` at an **absolute** composition file.
+   Relative paths are rejected on purpose (they would resolve against the
+   untrusted project cwd). The file must sit where dsh's `node_modules` (or
+   workspace) is reachable: plugin package names in a composition resolve
+   relative to the composition file's own directory.
+3. Provide whatever credential that composition names — `DEEPSEEK_API_KEY` for
+   DeepSeek's own models. See the credentials note below: it must be present in
+   the dsh host environment, and this bundle forwards it explicitly.
+
+Without steps 1–2 the Ouroboros tools still register and list fine; the first
+interview/Seed/QA call is what fails. Everything except the `dsh` backend works
+without them.
+
+### Credentials
+
+dsh does not hand child processes the harness environment wholesale. Its
+subprocess seam scrubs every credential-shaped name — anything matching
+`/KEY|PASSWORD|SECRET|TOKEN/i` — plus every `DSH_*` name, so harness
+credentials never leak into a spawned process implicitly. A plugin's explicit
+`env` layer merges after that scrub.
+
+So this bundle names a short allowlist rather than passing everything through:
+
+- `ANTHROPIC_API_KEY` — Ouroboros' default LLM backend.
+- `DEEPSEEK_API_KEY` — the `dsh` backend loopback above.
+
+To forward another (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`,
+...), add that one name to the `mcp-ouroboros` row's `env` in your own
+profile's `cordis.patch.yml`. Everything non-credential-shaped — `PATH`,
+`HOME`, the `OUROBOROS_*` selectors — passes through untouched.
+
+## Startup failures and recovery
+
+Connection failures are non-fatal (`failOnStartupError: false`): a machine
+without `uv` on `PATH` yet still boots dsh normally, just without the Ouroboros
+tools, and every other plugin keeps working.
+
+Recovery is not automatic in general. Whether `mcp-client` retries at all
+depends on your dsh build — the published `0.0.1-rc.1` has no reconnect loop,
+current `main` has one with bounded exponential backoff that gives up after a
+capped number of consecutive failures. Either way, after fixing the cause
+(installing `uv`, setting a runtime), reload the plugin or restart dsh rather
+than waiting for a reconnect.
 
 ## What you get
 
