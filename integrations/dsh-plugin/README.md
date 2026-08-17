@@ -94,9 +94,12 @@ So this bundle names a short allowlist rather than passing everything through:
 - `DEEPSEEK_API_KEY` — the `dsh` backend loopback above.
 
 To forward another (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`,
-...), add that one name to the `mcp-ouroboros` row's `env` in your own
-profile's `cordis.patch.yml`. Everything non-credential-shaped — `PATH`,
-`HOME`, the `OUROBOROS_*` selectors — passes through untouched.
+...), override the `mcp-ouroboros` row in your own profile's
+`cordis.patch.yml` with that one extra name in `env`. A later layer replaces a
+row's entire `config` rather than deep-merging it, so copy this bundle's
+`config` block and add your line to it. Everything non-credential-shaped —
+`PATH`, `HOME`, the `OUROBOROS_*` selectors — passes through untouched and
+needs no row at all.
 
 ## Startup failures and recovery
 

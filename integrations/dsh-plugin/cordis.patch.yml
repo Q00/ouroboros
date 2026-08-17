@@ -59,8 +59,13 @@
         # that scrub, so any credential Ouroboros genuinely needs has to be
         # named here. It is deliberately a short allowlist covering the two
         # documented backends — not a wildcard passthrough. To forward another
-        # (OPENAI_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY, ...), add that
-        # one name in your own profile's cordis.patch.yml override of this row.
+        # (OPENAI_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY, ...), override
+        # this row in your own profile's cordis.patch.yml with that one extra
+        # name — restating the whole `config`, since a later layer replaces a
+        # row's config rather than deep-merging it. Non-credential names
+        # (PATH, HOME, the OUROBOROS_* selectors) survive the scrub on their
+        # own; the OUROBOROS_* rows below are here to keep the contract
+        # visible in one place.
         #
         # `?? ''` keeps every value a string (the row's schema is a string
         # dict). Ouroboros treats a blank credential as unset, so an unset host
