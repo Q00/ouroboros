@@ -307,6 +307,15 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     outside this session's roster is rejected at submission. The child is told
     so here, where it is deciding what to read.
 
+    **The shape is stated exactly, because it was not.** This said the answers
+    were "keyed by ``lane_id``", which reads as a mapping; they are a list of
+    entries carrying a ``lane_id``. Two subagents made the same wrong move on
+    it -- ``"code_context" in aggregated_outputs`` against a list is ``False``
+    -- and one of them concluded the files held nothing and went back to
+    searching the repositories. Nothing failed loudly: the paths were right, the
+    files opened, and the lane simply reported finding nothing to reuse, which
+    is indistinguishable from there being nothing.
+
     What this must not become is a second set of rules. There is nothing here
     about proving a stored finding sufficient, reporting what a reuse left
     unsettled, or marking an answer as reused. Those would be bookkeeping about
@@ -333,9 +342,10 @@ plainly:
 {listing}
 ```
 
-Each file holds answers keyed by `lane_id` under `result.aggregated_outputs`.
-Read the `code_context` and `data_context` entries: those report what the system
-does and measures, which is what you are being asked for. Any other entry is
+In each file, `result.aggregated_outputs` is a **list** of entries shaped
+`{{"lane_id": ..., "output": ...}}` — not a mapping. Select the entries whose
+`lane_id` is `code_context` or `data_context`: those report what the system does
+and measures, which is what you are being asked for. Any other entry is
 reasoning about a different question — not evidence, and not yours to reuse.
 
 Read what looks relevant before you inspect code or take a measurement, use what

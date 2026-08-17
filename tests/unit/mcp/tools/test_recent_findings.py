@@ -214,7 +214,11 @@ def test_the_prompt_names_which_entries_may_be_read(
 
     prompt = _lane_prompts(_attach(roster, store))["code_context"]
 
-    assert "`code_context` and `data_context`" in prompt
+    # The two eligible lane ids and the reason the others are not evidence —
+    # asserted as the pair rather than as one sentence, so rewording the
+    # instruction does not break the test while dropping a lane would.
+    assert "`code_context`" in prompt
+    assert "`data_context`" in prompt
     assert "reasoning about a different question" in prompt
 
 
@@ -453,3 +457,33 @@ def test_a_path_survives_characters_that_markdown_would_eat(
     assert ordinary in section
     # Nothing after the block's own title may read as a heading.
     assert not any(line.startswith("## ") for line in section.splitlines()[1:])
+
+
+def test_the_block_describes_the_shape_a_published_body_actually_has(
+    roster: list[dict[str, str]], store: ContentAddressedArtifactStore
+) -> None:
+    """The prompt's description is checked against a real publication, not itself.
+
+    It said the answers were "keyed by `lane_id`", which reads as a mapping.
+    They are a list of entries carrying a `lane_id`, so `"code_context" in
+    aggregated_outputs` is `False` — two subagents made exactly that move, and
+    one concluded the files held nothing and went back to searching the
+    repositories. Nothing failed loudly: the paths were right and the files
+    opened, so a lane reporting no reusable findings looked identical to there
+    being none.
+
+    Asserting the sentence alone would pin one wording against another. What
+    makes this hold is reading a body the store actually published and checking
+    that the access the block describes is the access that works.
+    """
+    published = _publish(store, lanes=("code_context", "data_context"))
+
+    outputs = json.loads(Path(published).read_text())["result"]["aggregated_outputs"]
+    assert isinstance(outputs, list), "the block promises a list"
+    assert "code_context" not in outputs, "mapping access must not appear to work"
+    selected = [entry for entry in outputs if entry["lane_id"] == "code_context"]
+    assert len(selected) == 1 and "output" in selected[0]
+
+    section = _lane_prompts(_attach(roster, store))["code_context"]
+    assert "is a **list** of entries" in section
+    assert "not a mapping" in section
