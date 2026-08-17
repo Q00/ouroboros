@@ -368,7 +368,7 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`) |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `pi`, `gjc`, `zcode`, `ourocode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**

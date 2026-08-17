@@ -191,6 +191,8 @@ orchestrator:
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
 | `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
 | `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
+| `dsh_cli_path` | `string \| null` | `null` | Absolute path to the DeepSeek Harness ACP server binary `dsh-acp-demo` (`~` is expanded). Used by the LLM-only `dsh` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_DSH_CLI_PATH`. |
+| `dsh_config_path` | `string \| null` | `null` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required for that backend — it fails closed rather than guessing, and a relative path is rejected because it would resolve against the untrusted project cwd. Overridable via `OUROBOROS_DSH_CONFIG_PATH`. See [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
 
 ---
@@ -212,7 +214,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"ourocode"` \| `"gjc"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` is LLM-only and is not valid for `orchestrator.runtime_backend`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` (alias `deepseek_harness`) additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-6"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -642,6 +644,8 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
 | `OUROBOROS_PI_CLI_PATH` | `orchestrator.pi_cli_path` | Path to the Pi CLI binary. |
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
+| `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
+| `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow
