@@ -25,14 +25,12 @@ row that mounts dsh's existing `@deepseek-ai/dsh-mcp-client` against
 
 ## Install
 
-```sh
-dsh plugin --profile <your-profile> add dsh-ouroboros
-```
-
-or straight from GitHub:
+This bundle lives inside the main [Ouroboros](https://github.com/Q00/ouroboros)
+repository as a subdirectory (it has no independent release cadence or code of
+its own), so install it straight from GitHub with pnpm's subdirectory syntax:
 
 ```sh
-dsh plugin --profile <your-profile> add github:Q00/dsh-ouroboros
+dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"
 ```
 
 Then boot as usual (`dsh --profile <your-profile>`, or `dsh web` if your
