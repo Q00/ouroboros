@@ -97,8 +97,10 @@ _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 _RECENT_FINDINGS_MAX_PATHS = 20
 
 
-def _published_since(root: Path, since: datetime) -> list[tuple[datetime, str, str]]:
-    """Return ``(published_at, contract_id, artifact_ref)`` for recent publications.
+def _published_between(
+    root: Path, since: datetime, now_utc: datetime
+) -> list[tuple[datetime, str, str]]:
+    """Return ``(published_at, contract_id, artifact_ref)`` for publications in the window.
 
     Newest first, and nothing outside the window is looked at further. A
     manifest that cannot be read is skipped rather than raised on: this is a
@@ -136,7 +138,14 @@ def _published_since(root: Path, since: datetime) -> list[tuple[datetime, str, s
         # rather than as an answer at an unknown offset.
         if published_at.tzinfo is None:
             continue
-        if published_at >= since:
+        # A window has two ends. Only the older one was checked, which made the
+        # decision "a day" into "a day ago and onwards": a record stamped ahead
+        # of now stayed eligible for as long as its clock lead lasted. Records
+        # carry whatever the clock read when they were written, so a machine
+        # that was ahead and later corrected leaves them behind -- and a record
+        # that claims not to have happened yet is skipped rather than trusted,
+        # which costs the shortcut instead of widening the window.
+        if since <= published_at <= now_utc:
             found.append((published_at, contract_id, artifact_ref))
     # The reference breaks a same-timestamp tie, so two publications written in
     # one clock tick order the same way on every call rather than by whatever
@@ -174,10 +183,13 @@ def recent_finding_paths(
     """
     if findings_store is None:
         return []
-    since = (now or datetime.now(UTC)) - RECENT_FINDINGS_WINDOW
+    effective_now = now or datetime.now(UTC)
+    since = effective_now - RECENT_FINDINGS_WINDOW
     root = Path(findings_store.root)
     offered: list[str] = []
-    for _published_at, contract_id, _shortlisted_ref in _published_since(root, since):
+    for _published_at, contract_id, _shortlisted_ref in _published_between(
+        root, since, effective_now
+    ):
         if len(offered) >= _RECENT_FINDINGS_MAX_PATHS:
             break
         try:

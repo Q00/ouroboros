@@ -346,22 +346,57 @@ def test_the_offered_path_names_the_body_that_was_verified(
     other = _publish(store, claim="a different body entirely")
     assert published != other
 
-    real = recent_findings_module._published_since
+    real = recent_findings_module._published_between
 
-    def _shortlist_with_a_stale_reference(root: Path, since: datetime) -> Any:
+    def _shortlist_with_a_stale_reference(root: Path, since: datetime, now_utc: datetime) -> Any:
         return [
             (published_at, contract_id, "sha256:" + Path(other).stem)
-            for published_at, contract_id, _ref in real(root, since)
+            for published_at, contract_id, _ref in real(root, since, now_utc)
         ]
 
-    recent_findings_module._published_since = _shortlist_with_a_stale_reference
+    recent_findings_module._published_between = _shortlist_with_a_stale_reference
     try:
         offered = recent_finding_paths(store)
     finally:
-        recent_findings_module._published_since = real
+        recent_findings_module._published_between = real
 
     # Each publication is offered as the body its own fetch verified. Reading
     # the substituted reference instead would emit one digest for both, so the
     # set is what distinguishes the two behaviours: {published, other} when the
     # path follows the verification, {other} when it follows the shortlist.
     assert set(offered) == {published, other}
+
+
+def test_a_publication_stamped_ahead_of_now_is_not_offered(
+    store: ContentAddressedArtifactStore,
+) -> None:
+    """A window has two ends, and only the older one used to be checked.
+
+    Records carry whatever the clock read when they were written, so a machine
+    that ran ahead and was later corrected leaves timestamps in the future. With
+    one bound, such a record stayed eligible for as long as its lead lasted —
+    "a day" became "a day ago and onwards". The realistic lead is small, but the
+    shape is what matters: the window has to be the interval the decision names.
+
+    Skipping is the conservative direction: a record claiming not to have
+    happened yet costs the shortcut rather than widening the window.
+    """
+    ahead = datetime.now(UTC) + timedelta(days=30)
+    store.put_for_contract(
+        contract_id="fanout:stamped-ahead",
+        body={
+            "kind": "question_advisory",
+            "result": {"aggregated_outputs": [{"lane_id": "code_context", "output": {}}]},
+        },
+        runtime_id="test:publish",
+        duration_ms=1,
+        events_emitted_count=0,
+        now=ahead,
+    )
+
+    assert recent_finding_paths(store) == []
+    # Still excluded well after publication, since it is the interval that
+    # decides rather than the distance from one edge.
+    assert recent_finding_paths(store, now=ahead - timedelta(days=1)) == []
+    # And it becomes eligible exactly when it falls inside the window.
+    assert recent_finding_paths(store, now=ahead) != []
