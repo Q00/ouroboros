@@ -1244,6 +1244,59 @@ class TestInterviewEngineSystemPrompt:
 
         assert "### seed-closer" in prompt
 
+    def test_closure_round_keeps_role_boundaries_alongside_seed_closer(self) -> None:
+        """A closure round must not trade the interviewer role for the closer.
+
+        Storing a snapshot grows the header and attaches another perspective,
+        both of which are preserved ahead of the base agent prompt. Without a
+        reserved floor that pushed out the boundaries that forbid the model
+        from answering its own question — in exactly the rounds where the model
+        is most tempted to start implementing.
+        """
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        breakdown = {
+            "goal_clarity": {
+                "name": "Goal Clarity",
+                "clarity_score": 0.90,
+                "weight": 0.4,
+                "justification": "Goal is clear.",
+            },
+            "constraint_clarity": {
+                "name": "Constraint Clarity",
+                "clarity_score": 0.85,
+                "weight": 0.3,
+                "justification": "Constraints are clear.",
+            },
+            "success_criteria_clarity": {
+                "name": "Success Criteria Clarity",
+                "clarity_score": 0.80,
+                "weight": 0.3,
+                "justification": "Criteria are measurable.",
+            },
+        }
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Add deadlines to the kanban widget",
+            ambiguity_score=0.18,
+            ambiguity_breakdown=breakdown,
+        )
+        for round_number in range(1, 7):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=round_number,
+                    question=f"Q{round_number}?",
+                    user_response=f"A{round_number}",
+                )
+            )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "### seed-closer" in prompt
+        assert 'NEVER say "I will implement X"' in prompt
+        assert "NEVER promise to build demos" in prompt
+
     def test_system_prompt_omits_seed_closer_when_closure_mode_is_inactive(self) -> None:
         """High ambiguity should keep the closure perspective disabled."""
         mock_adapter = MagicMock()

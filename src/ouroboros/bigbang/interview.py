@@ -730,6 +730,10 @@ class InterviewEngine:
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+    # Opening span of the base agent prompt that survives trimming ahead of the
+    # perspective panel: the role boundaries, context boundaries, and response
+    # format that keep the generator asking questions instead of answering them.
+    _BASE_PROMPT_ROLE_FLOOR_CHARS = 500
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
     suppress_tool_use_prompt_cues: bool = False
     # When True, ``ask_next_question`` generates three persona candidates
@@ -1310,15 +1314,27 @@ class InterviewEngine:
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
+        #
+        # The base prompt opens with the role boundaries that keep the model an
+        # interviewer ("NEVER say I will implement", "always end with a
+        # question"). Those must outrank the panel: a growing header or panel
+        # otherwise pushes them out entirely, which is exactly when they matter
+        # most — a late round with a stored ambiguity snapshot and the
+        # seed-closer perspective attached.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
             perspective_panel = ""
             base_budget = 0
-        elif len(perspective_panel) > available_after_header:
-            perspective_panel = perspective_panel[:available_after_header]
-            base_budget = 0
         else:
+            reserved_base = min(
+                len(base_prompt),
+                self._BASE_PROMPT_ROLE_FLOOR_CHARS,
+                available_after_header,
+            )
+            panel_budget = available_after_header - reserved_base
+            if len(perspective_panel) > panel_budget:
+                perspective_panel = perspective_panel[:panel_budget]
             base_budget = available_after_header - len(perspective_panel)
 
         trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
@@ -1458,7 +1474,17 @@ class InterviewEngine:
             state.ambiguity_score is not None
             and state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
         ):
-            perspectives.append(InterviewPerspective.SEED_CLOSER)
+            # Closure rounds run a narrower panel, led by the closer. Two
+            # reasons, one budget and one substantive: the panel is trimmed
+            # from the tail, so appending the closer would drop it in exactly
+            # the rounds it exists for; and researcher/simplifier drilling is
+            # the behavior closure is meant to stop. The freed characters go
+            # back to the base prompt's role boundaries.
+            perspectives = [
+                InterviewPerspective.SEED_CLOSER,
+                InterviewPerspective.BREADTH_KEEPER,
+                InterviewPerspective.ARCHITECT,
+            ]
 
         if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
             perspectives.append(InterviewPerspective.ARCHITECT)
