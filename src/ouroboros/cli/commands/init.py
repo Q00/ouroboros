@@ -648,8 +648,8 @@ async def _run_interview(
         if should_start_workflow:
             await _start_workflow(
                 seed_path,
-                use_orchestrator,
                 runtime_backend=workflow_runtime_backend,
+                project_fallback_dir=Path.cwd(),
             )
 
     finally:
@@ -811,40 +811,51 @@ async def _generate_seed_from_interview(
 
 async def _start_workflow(
     seed_path: Path,
-    use_orchestrator: bool = False,
     parallel: bool = True,
     runtime_backend: str | None = None,
+    project_fallback_dir: Path | None = None,
 ) -> None:
     """Start workflow from generated seed.
 
     Args:
         seed_path: Path to the seed YAML file.
-        use_orchestrator: Whether to use Claude Code orchestrator.
         parallel: Execute independent ACs in parallel. Default: True.
         runtime_backend: Optional runtime backend for orchestrator execution.
+        project_fallback_dir: Directory to build in when the Seed does not say
+            where it belongs. An interview is conducted from the project it is
+            about, so the invocation directory stands in for the Seed file's
+            folder — otherwise a Seed written to ``~/.ouroboros/seeds`` makes
+            the Seed store the workspace. Seed metadata and a valid brownfield
+            target still win; the run command weighs all of that in one place.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
 
-    if use_orchestrator:
-        # Direct function call instead of subprocess
-        from ouroboros.cli.commands.run import _run_orchestrator
+    # One execution path, the same one `ouroboros run workflow` takes by
+    # default. The previous non-orchestrator branch printed "not yet
+    # implemented" and returned, so answering yes to "Start workflow now?"
+    # did nothing unless the caller had also passed --orchestrator.
+    #
+    # Nothing is caught here. `_run_orchestrator` signals every failure —
+    # unloadable Seed, unsafe project path, workspace error, failed execution —
+    # as `typer.Exit(1)` and has no zero-code exit to absorb, so catching it
+    # printed the error and still finished `init start` successfully: a caller
+    # in a script could not tell a built product from a failed one.
+    #
+    # `KeyboardInterrupt` is not caught either, but that is about ownership, not
+    # exit codes. The command wrapper below still answers Ctrl+C with exit 0 and
+    # "Interview interrupted. Progress has been saved.", which is the policy for
+    # an interactive command; the point is that one place decides it instead of
+    # this handoff printing a competing line on the way there.
+    from ouroboros.cli.commands.run import _run_orchestrator
 
-        try:
-            await _run_orchestrator(
-                seed_path,
-                resume_session=None,
-                parallel=parallel,
-                runtime_backend=runtime_backend,
-            )
-        except typer.Exit:
-            pass  # Normal exit
-        except KeyboardInterrupt:
-            print_info("Workflow interrupted.")
-    else:
-        # Standard workflow (placeholder for now)
-        print_info(f"Would execute workflow from: {seed_path}")
-        print_info("Standard workflow execution not yet implemented.")
+    await _run_orchestrator(
+        seed_path,
+        resume_session=None,
+        parallel=parallel,
+        runtime_backend=runtime_backend,
+        project_fallback_dir=project_fallback_dir,
+    )
 
 
 def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
@@ -1146,11 +1157,6 @@ def start(
     configure_cli_logging(debug=debug)
     if debug:
         print_info("Debug mode enabled - showing verbose logs")
-
-    if runtime and not orchestrator:
-        print_warning(
-            "--runtime only affects the workflow execution step when --orchestrator is enabled."
-        )
 
     # Show mode info
     selected_llm_backend = _resolve_init_llm_backend(
