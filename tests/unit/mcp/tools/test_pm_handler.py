@@ -938,17 +938,22 @@ async def test_atomic_pm_failure_returns_recoverable_session_envelope(tmp_path: 
             InterviewRound(round_number=1, question="Q1", user_response="A1"),
             InterviewRound(round_number=2, question="Q2", user_response="A2"),
             InterviewRound(round_number=3, question="Q3", user_response="A3"),
+            InterviewRound(round_number=4, question="Q4", user_response=None),
         ],
     )
     assert (await engine.save_state(state)).is_ok
     engine.plan_next_turn = AsyncMock(return_value=Result.err(ProviderError("empty response")))
     handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-    result = await handler.handle({"session_id": state.interview_id, "cwd": str(tmp_path)})
+    result = await handler.handle(
+        {"session_id": state.interview_id, "answer": "A4", "cwd": str(tmp_path)}
+    )
 
     assert result.is_ok
     assert result.value.is_error is True
     assert result.value.meta == {"session_id": state.interview_id, "recoverable": True}
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.rounds[-1].user_response == "A4"
     assert "Resume with" in result.value.text_content
 
 

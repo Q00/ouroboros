@@ -1500,6 +1500,16 @@ class PMInterviewHandler:
                         )
                     )
                 state = record_result.value
+
+        if answer:
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to persist PM answer: {save_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
         supports_atomic_turn = (
             isinstance(PMInterviewEngine, type)
             and isinstance(engine, PMInterviewEngine)
