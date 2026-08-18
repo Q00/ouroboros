@@ -106,7 +106,7 @@ def test_build_command_maps_anthropic_hyphen_id_to_dotted_form() -> None:
 
 def test_build_command_maps_current_default_from_catalog() -> None:
     runtime = _make_runtime(model=DEFAULT_OPUS_MODEL)
-    catalog = [CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+    catalog = [CopilotModel(id=DEFAULT_OPUS_MODEL, family=DEFAULT_OPUS_MODEL)]
 
     with patch(
         "ouroboros.copilot.model_discovery.list_copilot_models",
@@ -118,7 +118,7 @@ def test_build_command_maps_current_default_from_catalog() -> None:
         )
 
     idx = command.index("--model")
-    assert command[idx + 1] == "claude-opus-4.8"
+    assert command[idx + 1] == DEFAULT_OPUS_MODEL
 
 
 def test_build_command_passes_dotted_model_through_unchanged() -> None:

@@ -59,6 +59,9 @@ class CopilotModel:
 
 _FALLBACK_MODELS: tuple[CopilotModel, ...] = (
     CopilotModel(
+        id="claude-opus-5", family="claude-opus-5", vendor="Anthropic", name="Claude Opus 5"
+    ),
+    CopilotModel(
         id="claude-opus-4.8", family="claude-opus-4.8", vendor="Anthropic", name="Claude Opus 4.8"
     ),
     CopilotModel(
@@ -99,6 +102,8 @@ _FALLBACK_MODELS: tuple[CopilotModel, ...] = (
 )
 
 _STATIC_NAME_MAP: dict[str, str] = {
+    "claude-opus-5": "claude-opus-5",
+    "openrouter/anthropic/claude-opus-5": "claude-opus-5",
     "claude-sonnet-4-6": "claude-sonnet-4.6",
     "claude-opus-4-6": "claude-opus-4.6",
     "claude-opus-4-7": "claude-opus-4.7",
