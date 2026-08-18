@@ -84,11 +84,6 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
 # so this deadline — not the stall scope — is the real "host went away" signal.
 DEFAULT_DISPATCH_DEADLINE_SECONDS = 3600.0
 
-# After a dispatch has been listed to a poller once, suppress re-listing for
-# this long. A dispatch is re-announced only when the host has plausibly lost
-# it (crashed mid-spawn, dropped the poll response) — not on every 5s poll.
-ANNOUNCE_TTL_SECONDS = 300.0
-
 
 class HostDispatchNotBoundError(RuntimeError):
     """``host`` runtime executed without a composed bridge.
@@ -120,10 +115,10 @@ class _PendingDispatch:
     submitted_at: float | None = None
     expired: bool = False
     poisoned: bool = False
-    # Monotonic time this dispatch was last listed to a poller. Re-announcing
-    # on every ~5s job_wait would make a compliant host spawn duplicate
-    # workers into the same cwd; suppressed for ANNOUNCE_TTL after each listing.
-    announced_at: float | None = None
+    # Actionable delivery is one-shot for a live dispatch. If the announcement
+    # is lost, the attempt reaches its deadline and retry creates a fresh id;
+    # replaying the same id could run two workers in one working directory.
+    announced: bool = False
 
 
 class HostDispatchBridge:
@@ -315,14 +310,12 @@ class HostDispatchBridge:
         """Return the open dispatches correlated to ``session_id``.
 
         ``announce=True`` is the active ``job_wait`` delivery path: it claims
-        each returned announcement until ``ANNOUNCE_TTL_SECONDS`` elapses.
-        ``announce=False`` is the read-only ``job_status`` observation path:
-        it exposes pending identity without consuming the active host's sole
-        announcement.
+        each dispatch exactly once for its whole live attempt. ``announce=False``
+        is the read-only ``job_status`` observation path and never consumes
+        that actionable announcement.
         """
         if not session_id:
             return []
-        now = time.monotonic()
         rows = [
             pending
             for pending in self._pending.values()
@@ -330,19 +323,12 @@ class HostDispatchBridge:
             and not pending.poisoned
             and not pending.expired
             and pending.session_id == session_id
-            and (
-                not announce
-                or pending.announced_at is None
-                or now - pending.announced_at >= ANNOUNCE_TTL_SECONDS
-            )
+            and (not announce or not pending.announced)
         ]
         rows.sort(key=lambda pending: pending.created_at)
-        reannounced = {
-            pending.dispatch_id for pending in rows if announce and pending.announced_at is not None
-        }
         if announce:
             for pending in rows:
-                pending.announced_at = now
+                pending.announced = True
         return [
             {
                 "dispatch_id": pending.dispatch_id,
@@ -353,7 +339,6 @@ class HostDispatchBridge:
                 "submit_tool": "ouroboros_submit_fanout_results",
                 "session_id": pending.session_id,
                 "actionable": announce,
-                "reannounce": pending.dispatch_id in reannounced,
                 "subagents": [pending.payload],
             }
             for pending in rows
@@ -792,7 +777,6 @@ def _read_submission(result: Any) -> tuple[str, bool]:
 
 
 __all__ = [
-    "ANNOUNCE_TTL_SECONDS",
     "DEFAULT_DISPATCH_DEADLINE_SECONDS",
     "DEFAULT_HEARTBEAT_INTERVAL_SECONDS",
     "FANOUT_KIND_HOST_EXECUTION",

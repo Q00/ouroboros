@@ -9602,6 +9602,9 @@ class TestHostRuntimeSetup:
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert data["orchestrator"]["runtime_backend"] == "host"
 
+        assert "In your MCP host chat, type: ooo run" in result.output
+        assert "ouroboros run workflow seed.yaml" not in result.output
+
 
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""

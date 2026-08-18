@@ -47,6 +47,7 @@ from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
+from ouroboros.cli.commands.setup_completion import print_setup_completion
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -5091,10 +5092,7 @@ def setup(
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)
 
-    console.print("\n[bold green]Setup complete![/bold green]")
-    console.print("\n[dim]Next steps:[/dim]")
-    console.print('  ouroboros init start "your idea here"')
-    console.print("  ouroboros run workflow seed.yaml\n")
+    print_setup_completion(console, selected)
 
 
 # ── Artifact refresh subcommand ──────────────────────────────────

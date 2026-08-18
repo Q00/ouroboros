@@ -275,18 +275,23 @@ class TestDispatchRoundTrip:
         assert bridge.pending_for_session("other") == []
         assert len(bridge.pending_for_session("sess_scope")) == 1
 
-    def test_announce_once_suppresses_relisting(self, bridge: HostDispatchBridge) -> None:
-        # Regression (adversarial review): re-listing on every ~5s poll made a
-        # compliant host spawn duplicate workers into the same cwd.
-        dispatch_id = bridge.park(session_id="sess_an", execution_id=None, payload={"prompt": "p"})
+    def test_live_dispatch_is_never_reannounced(self, bridge: HostDispatchBridge) -> None:
+        # A long-running worker must never be duplicated in the same cwd. If
+        # the first announcement is lost, deadline/retry creates a fresh id.
+        dispatch_id = bridge.park(
+            session_id="sess_an",
+            execution_id=None,
+            payload={"prompt": "p"},
+        )
         assert dispatch_id is not None
         first = bridge.pending_for_session("sess_an")
-        assert len(first) == 1 and first[0]["reannounce"] is False
+        assert len(first) == 1
         assert bridge.pending_for_session("sess_an") == []
-        # After the TTL the dispatch is re-announced, flagged as such.
-        bridge._pending[dispatch_id].announced_at -= 10_000.0
-        again = bridge.pending_for_session("sess_an")
-        assert len(again) == 1 and again[0]["reannounce"] is True
+
+        # Age far beyond the former five-minute TTL: the same live dispatch
+        # still cannot become actionable a second time.
+        bridge._pending[dispatch_id].created_at -= 10_000.0
+        assert bridge.pending_for_session("sess_an") == []
 
     def test_read_only_observation_does_not_consume_announcement(
         self, bridge: HostDispatchBridge

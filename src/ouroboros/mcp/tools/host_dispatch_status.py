@@ -57,8 +57,8 @@ def pending_host_dispatch_suffix(pending: list[dict[str, Any]]) -> str:
         "`session_id`, `correlation_key` = the entry's "
         "`result_correlation_key`, and results = "
         '[{"key": "result", "content": <the subagent\'s final output>}]. '
-        "Each dispatch is announced once — spawn each `dispatch_id` exactly "
-        "once, never again on later polls (a `reannounce: true` entry means "
-        "your earlier worker was lost; spawn again only then). Keep pumping "
-        "ouroboros_job_wait afterwards."
+        "Each live dispatch is announced exactly once — spawn each `dispatch_id` "
+        "once and never start it again on later polls. If an announcement or "
+        "worker is lost, let the attempt reach its deadline; retry will issue a "
+        "fresh dispatch id. Keep pumping ouroboros_job_wait afterwards."
     )

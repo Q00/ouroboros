@@ -21,6 +21,16 @@ The dsh plugin bundle defaults this variable to `host`. A configured
 `orchestrator.runtime_profile.stages.execute` value takes precedence, so check
 the runtime profile when execution uses an unexpected backend.
 
+After setup, stay inside the MCP host chat and type:
+
+```text
+ooo run
+```
+
+The host command calls the job-tracked MCP execution surface. Do not run the
+terminal `ouroboros run` command with this runtime; a terminal has no host loop
+to receive and submit dispatches.
+
 ## Execution flow
 
 ```text
@@ -83,6 +93,9 @@ consuming the live dispatch. The host may correct and retry the same
 - Every dispatch is scoped to a non-empty session ID.
 - Correlation and session mismatches fail closed.
 - Duplicate, cancelled, superseded, or completed submissions are stale.
+- A live dispatch is announced once. Lost announcements or workers expire at
+  the attempt deadline; retry creates a fresh dispatch ID instead of replaying
+  work that may still be running.
 - Results arriving after the absolute dispatch deadline are not delivered.
 - Parked work emits heartbeats so the executor stall detector does not cancel
   a human-paced host prematurely.
@@ -94,10 +107,9 @@ consuming the live dispatch. The host may correct and retry the same
 
 ## Unsupported surfaces
 
-- Terminal `ouroboros run` rejects `host`; no MCP host is present to poll and
-  submit dispatches.
-- Direct `ouroboros_execute_seed` rejects `host`; use the job-tracked
-  `ouroboros_start_execute_seed` surface.
+- Terminal `ouroboros run` rejects `host`; use `ooo run` from the MCP host chat.
+- Direct `ouroboros_execute_seed` rejects `host`; the host-facing `ooo run`
+  command uses the job-tracked `ouroboros_start_execute_seed` surface.
 - Evolve and Ralph reject `host` until those jobs carry a discoverable session
   scope end to end.
 
