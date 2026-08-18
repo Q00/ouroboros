@@ -286,8 +286,8 @@ def _lane_agent(raw_lane: Mapping[str, Any], persona: str, capability: str) -> s
     return "researcher" if capability in {"inspect_code", "web_research"} else "general"
 
 
-def _findings_reading_lanes(catalog: Mapping[str, Any]) -> set[str]:
-    """Return the lanes of one tool that may be offered recent findings.
+def _open_contract_lanes(catalog: Mapping[str, Any]) -> set[str]:
+    """Return the lanes of one tool whose answer is prose rather than a fixed shape.
 
     A lane answering under a closed contract is not one of them, and the reason
     is the same on both sides of the exchange. It has nowhere to *use* a
@@ -298,6 +298,13 @@ def _findings_reading_lanes(catalog: Mapping[str, Any]) -> set[str]:
     answer, and those lanes are required, so the fan-out then cannot complete.
     Staying silent instead reports having found nothing, which is the confusion
     this mechanism exists to prevent (RFC Q00/ouroboros#2167).
+
+    This is half of what decides who is offered a finding; the other half is
+    which lanes produce one worth reusing, which belongs to ``recent_findings``
+    and is applied there. Each list stays with its own reason -- this one is
+    about answer shapes, that one about what a lane's work repeats -- and the
+    two meet where they are passed to each other rather than being restated in
+    one place that would then own neither.
 
     Decided here rather than at render time so the request carries only what
     some lane will read. A key nothing renders is a promise the schema makes and
@@ -324,7 +331,7 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     (RFC Q00/ouroboros#2167).
 
     Which lanes have a key at all is decided once, where the catalog is read
-    (see ``_findings_reading_lanes``); this only renders what it was handed.
+    (see ``_open_contract_lanes``); this only renders what it was handed.
 
     **A place to find them, and nothing to work out about it.** This block used
     to hand over paths and then explain how to arrange what was inside them --
@@ -635,7 +642,7 @@ def attach_question_advisory(
         last_question=last_question,
         recent_findings=recent_findings_by_lane(
             findings_store,
-            lanes=_findings_reading_lanes(_tool_advisory_catalog(tool_name)),
+            lanes=_open_contract_lanes(_tool_advisory_catalog(tool_name)),
         ),
     )
     try:

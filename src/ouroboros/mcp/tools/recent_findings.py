@@ -79,11 +79,16 @@ _ELIGIBLE_FANOUT_KIND = "question_advisory"
 #: nothing about this project bounds how fast an external fact turns over.
 _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 
-#: How many findings a lane is handed. A bound on attention, not on the search:
-#: the child reads these, and a project that ran all day should not spend its
-#: attention on the morning. Newest first, so what is cut is the oldest. What
-#: bounds the prompt is the budget below -- twenty entries is a count, and a
-#: count says nothing about how much twenty of something is.
+#: How many findings a lane is offered. A bound on attention, not on the
+#: search: the child chooses among these, and a project that ran all day should
+#: not spend its attention on the morning. Newest first, so what is cut is the
+#: oldest.
+#:
+#: It is also the whole bound on the prompt now, which it could not be while
+#: bodies travelled -- a count says nothing about how much twenty of something
+#: is, and twenty findings inlined outgrew what a host takes in one response.
+#: An id costs the same whatever the finding says, so counting them is counting
+#: characters.
 _RECENT_FINDINGS_MAX_ENTRIES = 20
 
 
