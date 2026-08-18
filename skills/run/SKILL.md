@@ -171,11 +171,14 @@ fallback instead of retrying the failing call.
    -->
    ```
 
-   Base64-decode `<payload>`, parse the JSON object, and use its
-   `job_observer` value exactly as if it came from `response.meta`. Never
-   reconstruct the observer contract from the human-readable Job/Session lines.
-   If both surfaces exist but differ, stop and report a transport-integrity
-   failure instead of spawning two observers.
+   Base64-decode `<payload>`, then fail closed unless it passes the canonical v1
+   validation implemented by `extract_job_observer_inline_handoff`: exactly one
+   bounded terminal sentinel; fixed protocol, role, ownership, wait/result tools,
+   restrictions, and follow-result keys; internally consistent IDs; and a
+   `job_id` matching the visible start receipt. Use visible Job/Session/Execution
+   IDs only as identity anchors, never to reconstruct the nested contract. If
+   structured and inline surfaces differ or validation fails, do not spawn an
+   observer; report a transport-integrity failure.
 
    When a structured or recovered `job_observer` is present and the host has an
    independent child/subagent session primitive, spawn exactly one observer

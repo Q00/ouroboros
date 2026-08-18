@@ -109,10 +109,12 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      events here. This conversation remains available for other safe work.
      ```
 
-   - If MCP metadata is unavailable, recover `job_observer` from the final
-     `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Decode
-     the payload and use its object unchanged; never infer it from visible IDs.
-     Reject a mismatch when both structured and inline surfaces exist.
+   - If `response.meta.job_observer` is unavailable, recover it from the final
+     `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail
+     closed unless the bounded payload passes canonical v1 validation and its
+     job identity matches the visible start receipt. Use that ID only as an
+     identity anchor, never to reconstruct tools or arguments. Reject validation
+     failure or any mismatch between structured and inline surfaces.
 
    - If the structured or recovered `job_observer` is present and the host
      supports an independent child session, spawn exactly one read-only

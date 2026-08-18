@@ -50,11 +50,14 @@ quickly; report both briefly, retain the `job_id` plus latest cursor, and keep
 monitoring ownership inside the agent UX.
 
 Use `meta.job_observer` when the host exposes MCP metadata. Otherwise recover
-the same contract from the final
-`<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel: base64-decode
-the payload, parse JSON, and use its `job_observer` value unchanged. Never infer
-the observer contract from displayed Job/Session lines. If structured and inline
-contracts both exist but differ, stop on transport-integrity failure.
+the contract from the final `<!-- ouroboros-job-observer-v1 base64 ... -->`
+content sentinel and fail closed unless it passes canonical v1 validation:
+exactly one bounded terminal sentinel, fixed protocol/ownership/tools and
+read-only restrictions, internally consistent IDs, allowlisted downstream keys,
+and a job identity matching the visible start receipt. The visible IDs are
+identity anchors only, not a source for reconstructing executable fields. If
+structured and inline contracts differ or validation fails, stop on
+transport-integrity failure.
 
 Delegate the contract to exactly one native Codex subagent session. That
 observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,

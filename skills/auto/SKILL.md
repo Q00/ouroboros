@@ -118,17 +118,18 @@ When an auto start response includes `response.meta.job_id`:
    parallel level will be announced from the first configuration/plan events
    rather than guessing them.
 2. If MCP metadata is unavailable, recover `job_observer` from the final
-   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Decode the
-   payload and use its `job_observer` object unchanged. Never reconstruct it
-   from visible Job/Session lines; reject a mismatch when both surfaces exist.
+   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail closed
+   unless the bounded payload passes canonical v1 validation and its job/session
+   identity matches the visible start receipt. Visible IDs are identity anchors,
+   not a source for reconstructing tools or arguments. Reject validation failure
+   or any mismatch between structured and inline surfaces.
 3. If the structured or recovered `job_observer` is present and the host
    supports independent child sessions, spawn exactly one read-only observer
    and pass the contract unchanged. Codex uses `spawn_agent`, OMP uses one
    native Task child, and Claude Code uses one Task/Agent child. The observer
    owns the cursor, waits until terminal, fetches the result, and follows
    downstream IDs named by `follow_result_job_keys`. It must not edit files,
-   control execution, or spawn implementation workers. The main session must
-   not poll the same job.
+   control execution, or spawn implementation workers. The main session must not poll the same job.
    On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
    a `wait` call is not a spawn, and the handoff may claim an observer only after
    the spawn result returns a live child ID/path. Once acknowledged, keep the
