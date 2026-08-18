@@ -34,7 +34,10 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
 )
-from ouroboros.bigbang.pm_completion import build_pm_completion_summary
+from ouroboros.bigbang.pm_completion import (
+    build_pm_completion_summary,
+    maybe_complete_pm_interview,
+)
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import (
     PM_UNCERTAINTY_GUIDANCE,
@@ -1506,10 +1509,21 @@ class PMInterviewHandler:
         if supports_atomic_turn:
             turn_result = await engine.plan_next_turn(state)
             if turn_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to plan PM interview turn: {turn_result.error}",
-                        tool_name="ouroboros_pm_interview",
+                error_msg = str(turn_result.error)
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=(
+                                    f"Question generation failed. Session ID: {session_id}\n\n"
+                                    f'Resume with: session_id="{session_id}"\n\n'
+                                    f"Reason: {error_msg[:200]}"
+                                ),
+                            ),
+                        ),
+                        is_error=True,
+                        meta={"session_id": session_id, "recoverable": True},
                     )
                 )
             turn: PMInterviewTurnPlan = turn_result.value
@@ -1540,15 +1554,34 @@ class PMInterviewHandler:
                         )
                     state = complete_result.value
         else:
-            question_result = await engine.ask_next_question(state)
-            if question_result.is_err:
+            completion_result = await maybe_complete_pm_interview(state, engine)
+            if completion_result.is_err:
                 return Result.err(
                     MCPToolError(
-                        str(question_result.error),
+                        f"Failed to complete interview: {completion_result.error}",
                         tool_name="ouroboros_pm_interview",
                     )
                 )
-            question = question_result.value
+            state, completion = completion_result.value
+            if completion is None:
+                question_result = await engine.ask_next_question(state)
+                if question_result.is_err:
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text=(
+                                        f"Question generation failed. Session ID: {session_id}\n\n"
+                                        f'Resume with: session_id="{session_id}"'
+                                    ),
+                                ),
+                            ),
+                            is_error=True,
+                            meta={"session_id": session_id, "recoverable": True},
+                        )
+                    )
+                question = question_result.value
         if completion is not None:
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:

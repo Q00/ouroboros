@@ -193,8 +193,8 @@ Marking as a decision point for later."
 
 
 def classification_policy_prompt() -> str:
-    """Return the canonical PM question-routing policy for composed planners."""
-    return _CLASSIFICATION_SYSTEM_PROMPT
+    """Return routing policy text without the standalone classifier schema."""
+    return _CLASSIFICATION_SYSTEM_PROMPT.split("## Response Format", 1)[0].rstrip()
 
 
 @dataclass
