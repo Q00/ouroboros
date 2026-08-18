@@ -50,6 +50,7 @@ from ouroboros.auto.policies import apply_domain_policy_defaults
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.runtime_routing import (
+    AutoStageRuntimePlan,
     demote_plugin_opencode_mode,
     resolve_auto_stage_runtime_plan,
 )
@@ -88,7 +89,10 @@ from ouroboros.mcp.tools.auto_start_lease_store import (
 from ouroboros.mcp.tools.auto_start_lease_store import (
     write_start_lease_locked as _write_start_lease_locked,
 )
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    _runtime_requires_in_process_job,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
@@ -788,6 +792,19 @@ class StartAutoHandler:
             fallback_runtime_backend=self.agent_runtime_backend,
             fallback_opencode_mode=self.opencode_mode,
         )
+        # The detach decision below sees only ``self.agent_runtime_backend``
+        # (auto's reflect-stage default): a mixed runtime_profile can put
+        # `stages.execute: host` behind an executable reflect/default runtime,
+        # so ask explicitly whether the resolved EXECUTE stage — the one that
+        # actually parks a host dispatch — needs this process to stay put.
+        execute_runtime_plan = _state_runtime_plan(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            fallback_opencode_mode=self.opencode_mode,
+        )
+        execute_requires_in_process = (not state.skip_run) and _runtime_requires_in_process_job(
+            execute_runtime_plan.execute.runtime_backend
+        )
         lease_token, lease_error = _reserve_start_lease(
             self._store,
             auto_session_id,
@@ -910,6 +927,7 @@ class StartAutoHandler:
                 on_detaching=_on_detaching,
                 on_started=_on_started,
                 on_enqueue_failure=_on_enqueue_failure,
+                requires_in_process_job=execute_requires_in_process,
             )
         except MCPToolError as exc:
             return Result.err(exc)
@@ -1191,12 +1209,18 @@ def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     return None
 
 
-def _state_dispatches_via_plugin(
+def _state_runtime_plan(
     state: AutoPipelineState,
     *,
     fallback_runtime_backend: str | None,
     fallback_opencode_mode: str | None,
-) -> bool:
+) -> AutoStageRuntimePlan:
+    """Resolve the same per-stage runtime plan ``AutoHandler._run`` will use.
+
+    Shared by ``_state_dispatches_via_plugin`` and ``StartAutoHandler`` so
+    both ask "what will actually run this stage" the identical way instead of
+    each hand-rolling the ``state.runtime_backend`` fallback chain.
+    """
     runtime_backend = state.runtime_backend or fallback_runtime_backend
     if runtime_backend is None and state.opencode_mode is not None:
         runtime_backend = "opencode"
@@ -1205,10 +1229,23 @@ def _state_dispatches_via_plugin(
         runtime_backend,
         state.opencode_mode or fallback_opencode_mode,
     )
-    runtime_plan = resolve_auto_stage_runtime_plan(
+    return resolve_auto_stage_runtime_plan(
         runtime_override=None,
         fallback_runtime_backend=runtime_backend,
         fallback_opencode_mode=opencode_mode,
+    )
+
+
+def _state_dispatches_via_plugin(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    fallback_opencode_mode: str | None,
+) -> bool:
+    runtime_plan = _state_runtime_plan(
+        state,
+        fallback_runtime_backend=fallback_runtime_backend,
+        fallback_opencode_mode=fallback_opencode_mode,
     )
     interview_dispatch = should_dispatch_via_plugin(
         runtime_plan.interview.runtime_backend,

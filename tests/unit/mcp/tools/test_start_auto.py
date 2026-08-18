@@ -1714,6 +1714,60 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_mixed_stage_execute_host_never_detaches(
+        self, tmp_path, fake_inner_auto, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``runtime_profile.stages.execute: host`` mix must never detach,
+        even though ``StartAutoHandler`` was constructed with an executable
+        reflect/default runtime (``codex``). A detached worker would park the
+        execute stage's host dispatch in its OWN ``HostDispatchBridge`` —
+        invisible to the MCP server the host actually polls/submits through,
+        so the parked dispatch would wait out its deadline unattended.
+        """
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "resolve_auto_stage_runtime_plan",
+            lambda **_kwargs: AutoStageRuntimePlan(
+                default=StageRuntime("codex", None),
+                interview=StageRuntime("codex", None),
+                execute=StageRuntime("host", None),
+                evaluate=StageRuntime("codex", None),
+                reflect=StageRuntime("codex", None),
+            ),
+        )
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'mixed_stage.db'}")
+        await store.initialize()
+        try:
+            # Real, durable-jobs-enabled manager over a file-backed store: this
+            # is exactly the configuration under which start_background_tool_job
+            # would otherwise detach (durable_jobs_enabled AND
+            # supports_cross_process_workers both True).
+            job_manager = JobManager(store, durable_jobs=True)
+            launch = AsyncMock(
+                side_effect=AssertionError(
+                    "detaching would isolate the execute stage's host-dispatch "
+                    "bridge from the MCP server the host polls/submits through"
+                )
+            )
+            with patch("ouroboros.mcp.tools.background.launch_detached_job", new=launch):
+                handler = StartAutoHandler(
+                    event_store=store,
+                    job_manager=job_manager,
+                    store=AutoStore(tmp_path),
+                    agent_runtime_backend="codex",
+                )
+                handler._inner_auto = fake_inner_auto
+                result = await handler.handle({"goal": "build a CLI"})
+
+            assert result.is_ok, result.error if result.is_err else None
+            launch.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_plugin_detached_auto_response_is_deterministic_after_scrubbing_handles(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

@@ -157,6 +157,7 @@ async def start_background_tool_job(
     prepare_inline: (Callable[[], Awaitable[tuple[JobLinks, WorkFn]]] | None) = None,
     on_cancel_before_work: Callable[[], Awaitable[None]] | None = None,
     acceptance_state: BackgroundJobAcceptanceState | None = None,
+    requires_in_process_job: bool = False,
 ) -> JobSnapshot:
     """Run the shared allocate -> guard -> agent-process -> start_job pipeline.
 
@@ -199,6 +200,15 @@ async def start_background_tool_job(
         acceptance_state: Optional caller-owned phase tracker used to classify
             cancellation as definitive non-acceptance or potentially accepted
             ownership without exposing transport internals to the caller.
+        requires_in_process_job: Force the in-process decision `runtime_backend`
+            alone cannot make. A caller whose job composes multiple stages at
+            different runtimes (``ooo auto`` with a mixed
+            ``runtime_profile.stages``) must resolve whether ANY stage is a
+            host-dispatch runtime itself and pass the result here — the
+            capability check on ``runtime_backend`` alone only sees the label
+            the caller was constructed with (e.g. auto's reflect-stage
+            default), which can differ from the stage that actually parks a
+            dispatch.
 
     Returns:
         The :class:`JobSnapshot` from a successful enqueue.
@@ -215,7 +225,9 @@ async def start_background_tool_job(
         getattr(job_manager, "durable_jobs_enabled", False) is True
         and getattr(event_store, "supports_cross_process_workers", False) is True
     )
-    if durable_jobs_enabled and _runtime_requires_in_process_job(runtime_backend):
+    if durable_jobs_enabled and (
+        _runtime_requires_in_process_job(runtime_backend) or requires_in_process_job
+    ):
         # Host-driven dispatch runtimes park in-process waiters that the MCP
         # host redeems through THIS server's bridge. A detached worker would
         # park them in its own process, invisible to every job_wait/submit
