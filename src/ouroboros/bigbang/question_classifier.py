@@ -192,6 +192,11 @@ Marking as a decision point for later."
 """
 
 
+def classification_policy_prompt() -> str:
+    """Return the canonical PM question-routing policy for composed planners."""
+    return _CLASSIFICATION_SYSTEM_PROMPT
+
+
 @dataclass
 class QuestionClassifier:
     """Classifies interview questions as PM-answerable, DEV-only, or decide-later.

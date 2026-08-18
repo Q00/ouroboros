@@ -24,6 +24,7 @@ from ouroboros.bigbang.pm_interview import (
     _PM_SYSTEM_PROMPT_PREFIX,
     PM_UNCERTAINTY_GUIDANCE,
     PMInterviewEngine,
+    PMInterviewTurnPlan,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -538,6 +539,7 @@ class TestPMInterviewEngineComposition:
         assert engine.inner.model == "test-model"
         assert engine.model == "test-model"
         assert engine.classifier.model == "test-model"
+
         assert engine.classifier.model_is_explicit is False
 
     def test_initial_state_is_clean(self, tmp_path: Path) -> None:
@@ -547,6 +549,56 @@ class TestPMInterviewEngineComposition:
         assert engine.classifications == []
         assert engine.codebase_context == ""
         assert engine._explored is False
+
+
+@pytest.mark.asyncio
+async def test_atomic_pm_turn_fuses_question_score_and_classification(tmp_path: Path) -> None:
+    payload = {
+        "next_question": "Which user workflow matters most?",
+        "goal_clarity_score": 0.8,
+        "goal_clarity_justification": "The product goal is specific.",
+        "constraint_clarity_score": 0.7,
+        "constraint_clarity_justification": "Core boundaries are present.",
+        "success_criteria_clarity_score": 0.6,
+        "success_criteria_clarity_justification": "One workflow decision remains.",
+        "category": "development",
+        "reframed_question": "What user-visible workflow should the system optimize?",
+        "reasoning": "The original question needs a PM-facing reframe.",
+        "defer_to_dev": False,
+        "decide_later": False,
+        "placeholder_response": "",
+    }
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+    engine.classifier.codebase_context = "FastAPI repository with indexed PostgreSQL queries"
+    state = InterviewState(
+        interview_id="pm_atomic_turn",
+        initial_context="Build an analytics workflow",
+        rounds=[
+            InterviewRound(round_number=1, question="Who uses it?", user_response="PMs"),
+            InterviewRound(round_number=2, question="What output?", user_response="Reports"),
+            InterviewRound(round_number=3, question="What scope?", user_response="MVP only"),
+        ],
+    )
+
+    result = await engine.plan_next_turn(state)
+
+    assert result.is_ok
+    assert isinstance(result.value, PMInterviewTurnPlan)
+    assert result.value.question == "What user-visible workflow should the system optimize?"
+    assert result.value.classification.output_type == ClassifierOutputType.REFRAMED
+    assert result.value.ambiguity is not None
+    adapter.complete.assert_awaited_once()
+    assert engine.get_pending_reframe() == {
+        "reframed": "What user-visible workflow should the system optimize?",
+        "original": "Which user workflow matters most?",
+    }
+    system_prompt = adapter.complete.call_args.args[0][0].content
+    assert "**PLANNING**" in system_prompt
+    assert "**DEVELOPMENT**" in system_prompt
+    assert "**DECIDE_LATER**" in system_prompt
+    assert "FastAPI repository with indexed PostgreSQL queries" in system_prompt
 
 
 class TestOpeningQuestion:
