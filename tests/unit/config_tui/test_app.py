@@ -355,6 +355,30 @@ async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_kiro_dynamic_model_listing_appears_in_select(app_env, monkeypatch) -> None:
+    """Kiro's authenticated CLI catalog is visible without replacing default."""
+
+    def _fake_listing(backend):
+        if backend == "kiro":
+            return ("auto", "claude-opus-5", "claude-sonnet-4.6")
+        return None
+
+    monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", _fake_listing)
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "kiro"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        values = {value for _, value in model_select._options}
+        assert {"default", "auto", "claude-opus-5", "claude-sonnet-4.6"} <= values
+        assert model_select.value == "default"
+
+
+@pytest.mark.asyncio
 async def test_large_listing_collapses_into_search_option(app_env, monkeypatch) -> None:
     """Hundreds of fetched models stay behind a 'Search N models…' entry
     instead of flooding the dropdown."""
