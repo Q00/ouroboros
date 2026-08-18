@@ -348,10 +348,10 @@ class ArtifactStore:
         if limit is not None:
             query += " LIMIT ?"
             parameters.append(limit)
-        connection = self._connect_for_read()
-        if connection is None:
-            return []
         try:
+            connection = self._connect_for_read()
+            if connection is None:
+                return []
             with closing(connection):
                 rows = connection.execute(query, parameters).fetchall()
         except sqlite3.Error as exc:
@@ -460,16 +460,32 @@ class ArtifactStore:
         A database that was never written to does not exist, and a read must
         not create it; the existence probe keeps a miss from becoming an
         error, and read-only mode keeps it from becoming a file.
+
+        A file whose table was never committed is the same absence.  SQLite
+        creates the file on connect and ``initialize`` commits the table after,
+        so anything interrupting that -- a full disk on the first publication,
+        most plainly -- leaves a file holding nothing.  Reading it as an error
+        rather than as nothing would be unrecoverable in a way no other miss
+        is: the publication that would create the table is reached through a
+        read, so the store could never initialize itself again.
         """
         if not self._database_path.exists():
             return None
-        return sqlite3.connect(f"{self._database_path.as_uri()}?mode=ro", uri=True)
+        connection = sqlite3.connect(f"{self._database_path.as_uri()}?mode=ro", uri=True)
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
+        ).fetchone():
+            return connection
+        connection.close()
+        return None
 
     def _read_one(self, query: str, contract_id: str) -> tuple[Any, ...] | None:
-        connection = self._connect_for_read()
-        if connection is None:
-            return None
         try:
+            # Opening is inside the guard: a file holding no table is absence,
+            # but a file that is not a database at all is still an error.
+            connection = self._connect_for_read()
+            if connection is None:
+                return None
             with closing(connection):
                 return connection.execute(query, (contract_id,)).fetchone()
         except sqlite3.Error as exc:

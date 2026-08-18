@@ -155,6 +155,28 @@ def test_applied_prune_returns_the_space_rather_than_only_the_row(tmp_path: Path
     assert _database_path(store).stat().st_size < size_before - report.removed_bytes // 2
 
 
+def test_a_database_whose_table_was_never_committed_reads_as_absence(tmp_path: Path) -> None:
+    """A file holding nothing is a miss, and a miss has to stay recoverable.
+
+    SQLite creates the file on connect and the table is committed after, so a
+    full disk on the very first publication leaves the file behind empty. Read
+    as an error this is unrecoverable in a way no other miss is: the write that
+    would create the table is reached through a read, so nothing could ever
+    initialize the store again.
+    """
+    store = _store(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    _database_path(store).write_bytes(b"")
+
+    assert store.envelope_if_exists("CONTRACT1") is None
+    assert store.fetch_if_exists("CONTRACT1") is None
+    assert store.published_contracts(since=NOW - timedelta(days=1), until=NOW) == []
+
+    envelope = _put(store, "CONTRACT1", {"published": True})
+
+    assert store.fetch("CONTRACT1").envelope == envelope
+
+
 def test_a_failed_compaction_does_not_report_the_prune_as_failed(tmp_path: Path) -> None:
     """The bodies are gone by then, and a tombstone is terminal.
 

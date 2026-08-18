@@ -18,6 +18,7 @@ would assert against the shape this feature deliberately stopped trusting.
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
@@ -345,21 +346,34 @@ def test_an_unreadable_store_returns_nothing_rather_than_raising(tmp_path: Path)
 def test_a_malformed_record_costs_the_shortcut_and_not_the_question(
     roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
-    """A contract record is a file inside a project, so it is project-controlled.
-
-    ``{}`` raised ``KeyError`` and a naive timestamp raised ``TypeError``, and
-    because the producer calls this outside its own guard either one took the
-    user's question rather than the shortcut. The guard now lives on the store,
-    which is what makes it survive the storage backend changing underneath it.
+    """A record is a row in a database inside a project, so it is project-controlled.
 
     Both directions are pinned. The malformed record is skipped, and a good one
     published beside it is still offered — degrading must not become blanking.
+
+    The broken record is written as a row. Written the old way — a stray
+    ``contracts/broken/events.json`` — this test passed without reaching any of
+    the code it names, because that layout stopped being read when the store
+    stopped being a directory.
     """
     claim = "the finding that must survive the broken record"
     _publish(store, claim=claim)
-    broken = store.root / "contracts" / "broken"
-    broken.mkdir(parents=True)
-    (broken / "events.json").write_text("{}", encoding="utf-8")
+    with closing(sqlite3.connect(store.root / "artifacts.db")) as connection, connection:
+        connection.execute(
+            "INSERT INTO artifacts"
+            " (contract_id, body, runtime_id, created_at, updated_at,"
+            "  duration_ms, events_emitted_count)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "fanout:broken",
+                json.dumps({"kind": "question_advisory", "result": []}),
+                "test:publish",
+                datetime.now(UTC).isoformat(),
+                datetime.now(UTC).isoformat(),
+                1,
+                0,
+            ),
+        )
 
     assert [entry["output"]["claim"] for entry in recent_findings_entries(store)] == [claim, claim]
     assert claim in _lane_prompts(_attach(roster, store))["code_context"]
