@@ -40,6 +40,7 @@ from ouroboros.mcp.tools.recent_findings import (
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.persistence.artifact_schema import lane_scoped_contract_id
 from ouroboros.persistence.artifact_store import ArtifactStore
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
@@ -260,7 +261,9 @@ def test_a_record_of_an_unexpected_shape_costs_only_itself(store: ArtifactStore)
 
     by_lane = recent_findings_by_lane(store)
 
-    assert [entry["contract_id"] for entry in by_lane["code_context"]] == [good]
+    assert [entry["contract_id"] for entry in by_lane["code_context"]] == [
+        lane_scoped_contract_id(good, "code_context")
+    ]
 
 
 def test_another_fanout_kind_is_not_offered(store: ArtifactStore) -> None:
@@ -297,3 +300,79 @@ def test_a_request_carrying_findings_satisfies_the_advertised_schema(
         Draft202012Validator(_interview_question_advisory_request_schema()).iter_errors(request)
     )
     assert errors == [], [error.message for error in errors]
+
+
+def _publish_distinguishable(store: ArtifactStore) -> str:
+    """Publish one fan-out whose lanes are told apart by their own text."""
+    body = {
+        "kind": "question_advisory",
+        "result": {
+            "aggregated_outputs": [
+                {"lane_id": "code_context", "output": {"finding": "the code says CODE-ONLY"}},
+                {"lane_id": "data_context", "output": {"finding": "the rows say DATA-ONLY"}},
+                {
+                    "lane_id": "ambiguity_contrarian",
+                    "output": {"finding": "the question asks CONTRARIAN-ONLY"},
+                },
+            ]
+        },
+    }
+    canonical = json.dumps(body, sort_keys=True).encode("utf-8")
+    return _publish_body(store, body, contract_id=f"fanout:{hashlib.sha256(canonical).hexdigest()}")
+
+
+def test_fetching_the_offered_id_returns_only_the_requesting_lane(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    """The address a lane is given names the lane, so what comes back is its own.
+
+    A fan-out publishes one artifact carrying every lane it dispatched. Offering
+    that artifact's own id -- grouped per lane but identical across them -- told
+    a lane the body was its own and handed it every sibling's output, because a
+    turn's id is the only address such a body has. What closes it is the
+    address, not a rule the child is asked to follow: there is nothing in a
+    one-lane body to select from.
+    """
+    _publish_distinguishable(store)
+
+    offered = recent_findings_by_lane(store)
+    fetched = store.fetch(offered["code_context"][0]["contract_id"]).body
+
+    assert fetched == {"finding": "the code says CODE-ONLY"}
+    assert "DATA-ONLY" not in json.dumps(fetched)
+    assert "CONTRARIAN-ONLY" not in json.dumps(fetched)
+
+
+def test_each_lane_fetches_its_own_output_from_the_same_fan_out(store: ArtifactStore) -> None:
+    """Two lanes of one turn are handed two addresses, not one shared one."""
+    _publish_distinguishable(store)
+
+    offered = recent_findings_by_lane(store)
+    code = offered["code_context"][0]["contract_id"]
+    data = offered["data_context"][0]["contract_id"]
+
+    assert code != data
+    assert store.fetch(code).body == {"finding": "the code says CODE-ONLY"}
+    assert store.fetch(data).body == {"finding": "the rows say DATA-ONLY"}
+
+
+def test_an_unscoped_contract_id_still_fetches_the_whole_body(store: ArtifactStore) -> None:
+    """Every caller outside the advisory path passes a plain id and must be untouched."""
+    contract_id = _publish_distinguishable(store)
+
+    body = store.fetch(contract_id).body
+
+    assert [entry["lane_id"] for entry in body["result"]["aggregated_outputs"]] == [
+        "code_context",
+        "data_context",
+        "ambiguity_contrarian",
+    ]
+
+
+def test_a_lane_absent_from_a_fan_out_has_no_address_in_it(store: ArtifactStore) -> None:
+    """Scoping to a lane the body does not carry is absence, not someone else's output."""
+    contract_id = _publish_distinguishable(store)
+
+    assert store.fetch_lane_if_exists(contract_id, "web_context") is None
+    with pytest.raises(Exception, match="does not exist"):
+        store.fetch(lane_scoped_contract_id(contract_id, "web_context"))

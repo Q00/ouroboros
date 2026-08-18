@@ -52,6 +52,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
+from ouroboros.persistence.artifact_schema import lane_scoped_contract_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ouroboros.persistence.artifact_store import ArtifactStore
@@ -190,7 +191,7 @@ def recent_findings_by_lane(
                 continue
             found.append(
                 {
-                    "contract_id": published.contract_id,
+                    "contract_id": lane_scoped_contract_id(published.contract_id, lane_id),
                     "published_at": published.published_at.isoformat(),
                 }
             )

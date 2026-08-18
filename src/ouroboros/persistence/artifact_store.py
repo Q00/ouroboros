@@ -42,7 +42,11 @@ from ouroboros.persistence.artifact_errors import (
     ArtifactTooLargeError,
 )
 from ouroboros.persistence.artifact_schema import as_utc as _as_utc
-from ouroboros.persistence.artifact_schema import canonical_artifact_bytes
+from ouroboros.persistence.artifact_schema import (
+    canonical_artifact_bytes,
+    lane_scoped_contract_id,
+    split_lane_scoped_contract_id,
+)
 from ouroboros.persistence.artifact_schema import validate_contract_id as _validate_contract_id
 from ouroboros.persistence.sqlite_connection import configure_writable_sqlite_connection
 
@@ -241,7 +245,21 @@ class ArtifactStore:
         return envelope
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
-        """Explicitly fetch the body referenced by one contract."""
+        """Explicitly fetch the body referenced by one contract.
+
+        A contract id naming a lane (``<contract>#<lane>``) fetches that lane's
+        output alone; see ``fetch_lane_if_exists``.
+        """
+        base, lane_id = split_lane_scoped_contract_id(contract_id)
+        if lane_id is not None:
+            fetched = self.fetch_lane_if_exists(base, lane_id)
+            if fetched is None:
+                raise ArtifactNotFoundError(
+                    "Artifact contract does not exist",
+                    operation="read",
+                    details={"contract_id": contract_id},
+                )
+            return fetched
         fetched = self.fetch_if_exists(contract_id)
         if fetched is None:
             raise ArtifactNotFoundError(
@@ -250,6 +268,49 @@ class ArtifactStore:
                 details={"contract_id": contract_id},
             )
         return fetched
+
+    def fetch_lane_if_exists(self, contract_id: str, lane_id: str) -> FetchedArtifact | None:
+        """Fetch one lane's output from a fan-out body, or ``None`` if absent.
+
+        The whole filter is the ``WHERE`` below.  ``$.lane_id`` is the key the
+        fan-out itself assigned from its dispatch roster, so it names the lane
+        the server sent the work to; the ``lane_id`` a child happens to write
+        inside its own output is not read here and is absent from some bodies.
+
+        Returns the lane's output as the body, so a caller that asked for one
+        lane is handed one lane -- there is nothing left in it to select.
+        """
+        contract_id = _validate_contract_id(contract_id)
+        row = self._read_one(
+            "SELECT json_extract(lane.value,'$.output'), runtime_id, duration_ms,"
+            " events_emitted_count, updated_at, body"
+            " FROM artifacts, json_each(body,'$.result.aggregated_outputs') AS lane"
+            " WHERE contract_id = ? AND json_extract(lane.value,'$.lane_id') = ?",
+            contract_id,
+            lane_id,
+        )
+        if row is None:
+            return None
+        output_text, runtime_id, duration_ms, events_emitted_count, updated_at, body_text = row
+        if body_text is None:
+            raise _tombstoned_read_error(contract_id, tombstoned_at=updated_at)
+        try:
+            output = json.loads(output_text) if output_text is not None else None
+        except json.JSONDecodeError as exc:
+            raise ArtifactIntegrityError(
+                "Artifact body is not valid JSON",
+                operation="read",
+                details={"contract_id": contract_id},
+            ) from exc
+        return FetchedArtifact(
+            envelope=_envelope(
+                lane_scoped_contract_id(contract_id, lane_id),
+                runtime_id=runtime_id,
+                duration_ms=duration_ms,
+                events_emitted_count=events_emitted_count,
+            ),
+            body=output,
+        )
 
     def envelope_if_exists(self, contract_id: str) -> DisposableResultEnvelope | None:
         """Read only a contract's bounded envelope, never its artifact body.
@@ -484,7 +545,12 @@ class ArtifactStore:
         connection.close()
         return None
 
-    def _read_one(self, query: str, contract_id: str) -> tuple[Any, ...] | None:
+    def _read_one(
+        self,
+        query: str,
+        contract_id: str,
+        *rest: str,
+    ) -> tuple[Any, ...] | None:
         try:
             # Opening is inside the guard: a file holding no table is absence,
             # but a file that is not a database at all is still an error.
@@ -492,7 +558,7 @@ class ArtifactStore:
             if connection is None:
                 return None
             with closing(connection):
-                return connection.execute(query, (contract_id,)).fetchone()
+                return connection.execute(query, (contract_id, *rest)).fetchone()
         except sqlite3.Error as exc:
             raise ArtifactStoreError(
                 "Artifact read failed",
