@@ -18,8 +18,6 @@ def configure_omp_tool_call_timeout(*, dry_run: bool = False) -> bool:
     omp = shutil.which("omp")
     if omp is None:
         return True
-    if dry_run:
-        return True
 
     try:
         current = subprocess.run(
@@ -33,6 +31,12 @@ def configure_omp_tool_call_timeout(*, dry_run: bool = False) -> bool:
             return True
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
+    if dry_run:
+        print(
+            "Would run: "
+            f"{omp} config set extensionHandlers.toolCallTimeoutMs {OMP_TOOL_CALL_TIMEOUT_MS}"
+        )
+        return True
 
     try:
         result = subprocess.run(

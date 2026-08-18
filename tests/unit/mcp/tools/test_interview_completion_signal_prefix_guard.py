@@ -30,7 +30,6 @@ from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_sign
         "ready for seed generation",
         "[from-user] done",
         "[from-user][refined] No remaining ambiguity",
-        "[from-user][closure] 任務已經足夠清楚。",
         "[from-user][refined][closure] 지금까지의 합의로 Seed를 생성한다.",
     ],
 )

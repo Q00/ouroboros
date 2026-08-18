@@ -219,10 +219,7 @@ _INTERVIEW_COMPLETION_PHRASES = (
     "no ambiguity remains",
     "no ambiguity left",
 )
-_INTERVIEW_STRUCTURED_COMPLETION_PREFIXES = (
-    "[from-user][refined][closure]",
-    "[from-user][closure]",
-)
+_INTERVIEW_STRUCTURED_COMPLETION_PREFIX = "[from-user][refined][closure]"
 
 
 def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
@@ -320,7 +317,7 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     ):
         return False
 
-    if any(stripped.startswith(prefix) for prefix in _INTERVIEW_STRUCTURED_COMPLETION_PREFIXES):
+    if stripped.startswith(_INTERVIEW_STRUCTURED_COMPLETION_PREFIX):
         return True
 
     normalized = _normalize_interview_answer(answer)

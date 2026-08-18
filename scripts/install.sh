@@ -1389,6 +1389,19 @@ if [ -n "$OUROBOROS_SETUP_CMD" ]; then
   _info "Refreshing runtime artifacts for detected runtimes"
   "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
+_decimal_at_least() {
+  local left right
+  left="${1#${1%%[!0]*}}"
+  right="${2#${2%%[!0]*}}"
+  [ -n "$left" ] || left=0
+  [ -n "$right" ] || right=0
+  if [ "${#left}" -ne "${#right}" ]; then
+    [ "${#left}" -gt "${#right}" ]
+  else
+    [ "$left" = "$right" ] || [[ "$left" > "$right" ]]
+  fi
+}
+
 _ensure_omp_tool_call_timeout() {
   local omp_bin current
   omp_bin="$(command -v omp 2>/dev/null || true)"
@@ -1399,7 +1412,7 @@ _ensure_omp_tool_call_timeout() {
   case "$current" in
     ''|*[!0-9]*) ;;
     *)
-      if [ "$current" -ge 60000 ]; then
+      if _decimal_at_least "$current" 60000; then
         return 0
       fi
       ;;

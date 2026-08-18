@@ -51,11 +51,27 @@ def test_preserves_higher_user_timeout() -> None:
     run.assert_called_once()
 
 
-def test_dry_run_does_not_mutate_omp() -> None:
+def test_preserves_oversized_decimal_timeout() -> None:
+    current = MagicMock(returncode=0, stdout="9223372036854775808\n")
     with (
         patch("ouroboros.cli.omp_config.shutil.which", return_value="/bin/omp"),
-        patch("ouroboros.cli.omp_config.subprocess.run") as run,
+        patch("ouroboros.cli.omp_config.subprocess.run", return_value=current) as run,
+    ):
+        assert configure_omp_tool_call_timeout() is True
+
+    run.assert_called_once()
+
+
+def test_dry_run_previews_without_mutating_omp(capsys) -> None:
+    current = MagicMock(returncode=0, stdout="30000\n")
+    with (
+        patch("ouroboros.cli.omp_config.shutil.which", return_value="/bin/omp"),
+        patch("ouroboros.cli.omp_config.subprocess.run", return_value=current) as run,
     ):
         assert configure_omp_tool_call_timeout(dry_run=True) is True
 
-    run.assert_not_called()
+    run.assert_called_once()
+    assert (
+        "Would run: /bin/omp config set extensionHandlers.toolCallTimeoutMs 60000"
+        in capsys.readouterr().out
+    )
