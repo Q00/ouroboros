@@ -835,20 +835,22 @@ async def _start_workflow(
     # default. The previous non-orchestrator branch printed "not yet
     # implemented" and returned, so answering yes to "Start workflow now?"
     # did nothing unless the caller had also passed --orchestrator.
+    #
+    # Nothing is caught here. `_run_orchestrator` signals every failure —
+    # unloadable Seed, unsafe project path, workspace error, failed execution —
+    # as `typer.Exit(1)` and has no zero-code exit to absorb, so catching it
+    # printed the error and still finished `init start` successfully. A caller
+    # in a script cannot tell a built product from a failed one, and Ctrl+C read
+    # the same way. Sharing the run command's path means sharing its exit code.
     from ouroboros.cli.commands.run import _run_orchestrator
 
-    try:
-        await _run_orchestrator(
-            seed_path,
-            resume_session=None,
-            parallel=parallel,
-            runtime_backend=runtime_backend,
-            project_fallback_dir=project_fallback_dir,
-        )
-    except typer.Exit:
-        pass  # Normal exit
-    except KeyboardInterrupt:
-        print_info("Workflow interrupted.")
+    await _run_orchestrator(
+        seed_path,
+        resume_session=None,
+        parallel=parallel,
+        runtime_backend=runtime_backend,
+        project_fallback_dir=project_fallback_dir,
+    )
 
 
 def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
