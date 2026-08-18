@@ -997,6 +997,40 @@ class TestCheckFlow:
         assert result.exit_code == 0
         assert "up to date" in result.output
 
+    def test_up_to_date_command_repairs_omp_timeout(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        configure_omp.assert_called_once_with(dry_run=False)
+
+    def test_up_to_date_omp_failure_warns_without_failing_update(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=False,
+            ),
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        assert "Could not set OMP MCP tool timeout" in _plain(result.output)
+
     def test_unreachable_pypi_exits_nonzero(self) -> None:
         with patch(
             "ouroboros.cli.commands.update._latest_pypi_version",

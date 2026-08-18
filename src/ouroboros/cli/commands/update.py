@@ -777,6 +777,11 @@ def update(
     console.print(f"Latest:    [cyan]v{latest}[/cyan]")
 
     if _compare_versions(current, latest) >= 0:
+        if not check and not configure_omp_tool_call_timeout(dry_run=dry_run):
+            print_warning(
+                "Could not set OMP MCP tool timeout; run: "
+                "omp config set extensionHandlers.toolCallTimeoutMs 60000"
+            )
         console.print(f"\n[green]Ouroboros is up to date (v{current}).[/green]\n")
         raise typer.Exit()
 
