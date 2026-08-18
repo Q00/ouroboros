@@ -21,7 +21,6 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
-from ouroboros.orchestrator import parallel_executor
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
@@ -47,7 +46,6 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
-from ouroboros.orchestrator.verify_shell import VerifyShellRoute
 
 
 class _StubAdapter:
@@ -2074,11 +2072,7 @@ async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
     spec = AcceptanceCriterionSpec(description="ok", verify_command="exit 0")
     recorded: dict[str, Any] = {}
 
-    monkeypatch.setattr(
-        parallel_executor,
-        "resolve_verify_shell",
-        lambda: VerifyShellRoute(shell_path="/bin/bash", source="posix_default"),
-    )
+    executor._verify_shell_path = "/bin/bash"
     real_exec = asyncio.create_subprocess_exec
 
     async def spy_exec(*argv: str, **kwargs: Any) -> Any:
@@ -2094,14 +2088,11 @@ async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
 
 
 @pytest.mark.asyncio
-async def test_verify_gate_quarantines_when_no_posix_shell_exists(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+async def test_verify_gate_quarantines_when_no_posix_shell_exists(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
-    # A pipeline cannot be reproduced without an interpreter, so the shell-free
-    # path refuses it — the only remaining answer is "this machine cannot say".
+    # No real shell means the arbitrary pipeline is unavailable, never emulated.
     spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
-    monkeypatch.setattr(parallel_executor, "resolve_verify_shell", lambda: None)
+    executor._verify_shell_path = None
 
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
@@ -2111,13 +2102,11 @@ async def test_verify_gate_quarantines_when_no_posix_shell_exists(
 
 
 @pytest.mark.asyncio
-async def test_unverifiable_ac_keeps_worker_success_without_retry(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+async def test_unverifiable_ac_keeps_worker_success_without_retry(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
     seed = _seed_with_specs(spec)
-    monkeypatch.setattr(parallel_executor, "resolve_verify_shell", lambda: None)
+    executor._verify_shell_path = None
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ok",
@@ -2140,6 +2129,34 @@ async def test_unverifiable_ac_keeps_worker_success_without_retry(
     assert gated.verify_gate_outcome.environment_unverifiable is True
     assert gated.error is None
     assert is_retryable_failure(gated) is False
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_preserves_unverified_success(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok")
+    seed = _seed_with_specs(spec)
+    executor._verify_shell_path = None
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=True,
+        final_message="done",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+    )
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[gated],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is True
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
 
 
 def test_report_surfaces_unverified_success() -> None:

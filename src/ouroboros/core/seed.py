@@ -568,6 +568,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _validate_success_contract(self) -> AcceptanceCriterionSpec:
+        if self.verify_command and self.verify_exemption_reason:
+            raise ValueError("verify_exemption_reason is mutually exclusive with verify_command")
         if self.output_assertion and not self.verify_command:
             raise ValueError("output_assertion requires verify_command")
         invalid_artifacts = tuple(

@@ -155,6 +155,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
@@ -207,6 +208,7 @@ from ouroboros.orchestrator.session import (
     SessionTracker,
     runtime_resume_identity_from_payload,
 )
+from ouroboros.orchestrator.verify_shell import resolve_verify_shell
 from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
@@ -1067,6 +1069,8 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        verify_shell = resolve_verify_shell() if self._run_verify_commands else None
+        self._verify_shell_path = verify_shell.shell_path if verify_shell is not None else None
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -3915,6 +3919,7 @@ class OrchestratorRunner:
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "verify_shell_path": self._verify_shell_path,
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6108,6 +6113,32 @@ class OrchestratorRunner:
                 message=pre_adaptive_rejection.message,
                 details=pre_adaptive_rejection.details,
             )
+
+        migrated_verify_shell_semantics = migrated_pre_verify_shell_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verify_shell_semantics is not None:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-verify-shell contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_proof, dict)
+            migrated_contract["execution_semantics"] = migrated_verify_shell_semantics
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_verify_shell_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_verify_shell_semantics
+            self._verify_shell_path = None
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -10294,6 +10325,7 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            verify_shell_path=cast(str | None, execution_semantics["verify_shell_path"]),
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

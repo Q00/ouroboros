@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 import contextlib
 from dataclasses import dataclass
 import os
+from pathlib import PureWindowsPath
+import subprocess
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,21 +31,45 @@ class VerifyRun:
     start_error: str | None = None
 
 
+def _running_on_windows() -> bool:
+    return os.name == "nt"
+
+
 def _spawn_kwargs() -> dict[str, object]:
-    # A new session on POSIX so a timeout can kill the whole process group
-    # rather than leaving orphaned children behind the shell.
-    return {"start_new_session": True} if os.name != "nt" else {}
+    """Create an independently terminable verifier process group."""
+    if _running_on_windows():
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)}
+    return {"start_new_session": True}
+
+
+async def _terminate_windows_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Use Windows' tree-aware terminator, never a shell command."""
+    system_root = os.environ.get("SYSTEMROOT", "").strip() or r"C:\Windows"
+    taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            taskkill,
+            "/PID",
+            str(proc.pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(killer.communicate(), timeout=5.0)
+    except Exception:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
-    if os.name != "nt":
+    if _running_on_windows():
+        await _terminate_windows_process_tree(proc)
+    else:
         import signal
 
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
     with contextlib.suppress(Exception):
         await proc.wait()
 

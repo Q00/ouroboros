@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator import verify_command_runner
+from ouroboros.orchestrator.verify_command_runner import (
+    _spawn_kwargs,
+    _terminate,
+    run_with_shell,
+)
 from ouroboros.orchestrator.verify_shell import resolve_verify_shell
 
 
@@ -61,3 +68,27 @@ async def test_run_with_shell_reports_start_error(tmp_path: Path) -> None:
 
     assert run.start_error is not None
     assert run.timed_out is False
+
+
+def test_windows_spawn_uses_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+
+    assert "creationflags" in _spawn_kwargs()
+
+
+@pytest.mark.asyncio
+async def test_windows_timeout_terminates_the_full_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+    killer = SimpleNamespace(communicate=AsyncMock())
+    create = AsyncMock(return_value=killer)
+    monkeypatch.setattr(verify_command_runner.asyncio, "create_subprocess_exec", create)
+    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=AsyncMock())
+
+    await _terminate(process)
+
+    args = create.await_args.args
+    assert args[0].endswith(r"System32\taskkill.exe")
+    assert args[1:] == ("/PID", "321", "/T", "/F")
+    process.wait.assert_awaited_once()

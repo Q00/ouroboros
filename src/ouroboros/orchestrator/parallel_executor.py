@@ -441,6 +441,13 @@ from ouroboros.orchestrator.workspace_evidence_paths import (
     load_tracked_workspace_paths,
 )
 
+
+class _AutoVerifyShell:
+    """Constructor sentinel for low-level callers without durable semantics."""
+
+
+_AUTO_VERIFY_SHELL = _AutoVerifyShell()
+
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
 _has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
 _PROVIDER_OBSERVATION_SINK: ContextVar[
@@ -2622,6 +2629,7 @@ class ParallelACExecutor:
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
+        verify_shell_path: str | None | _AutoVerifyShell = _AUTO_VERIFY_SHELL,
         ac_retry_attempts: int = 0,
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
@@ -2665,6 +2673,9 @@ class ParallelACExecutor:
                 and ``spec.verify_command`` must exit 0 (plus any
                 ``output_assertion``).
             verify_command_timeout_seconds: Timeout for an AC verify command.
+            verify_shell_path: Resolved absolute Bash path sealed by the runner.
+                ``None`` means verification remains unavailable for this execution.
+                The private auto sentinel exists only for low-level/test callers.
             ac_retry_attempts: How many times a failed AC is re-dispatched
                 before it is marked FAILED (excludes stall retries). The
                 low-level constructor default is 0 so direct/test callers keep
@@ -2728,6 +2739,15 @@ class ParallelACExecutor:
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        if isinstance(verify_shell_path, _AutoVerifyShell):
+            verify_shell = resolve_verify_shell()
+            self._verify_shell_path = verify_shell.shell_path if verify_shell is not None else None
+        elif verify_shell_path is None or (
+            isinstance(verify_shell_path, str) and verify_shell_path
+        ):
+            self._verify_shell_path = verify_shell_path
+        else:
+            raise ValueError("verify_shell_path must be an absolute path or None")
         self._ac_retry_attempts = max(0, ac_retry_attempts)
         # Effort-first investment dial (RFC #1405). AC investment metadata may
         # impose a floor or authorize one lower notch; decomposition alone never
@@ -5283,7 +5303,7 @@ class ParallelACExecutor:
                 settled.append(result)
                 continue
 
-            if not outcome.passed:
+            if not outcome.passed and not outcome.environment_unverifiable:
                 individual_failures[result.ac_index] = (
                     f"Final workspace verify gate failed: {outcome.reason}",
                     outcome,
@@ -5311,7 +5331,7 @@ class ParallelACExecutor:
                 settled.append(result)
                 continue
 
-            if spec.verify_command:
+            if spec.verify_command and not outcome.environment_unverifiable:
                 if coordinator_revalidated:
                     # Coordinator revalidation deliberately refuses to replay
                     # arbitrary shell contracts.  A command-bearing success
@@ -7065,6 +7085,7 @@ class ParallelACExecutor:
             # backend, so passing it to the alt-harness executor is safe.
             model_router=self._model_router,
             cross_harness_redispatch=False,
+            verify_shell_path=self._verify_shell_path,
             # The router is inert on a different backend, so the baseline resolves
             # no parent-tier model and the replay self-skips — threading the flag
             # just keeps the throwaway executor's behavior consistent.
@@ -9691,8 +9712,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # command text itself is never rewritten — the pass/fail signal stays
         # the exit code of exactly what the seed declared.
         verify_env = sanitized_verify_environment()
-        route = resolve_verify_shell()
-        if route is None:
+        if self._verify_shell_path is None:
             return _VerifyGateOutcome(
                 passed=False,
                 reason=verify_shell_unavailable_reason(),
@@ -9701,7 +9721,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 environment_unverifiable=True,
             )
         run = await run_with_shell(
-            route.argv(command),
+            (self._verify_shell_path, "-c", command),
             cwd=cwd,
             env=verify_env,
             timeout_seconds=self._verify_command_timeout_seconds,

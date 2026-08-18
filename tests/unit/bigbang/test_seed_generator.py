@@ -3823,6 +3823,22 @@ class TestVerifyExemptionParsing:
 
         assert criteria[0].verify_exemption_reason is None
 
+    def test_exempt_reason_cannot_accompany_verify_command(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _parse_extracted_acceptance_criteria(
+                json.dumps(
+                    [
+                        {
+                            "description": "Tests pass",
+                            "verify": "pytest -q",
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                            "exempt": "Browser-only check",
+                        }
+                    ]
+                )
+            )
+
     def test_criteria_without_the_key_stay_valid(self) -> None:
         criteria = _parse_extracted_acceptance_criteria(
             json.dumps(
