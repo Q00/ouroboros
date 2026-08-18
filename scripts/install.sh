@@ -82,6 +82,40 @@ _info() {
   _say "  ${DIM}•${RESET} $1"
 }
 
+# Quote a string as one shell word using ASCII only, independent of the host
+# bash version. `printf %q` cannot be used here: bash 3.2 (the macOS system
+# bash) escapes only the bytes of a multibyte character that it happens to
+# consider unsafe, leaving the rest raw, which emits invalid UTF-8 and lets a
+# profile name smuggle RTL overrides or ANSI escapes into the terminal. This
+# escapes every byte outside a conservative safe set, so the output is always
+# printable ASCII and always re-reads as the original name.
+_shell_quote() {
+  local _sq_in=$1 _sq_out='' _sq_char _sq_code _sq_i _sq_len
+  local LC_ALL=C
+  case $_sq_in in
+    '') printf "\$''"; return ;;
+    *[!A-Za-z0-9_.,:/@%+=-]*) ;;
+    *) printf '%s' "$_sq_in"; return ;;
+  esac
+  _sq_len=${#_sq_in}
+  _sq_i=0
+  while [ "$_sq_i" -lt "$_sq_len" ]; do
+    _sq_char=${_sq_in:_sq_i:1}
+    case $_sq_char in
+      [A-Za-z0-9_.,:/@%+=-]) _sq_out=$_sq_out$_sq_char ;;
+      *)
+        # `printf "'c"` yields a signed value, so bytes >= 0x80 arrive
+        # negative; mask them back into the 0-255 range before formatting.
+        printf -v _sq_code '%d' "'$_sq_char"
+        printf -v _sq_code '%03o' "$((_sq_code & 255))"
+        _sq_out=$_sq_out\\$_sq_code
+        ;;
+    esac
+    _sq_i=$((_sq_i + 1))
+  done
+  printf '%s' "\$'$_sq_out'"
+}
+
 _choice() {
   printf '  %b[%s]%b %-8s %s\n' "$BOLD" "$1" "$RESET" "$2" "$3"
 }
@@ -1492,7 +1526,7 @@ if [ "$HAS_DSH" = true ]; then
   fi
 
   for _dsh_profile in "${DSH_TARGET_PROFILES[@]}"; do
-    LC_ALL=C printf -v _dsh_profile_q '%q' "$_dsh_profile"
+    _dsh_profile_q=$(_shell_quote "$_dsh_profile")
     if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
       _ok "dsh profile $_dsh_profile_q: Ouroboros tools installed"
     else
