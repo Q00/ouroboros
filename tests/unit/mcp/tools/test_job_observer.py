@@ -1,8 +1,11 @@
 """Tests for the structured background-job observer handoff."""
 
 from ouroboros.mcp.tools.job_observer import (
+    JOB_OBSERVER_INLINE_OPEN,
     JOB_OBSERVER_PROTOCOL,
+    append_job_observer_inline_handoff,
     build_job_observer_contract,
+    extract_job_observer_inline_handoff,
 )
 
 
@@ -131,3 +134,24 @@ def test_job_observer_contract_normalizes_non_integer_cursor() -> None:
 
     assert contract["cursor"] == 0
     assert contract["wait"]["arguments"]["cursor"] == 0
+
+
+def test_inline_handoff_round_trips_canonical_observer_contract() -> None:
+    contract = build_job_observer_contract(
+        job_id="job_123",
+        cursor=7,
+        session_id="orch_123",
+        execution_id="exec_123",
+        follow_result_job_keys=("chained_evaluate_job_id",),
+    )
+
+    text = append_job_observer_inline_handoff("Started background execution.", contract)
+
+    assert JOB_OBSERVER_INLINE_OPEN in text
+    assert extract_job_observer_inline_handoff(text) == contract
+
+
+def test_inline_handoff_rejects_malformed_payload() -> None:
+    text = f"Started background execution.\n\n{JOB_OBSERVER_INLINE_OPEN}not-base64\n-->"
+
+    assert extract_job_observer_inline_handoff(text) is None

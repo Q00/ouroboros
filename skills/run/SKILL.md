@@ -160,16 +160,37 @@ fallback instead of retrying the failing call.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   When `response.meta.job_observer` is present and the host has an independent
-   child/subagent session primitive, spawn exactly one observer session and pass
-   that object unchanged. Codex requires explicit native subagent delegation;
-   Claude Code uses one Task/Agent child. The observer must:
+   **Text-only host compatibility (OMP and similar bridges):**
+
+   If `response.meta.job_observer` is unavailable, inspect the response content
+   for the final sentinel block:
+
+   ```text
+   <!-- ouroboros-job-observer-v1 base64
+   <payload>
+   -->
+   ```
+
+   Base64-decode `<payload>`, parse the JSON object, and use its
+   `job_observer` value exactly as if it came from `response.meta`. Never
+   reconstruct the observer contract from the human-readable Job/Session lines.
+   If both surfaces exist but differ, stop and report a transport-integrity
+   failure instead of spawning two observers.
+
+   When a structured or recovered `job_observer` is present and the host has an
+   independent child/subagent session primitive, spawn exactly one observer
+   session and pass that object unchanged. Codex uses `spawn_agent`, OMP uses
+   one native Task child, and Claude Code uses one Task/Agent child. The observer must:
 
    - On Codex, call the native `spawn_agent` primitive exactly once with
-     `task_name="run_observer"` and include `response.meta.job_observer`
-     unchanged in the child message. A `wait` call is not a spawn.
+     `task_name="run_observer"` and include the structured or recovered
+     `job_observer` unchanged in the child message. A `wait` call is not a spawn.
    - Require the spawn result to return a live child ID/path before saying an
      observer is connected or before ending the start turn.
+   - On OMP, submit exactly one Task item named `RunObserver` with the recovered
+     or structured contract unchanged, require the returned live agent/job ID,
+     and use the host wait/inbox relay until the observer returns terminal.
+     A job-status poll in the parent is not an observer spawn.
 
    - remain read-only: no repository edits, execution control, or worker fan-out;
    - own the job cursor exclusively and reload deferred MCP schemas immediately

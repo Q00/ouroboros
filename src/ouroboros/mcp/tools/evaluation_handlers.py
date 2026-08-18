@@ -36,7 +36,10 @@ from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
     FetchArtifactHandler,
     SubmitFanoutResultsHandler,
 )
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -2216,22 +2219,24 @@ class StartEvaluateHandler:
             acceptance_may_have_occurred=background_acceptance.may_have_accepted,
         )
 
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=session_id,
+            follow_result_job_keys=("chained_ralph_job_id",),
+        )
         text = (
             f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
             f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
             "or ouroboros_job_result to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "session_id": session_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=session_id,
-                follow_result_job_keys=("chained_ralph_job_id",),
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

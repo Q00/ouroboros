@@ -117,22 +117,30 @@ When an auto start response includes `response.meta.job_id`:
    `frugality_assurance` when present. Say that the exact active model and first
    parallel level will be announced from the first configuration/plan events
    rather than guessing them.
-2. If `response.meta.job_observer` is present and the host supports independent
-   child sessions, spawn exactly one read-only observer and pass the contract
-   unchanged. Codex uses explicit native subagent delegation; Claude Code uses
-   one Task/Agent child. The observer owns the cursor, waits until terminal,
-   fetches the result, and follows downstream IDs named by
-   `follow_result_job_keys`. It must not edit files, control execution, or spawn
-   implementation workers. The main session must not poll the same job.
+2. If MCP metadata is unavailable, recover `job_observer` from the final
+   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Decode the
+   payload and use its `job_observer` object unchanged. Never reconstruct it
+   from visible Job/Session lines; reject a mismatch when both surfaces exist.
+3. If the structured or recovered `job_observer` is present and the host
+   supports independent child sessions, spawn exactly one read-only observer
+   and pass the contract unchanged. Codex uses `spawn_agent`, OMP uses one
+   native Task child, and Claude Code uses one Task/Agent child. The observer
+   owns the cursor, waits until terminal, fetches the result, and follows
+   downstream IDs named by `follow_result_job_keys`. It must not edit files,
+   control execution, or spawn implementation workers. The main session must
+   not poll the same job.
    On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
    a `wait` call is not a spawn, and the handoff may claim an observer only after
    the spawn result returns a live child ID/path. Once acknowledged, keep the
    parent turn open with `wait_agent` calls of at most 60 seconds while the child
    remains active. A child `send_message` only queues a mailbox event; it cannot
    revive an ended parent turn. Relay meaningful updates and wait again until
-   the observer sends its terminal summary. User input may interrupt the wait;
-   handle it and resume waiting while observation remains active unless the user
-   asks to stop live observation or replaces the active request. Then end only
+   the observer sends its terminal summary.
+   On OMP, submit exactly one native Task child named `RunObserver`, require its
+   live agent/job ID, and use the host wait/inbox relay until terminal.
+   User input may interrupt the wait; handle it and resume waiting while
+   observation remains active unless the user asks to stop live observation or
+   replaces the active request. Then end only
    the relay loop, keep the durable job running, and offer next-turn or explicit-
    status catch-up. If the observer child fails, is cancelled, or exits before a
    terminal summary, use that same fallback instead of waiting indefinitely.
@@ -141,7 +149,7 @@ When an auto start response includes `response.meta.job_id`:
    continues after the stdio turn; say that durable progress will be caught up
    on the next parent turn or an explicit status request. Keep the current turn
    open in the fallback polling loop only when the user asked for live watching.
-3. If child-to-parent progress messages are supported, the observer relays only
+4. If child-to-parent progress messages are supported, the observer relays only
    meaningful `phase_changed`, `progress_advanced`, `attention_required`, and
    `terminal` events in at most 1-2 lines. During interview, it may use
    `ouroboros_session_status(session_id=<auto_session_id>)` to surface a new
@@ -156,14 +164,14 @@ When an auto start response includes `response.meta.job_id`:
    report only material changes. Never relay raw commands or reasoning.
    Before the main session writes to the active auto workspace, check for overlap
    with worker files or move the unrelated work to an isolated worktree.
-4. When no independent child session exists and the user explicitly asks to
+5. When no independent child session exists and the user explicitly asks to
    keep watching in this turn, enter the fallback low-noise loop. Otherwise end
    the turn safely and resume from the durable cursor on the next interaction:
    - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary", stream="linked", wait_for="attention_or_ac_change")`
    - update `cursor = response.meta.cursor` after every wait/status response
    - treat `response.meta` as the source of truth; use response text only as a
      human-readable hint
-5. Relay only meaningful changes: status changes, phase changes, new
+6. Relay only meaningful changes: status changes, phase changes, new
    execution/session/lineage handles, progress counters, blocker/error text, or
    a terminal state. If `response.meta.changed is false`, continue silently
    unless the user asked for heartbeat updates.
@@ -185,7 +193,7 @@ When an auto start response includes `response.meta.job_id`:
    `fallback_mode="after_turn"`. Use `mode="inform"` for a read-only AC question
    or assurance request, omit `fallback_mode` entirely in that mode, and relay
    the bounded reply from the completed event.
-6. **During the interview phase, surface the live Q&A — not just the round
+7. **During the interview phase, surface the live Q&A — not just the round
    counter.** Whenever the relayed phase is `interview` (e.g. progress reads
    `interview round N/50`), call
    `ouroboros_session_status(session_id=<auto_session_id>)` and relay to the
@@ -200,14 +208,14 @@ When an auto start response includes `response.meta.job_id`:
    nothing for the auto session, and it shows only the last 3 answers (each
    truncated). Keep it low-noise: relay the pending question and any newly
    answered rounds, not the same 3 entries every poll.
-7. If the job status is non-terminal (`queued`, `running`, or another active
+8. If the job status is non-terminal (`queued`, `running`, or another active
    status), keep waiting. Do not tell the user to call job tools themselves.
-8. When the job reaches a terminal status, the polling owner calls
+9. When the job reaches a terminal status, the polling owner calls
    `ouroboros_job_result(job_id)`
    and summarize the final auto-session outcome. If the final auto result is
    `detached`, keep tracking the surfaced downstream job/Ralph handles when
    available instead of presenting `detached` as completion.
-9. If `response.meta.status == "delegated_to_plugin"` and
+10. If `response.meta.status == "delegated_to_plugin"` and
    `response.meta.job_id is None`, report that OpenCode plugin mode delegated
    the work to the child Task/session. Do not call job wait/result without a
    real job id; follow the host Task widget/session lifecycle.

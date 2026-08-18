@@ -109,22 +109,29 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      events here. This conversation remains available for other safe work.
      ```
 
-   - If `response.meta.job_observer` is present and the host supports an
-     independent child session, spawn exactly one read-only observer and pass
-     that contract unchanged. The observer exclusively owns job wait/result
-     calls and the cursor. The main session retains only user conversation,
-     explicit on-demand status, and cancellation when the user requests it. The
-     main session must not poll the same job while the observer is active. It may
-     refine requirements, perform read-only review, or work in an unrelated
-     isolated worktree; check active-worker conflicts before writing to Ralph's
-     workspace.
+   - If MCP metadata is unavailable, recover `job_observer` from the final
+     `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Decode
+     the payload and use its object unchanged; never infer it from visible IDs.
+     Reject a mismatch when both structured and inline surfaces exist.
+
+   - If the structured or recovered `job_observer` is present and the host
+     supports an independent child session, spawn exactly one read-only
+     observer and pass that contract unchanged. The observer exclusively owns
+     job wait/result calls and the cursor. The main session retains only user
+     conversation, explicit on-demand status, and cancellation when the user
+     requests it. The main session must not poll the same job while the observer
+     is active. It may refine requirements, perform read-only review, or work in
+     an unrelated isolated worktree; check active-worker conflicts before
+     writing to Ralph's workspace.
      On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
      `wait` is not a spawn, and do not claim an observer until a live child
      ID/path is returned. Once acknowledged, keep the parent turn open with
      `wait_agent` calls of at most 60 seconds while the observer is active. Child
      `send_message` calls only enqueue mailbox events and cannot revive an ended
-     parent turn. Relay meaningful updates and wait again until the terminal
-     summary arrives. User input may interrupt the wait; handle it and resume
+     parent turn. Relay meaningful updates and wait again until terminal.
+     On OMP, submit exactly one native Task child named `RunObserver`, require
+     its live agent/job ID, and use the host wait/inbox relay until terminal.
+     User input may interrupt the wait; handle it and resume
      waiting while observation remains active unless the user asks to stop live
      observation or replaces the active request. Then end only the relay loop,
      keep the durable job running, and offer next-turn or explicit-status catch-

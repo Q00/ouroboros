@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Mapping
+import json
 from typing import Any
 
 JOB_OBSERVER_PROTOCOL = "ouroboros.job_observer.v1"
+JOB_OBSERVER_INLINE_OPEN = "<!-- ouroboros-job-observer-v1 base64\n"
+JOB_OBSERVER_INLINE_CLOSE = "\n-->"
 
 
 def build_job_observer_contract(
@@ -138,4 +143,45 @@ def build_job_observer_contract(
     }
 
 
-__all__ = ["JOB_OBSERVER_PROTOCOL", "build_job_observer_contract"]
+def append_job_observer_inline_handoff(
+    text: str,
+    contract: Mapping[str, Any],
+) -> str:
+    """Append a hidden observer contract for text-only MCP hosts such as OMP."""
+    payload = json.dumps(
+        {"job_observer": dict(contract)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"{text.rstrip()}\n\n{JOB_OBSERVER_INLINE_OPEN}{encoded}{JOB_OBSERVER_INLINE_CLOSE}"
+
+
+def extract_job_observer_inline_handoff(text: str) -> dict[str, Any] | None:
+    """Recover the canonical observer contract from text-only MCP output."""
+    open_idx = text.rfind(JOB_OBSERVER_INLINE_OPEN)
+    if open_idx == -1:
+        return None
+    close_idx = text.find(JOB_OBSERVER_INLINE_CLOSE, open_idx)
+    if close_idx == -1:
+        return None
+    encoded = text[open_idx + len(JOB_OBSERVER_INLINE_OPEN) : close_idx]
+    try:
+        decoded = base64.b64decode(encoded.encode("ascii"), validate=True).decode("utf-8")
+        payload = json.loads(decoded)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    contract = payload.get("job_observer")
+    return dict(contract) if isinstance(contract, dict) else None
+
+
+__all__ = [
+    "JOB_OBSERVER_INLINE_CLOSE",
+    "JOB_OBSERVER_INLINE_OPEN",
+    "JOB_OBSERVER_PROTOCOL",
+    "append_job_observer_inline_handoff",
+    "build_job_observer_contract",
+    "extract_job_observer_inline_handoff",
+]

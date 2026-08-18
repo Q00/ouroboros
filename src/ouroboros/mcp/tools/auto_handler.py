@@ -91,7 +91,10 @@ from ouroboros.mcp.tools.auto_start_lease_store import (
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
@@ -928,6 +931,12 @@ class StartAutoHandler:
 
         dashboard_url = await resolve_dashboard_base_url(self._event_store)
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=getattr(snapshot, "cursor", 0),
+            session_id=auto_session_id,
+            follow_result_job_keys=_FOLLOW_JOBS,
+        )
         text = (
             "Started background auto session.\n\n"
             "Status: queued\n"
@@ -943,6 +952,7 @@ class StartAutoHandler:
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
             "then fetch ouroboros_job_result."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "auto_session_id": auto_session_id,
@@ -954,12 +964,7 @@ class StartAutoHandler:
             "status_tool": "ouroboros_job_status",
             "wait_tool": "ouroboros_job_wait",
             "result_tool": "ouroboros_job_result",
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=getattr(snapshot, "cursor", 0),
-                session_id=auto_session_id,
-                follow_result_job_keys=_FOLLOW_JOBS,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

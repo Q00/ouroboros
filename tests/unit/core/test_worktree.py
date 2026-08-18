@@ -370,7 +370,7 @@ class TestWorktreeHardening:
 
         assert "git commit --allow-empty" in exc_info.value.message
 
-    def test_maybe_prepare_creates_worktree_from_dirty_source_when_allowed(
+    def test_maybe_prepare_creates_clean_worktree_from_dirty_source_by_default(
         self, tmp_path: Path
     ) -> None:
         repo_root = tmp_path / "repo"
@@ -385,7 +385,6 @@ class TestWorktreeHardening:
             workspace = maybe_prepare_task_workspace(
                 repo_root,
                 "orch_test_dirty",
-                allow_dirty=True,
             )
 
         try:
@@ -393,6 +392,7 @@ class TestWorktreeHardening:
             assert workspace.worktree_path != str(repo_root)
             assert Path(workspace.worktree_path).is_dir()
             assert workspace.effective_cwd == workspace.worktree_path
+            assert self._git(Path(workspace.worktree_path), "status", "--porcelain") == ""
             assert not (Path(workspace.worktree_path) / "dirty.txt").exists()
             assert (repo_root / "dirty.txt").read_text(encoding="utf-8") == (
                 "uncommitted caller work\n"
