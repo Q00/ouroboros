@@ -2061,7 +2061,7 @@ class TestLLMHelperLookups:
         ):
             assert get_consensus_models(backend="claude") == (
                 "openrouter/openai/gpt-4o",
-                "openrouter/anthropic/claude-opus-4.8",
+                "openrouter/anthropic/claude-opus-5",
                 "openrouter/google/gemini-2.5-pro",
             )
 

@@ -60,7 +60,10 @@ DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-5"
 LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
     DEFAULT_OPUS_MODEL: ("claude-opus-4-8", "claude-opus-4-6"),
     DEFAULT_SONNET_MODEL: ("claude-sonnet-4-20250514",),
-    DEFAULT_CONSENSUS_OPUS_MODEL: ("openrouter/anthropic/claude-opus-4.8", "openrouter/anthropic/claude-opus-4-6"),
+    DEFAULT_CONSENSUS_OPUS_MODEL: (
+        "openrouter/anthropic/claude-opus-4.8",
+        "openrouter/anthropic/claude-opus-4-6",
+    ),
 }
 
 

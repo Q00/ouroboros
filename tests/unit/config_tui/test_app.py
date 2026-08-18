@@ -102,7 +102,7 @@ async def test_agent_change_resets_incompatible_stage_model(app_env) -> None:
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
-        assert model_select.value == "claude-opus-4-8"
+        assert model_select.value == "claude-opus-5"
 
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()
@@ -685,7 +685,7 @@ async def test_execute_backend_change_clears_pin_instead_of_persisting_automatic
         pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
         await pilot.pause()
         displayed = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select).value
-        assert displayed == "claude-opus-4-8"
+        assert displayed == "claude-opus-5"
         # Textual may deliver the automatic model selection after the
         # programmatic guard was consumed under full-suite timing. Saving must
         # still treat this backend-switch default as automatic, not a user pin.
