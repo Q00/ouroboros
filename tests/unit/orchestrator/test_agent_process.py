@@ -3251,3 +3251,74 @@ def test_the_control_namespace_is_not_reachable_by_naming_it(tmp_path, lookalike
         "stop lookalike",
     )
     assert AgentProcessHandle.load_persisted_cancel("external", store=store) == (False, None)
+
+
+def _write_legacy_cancel(store, process_id: str, *, cancel_key: object, reason: str) -> None:
+    """Write a cancel checkpoint exactly as the released derivation wrote one."""
+    from ouroboros.orchestrator.agent_process import _CANCEL_CONTROL_SEED_PREFIX
+    from ouroboros.persistence.checkpoint import CheckpointData
+
+    state = {"status": "cancelled", "process_id": process_id, "reason": reason}
+    if cancel_key is not None:
+        state["cancel_key"] = cancel_key
+    assert store.save(
+        CheckpointData.create(
+            seed_id=f"{_CANCEL_CONTROL_SEED_PREFIX}{process_id}",
+            phase="agent_process_cancelled",
+            state=state,
+        )
+    ).is_ok
+
+
+def test_a_cancellation_written_before_the_key_changed_survives_the_upgrade(tmp_path) -> None:
+    """Durable cancellation is durable across the software that made it durable.
+
+    The cancel checkpoint is state that shipped, so an upgrade that stopped
+    finding it would resume work an operator had cancelled — the one outcome
+    durability exists to prevent. It is then consumed under the current key by
+    the path that already consumes it, and a consumed marker there ends every
+    later read before it reaches back, so the old key retires itself.
+    """
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    _write_legacy_cancel(store, "proc-1", cancel_key="proc-1", reason="operator stop")
+
+    assert AgentProcessHandle.load_persisted_cancel("proc-1", store=store) == (
+        True,
+        "operator stop",
+    )
+
+    AgentProcessHandle._consume_persisted_cancel(  # noqa: SLF001
+        "proc-1", store=store, reason="operator stop"
+    )
+
+    assert AgentProcessHandle.load_persisted_cancel("proc-1", store=store) == (False, None)
+
+
+def test_reading_the_old_key_does_not_bring_its_aliasing_back(tmp_path) -> None:
+    """The legacy file is reachable by a lookalike; honouring it must not be.
+
+    The released seed embedded the id in a filename that folds ``:`` onto ``_``,
+    so ``a_b`` opens the checkpoint written for ``a:b``. The stored ``cancel_key``
+    is what separates them, and a marker too old to carry one is not honoured at
+    all — an unidentifiable cancellation fails closed rather than landing on
+    whichever process happens to ask.
+    """
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+    _write_legacy_cancel(store, "a:b", cancel_key="a:b", reason="stop a:b")
+
+    assert AgentProcessHandle.load_persisted_cancel("a:b", store=store) == (True, "stop a:b")
+    assert AgentProcessHandle.load_persisted_cancel("a_b", store=store) == (False, None)
+
+    unnamed = CheckpointStore(base_path=tmp_path / "unnamed")
+    unnamed.initialize()
+    _write_legacy_cancel(unnamed, "proc-2", cancel_key=None, reason="stop proc-2")
+
+    assert AgentProcessHandle.load_persisted_cancel("proc-2", store=unnamed) == (False, None)

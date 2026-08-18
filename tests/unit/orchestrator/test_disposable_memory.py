@@ -288,6 +288,33 @@ async def test_reference_event_is_idempotent_when_same_contract_is_recovered(
     assert len(references) == 1
 
 
+def test_the_envelope_that_dropped_a_required_field_says_so_in_its_version(
+    tmp_path: Path,
+) -> None:
+    """Dropping `artifact_ref` is not additive, so it cannot stay version 1.
+
+    This envelope is the payload of `artifact.referenced`, and that store is
+    append-only: rows written before this change carry `artifact_ref` and say
+    version 1. If the new shape also said 1, the store would hold two shapes
+    under one number and nothing could tell which it was reading — which is the
+    single thing the number is for.
+    """
+    service, _ = _service(tmp_path)
+
+    envelope = service.artifact_store.put_for_contract(
+        contract_id="01K1DISPOSABLEMEMORY00016",
+        body={"stable": True},
+        runtime_id="fixture-runtime",
+        duration_ms=1,
+        events_emitted_count=0,
+    )
+    payload = create_artifact_referenced_event(envelope).data
+
+    assert envelope.schema_version == 2
+    assert payload["schema_version"] == 2
+    assert "artifact_ref" not in payload
+
+
 @pytest.mark.asyncio
 async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_path: Path) -> None:
     service, event_store = _service(tmp_path)

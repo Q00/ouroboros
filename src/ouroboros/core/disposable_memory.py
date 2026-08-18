@@ -36,7 +36,14 @@ class DisposableResultEnvelope(BaseModel, frozen=True):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    # Version 2 drops `artifact_ref`, which version 1 required.  Removing a
+    # required field is not an additive change, so it cannot happen under the
+    # same number: this envelope is stamped into `artifact.referenced`, and an
+    # append-only store would otherwise hold two shapes both claiming to be
+    # version 1, with nothing able to tell which it was reading.  Rows written
+    # before this keep saying 1 and keep their `artifact_ref`; a reader that
+    # cares which shape it has is asking the field that exists to answer it.
+    schema_version: Literal[2] = 2
     # Length is the whole rule.  The character restriction that used to live
     # here was a path-safe-filename rule, and a contract id stopped being this
     # store's filename when the store stopped being a directory.  It still

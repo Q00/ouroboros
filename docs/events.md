@@ -163,7 +163,7 @@ the event type within the contract aggregate rather than on the id.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | `int` | Disposable envelope schema, currently `1` |
+| `schema_version` | `int` | Disposable envelope schema, currently `2`. Version `1` additionally required `artifact_ref`; rows written under it keep that field and keep saying `1`, so a reader distinguishes the two shapes by this value |
 | `contract_id` | `string` | Contract owning this result |
 | `result.status` | `string` | `completed` or `failed` |
 | `runtime_id` | `string` | Runtime that produced the artifact |
