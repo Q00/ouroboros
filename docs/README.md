@@ -26,6 +26,7 @@ replayable execution contract on your choice of runtime backend.
 - [Codex CLI (한국어)](./runtime-guides/codex.ko.md) - 같은 문서의 한국어판
 - [GitHub Copilot CLI (한국어)](./runtime-guides/copilot.ko.md) - 같은 문서의 한국어판
 - [Kiro CLI (한국어)](./runtime-guides/kiro.ko.md) - 같은 문서의 한국어판
+- [Goose (한국어)](./runtime-guides/goose.ko.md) - 같은 문서의 한국어판
 
 ### Architecture
 
