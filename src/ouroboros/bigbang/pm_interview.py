@@ -628,15 +628,13 @@ Also include these PM routing fields in the same JSON object:
 
 Apply this canonical PM routing policy:
 {classification_policy_prompt()}
-
-Restored brownfield classifier context, if present:
-{self.classifier.codebase_context[:2000]}
 """
         turn_result = await planner.plan(
             state,
             scoring_state=_decision_only_view(state),
             additional_scoring_context=additional_context,
             extra_response_contract=response_contract,
+            additional_untrusted_context=self.classifier.codebase_context[:2000],
         )
         if turn_result.is_err:
             return Result.err(turn_result.error)
