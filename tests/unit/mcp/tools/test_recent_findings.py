@@ -439,3 +439,129 @@ def test_the_prompt_hands_over_both_values_the_fetch_needs(
     # capped -- so it is stated as what was offered rather than as a total.
     assert "You are offered 1 recent finding" in prompt
     assert "you were offered\n1," in prompt
+
+
+def test_a_tombstoned_artifact_is_tombstoned_through_the_scoped_read_too(
+    store: ArtifactStore,
+) -> None:
+    """Pruning is terminal state, and a read path that hides it re-answers replay.
+
+    The lane match was an inner join, so a pruned row -- whose body is SQL NULL
+    and yields no lanes -- vanished before the tombstone check could run, and a
+    scoped read reported the contract as never having existed. The join is now
+    outer: no row is no contract, a NULL body is the same tombstone ``fetch``
+    reports, and only a live body can report a missing lane.
+    """
+    from datetime import timedelta
+
+    from ouroboros.persistence.artifact_errors import ArtifactTombstonedError
+
+    contract_id = _publish_distinguishable(store)
+    store.prune(apply=True, now=datetime.now(UTC) + timedelta(days=91))
+
+    with pytest.raises(ArtifactTombstonedError):
+        store.fetch(contract_id)
+    with pytest.raises(ArtifactTombstonedError):
+        store.fetch_lane(contract_id, "code_context")
+    with pytest.raises(ArtifactTombstonedError):
+        store.fetch_lane(contract_id, "lane_never_dispatched")
+
+
+def test_a_missing_contract_is_not_found_whichever_lane_is_asked(store: ArtifactStore) -> None:
+    """The scoped read tells a missing contract apart from a missing lane."""
+    assert store.fetch_lane_if_exists("fanout:never-published", "code_context") is None
+    with pytest.raises(ArtifactNotFoundError):
+        store.fetch_lane("fanout:never-published", "code_context")
+
+
+def _fetch_handler(store: ArtifactStore) -> Any:
+    from ouroboros.mcp.tools.fanout_handler import FetchArtifactHandler
+
+    return FetchArtifactHandler(disposable_memory=DisposableMemory(artifact_store=store))
+
+
+def test_a_supplied_blank_lane_id_fails_closed_at_the_tool_boundary(
+    store: ArtifactStore,
+) -> None:
+    """A malformed scoped request is an error, never the broader read.
+
+    The handler used to normalize the argument and branch on truthiness, so
+    ``lane_id: "   "`` -- supplied, but blank -- silently became an unscoped
+    fetch and returned every sibling's output. Presence now decides the path:
+    anything supplied is looked up verbatim, and no fan-out ever dispatched a
+    blank lane, so it is not-found.
+    """
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    for supplied in ("", "   ", "\t"):
+        result = asyncio.run(handler.handle({"contract_id": contract_id, "lane_id": supplied}))
+        assert result.is_err, repr(supplied)
+        assert "artifact fetch failed" in str(result.error)
+
+
+def test_an_unknown_lane_id_fails_closed_at_the_tool_boundary(store: ArtifactStore) -> None:
+    """A lane the artifact does not carry is an error, not someone else's output."""
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    result = asyncio.run(handler.handle({"contract_id": contract_id, "lane_id": "web_context"}))
+
+    assert result.is_err
+
+
+def test_an_omitted_lane_id_is_the_legacy_whole_artifact_read(store: ArtifactStore) -> None:
+    """Intentional omission stays the compatibility path -- absent key or JSON null."""
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    for arguments in (
+        {"contract_id": contract_id},
+        {"contract_id": contract_id, "lane_id": None},
+    ):
+        result = asyncio.run(handler.handle(dict(arguments)))
+        assert result.is_ok, arguments
+        lanes = result.value.meta["body"]["result"]["aggregated_outputs"]
+        assert [entry["lane_id"] for entry in lanes] == [
+            "code_context",
+            "data_context",
+            "ambiguity_contrarian",
+        ]
+        assert "lane_id" not in result.value.meta
+
+
+def test_a_valid_scoped_request_returns_that_lane_through_the_tool(
+    store: ArtifactStore,
+) -> None:
+    """The one good path, pinned beside the failure paths that surround it."""
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    result = asyncio.run(handler.handle({"contract_id": contract_id, "lane_id": "code_context"}))
+
+    assert result.is_ok
+    assert result.value.meta == {
+        "contract_id": contract_id,
+        "lane_id": "code_context",
+        "body": {"finding": "the code says CODE-ONLY"},
+    }
+
+
+def test_the_request_schema_makes_a_mismatched_lane_pairing_unrepresentable(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    """An entry under one lane key naming a sibling would offer that sibling's output."""
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _interview_question_advisory_request_schema,
+    )
+
+    _publish(store)
+    meta = _attach([], store, tool_name="ouroboros_interview", phase="start")
+    request = json.loads(json.dumps(meta["question_advisory_request"]))
+    validator = Draft202012Validator(_interview_question_advisory_request_schema())
+
+    assert list(validator.iter_errors(request)) == []
+    request["recent_findings"]["code_context"][0]["lane_id"] = "data_context"
+    assert list(validator.iter_errors(request)) != []

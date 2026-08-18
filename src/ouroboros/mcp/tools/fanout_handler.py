@@ -262,7 +262,8 @@ class FetchArtifactHandler:
                         "Optional. Narrows a fan-out artifact to the output of one "
                         "lane, returning that lane's body alone. Pass the lane_id "
                         "offered beside the contract_id; omit it to read the whole "
-                        "artifact."
+                        "artifact. A supplied lane the artifact does not carry is "
+                        "an error, never a broader read."
                     ),
                     required=False,
                 ),
@@ -289,14 +290,23 @@ class FetchArtifactHandler:
                     tool_name="ouroboros_fetch_artifact",
                 )
             )
-        lane_id = str(arguments.get("lane_id") or "").strip()
+        # Presence decides the path; the value is never coerced toward the
+        # broader read.  Normalizing the argument first ("strip, then branch on
+        # truthiness") turned a supplied-but-blank lane into an unscoped fetch
+        # -- a malformed request quietly granted every sibling's output.  Here
+        # only an absent or JSON-null argument means the legacy whole-artifact
+        # read; anything supplied is looked up verbatim, and a lane no fan-out
+        # ever dispatched (blank included) fails as not-found rather than
+        # falling open.
+        lane_argument = arguments.get("lane_id")
+        lane_id = None if lane_argument is None else str(lane_argument)
         try:
-            if lane_id:
+            if lane_id is None:
+                fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
+            else:
                 fetched = await asyncio.to_thread(
                     self.disposable_memory.fetch_lane, contract_id, lane_id
                 )
-            else:
-                fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
         except (ArtifactStoreError, OSError, ValueError) as exc:
             return Result.err(
                 MCPToolError(
@@ -309,7 +319,7 @@ class FetchArtifactHandler:
             "contract_id": fetched.envelope.contract_id,
             "body": fetched.body,
         }
-        if lane_id:
+        if lane_id is not None:
             payload["lane_id"] = lane_id
         return Result.ok(
             MCPToolResult(

@@ -281,6 +281,14 @@ class ArtifactStore:
         JSON-native content, so an extraction that only survives objects and
         arrays loses the rest silently.  ``->`` returns JSON for every type.
 
+        The lane match is an outer join, deliberately: an inner ``json_each``
+        source removes the artifact's row itself whenever no lane matches --
+        which is also what a pruned body produces -- so a tombstone became
+        indistinguishable from a contract that never existed.  With the row
+        kept, the three absences stay three: no row is no contract, a ``NULL``
+        body is the tombstone ``fetch`` reports for the same id, and a ``NULL``
+        lane match on a live body is a lane this fan-out never carried.
+
         Returns the lane's output as the body, so a caller that asked for one
         lane is handed one lane -- there is nothing left in it to select.
         """
@@ -288,8 +296,10 @@ class ArtifactStore:
         row = self._read_one(
             "SELECT lane.value -> '$.output', runtime_id, duration_ms,"
             " events_emitted_count, updated_at, body"
-            " FROM artifacts, json_each(body,'$.result.aggregated_outputs') AS lane"
-            " WHERE contract_id = ? AND json_extract(lane.value,'$.lane_id') = ?",
+            " FROM artifacts LEFT JOIN"
+            " json_each(artifacts.body,'$.result.aggregated_outputs') AS lane"
+            " ON json_extract(lane.value,'$.lane_id') = ?2"
+            " WHERE contract_id = ?1",
             contract_id,
             lane_id,
         )
@@ -298,9 +308,10 @@ class ArtifactStore:
         output_json, runtime_id, duration_ms, events_emitted_count, updated_at, body_text = row
         if body_text is None:
             raise _tombstoned_read_error(contract_id, tombstoned_at=updated_at)
-        # ``->`` yields SQL NULL only for a lane entry carrying no ``output``
-        # key at all; a JSON ``null`` output arrives as the four-byte ``null``,
-        # exactly as a published body does in ``fetch_if_exists``.
+        # ``->`` yields SQL NULL for a lane this body never carried and for a
+        # lane entry with no ``output`` key; a JSON ``null`` output arrives as
+        # the four-byte ``null``, exactly as a published body does in
+        # ``fetch_if_exists``.
         if output_json is None:
             return None
         try:

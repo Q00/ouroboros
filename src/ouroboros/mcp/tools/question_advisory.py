@@ -339,7 +339,8 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     selected against the wrong shape, found nothing and re-investigated; nothing
     failed loudly, because a lane reporting no reusable findings looks exactly
     like a project having none. What removes that failure is not withholding the
-    place: it is that the ids here are already this lane's own, so there is no
+    place: each entry pairs the contract with this lane's id, the fetch passes
+    both back, and the store returns this lane's output alone -- so there is no
     arrangement left to describe and no instruction to carry out incorrectly.
 
     **The bodies stay in the store, and that is not a preference.** Carried

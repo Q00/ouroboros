@@ -25,15 +25,16 @@ and ``data_context`` -- the lanes reporting on the system -- and since one
 submission can carry six lanes, eligibility is read per lane and only the
 eligible lanes of a body travel onward.
 
-What travels is where a finding is -- a contract id and a publication time --
-and a lane fetches its own. Bodies travelled once and could not: the same block
-was copied into every lane of the turn, the tool result outgrew what a host
-takes inline, and the turn lost its fan-out entirely.
+What travels is where a finding is -- a contract id, the lane that produced it,
+and a publication time -- and a lane fetches its own by passing both values
+back. Bodies travelled once and could not: the same block was copied into every
+lane of the turn, the tool result outgrew what a host takes inline, and the
+turn lost its fan-out entirely.
 
-The narrowing still happens here, which is what keeps the old failure from
-returning. A lane is given its own lane's ids (RFC Q00/ouroboros#2167), so there
-is no selecting left for the child and no rule for it to carry out. That rule
-once cost a lane its findings: told to select from a body it had to open, it
+The narrowing is the store's (RFC Q00/ouroboros#2167): the fetch takes the lane
+beside the contract and returns that lane's output alone, so there is no
+selecting left for the child and no rule for it to carry out. That rule once
+cost a lane its findings: told to select from a body it had to open, it
 selected against the wrong shape, found nothing, and re-investigated -- silently,
 since a lane with nothing to reuse looks exactly like a project with nothing to
 reuse. Which is why the count travels beside the ids: a lane that cannot reach

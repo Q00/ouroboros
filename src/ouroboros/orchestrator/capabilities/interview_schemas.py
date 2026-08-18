@@ -1070,7 +1070,11 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "required": ["contract_id", "lane_id", "published_at"],
                             "properties": {
                                 "contract_id": {"type": "string", "minLength": 1},
-                                "lane_id": {"type": "string", "minLength": 1},
+                                # const, not just string: an entry under one
+                                # lane key naming a sibling lane would offer
+                                # that sibling's output, so the pairing is made
+                                # unrepresentable rather than trusted.
+                                "lane_id": {"const": lane},
                                 "published_at": {"type": "string", "minLength": 1},
                             },
                         },
