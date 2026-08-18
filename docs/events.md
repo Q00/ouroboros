@@ -156,10 +156,11 @@ The aggregate is `contract/<contract_id>`. Raw child output and transcripts are
 forbidden from this event; consumers must call the explicit artifact
 fetch/replay API.
 
-The event id is a UUIDv5 over the contract id alone, because a contract
-publishes at most one artifact. Rows written before the derivation dropped the
-content address still carry the older id, so exactly-once appending matches on
-the event type within the contract aggregate rather than on the id.
+The event id is a UUIDv5 over the contract id alone, and exactly-once appending
+matches on that id. A row written before the derivation dropped the content
+address carries a different id and names a body in the filesystem store, so it
+does not stand in for a publication into the database — a contract re-run after
+the cutover appends its own row rather than being masked by the older one.
 
 | Field | Type | Description |
 |-------|------|-------------|

@@ -155,6 +155,34 @@ def test_applied_prune_returns_the_space_rather_than_only_the_row(tmp_path: Path
     assert _database_path(store).stat().st_size < size_before - report.removed_bytes // 2
 
 
+def test_a_failed_compaction_does_not_report_the_prune_as_failed(tmp_path: Path) -> None:
+    """The bodies are gone by then, and a tombstone is terminal.
+
+    Reporting failure would tell a caller nothing happened when the one
+    irreversible part already did — and the likeliest way to fail is a full
+    disk, which is the state a caller prunes to escape.
+    """
+
+    class NoVacuum(sqlite3.Connection):
+        def execute(self, sql: str, *args: Any, **kwargs: Any):  # noqa: ANN202
+            if sql.strip().upper().startswith("VACUUM"):
+                raise sqlite3.OperationalError("unable to open database file")
+            return super().execute(sql, *args, **kwargs)
+
+    store = _store(tmp_path)
+    _put(store, "CONTRACT1", {"payload": "x" * 1000})
+    _age(store, "CONTRACT1", days=200)
+    store._connect_for_write = lambda: sqlite3.connect(  # type: ignore[method-assign]
+        _database_path(store), factory=NoVacuum
+    )
+
+    report = store.prune(apply=True, now=NOW)
+
+    assert report.removed_contract_ids == ("CONTRACT1",)
+    with pytest.raises(ArtifactTombstonedError):
+        store.fetch("CONTRACT1")
+
+
 def test_prune_reports_encoded_bytes_not_characters(tmp_path: Path) -> None:
     """Every name this number travels under says bytes, so it has to be bytes.
 

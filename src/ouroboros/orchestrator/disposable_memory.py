@@ -10,10 +10,7 @@ import time
 from typing import Any
 
 from ouroboros.core.disposable_memory import DisposableResultEnvelope
-from ouroboros.events.artifact import (
-    ARTIFACT_REFERENCED_EVENT,
-    create_artifact_referenced_event,
-)
+from ouroboros.events.artifact import create_artifact_referenced_event
 from ouroboros.events.io import new_call_id
 from ouroboros.orchestrator.agent_process import AgentProcessHandle, run_with_agent_process
 from ouroboros.persistence.artifact_store import (
@@ -204,27 +201,29 @@ class DisposableMemory:
         if callable(initialize):
             await initialize()
         event = create_artifact_referenced_event(envelope)
-        if await _event_already_persisted(store, envelope.contract_id):
+        if await _event_already_persisted(store, event):
             return
         try:
             await store.append(event)
         except Exception:
-            if await _event_already_persisted(store, envelope.contract_id):
+            if await _event_already_persisted(store, event):
                 return
             raise
 
 
-async def _event_already_persisted(store: Any, contract_id: str) -> bool:
-    """Ask whether this contract already carries its one reference row."""
+async def _event_already_persisted(store: Any, event: Any) -> bool:
+    """Ask whether this exact reference row is already in the ledger."""
     replay = getattr(store, "replay", None)
     if not callable(replay):
         return False
-    events = await replay("contract", contract_id)
-    # The match is on the event type rather than the derived id.  A contract
-    # aggregate holds at most one reference row, so the type is the real key,
-    # and matching it also recognizes rows written by an older id formula —
-    # matching the id alone would read those as absent and append a duplicate.
-    return any(getattr(event, "type", None) == ARTIFACT_REFERENCED_EVENT for event in events)
+    events = await replay("contract", event.aggregate_id)
+    # The id, not the type.  A row written under the older formula names a body
+    # in the filesystem store this change deletes, so it is not this
+    # publication and must not stand in for it -- the ledger would then hold a
+    # reference to a body that is gone while the one that exists went
+    # unrecorded.  Two rows for one contract on an upgraded machine is what
+    # actually happened: it published twice, into two different stores.
+    return any(getattr(candidate, "id", None) == event.id for candidate in events)
 
 
 def _consume_background_result(task: asyncio.Task[Any]) -> None:

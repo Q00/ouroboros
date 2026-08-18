@@ -316,25 +316,26 @@ def test_the_envelope_that_dropped_a_required_field_says_so_in_its_version(
 
 
 @pytest.mark.asyncio
-async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_path: Path) -> None:
+async def test_a_row_from_the_old_store_does_not_stand_in_for_a_new_publication(
+    tmp_path: Path,
+) -> None:
+    """The ledger records the publication that exists, not the one that is gone.
+
+    A machine upgraded into this change keeps its EventStore and loses its
+    filesystem artifacts, so a contract re-run afterwards publishes a new body
+    while an old row still names the deleted one. Letting the old row count as
+    this publication would leave the ledger pointing at a body nobody can fetch
+    and no record of the body that exists. Two rows is what happened: the
+    contract published twice, into two different stores.
+    """
     service, event_store = _service(tmp_path)
     contract_id = "01K1DISPOSABLEMEMORY00015"
 
     async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
         return {"stable": True}
 
-    envelope = service.artifact_store.put_for_contract(
-        contract_id=contract_id,
-        body={"stable": True},
-        runtime_id="fixture-runtime",
-        duration_ms=1,
-        events_emitted_count=0,
-    )
-    # The id this row carried before the derivation dropped the content
-    # address.  Envelopes no longer name that address, so the old formula is
-    # reconstructed here exactly as the older code computed it: a ledger
-    # written back then holds precisely this row, and the guarantee has to
-    # survive reading it back.
+    # The row a pre-cutover ledger holds, under the formula that folded in the
+    # content address the filesystem store gave it.
     legacy_artifact_ref = (
         "sha256:" + hashlib.sha256(canonical_artifact_bytes({"stable": True})).hexdigest()
     )
@@ -344,27 +345,65 @@ async def test_reference_event_recognizes_a_row_written_under_the_old_id(tmp_pat
             f"ouroboros:artifact:{contract_id}:{legacy_artifact_ref}:referenced",
         )
     )
-    assert legacy_id != create_artifact_referenced_event(envelope).id
     event_store.appended.append(
         BaseEvent(
             id=legacy_id,
             type="artifact.referenced",
             aggregate_type="contract",
             aggregate_id=contract_id,
-            data={**envelope.model_dump(mode="json"), "artifact_ref": legacy_artifact_ref},
+            data={
+                "schema_version": 1,
+                "contract_id": contract_id,
+                "artifact_ref": legacy_artifact_ref,
+                "result": {"status": "completed"},
+                "runtime_id": "runtime-before-the-cutover",
+                "duration_ms": 1,
+                "events_emitted_count": 0,
+            },
         )
     )
 
-    recovered = await service.run(
-        intent="rekeyed-reference",
+    envelope = await service.run(
+        intent="rerun after the cutover",
         runtime_id="fixture-runtime",
         work_fn=child_work,
         contract_id=contract_id,
     )
 
-    assert recovered == envelope
+    assert service.artifact_store.fetch(contract_id).body == {"stable": True}
     references = [event for event in event_store.appended if event.type == "artifact.referenced"]
-    assert [event.id for event in references] == [legacy_id]
+    assert [event.id for event in references] == [
+        legacy_id,
+        create_artifact_referenced_event(envelope).id,
+    ]
+    assert references[-1].data["runtime_id"] == "fixture-runtime"
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_contract_appends_its_reference_only_once(tmp_path: Path) -> None:
+    """Exactly-once still holds for the publication this version writes."""
+    service, event_store = _service(tmp_path)
+    contract_id = "01K1DISPOSABLEMEMORY00017"
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        return {"stable": True}
+
+    first = await service.run(
+        intent="publish",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+    again = await service.run(
+        intent="recover",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    assert again == first
+    references = [event for event in event_store.appended if event.type == "artifact.referenced"]
+    assert [event.id for event in references] == [create_artifact_referenced_event(first).id]
 
 
 @pytest.mark.asyncio

@@ -384,9 +384,9 @@ class ArtifactStore:
         counts nothing.
 
         Clearing a column only frees its pages back to the database, so an
-        applied prune that removed anything is followed by ``VACUUM``: a report
-        that says bytes were removed has to mean the disk got them back, not
-        that a file of the same size now has room inside it.
+        applied prune that removed anything is followed by ``VACUUM`` -- best
+        effort, since by then the bodies are gone and a failure would report
+        as failed something that already happened.
         """
         if ttl.total_seconds() < 0:
             raise ValueError("ttl must not be negative")
@@ -425,9 +425,12 @@ class ArtifactStore:
                             removed_contract_ids.append(candidate.contract_id)
                             removed_bytes += candidate.body_bytes
                 if removed_contract_ids:
-                    # Outside the transaction above: VACUUM rebuilds the file
-                    # and cannot run inside one.
-                    connection.execute("VACUUM")
+                    try:
+                        # Outside the transaction: VACUUM cannot run in one.
+                        # Outside the result too -- the bodies are already gone.
+                        connection.execute("VACUUM")
+                    except sqlite3.Error:
+                        pass
         except sqlite3.Error as exc:
             raise ArtifactStoreError(
                 "Artifact pruning failed",
