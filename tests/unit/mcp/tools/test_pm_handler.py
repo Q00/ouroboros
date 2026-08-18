@@ -920,3 +920,78 @@ class TestSelectReposSessionContinuity:
             brownfield_repos=None,
         )
         assert result.value.meta["session_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_atomic_pm_failure_returns_recoverable_session_envelope(tmp_path: Path) -> None:
+    from ouroboros.core.errors import ProviderError
+
+    engine = PMInterviewEngine.create(
+        llm_adapter=MagicMock(),
+        model="test-model",
+        state_dir=tmp_path,
+    )
+    state = InterviewState(
+        interview_id="pm_atomic_failure",
+        initial_context="Build a planning workflow",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3", user_response="A3"),
+        ],
+    )
+    assert (await engine.save_state(state)).is_ok
+    engine.plan_next_turn = AsyncMock(return_value=Result.err(ProviderError("empty response")))
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle({"session_id": state.interview_id, "cwd": str(tmp_path)})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert result.value.meta == {"session_id": state.interview_id, "recoverable": True}
+    assert "Resume with" in result.value.text_content
+
+
+@pytest.mark.asyncio
+async def test_legacy_pm_engine_checks_completion_before_asking_question(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.core.errors import ProviderError
+
+    state = InterviewState(
+        interview_id="pm_legacy_complete",
+        initial_context="ctx",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3", user_response="A3"),
+        ],
+    )
+    engine = _make_engine_stub()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    engine.check_completion = AsyncMock(
+        return_value={
+            "interview_complete": True,
+            "completion_reason": "ambiguity_resolved",
+            "rounds_completed": 3,
+            "ambiguity_score": 0.1,
+        }
+    )
+    engine.complete_interview = AsyncMock(return_value=Result.ok(state))
+    engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+    engine.generate_pm_seed = AsyncMock(return_value=Result.err(ProviderError("skip generation")))
+    engine.ask_next_question = AsyncMock()
+    handler = PMInterviewHandler(data_dir=tmp_path)
+
+    with patch("ouroboros.mcp.tools.pm_handler._save_pm_meta"):
+        result = await handler._handle_answer(
+            engine,
+            state.interview_id,
+            None,
+            str(tmp_path),
+        )
+
+    assert result.is_ok
+    engine.check_completion.assert_awaited_once_with(state)
+    engine.complete_interview.assert_awaited_once_with(state)
+    engine.ask_next_question.assert_not_called()

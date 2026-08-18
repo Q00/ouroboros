@@ -1500,11 +1500,10 @@ class PMInterviewHandler:
                         )
                     )
                 state = record_result.value
-                state.clear_stored_ambiguity()
-
-        completion: dict[str, Any] | None = None
-        supports_atomic_turn = isinstance(PMInterviewEngine, type) and isinstance(
-            engine, PMInterviewEngine
+        supports_atomic_turn = (
+            isinstance(PMInterviewEngine, type)
+            and isinstance(engine, PMInterviewEngine)
+            and engine.supports_atomic_turn is True
         )
         if supports_atomic_turn:
             turn_result = await engine.plan_next_turn(state)

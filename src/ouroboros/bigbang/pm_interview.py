@@ -241,6 +241,8 @@ class PMInterviewEngine:
         engine.save_pm_seed(pm_seed)
     """
 
+    supports_atomic_turn = True
+
     inner: InterviewEngine
     classifier: QuestionClassifier
     llm_adapter: LLMAdapter

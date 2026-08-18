@@ -548,3 +548,15 @@ class TestQuestionClassifierDecideLater:
         assert cr.output_type == ClassifierOutputType.DECIDE_LATER
         assert cr.question_for_pm == question  # returned to user for decision
         assert "initial deployment" in cr.placeholder_response
+
+
+def test_shared_classification_policy_omits_standalone_response_schema() -> None:
+    from ouroboros.bigbang.question_classifier import classification_policy_prompt
+
+    policy = classification_policy_prompt()
+
+    assert "**PLANNING**" in policy
+    assert "**DEVELOPMENT**" in policy
+    assert "**DECIDE_LATER**" in policy
+    assert "## Response Format" not in policy
+    assert "Respond ONLY with valid JSON" not in policy
