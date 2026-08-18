@@ -97,7 +97,7 @@ def test_stale_env_override_falls_through_instead_of_dead_ending(
     route = resolve_verify_shell()
 
     assert route is not None
-    assert route.shell_path == "/bin/bash"
+    assert route.shell_path == os.path.realpath("/bin/bash")
     assert route.source == "posix_default"
 
 
@@ -109,7 +109,7 @@ def test_posix_prefers_bash_over_sh(monkeypatch: pytest.MonkeyPatch) -> None:
     route = resolve_verify_shell()
 
     assert route is not None
-    assert route.shell_path == "/bin/bash"
+    assert route.shell_path == os.path.realpath("/bin/bash")
 
 
 def test_posix_never_substitutes_sh_for_bash(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,7 +300,7 @@ def test_a_failed_resolution_is_never_cached(monkeypatch: pytest.MonkeyPatch) ->
 
     route = resolve_verify_shell()
     assert route is not None
-    assert route.shell_path == "/bin/bash"
+    assert route.shell_path == os.path.realpath("/bin/bash")
 
 
 def test_a_successful_resolution_is_still_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,7 +431,7 @@ def test_a_relative_override_is_refused_not_resolved(monkeypatch: pytest.MonkeyP
     route = resolve_verify_shell()
 
     assert route is not None
-    assert route.shell_path == "/bin/bash"
+    assert route.shell_path == os.path.realpath("/bin/bash")
     assert route.source == "posix_default"
 
 
