@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
+import ntpath
 import os
 from pathlib import Path, PureWindowsPath
 import shutil
@@ -81,6 +83,14 @@ def _is_absolute(path: str) -> bool:
     return os.path.isabs(path)
 
 
+def _canonical_path(path: str) -> str:
+    """Return one canonical executable path on real and simulated platforms."""
+    if _running_on_windows():
+        normalized = ntpath.normpath(path)
+        return os.path.realpath(normalized) if os.name == "nt" else normalized
+    return os.path.realpath(path)
+
+
 def _executable(candidate: str | None) -> str | None:
     """Return an executable **absolute** path for ``candidate``, else ``None``.
 
@@ -103,7 +113,10 @@ def _executable(candidate: str | None) -> str | None:
     resolved = shutil.which(expanded)
     if resolved is None or not _is_absolute(resolved):
         return None
-    return resolved
+    canonical = _canonical_path(resolved)
+    if not _is_absolute(canonical):
+        return None
+    return canonical
 
 
 def _config_value() -> str | None:
@@ -175,6 +188,55 @@ def _validated_executable(candidate: str | None) -> str | None:
     if _running_on_windows() and _is_wsl_launcher(resolved):
         return None
     return resolved
+
+
+_VERIFY_SHELL_IDENTITY_KEYS = frozenset({"path", "realpath", "sha256"})
+
+
+def _sha256_file(path: str) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as shell_file:
+            for chunk in iter(lambda: shell_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def capture_verify_shell_identity(route: VerifyShellRoute) -> dict[str, str] | None:
+    """Seal the canonical executable and its content, not a mutable alias."""
+    realpath = _executable(route.shell_path)
+    if realpath is None or (_running_on_windows() and _is_wsl_launcher(realpath)):
+        return None
+    digest = _sha256_file(realpath)
+    if digest is None:
+        return None
+    return {"path": route.shell_path, "realpath": realpath, "sha256": digest}
+
+
+def verify_shell_path_from_identity(identity: object) -> str | None:
+    """Return the sealed executable only while target and content still match."""
+    if not isinstance(identity, Mapping) or set(identity) != _VERIFY_SHELL_IDENTITY_KEYS:
+        return None
+    path = identity.get("path")
+    expected_realpath = identity.get("realpath")
+    expected_digest = identity.get("sha256")
+    if not all(
+        isinstance(value, str) and value for value in (path, expected_realpath, expected_digest)
+    ):
+        return None
+    assert isinstance(path, str)
+    assert isinstance(expected_realpath, str)
+    assert isinstance(expected_digest, str)
+    current_realpath = _executable(path)
+    if current_realpath != expected_realpath:
+        return None
+    if _running_on_windows() and _is_wsl_launcher(current_realpath):
+        return None
+    if _sha256_file(current_realpath) != expected_digest:
+        return None
+    return current_realpath
 
 
 def _posix_candidates() -> tuple[tuple[str, str], ...]:

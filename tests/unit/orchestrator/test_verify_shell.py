@@ -6,6 +6,7 @@ Windows branches are covered without Windows CI by patching the platform seam,
 
 from __future__ import annotations
 
+import os
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -15,7 +16,9 @@ from ouroboros.orchestrator import verify_shell
 from ouroboros.orchestrator.verify_shell import (
     VERIFY_BASH_ENV_VAR,
     VerifyShellRoute,
+    capture_verify_shell_identity,
     resolve_verify_shell,
+    verify_shell_path_from_identity,
     verify_shell_unavailable_reason,
 )
 
@@ -110,10 +113,8 @@ def test_posix_prefers_bash_over_sh(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_posix_never_substitutes_sh_for_bash(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`sh` reads the same text differently — `echo -e X` prints `X` under bash
-    and `-e X` under `sh` — so its verdict is about a different command. A
-    machine with only `sh` has no verify shell, which routes the command
-    through the exact shell-free planner instead."""
+    """`sh` reads the same text differently, so a machine with only `sh`
+    has no verification shell and records the AC as unavailable."""
     monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: False)
     monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
     monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
@@ -227,6 +228,39 @@ def test_windows_rejects_wsl_launcher_from_configured_routes(
     else:
         monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
         monkeypatch.setattr(verify_shell, "_config_value", lambda: wsl)
+
+    assert resolve_verify_shell() is None
+
+
+def test_shell_identity_rejects_retarget_and_content_drift(tmp_path: Path) -> None:
+    target = tmp_path / "bash"
+    target.write_bytes(b"bash-v1")
+    target.chmod(0o755)
+    alias = tmp_path / "alias-bash"
+    try:
+        os.symlink(target, alias)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted in this environment")
+
+    identity = capture_verify_shell_identity(VerifyShellRoute(str(alias), "config"))
+    assert identity is not None
+    assert identity["realpath"] == str(target)
+    assert verify_shell_path_from_identity(identity) == str(target)
+
+    target.write_bytes(b"bash-v2")
+    assert verify_shell_path_from_identity(identity) is None
+
+
+def test_windows_wsl_alias_is_rejected_after_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    alias = r"C:\Windows\Temp\..\System32\bash.exe"
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_always(alias))
 
     assert resolve_verify_shell() is None
 

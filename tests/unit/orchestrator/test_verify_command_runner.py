@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,6 +13,7 @@ from ouroboros.orchestrator import verify_command_runner
 from ouroboros.orchestrator.verify_command_runner import (
     _spawn_kwargs,
     _terminate,
+    _WindowsJob,
     run_with_shell,
 )
 from ouroboros.orchestrator.verify_shell import resolve_verify_shell
@@ -81,14 +82,74 @@ async def test_windows_timeout_terminates_the_full_process_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
-    killer = SimpleNamespace(communicate=AsyncMock())
+    killer = SimpleNamespace(communicate=AsyncMock(), returncode=0)
     create = AsyncMock(return_value=killer)
     monkeypatch.setattr(verify_command_runner.asyncio, "create_subprocess_exec", create)
-    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=AsyncMock())
+    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=MagicMock())
 
     await _terminate(process)
 
     args = create.await_args.args
     assert args[0].endswith(r"System32\taskkill.exe")
     assert args[1:] == ("/PID", "321", "/T", "/F")
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_windows_taskkill_failure_has_bounded_parent_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+    killer = SimpleNamespace(communicate=AsyncMock(), returncode=1)
+    monkeypatch.setattr(
+        verify_command_runner.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=killer),
+    )
+    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=MagicMock())
+
+    await _terminate(process)
+
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["startup", "timeout"])
+async def test_windows_taskkill_operational_failure_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+    if failure == "startup":
+        create = AsyncMock(side_effect=OSError("taskkill unavailable"))
+    else:
+        killer = SimpleNamespace(
+            communicate=AsyncMock(side_effect=TimeoutError),
+            returncode=None,
+        )
+        create = AsyncMock(return_value=killer)
+    monkeypatch.setattr(verify_command_runner.asyncio, "create_subprocess_exec", create)
+    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=MagicMock())
+
+    await _terminate(process)
+
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_windows_job_close_terminates_tree_without_taskkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+    create = AsyncMock()
+    monkeypatch.setattr(verify_command_runner.asyncio, "create_subprocess_exec", create)
+    close = MagicMock()
+    job = _WindowsJob(handle=object(), close_handle=close)
+    process = SimpleNamespace(pid=321, wait=AsyncMock(), kill=MagicMock())
+
+    await _terminate(process, job)
+
+    close.assert_called_once()
+    create.assert_not_awaited()
     process.wait.assert_awaited_once()

@@ -220,37 +220,29 @@ Shipped:
   commands previously ran under `sh` — `dash` on Debian/Ubuntu. They now run
   under `bash`, or not at all. Two directions of change, both intended: a
   bashism that used to fail the gate now runs as authored, and a machine with
-  no bash now reports unverifiable (retryable) where it used to hand the
-  command to `sh` and record whatever that said.
-- **Part A, unverifiable outcome.** With no interpreter, the gate returns
-  `environment_unverifiable` and `verify_quarantine.py` marks the AC `FAILED`
-  with `FailureClass.VERIFY_ENVIRONMENT_UNAVAILABLE` (`RETRY` admission). The
-  run continues, the AC is never counted as a pass, the report lists it as
-  needing manual confirmation, and it **keeps its retries** — each attempt
-  re-resolves the shell, so an operator installing Git Bash or setting
-  `OUROBOROS_VERIFY_BASH` mid-run recovers the AC without restarting.
+  no Bash now reports verification unavailable; it never records a worker
+  failure or consumes a worker retry. The sealed resolved Bash identity is
+  selected once for the execution and revalidated by canonical path plus file
+  digest before a pending verifier subprocess starts. A changed or missing
+  identity remains unavailable rather than silently selecting a new executable.
+- **Part A, unavailable outcome.** `verify_quarantine.py` preserves a successful
+  worker result and emits an operator-visible unverified-success event. Startup
+  errors and timeouts use the same path. The final settlement revalidates
+  artifacts and workspace state but never turns unavailable verification into a
+  worker failure.
 
-  Supersedes this RFC's `environment_unverifiable` "quarantine" wording where
-  it implied a terminal state. `BLOCKED` was tried first and is wrong here:
-  `route_escalation` refuses to escalate a BLOCKED failure and raises
-  `HUMAN_HANDOFF_REQUIRED`, and `is_retryable_failure` drops it — correct for
-  "a human must intervene before anything proceeds", wrong for "this machine
-  is missing a shell and the next attempt may find one". Relatedly,
-  `resolve_verify_shell` caches only *successful* resolutions: a cached "no
-  shell" keyed on PATH would never notice a Git Bash install (discovered via
-  `%ProgramFiles%`) and would defeat the retry it exists to serve.
-- **Part B3, reclassification** — *ships in the stacked follow-up PR, not
-  this one* (only the `TRANSCRIPT_MISSING_INFRASTRUCTURE` failure class and
-  its retry policy land here; the producer follows). There, a fully empty
-  `support_messages` yields that class with the
-  `transcript_missing_infrastructure:` reason code and a `RETRY` admission,
-  instead of a generic evidence-missing worker rejection.
-- **Part B1, warn stage** — *ships in the stacked follow-up PR, not this
-  one*: `AcceptanceCriterionSpec.verify_exemption_reason` (authored as the
-  optional `exempt` key in the extraction JSON), `core/seed_verify_gate.py`,
-  and config `seed.verify_command_gate` (`warn` default, `block` available).
-  The gate runs at new-session preparation, so sessions already in flight
-  are never re-judged under a tightened gate.
+  `BLOCKED` and retryable failure classes remain reserved for worker/runtime
+  failures. Verifier infrastructure is a separate fact and does not enter
+  route escalation or worker redispatch.
+- **Part B3, transcript unavailability.** A fully empty `support_messages`
+  projection yields `VerifierStatus.UNAVAILABLE` with
+  `TRANSCRIPT_MISSING_INFRASTRUCTURE` and `ACCEPT` admission. Completed work is
+  retained as unverified success; no worker retry or redispatch occurs.
+- **Part B1, warn stage.** `AcceptanceCriterionSpec.verify_exemption_reason`
+  (authored as the optional `exempt` key), `core/seed_verify_gate.py`, and
+  config `seed.verify_command_gate` (`warn` default, `block` available) run at
+  new-session preparation. The exemption is mutually exclusive with a command
+  and survives acceptance normalization and semantic identity transfer.
 
 Deferred, with the reason:
 
@@ -260,13 +252,10 @@ Deferred, with the reason:
   calls; with no LLM tier wired, an on-disk cache for a four-syscall lookup
   would only add a staleness hazard. `resolve_verify_shell()` returning `None`
   is the seam these tiers would attach to.
-- **B3's "re-collect the transcript once" retry.** There is no durable per-AC
-  runtime transcript to re-read: `AgentMessage`s live only in the executor's
-  memory for the attempt, and the harness journal stores truncated
-  `args_preview` strings that cannot soundly back a full command claim.
-  Wiring this needs a durable transcript, which is new plumbing beyond this
-  RFC's "self-contained" scope. The reclassification above is what makes that
-  work routable when the transcript exists.
+- **Durable transcript re-collection.** There is no durable full per-AC tool
+  transcript to replay yet. Event-native acceptance contracts and trajectory
+  sealing are tracked separately; until then, missing transcript evidence stays
+  explicit `UNAVAILABLE` and never causes repeated provider work.
 - **B1's `block` default.** Shipped as `warn` per the staged rollout; flipping
   the default is Release N+1, after telemetry on existing seeds.
 

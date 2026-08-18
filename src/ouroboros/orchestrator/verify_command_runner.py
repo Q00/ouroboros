@@ -8,7 +8,7 @@ a subtly different command.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 from dataclasses import dataclass
 import os
@@ -31,6 +31,88 @@ class VerifyRun:
     start_error: str | None = None
 
 
+@dataclass(slots=True)
+class _WindowsJob:
+    handle: object
+    close_handle: Callable[[object], object]
+    closed: bool = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.close_handle(self.handle)
+
+
+def _create_windows_job(pid: int) -> _WindowsJob:
+    """Assign ``pid`` to a kill-on-close Windows Job Object."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_ulonglong)
+            for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )
+        ]
+
+    class _ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimitInformation),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    close = kernel32.CloseHandle
+    try:
+        limits = _ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+        process = kernel32.OpenProcess(0x0001 | 0x0100 | 0x1000, False, pid)
+        if not process:
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            if not kernel32.AssignProcessToJobObject(job, process):
+                raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+        finally:
+            close(process)
+    except Exception:
+        close(job)
+        raise
+    return _WindowsJob(job, close)
+
+
 def _running_on_windows() -> bool:
     return os.name == "nt"
 
@@ -42,8 +124,13 @@ def _spawn_kwargs() -> dict[str, object]:
     return {"start_new_session": True}
 
 
-async def _terminate_windows_process_tree(proc: asyncio.subprocess.Process) -> None:
-    """Use Windows' tree-aware terminator, never a shell command."""
+async def _terminate_windows_process_tree(
+    proc: asyncio.subprocess.Process, job: _WindowsJob | None = None
+) -> None:
+    """Terminate the whole verifier tree with a Job Object or bounded fallback."""
+    if job is not None:
+        job.close()
+        return
     system_root = os.environ.get("SYSTEMROOT", "").strip() or r"C:\Windows"
     taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
     try:
@@ -57,21 +144,28 @@ async def _terminate_windows_process_tree(proc: asyncio.subprocess.Process) -> N
             stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(killer.communicate(), timeout=5.0)
+        if killer.returncode != 0:
+            raise RuntimeError("taskkill failed")
     except Exception:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
 
-async def _terminate(proc: asyncio.subprocess.Process) -> None:
+async def _terminate(proc: asyncio.subprocess.Process, job: _WindowsJob | None = None) -> None:
     if _running_on_windows():
-        await _terminate_windows_process_tree(proc)
+        await _terminate_windows_process_tree(proc, job)
     else:
         import signal
 
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
-    with contextlib.suppress(Exception):
-        await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
 
 
 async def _run_process(
@@ -93,14 +187,25 @@ async def _run_process(
     except Exception as exc:  # pragma: no cover - spawn failure is environmental
         return VerifyRun(returncode=1, output="", start_error=str(exc))
 
+    job: _WindowsJob | None = None
+    if _running_on_windows():
+        try:
+            job = _create_windows_job(proc.pid)
+        except Exception as exc:
+            await _terminate(proc)
+            return VerifyRun(returncode=1, output="", start_error=str(exc))
+
     try:
         stdout_bytes, _ = await asyncio.wait_for(
             proc.communicate(),
             timeout=timeout_seconds,
         )
     except TimeoutError:
-        await _terminate(proc)
+        await _terminate(proc, job)
         return VerifyRun(returncode=1, output="", timed_out=True)
+    finally:
+        if job is not None:
+            job.close()
 
     return VerifyRun(
         returncode=proc.returncode if proc.returncode is not None else 1,

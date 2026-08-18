@@ -46,6 +46,7 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
 class _StubAdapter:
@@ -2072,7 +2073,8 @@ async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
     spec = AcceptanceCriterionSpec(description="ok", verify_command="exit 0")
     recorded: dict[str, Any] = {}
 
-    executor._verify_shell_path = "/bin/bash"
+    expected_shell = verify_shell_path_from_identity(executor._verify_shell_identity)
+    assert expected_shell is not None
     real_exec = asyncio.create_subprocess_exec
 
     async def spy_exec(*argv: str, **kwargs: Any) -> Any:
@@ -2084,7 +2086,7 @@ async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
     assert outcome.passed is True
-    assert recorded["argv"] == ("/bin/bash", "-c", "exit 0")
+    assert recorded["argv"] == (expected_shell, "-c", "exit 0")
 
 
 @pytest.mark.asyncio
@@ -2092,7 +2094,7 @@ async def test_verify_gate_quarantines_when_no_posix_shell_exists(tmp_path: Any)
     executor = _make_executor(working_directory=str(tmp_path))
     # No real shell means the arbitrary pipeline is unavailable, never emulated.
     spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
-    executor._verify_shell_path = None
+    executor._verify_shell_identity = None
 
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
@@ -2106,7 +2108,7 @@ async def test_unverifiable_ac_keeps_worker_success_without_retry(tmp_path: Any)
     executor = _make_executor(working_directory=str(tmp_path))
     spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
     seed = _seed_with_specs(spec)
-    executor._verify_shell_path = None
+    executor._verify_shell_identity = None
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ok",
@@ -2136,7 +2138,7 @@ async def test_final_settlement_preserves_unverified_success(tmp_path: Any) -> N
     executor = _make_executor(working_directory=str(tmp_path))
     spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok")
     seed = _seed_with_specs(spec)
-    executor._verify_shell_path = None
+    executor._verify_shell_identity = None
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ok",
