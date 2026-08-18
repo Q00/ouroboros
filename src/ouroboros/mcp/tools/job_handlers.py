@@ -23,6 +23,7 @@ from ouroboros.mcp.job_manager import (
     JobSnapshot,
     JobStatus,
 )
+from ouroboros.mcp.tools import host_dispatch_status
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
@@ -1218,48 +1219,13 @@ def _job_snapshot_meta(snapshot: JobSnapshot) -> dict[str, Any]:
     }
 
 
-def _pending_host_dispatches(bridge: Any | None, snapshot: Any) -> list[dict[str, Any]]:
-    """Return open host-execution dispatches correlated to this job's session.
-
-    Terminal jobs list nothing: a dispatch that outlived its job is stale by
-    definition and surfacing it would send the host to work for a run that can
-    no longer accept the result.
-    """
-    if bridge is None or snapshot.is_terminal:
-        return []
-    session_id = getattr(snapshot.links, "session_id", None)
-    try:
-        return list(bridge.pending_for_session(session_id))
-    except Exception:  # pragma: no cover - defensive: never break job polling
-        log.warning("mcp.tool.job.pending_host_dispatches_failed", exc_info=True)
-        return []
-
-
-def _pending_host_dispatch_suffix(pending: list[dict[str, Any]]) -> str:
-    return (
-        f"\n\nPending host dispatches: {len(pending)} — spawn one subagent per "
-        "entry in `meta.pending_host_dispatches`, giving it the entry's worker "
-        "`prompt` and running it in the entry's `subagents[0].context."
-        "working_directory`. Then call `ouroboros_submit_fanout_results` with "
-        "the entry's `fanout_id`, `session_id`, `correlation_key` = the "
-        "entry's `result_correlation_key`, and results = "
-        '[{"key": "result", "content": <the subagent\'s final output>}]. '
-        "Each dispatch is announced once — spawn each `dispatch_id` exactly "
-        "once, never again on later polls (a `reannounce: true` entry means "
-        "your earlier worker was lost; spawn again only then). Keep pumping "
-        "ouroboros_job_wait afterwards."
-    )
-
-
 @dataclass
 class JobStatusHandler:
     """Return a human-readable status summary for a background job."""
 
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
-    # HostDispatchBridge from the MCP composition root: open host-driven
-    # execution dispatches for this job ride along in ``meta`` so a pumping
-    # host learns what to spawn (see orchestrator.host_dispatch).
+    # See ``host_dispatch_status``: open dispatches ride along in ``meta``.
     host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -1317,9 +1283,11 @@ class JobStatusHandler:
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
 
-        pending_host_dispatches = _pending_host_dispatches(self.host_dispatch_bridge, snapshot)
+        pending_host_dispatches = host_dispatch_status.pending_host_dispatches(
+            self.host_dispatch_bridge, snapshot
+        )
         if pending_host_dispatches:
-            text += _pending_host_dispatch_suffix(pending_host_dispatches)
+            text += host_dispatch_status.pending_host_dispatch_suffix(pending_host_dispatches)
 
         return Result.ok(
             MCPToolResult(
@@ -1329,10 +1297,8 @@ class JobStatusHandler:
                     **_job_snapshot_meta(snapshot),
                     "view": view,
                     **progress,
-                    **(
-                        {"pending_host_dispatches": pending_host_dispatches}
-                        if pending_host_dispatches
-                        else {}
+                    **host_dispatch_status.pending_host_dispatches_meta_field(
+                        pending_host_dispatches
                     ),
                 },
             )
@@ -1493,11 +1459,13 @@ class JobWaitHandler:
                         "\n\nLive snapshot returned without long-polling; "
                         f"poll again with cursor={cached_snapshot.cursor}."
                     )
-                live_pending_dispatches = _pending_host_dispatches(
+                live_pending_dispatches = host_dispatch_status.pending_host_dispatches(
                     self.host_dispatch_bridge, cached_snapshot
                 )
                 if live_pending_dispatches:
-                    text += _pending_host_dispatch_suffix(live_pending_dispatches)
+                    text += host_dispatch_status.pending_host_dispatch_suffix(
+                        live_pending_dispatches
+                    )
                 result = MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                     is_error=_job_is_error(cached_snapshot),
@@ -1516,10 +1484,8 @@ class JobWaitHandler:
                         "stream_events": [],
                         "stream_has_more": False,
                         **progress,
-                        **(
-                            {"pending_host_dispatches": live_pending_dispatches}
-                            if live_pending_dispatches
-                            else {}
+                        **host_dispatch_status.pending_host_dispatches_meta_field(
+                            live_pending_dispatches
                         ),
                     },
                 )
@@ -1852,7 +1818,9 @@ class JobWaitHandler:
             )
         )
         stream_changed = bool(stream_items)
-        pending_host_dispatches = _pending_host_dispatches(self.host_dispatch_bridge, snapshot)
+        pending_host_dispatches = host_dispatch_status.pending_host_dispatches(
+            self.host_dispatch_bridge, snapshot
+        )
         response_changed = (
             changed
             or execution_progress_changed
@@ -1903,7 +1871,7 @@ class JobWaitHandler:
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
             text += _compact_stream_suffix(stream_items, snapshot.cursor, has_more=stream_has_more)
         if pending_host_dispatches:
-            text += _pending_host_dispatch_suffix(pending_host_dispatches)
+            text += host_dispatch_status.pending_host_dispatch_suffix(pending_host_dispatches)
         result = MCPToolResult(
             content=(MCPContentItem(type=ContentType.TEXT, text=text),),
             is_error=_job_is_error(snapshot),
@@ -1922,11 +1890,7 @@ class JobWaitHandler:
                 "relay_events": relay_events,
                 "stream_has_more": stream_has_more,
                 **progress,
-                **(
-                    {"pending_host_dispatches": pending_host_dispatches}
-                    if pending_host_dispatches
-                    else {}
-                ),
+                **host_dispatch_status.pending_host_dispatches_meta_field(pending_host_dispatches),
             },
         )
         log.debug(

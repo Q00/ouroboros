@@ -74,6 +74,11 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus
+from ouroboros.orchestrator.host_dispatch import (
+    HostDispatchBridge,
+    bind_host_dispatch_bridge,
+    reject_host_runtime_for_evolve,
+)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.job_manager import JobManager
@@ -1872,6 +1877,7 @@ def create_ouroboros_server(
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         await _ensure_evolution_store_initialized()
+        reject_host_runtime_for_evolve(execute_runtime_backend, phase="execution")
         task_cwd = evolutionary_loop.get_project_dir()
         runner_adapter = create_agent_runtime(
             backend=execute_runtime_backend,
@@ -1880,9 +1886,6 @@ def create_ouroboros_server(
             # Executor's internal LLM follows its own EXECUTE stage, not EVALUATE.
             llm_backend=execute_runtime_backend,
         )
-        # Late-bound name: assigned during composition, long before this
-        # closure ever runs. No-op unless the backend is ``host``.
-        bind_host_dispatch_bridge(runner_adapter, host_dispatch_bridge)
         _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
         _evo_mcp_prefix = (
             mcp_bridge.tool_prefix
@@ -2141,6 +2144,7 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
+        reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
         validation_adapter = create_agent_runtime(
             backend=execute_runtime_backend,
             model=validation_model,
@@ -2149,8 +2153,6 @@ def create_ouroboros_server(
             # Validation runs on the EXECUTE stage; align its internal LLM too.
             llm_backend=execute_runtime_backend,
         )
-        # Same late-bound composition names as the evolution executor above.
-        bind_host_dispatch_bridge(validation_adapter, host_dispatch_bridge)
 
         for attempt in range(1, max_attempts + 1):
             collect_result = await _run_collect()
@@ -2246,16 +2248,6 @@ def create_ouroboros_server(
         forced_inline_job_id=forced_inline_job_id,
     )
     session_signal_hub = SessionSignalHub(event_store=event_store)
-    # Host-driven execution bridge (orchestrator.host_dispatch): a sibling of
-    # the signal hub, deliberately not part of Synapse. Composed against the
-    # same durable fanout registry the advisory lanes use (built below) and
-    # threaded into the execute handler, the job pollers, and the fan-out
-    # submit handler. One bridge per server.
-    from ouroboros.orchestrator.host_dispatch import (
-        HostDispatchBridge,
-        bind_host_dispatch_bridge,
-    )
-
     session_signal_target_resolver = EventStoreSessionSignalTargetResolver(
         event_store=event_store,
         capabilities_by_backend={
@@ -2370,24 +2362,17 @@ def create_ouroboros_server(
     # ``fanout_id`` was ever stamped and the re-entry contract in
     # skills/interview/SKILL.md named a tool that was not there.
     #
-    # Built at its FINAL directory rather than at the default plus a later
-    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
-    # the mutable path never had a reason to exist here — and leaving it mutable
-    # is not free: a producer that registers before the first interview turn (a
-    # lateral panel) would have its record moved out from under an already
-    # issued fan-out id, whose valid submission then returns
+    # Built at its FINAL directory (``state_dir_path``, resolved above), not a
+    # mutable path re-rooted later: a producer registering before the first
+    # interview turn would otherwise have its record moved out from under an
+    # already-issued fan-out id, whose valid submission then returns
     # ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
     host_dispatch_bridge = HostDispatchBridge(fanout_registry)
-    # The default runtime and the execute handler were materialized before the
-    # registry (and therefore the bridge) existed; late-bind both. No-ops for
-    # every backend except ``host``.
     bind_host_dispatch_bridge(default_execute_runtime, host_dispatch_bridge)
     execute_seed.host_dispatch_bridge = host_dispatch_bridge
-    # Create the lifecycle owner before its production handlers. Raw builtin
-    # runtime interception calls handlers directly rather than through
-    # ``call_tool()``, so durable fan-out publication receives this same
-    # explicit readiness boundary as server transport requests.
+    # Lifecycle owner before its handlers: raw builtin interception calls
+    # handlers directly, bypassing ``call_tool()``'s readiness boundary.
     from ouroboros.backends import render_mcp_server_instructions
     from ouroboros.mcp.update_notice import append_cached_update_notice
 
