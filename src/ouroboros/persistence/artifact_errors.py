@@ -16,11 +16,7 @@ class ArtifactTombstonedError(ArtifactStoreError):
 
 
 class ArtifactIntegrityError(ArtifactStoreError):
-    """Raised when stored bytes do not match their content address."""
-
-
-class ArtifactManifestError(ArtifactStoreError):
-    """Raised when reachability cannot be established from durable metadata."""
+    """Raised when a stored body is not the JSON it has to be to be returned."""
 
 
 class ArtifactContractConflictError(ArtifactStoreError):
@@ -34,7 +30,6 @@ class ArtifactTooLargeError(ArtifactStoreError):
 __all__ = [
     "ArtifactContractConflictError",
     "ArtifactIntegrityError",
-    "ArtifactManifestError",
     "ArtifactNotFoundError",
     "ArtifactStoreError",
     "ArtifactTombstonedError",
