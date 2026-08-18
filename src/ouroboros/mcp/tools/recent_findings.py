@@ -41,6 +41,7 @@ it is what the RFC decided.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import json
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
@@ -71,10 +72,84 @@ _ELIGIBLE_FANOUT_KIND = "question_advisory"
 #: nothing about this project bounds how fast an external fact turns over.
 _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 
-#: How many findings a lane is handed. A bound on the prompt, not on the search:
+#: How many findings a lane is handed. A bound on attention, not on the search:
 #: the child reads these, and a project that ran all day should not spend its
-#: attention on the morning. Newest first, so what is cut is the oldest.
+#: attention on the morning. Newest first, so what is cut is the oldest. What
+#: bounds the prompt is the budget below -- twenty entries is a count, and a
+#: count says nothing about how much twenty of something is.
 _RECENT_FINDINGS_MAX_ENTRIES = 20
+
+#: How large the rendered block may be. Counting entries does not bound a
+#: prompt -- a finding is whatever a lane wrote, and the store admits a body of
+#: 1 MiB, so twenty of them is twenty megabytes into every lane of every turn.
+#: The number matches ``_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS``, the largest
+#: block an advisory prompt already carries; findings are evidence and may be
+#: the largest thing in it, but not by an order of magnitude.
+_RECENT_FINDINGS_MAX_CHARS = 24_000
+
+#: What a shortened finding says about itself, spelled the way every other
+#: bounded block in an advisory prompt spells it.
+_TRUNCATION_MARKER = "... [truncated]"
+
+
+def render_recent_findings(entries: list[dict]) -> str:
+    """Render the entries exactly as a prompt carries them.
+
+    The budget below and the prompt that receives it call this same function,
+    so there is no second rendering for a measurement to be taken against and
+    be wrong about. Encoded rather than written out: a finding may contain a
+    newline or a line that reads as a heading, and written plainly the tail of
+    one would become structure in whatever prompt holds it.
+    """
+    return json.dumps(entries, ensure_ascii=False, indent=2)
+
+
+def _within_prompt_budget(entries: list[dict]) -> list[dict]:
+    """Take the newest entries whose rendering fits, and never take none.
+
+    The budget is a ceiling with nothing added on top of it, so what a lane
+    receives is bounded by one number rather than by one number plus whatever
+    the largest single finding happened to be.
+
+    Which forces the last entry to be shortened rather than dropped, because a
+    budget that can return nothing would hand a lane the one state this whole
+    mechanism exists to prevent: silence that reads as "this project has
+    nothing" while it has something (RFC Q00/ouroboros#2168, carried from
+    #2167). A shortened finding is not that -- it says what it says up to the
+    cut and says that it was cut, and a lane investigates the rest the way it
+    would have anyway.
+    """
+    admitted: list[dict] = []
+    for entry in entries:
+        candidate = [*admitted, entry]
+        if len(render_recent_findings(candidate)) > _RECENT_FINDINGS_MAX_CHARS:
+            return admitted or [_shortened_to_fit(entry)]
+        admitted = candidate
+    return admitted
+
+
+def _shortened_to_fit(entry: dict) -> dict:
+    """Fit one finding that does not fit, by shortening what it reported.
+
+    The other fields stay whole: a contract id and a publication time cost
+    nothing and are what makes the entry legible as a finding at all. Only
+    ``output`` is shortened, and it becomes rendered text rather than staying
+    a structure, because half a structure is not one.
+
+    The loop rather than one slice: escaping expands, so the length of a
+    rendering is not the length of what was sliced. Each pass removes at least
+    the overflow it measured, and removing a source character never adds a
+    rendered one, so it terminates.
+    """
+    text = json.dumps(entry["output"], ensure_ascii=False)
+    keep = len(text)
+    while keep > 0:
+        candidate = {**entry, "output": text[:keep] + _TRUNCATION_MARKER}
+        overflow = len(render_recent_findings([candidate])) - _RECENT_FINDINGS_MAX_CHARS
+        if overflow <= 0:
+            return candidate
+        keep -= max(overflow, 1)
+    return {**entry, "output": _TRUNCATION_MARKER}
 
 
 def _eligible_lane_outputs(body: Any) -> list[tuple[str, Any]]:
@@ -107,6 +182,10 @@ def recent_findings_entries(
     One entry per eligible lane -- ``contract_id``, ``published_at``, ``lane_id``
     and ``output`` -- so what reaches the child is the finding and not a rule for
     extracting it.
+
+    Bounded by how much it renders to, not only by how many entries it is: this
+    is the retrieval interface, and how much comes back at once is its decision
+    to make.
 
     A store that cannot be read returns nothing, and so does a single record that
     cannot be read: the rest of the store still answers. This is advisory -- a
@@ -141,10 +220,11 @@ def recent_findings_entries(
                     "output": output,
                 }
             )
-    return entries[:_RECENT_FINDINGS_MAX_ENTRIES]
+    return _within_prompt_budget(entries[:_RECENT_FINDINGS_MAX_ENTRIES])
 
 
 __all__ = [
     "RECENT_FINDINGS_WINDOW",
     "recent_findings_entries",
+    "render_recent_findings",
 ]

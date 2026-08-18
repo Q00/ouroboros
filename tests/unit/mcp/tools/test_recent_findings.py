@@ -188,6 +188,50 @@ def test_the_lane_is_handed_the_finding_and_not_an_instruction_for_finding_it(
     assert "aggregated_outputs" not in prompt
 
 
+def test_many_large_findings_do_not_grow_a_lane_prompt_without_bound(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    """Counting entries is not a bound on a prompt.
+
+    A finding is whatever a lane wrote and the store admits a body of 1 MiB, so
+    twenty of them is twenty megabytes into every lane of every turn — past a
+    model's context, and paid for on every request that happens to follow a busy
+    day.
+    """
+    without_findings = _lane_prompts(_attach(roster, None))
+    for index in range(10):
+        _publish(store, claim="x" * 120_000 + f"-{index}")
+
+    prompts = _lane_prompts(_attach(roster, store))
+
+    for lane_id, prompt in prompts.items():
+        assert "## Recently Found Here" in prompt
+        # What findings may add to a prompt, which is the quantity that grows.
+        assert len(prompt) - len(without_findings[lane_id]) < 25_000
+
+
+def test_one_oversized_finding_is_shortened_rather_than_silently_dropped(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    """The budget may return less; it may never return nothing.
+
+    An empty block and a project with no findings are the same prompt, and a
+    lane told the second when the first is true re-investigates what was already
+    known — the one failure this whole mechanism exists to prevent. So a finding
+    too large to carry whole is carried short, and says so.
+    """
+    without_findings = _lane_prompts(_attach(roster, None))["code_context"]
+    _publish(store, claim="y" * 200_000)
+
+    entries = recent_findings_entries(store)
+    prompt = _lane_prompts(_attach(roster, store))["code_context"]
+
+    assert [entry["lane_id"] for entry in entries] == ["code_context"]
+    assert "yyyy" in prompt
+    assert "[truncated]" in prompt
+    assert len(prompt) - len(without_findings) < 25_000
+
+
 def test_a_finding_older_than_the_window_is_not_offered(
     store: ArtifactStore,
 ) -> None:

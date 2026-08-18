@@ -114,7 +114,7 @@ def _print_contract_body(project_dir: Path, contract_id: str, *, replay: bool) -
 
 @app.command("fetch")
 def fetch(
-    contract_id: Annotated[str, typer.Argument(help="Contract id holding the artifact ref.")],
+    contract_id: Annotated[str, typer.Argument(help="Contract id the artifact is bound to.")],
     project_dir: Annotated[
         Path,
         typer.Option("--project-dir", file_okay=False, dir_okay=True),

@@ -58,25 +58,26 @@ _DATABASE_FILENAME: Final[str] = "artifacts.db"
 # of every kind-filtered answer.
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS artifacts (
-  contract_id   TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
-  body          TEXT,
-  kind          TEXT GENERATED ALWAYS AS (json_extract(body,'$.kind')) VIRTUAL,
-  created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL,
-  duration_ms   INTEGER NOT NULL,
-  pruned_reason TEXT
+  contract_id          TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
+  body                 TEXT,
+  kind                 TEXT GENERATED ALWAYS AS (json_extract(body,'$.kind')) VIRTUAL,
+  runtime_id           TEXT NOT NULL,
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL,
+  duration_ms          INTEGER NOT NULL,
+  events_emitted_count INTEGER NOT NULL,
+  pruned_reason        TEXT
 )
 """
 
-# The envelope fields that used to describe the producing execution are fixed
-# constants now.  The store records the body and how long producing it took;
-# who ran the work and what it emitted were execution details, and the store
-# stopped keeping them.  The same constants are applied on the write return
-# and on every read, so the envelope a publisher receives is exactly the
-# envelope a later identical publication collapses into.
+# ``status`` is the one envelope field the store still assembles rather than
+# stores: a failed publication is never written, so the column would hold one
+# value forever.  ``runtime_id`` and ``events_emitted_count`` are not that
+# case and are stored -- they are the caller's, handed over exactly as ``body``
+# is, and returning what was handed over is the contract.  A store that
+# substitutes its own name for the producing runtime's is answering a question
+# it was not asked.
 _ENVELOPE_STATUS: Final[DisposableResultStatus] = DisposableResultStatus.COMPLETED
-_ENVELOPE_RUNTIME_ID: Final[str] = "artifact-store"
-_ENVELOPE_EVENTS_EMITTED_COUNT: Final[int] = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +124,12 @@ class ArtifactStore:
         artifact_root: Path,
         *,
         max_artifact_bytes: int = MAX_DISPOSABLE_ARTIFACT_BYTES,
-        project_root: Path | None = None,
     ) -> None:
         if not 0 < max_artifact_bytes <= MAX_DISPOSABLE_ARTIFACT_BYTES:
             raise ValueError(
                 "max_artifact_bytes must be positive and cannot exceed the 1 MiB hard cap"
             )
         self.root = Path(os.path.abspath(artifact_root.expanduser()))
-        self._project_root = project_root.expanduser().resolve() if project_root else None
         self.max_artifact_bytes = max_artifact_bytes
         self._database_path = self.root / _DATABASE_FILENAME
 
@@ -145,7 +144,6 @@ class ArtifactStore:
         return cls(
             project_dir.expanduser().resolve() / ".ouroboros" / "artifacts",
             max_artifact_bytes=max_artifact_bytes,
-            project_root=project_dir.expanduser().resolve(),
         )
 
     def initialize(self) -> None:
@@ -174,10 +172,10 @@ class ArtifactStore:
     ) -> DisposableResultEnvelope:
         """Publish a body and durably bind its bounded envelope to one contract.
 
-        ``runtime_id`` and ``events_emitted_count`` are accepted for the
-        caller's sake and deliberately not recorded: the envelope carries the
-        store's fixed constants so the write return and every later read of
-        the same contract agree.
+        ``runtime_id`` and ``events_emitted_count`` are recorded beside the
+        body, so the write return and every later read of the same contract
+        answer with what the publisher supplied rather than with a value the
+        store made up.
         """
         contract_id = _validate_contract_id(contract_id)
         payload = canonical_artifact_bytes(body)
@@ -190,7 +188,12 @@ class ArtifactStore:
                     "max_artifact_bytes": self.max_artifact_bytes,
                 },
             )
-        envelope = _envelope(contract_id, duration_ms=duration_ms)
+        envelope = _envelope(
+            contract_id,
+            runtime_id=runtime_id,
+            duration_ms=duration_ms,
+            events_emitted_count=events_emitted_count,
+        )
         body_text = payload.decode("utf-8")
         self.initialize()
         if precommit_check is not None:
@@ -207,9 +210,18 @@ class ArtifactStore:
                     with connection:
                         connection.execute(
                             "INSERT INTO artifacts"
-                            " (contract_id, body, created_at, updated_at, duration_ms)"
-                            " VALUES (?, ?, ?, ?, ?)",
-                            (contract_id, body_text, timestamp, timestamp, duration_ms),
+                            " (contract_id, body, runtime_id, created_at, updated_at,"
+                            "  duration_ms, events_emitted_count)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                contract_id,
+                                body_text,
+                                runtime_id,
+                                timestamp,
+                                timestamp,
+                                duration_ms,
+                                events_emitted_count,
+                            ),
                         )
                 except sqlite3.IntegrityError:
                     # A racing publisher won the contract key between the
@@ -248,26 +260,33 @@ class ArtifactStore:
         """
         contract_id = _validate_contract_id(contract_id)
         row = self._read_one(
-            "SELECT pruned_reason, duration_ms, updated_at FROM artifacts WHERE contract_id = ?",
+            "SELECT pruned_reason, runtime_id, duration_ms, events_emitted_count, updated_at"
+            " FROM artifacts WHERE contract_id = ?",
             contract_id,
         )
         if row is None:
             return None
-        pruned_reason, duration_ms, updated_at = row
+        pruned_reason, runtime_id, duration_ms, events_emitted_count, updated_at = row
         if pruned_reason is not None:
             raise _tombstoned_read_error(contract_id, tombstoned_at=updated_at)
-        return _envelope(contract_id, duration_ms=duration_ms)
+        return _envelope(
+            contract_id,
+            runtime_id=runtime_id,
+            duration_ms=duration_ms,
+            events_emitted_count=events_emitted_count,
+        )
 
     def fetch_if_exists(self, contract_id: str) -> FetchedArtifact | None:
         """Fetch a durable contract, returning ``None`` only when none exists."""
         contract_id = _validate_contract_id(contract_id)
         row = self._read_one(
-            "SELECT body, duration_ms, updated_at FROM artifacts WHERE contract_id = ?",
+            "SELECT body, runtime_id, duration_ms, events_emitted_count, updated_at"
+            " FROM artifacts WHERE contract_id = ?",
             contract_id,
         )
         if row is None:
             return None
-        body_text, duration_ms, updated_at = row
+        body_text, runtime_id, duration_ms, events_emitted_count, updated_at = row
         # An absent body means pruned, and nothing else can mean it: a
         # published body that is JSON ``null`` was stored as the four-byte
         # text ``null``, so SQL NULL here is only ever what pruning wrote.
@@ -282,7 +301,12 @@ class ArtifactStore:
                 details={"contract_id": contract_id},
             ) from exc
         return FetchedArtifact(
-            envelope=_envelope(contract_id, duration_ms=duration_ms),
+            envelope=_envelope(
+                contract_id,
+                runtime_id=runtime_id,
+                duration_ms=duration_ms,
+                events_emitted_count=events_emitted_count,
+            ),
             body=body,
         )
 
@@ -358,6 +382,11 @@ class ArtifactStore:
         NULL`` guard on the UPDATE makes applying idempotent under concurrent
         pruners: whichever writes first removes the bytes, and the other
         counts nothing.
+
+        Clearing a column only frees its pages back to the database, so an
+        applied prune that removed anything is followed by ``VACUUM``: a report
+        that says bytes were removed has to mean the disk got them back, not
+        that a file of the same size now has room inside it.
         """
         if ttl.total_seconds() < 0:
             raise ValueError("ttl must not be negative")
@@ -390,6 +419,10 @@ class ArtifactStore:
                         if cursor.rowcount == 1:
                             removed_contract_ids.append(candidate.contract_id)
                             removed_bytes += candidate.body_bytes
+                if removed_contract_ids:
+                    # Outside the transaction above: VACUUM rebuilds the file
+                    # and cannot run inside one.
+                    connection.execute("VACUUM")
         except sqlite3.Error as exc:
             raise ArtifactStoreError(
                 "Artifact pruning failed",
@@ -444,7 +477,8 @@ def _select_publication(
     contract_id: str,
 ) -> tuple[Any, ...] | None:
     return connection.execute(
-        "SELECT body, pruned_reason, duration_ms FROM artifacts WHERE contract_id = ?",
+        "SELECT body, pruned_reason, runtime_id, duration_ms, events_emitted_count"
+        " FROM artifacts WHERE contract_id = ?",
         (contract_id,),
     ).fetchone()
 
@@ -455,7 +489,13 @@ def _resolve_existing_row(
     body_text: str,
 ) -> DisposableResultEnvelope:
     """Decide what one already-published contract means for this arrival."""
-    stored_body, pruned_reason, stored_duration_ms = row
+    (
+        stored_body,
+        pruned_reason,
+        stored_runtime_id,
+        stored_duration_ms,
+        stored_events_emitted_count,
+    ) = row
     if pruned_reason is not None:
         raise ArtifactTombstonedError(
             "Contract artifact was pruned; allocate a new contract id to rerun",
@@ -463,9 +503,15 @@ def _resolve_existing_row(
             details={"contract_id": contract_id},
         )
     if stored_body == body_text:
-        # The stored publication won; its duration is the one on record, not
-        # whatever this arriving call measured.
-        return _envelope(contract_id, duration_ms=stored_duration_ms)
+        # The stored publication won, so its provenance is the one on record --
+        # its duration, its runtime and its event count, not whatever this
+        # arriving call measured or claims to be.
+        return _envelope(
+            contract_id,
+            runtime_id=stored_runtime_id,
+            duration_ms=stored_duration_ms,
+            events_emitted_count=stored_events_emitted_count,
+        )
     raise ArtifactContractConflictError(
         "Contract id is already bound to a different artifact",
         operation="write",
@@ -473,14 +519,20 @@ def _resolve_existing_row(
     )
 
 
-def _envelope(contract_id: str, *, duration_ms: int) -> DisposableResultEnvelope:
+def _envelope(
+    contract_id: str,
+    *,
+    runtime_id: str,
+    duration_ms: int,
+    events_emitted_count: int,
+) -> DisposableResultEnvelope:
     """Assemble the one envelope shape every store answer uses."""
     return DisposableResultEnvelope(
         contract_id=contract_id,
         result=DisposableResultSummary(status=_ENVELOPE_STATUS),
-        runtime_id=_ENVELOPE_RUNTIME_ID,
+        runtime_id=runtime_id,
         duration_ms=duration_ms,
-        events_emitted_count=_ENVELOPE_EVENTS_EMITTED_COUNT,
+        events_emitted_count=events_emitted_count,
     )
 
 

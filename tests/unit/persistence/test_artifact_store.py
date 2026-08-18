@@ -40,15 +40,17 @@ def _put(
     body: object,
     *,
     duration_ms: int = 12,
+    runtime_id: str = "test-runtime",
+    events_emitted_count: int = 3,
     precommit_check: Any = None,
     commit_check: Any = None,
 ):
     return store.put_for_contract(
         contract_id=contract_id,
         body=body,
-        runtime_id="test-runtime",
+        runtime_id=runtime_id,
         duration_ms=duration_ms,
-        events_emitted_count=3,
+        events_emitted_count=events_emitted_count,
         precommit_check=precommit_check,
         commit_check=commit_check,
     )
@@ -95,6 +97,62 @@ def test_identical_republication_returns_stored_envelope_and_writes_nothing(
     assert second == first
     assert second.duration_ms == 12
     assert _row(store, "CONTRACT1") == stored_row
+
+
+def test_publisher_provenance_is_returned_rather_than_replaced(tmp_path: Path) -> None:
+    """What the publisher handed over comes back, on the write and on every read.
+
+    ``runtime_id`` and ``events_emitted_count`` arrive on the same call as the
+    body, and ``docs/events.md`` defines the first as the runtime that produced
+    the artifact.  A store that answers with a name of its own is answering a
+    question it was not asked.
+    """
+    store = _store(tmp_path)
+    written = _put(
+        store,
+        "CONTRACT1",
+        {"version": 1},
+        runtime_id="mcp:fanout-synthesis:v2",
+        events_emitted_count=9,
+    )
+
+    assert written.runtime_id == "mcp:fanout-synthesis:v2"
+    assert written.events_emitted_count == 9
+    for read in (
+        store.fetch("CONTRACT1").envelope,
+        store.envelope_if_exists("CONTRACT1"),
+        store.replay("CONTRACT1").envelope,
+    ):
+        assert read == written
+
+    # A second identical publication collapses into the stored one, so the
+    # provenance on record wins over whatever this arrival claims to be.
+    collapsed = _put(
+        store,
+        "CONTRACT1",
+        {"version": 1},
+        runtime_id="some-other-runtime",
+        events_emitted_count=0,
+    )
+    assert collapsed == written
+
+
+def test_applied_prune_returns_the_space_rather_than_only_the_row(tmp_path: Path) -> None:
+    """A report that says bytes were removed has to mean the disk got them back.
+
+    Clearing a column frees pages inside the database and leaves the file the
+    size it was, which would make the CLI's byte count a claim about space no
+    one can spend.
+    """
+    store = _store(tmp_path)
+    _put(store, "CONTRACT1", {"payload": "x" * 400_000})
+    _age(store, "CONTRACT1", days=200)
+    size_before = _database_path(store).stat().st_size
+
+    report = store.prune(apply=True, now=NOW)
+
+    assert report.removed_bytes > 300_000
+    assert _database_path(store).stat().st_size < size_before - report.removed_bytes // 2
 
 
 def test_contract_id_cannot_be_reused_for_different_content(tmp_path: Path) -> None:

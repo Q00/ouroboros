@@ -39,7 +39,7 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_task,
 )
 from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
-from ouroboros.mcp.tools.recent_findings import recent_findings_entries
+from ouroboros.mcp.tools.recent_findings import recent_findings_entries, render_recent_findings
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -320,13 +320,10 @@ def _recent_findings_section(request: Mapping[str, Any]) -> str:
     entries = list(raw) if isinstance(raw, (list, tuple)) else []
     if not entries:
         return ""
-    # Rendered as JSON rather than as prose or a Markdown list. A finding is
-    # whatever a child wrote, so it may legitimately contain a newline or a line
-    # that reads as a heading -- written plainly, the tail of one would become
-    # structure in this prompt, and the reader would receive neither a usable
-    # finding nor the framing this block intended. Encoding makes each value
-    # survive as exactly one value whatever it contains.
-    listing = json.dumps(entries, ensure_ascii=False, indent=2)
+    # Rendered by the retrieval module rather than here, because that is where
+    # the size of this block was decided and a budget measured against a
+    # different rendering than the one that ships is not a budget.
+    listing = render_recent_findings(entries)
     return f"""## Recently Found Here
 Advisory lanes have run in this project recently. These are what they found,
 newest first, as JSON — encoded rather than written out, since a finding may
