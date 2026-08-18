@@ -59,8 +59,8 @@ identity anchors only, not a source for reconstructing executable fields. If
 structured and inline contracts differ or validation fails, stop on
 transport-integrity failure.
 
-Delegate the contract to exactly one native Codex subagent session. That
-observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,
+When the response exposes an observer contract, explicitly delegate that object to exactly one native Codex subagent session.
+That observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,
 `ouroboros_job_result`, and any downstream job IDs named by
 `follow_result_job_keys`. Keep the main session available for the user; do not
 poll the same job from both sessions. The main session may perform an on-demand
