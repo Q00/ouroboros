@@ -839,9 +839,14 @@ async def _start_workflow(
     # Nothing is caught here. `_run_orchestrator` signals every failure —
     # unloadable Seed, unsafe project path, workspace error, failed execution —
     # as `typer.Exit(1)` and has no zero-code exit to absorb, so catching it
-    # printed the error and still finished `init start` successfully. A caller
-    # in a script cannot tell a built product from a failed one, and Ctrl+C read
-    # the same way. Sharing the run command's path means sharing its exit code.
+    # printed the error and still finished `init start` successfully: a caller
+    # in a script could not tell a built product from a failed one.
+    #
+    # `KeyboardInterrupt` is not caught either, but that is about ownership, not
+    # exit codes. The command wrapper below still answers Ctrl+C with exit 0 and
+    # "Interview interrupted. Progress has been saved.", which is the policy for
+    # an interactive command; the point is that one place decides it instead of
+    # this handoff printing a competing line on the way there.
     from ouroboros.cli.commands.run import _run_orchestrator
 
     await _run_orchestrator(
