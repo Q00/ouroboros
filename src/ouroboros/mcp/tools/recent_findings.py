@@ -25,13 +25,20 @@ and ``data_context`` -- the lanes reporting on the system -- and since one
 submission can carry six lanes, eligibility is read per lane and only the
 eligible lanes of a body travel onward.
 
-What travels is the finding itself, one flat entry per eligible lane. The
-narrowing happens here, where the eligible-lane rule already lives, so the child
-is handed evidence rather than a place to look and a rule for looking. Handing
-over the place cost a lane its findings once: told to select from a body it had
-to open, it selected against the wrong shape, found nothing, and re-investigated
--- silently, since a lane with nothing to reuse looks exactly like a project
-with nothing to reuse.
+What travels is where a finding is -- a contract id and a publication time --
+and a lane fetches its own. Bodies travelled once and could not: the same block
+was copied into every lane of the turn, the tool result outgrew what a host
+takes inline, and the turn lost its fan-out entirely.
+
+The narrowing still happens here, which is what keeps the old failure from
+returning. A lane is given its own lane's ids (RFC Q00/ouroboros#2167), so there
+is no selecting left for the child and no rule for it to carry out. That rule
+once cost a lane its findings: told to select from a body it had to open, it
+selected against the wrong shape, found nothing, and re-investigated -- silently,
+since a lane with nothing to reuse looks exactly like a project with nothing to
+reuse. Which is why the count travels beside the ids: a lane that cannot reach
+the fetch tool still knows something is there, and can say so instead of
+reporting emptiness.
 
 Freshness is the window and nothing else. Nothing here re-establishes at read
 time that a finding still holds: drift inside the window is not a gap left open,
@@ -40,8 +47,8 @@ it is what the RFC decided.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
-import json
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
@@ -79,124 +86,74 @@ _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 #: count says nothing about how much twenty of something is.
 _RECENT_FINDINGS_MAX_ENTRIES = 20
 
-#: How large the rendered block may be. Counting entries does not bound a
-#: prompt -- a finding is whatever a lane wrote, and the store admits a body of
-#: 1 MiB, so twenty of them is twenty megabytes into every lane of every turn.
-#: The number matches ``_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS``, the largest
-#: block an advisory prompt already carries; findings are evidence and may be
-#: the largest thing in it, but not by an order of magnitude.
-_RECENT_FINDINGS_MAX_CHARS = 24_000
 
-#: What a shortened finding says about itself, spelled the way every other
-#: bounded block in an advisory prompt spells it.
-_TRUNCATION_MARKER = "... [truncated]"
-
-
-def render_recent_findings(entries: list[dict]) -> str:
-    """Render the entries exactly as a prompt carries them.
-
-    The budget below and the prompt that receives it call this same function,
-    so there is no second rendering for a measurement to be taken against and
-    be wrong about. Encoded rather than written out: a finding may contain a
-    newline or a line that reads as a heading, and written plainly the tail of
-    one would become structure in whatever prompt holds it.
-    """
-    return json.dumps(entries, ensure_ascii=False, indent=2)
-
-
-def _within_prompt_budget(entries: list[dict]) -> list[dict]:
-    """Take the newest entries whose rendering fits, and never take none.
-
-    The budget is a ceiling with nothing added on top of it, so what a lane
-    receives is bounded by one number rather than by one number plus whatever
-    the largest single finding happened to be.
-
-    Which forces the last entry to be shortened rather than dropped, because a
-    budget that can return nothing would hand a lane the one state this whole
-    mechanism exists to prevent: silence that reads as "this project has
-    nothing" while it has something (RFC Q00/ouroboros#2168, carried from
-    #2167). A shortened finding is not that -- it says what it says up to the
-    cut and says that it was cut, and a lane investigates the rest the way it
-    would have anyway.
-    """
-    admitted: list[dict] = []
-    for entry in entries:
-        candidate = [*admitted, entry]
-        if len(render_recent_findings(candidate)) > _RECENT_FINDINGS_MAX_CHARS:
-            return admitted or [_shortened_to_fit(entry)]
-        admitted = candidate
-    return admitted
-
-
-def _shortened_to_fit(entry: dict) -> dict:
-    """Fit one finding that does not fit, by shortening what it reported.
-
-    The other fields stay whole: a contract id and a publication time cost
-    nothing and are what makes the entry legible as a finding at all. Only
-    ``output`` is shortened, and it becomes rendered text rather than staying
-    a structure, because half a structure is not one.
-
-    The loop rather than one slice: escaping expands, so the length of a
-    rendering is not the length of what was sliced. Each pass removes at least
-    the overflow it measured, and removing a source character never adds a
-    rendered one, so it terminates.
-    """
-    text = json.dumps(entry["output"], ensure_ascii=False)
-    keep = len(text)
-    while keep > 0:
-        candidate = {**entry, "output": text[:keep] + _TRUNCATION_MARKER}
-        overflow = len(render_recent_findings([candidate])) - _RECENT_FINDINGS_MAX_CHARS
-        if overflow <= 0:
-            return candidate
-        keep -= max(overflow, 1)
-    return {**entry, "output": _TRUNCATION_MARKER}
-
-
-def _eligible_lane_outputs(body: Any) -> list[tuple[str, Any]]:
-    """Return ``(lane_id, output)`` for the lanes of one body this decision admits.
+def _eligible_lane_ids(body: Any) -> set[str]:
+    """Return which eligible lanes one published body carries.
 
     The fan-out kind was already decided by the store's query; what is judged
     here is the lanes. Empty for a body whose lanes are all ineligible -- an
     interview turn runs six lanes, and a contrarian's challenge reused as
     evidence answers a question nobody asked.
+
+    Only the lane ids are read. What a lane *wrote* stays in the store and is
+    reached by the lane itself, so nothing here carries a body onward.
     """
     if not isinstance(body, dict):
-        return []
+        return set()
     result = body.get("result")
     if not isinstance(result, dict):
-        return []
+        return set()
     outputs = result.get("aggregated_outputs")
     if not isinstance(outputs, list):
-        return []
-    return [
-        (entry["lane_id"], entry.get("output"))
+        return set()
+    return {
+        entry["lane_id"]
         for entry in outputs
         if isinstance(entry, dict) and entry.get("lane_id") in _ELIGIBLE_LANE_IDS
-    ]
+    }
 
 
-def recent_findings_entries(
+def recent_findings_by_lane(
     findings_store: ArtifactStore | None,
     *,
+    lanes: Collection[str] | None = None,
     now: datetime | None = None,
-) -> list[dict]:
-    """Return this project's recently published eligible findings, newest first.
+) -> dict[str, list[dict]]:
+    """Return, per eligible lane, the recent findings that lane itself published.
 
-    One entry per eligible lane -- ``contract_id``, ``published_at``, ``lane_id``
-    and ``output`` -- so what reaches the child is the finding and not a rule for
-    extracting it.
+    Keyed by lane id, and a lane with none is absent rather than empty. What
+    each entry carries is ``contract_id`` and ``published_at`` -- where the
+    finding is and when it was made, never what it said. A lane reads its own
+    with ``ouroboros_fetch_artifact``.
 
-    Bounded by how much it renders to, not only by how many entries it is: this
-    is the retrieval interface, and how much comes back at once is its decision
-    to make.
+    **Bodies do not travel, and that is the whole of it.** They did once: every
+    lane of the turn received every eligible finding inline, so one turn carried
+    six copies of the same text and the tool result outgrew what a host will
+    take inline. Written to a file instead, it stopped being a fan-out at all --
+    the host spent the turn reading its own output rather than dispatching. Ids
+    cost the same whatever a lane wrote.
 
-    A store that cannot be read returns nothing, and so does a single record that
-    cannot be read: the rest of the store still answers. This is advisory -- a
-    lane that is handed no findings investigates the way it always did, and
-    raising here would cost the user their question to save the child a shortcut.
+    **A lane is offered only its own** (RFC Q00/ouroboros#2167). The four
+    reasoning lanes are absent from this mapping: a lane that produces no fact
+    that keeps consumes none either, and handing one a code fact is a new
+    capability rather than a cache hit.
+
+    ``lanes`` narrows it further to the lanes of a particular tool that can
+    read at all -- a caller passing none of them gets an empty mapping, which
+    is the honest answer for a tool whose every lane answers under a closed
+    contract. Absent, every eligible lane is returned.
+
+    A store that cannot be read returns nothing, and so does a single record
+    that cannot be read: the rest of the store still answers. This is advisory
+    -- a lane offered no findings investigates the way it always did, and
+    raising here would cost the user their question to save the child a
+    shortcut.
     """
     if findings_store is None:
-        return []
+        return {}
+    readable = _ELIGIBLE_LANE_IDS if lanes is None else _ELIGIBLE_LANE_IDS & set(lanes)
+    if not readable:
+        return {}
     effective_now = now or datetime.now(UTC)
     try:
         published_contracts = findings_store.published_contracts(
@@ -205,14 +162,16 @@ def recent_findings_entries(
             kind=_ELIGIBLE_FANOUT_KIND,
         )
     except (ArtifactStoreError, OSError):
-        return []
-    entries: list[dict] = []
+        return {}
+    by_lane: dict[str, list[dict]] = {}
     for published in published_contracts:
-        if len(entries) >= _RECENT_FINDINGS_MAX_ENTRIES:
+        if by_lane.keys() >= readable and all(
+            len(found) >= _RECENT_FINDINGS_MAX_ENTRIES for found in by_lane.values()
+        ):
             break
         try:
             fetched = findings_store.fetch(published.contract_id)
-            lanes = _eligible_lane_outputs(fetched.body)
+            carried = _eligible_lane_ids(fetched.body)
         except Exception:
             # Reading the record's shape is inside the boundary, not after it.
             # A body is whatever was published, so the shapes it can take are
@@ -220,20 +179,20 @@ def recent_findings_entries(
             # outside the boundary costs every later finding in the window, not
             # just its own.
             continue
-        for lane_id, output in lanes:
-            entries.append(
+        for lane_id in sorted(carried & readable):
+            found = by_lane.setdefault(lane_id, [])
+            if len(found) >= _RECENT_FINDINGS_MAX_ENTRIES:
+                continue
+            found.append(
                 {
                     "contract_id": published.contract_id,
                     "published_at": published.published_at.isoformat(),
-                    "lane_id": lane_id,
-                    "output": output,
                 }
             )
-    return _within_prompt_budget(entries[:_RECENT_FINDINGS_MAX_ENTRIES])
+    return by_lane
 
 
 __all__ = [
     "RECENT_FINDINGS_WINDOW",
-    "recent_findings_entries",
-    "render_recent_findings",
+    "recent_findings_by_lane",
 ]

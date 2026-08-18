@@ -1058,26 +1058,36 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "description": "The already user-visible MCP interview question.",
             },
             "recent_findings": {
-                "type": "array",
-                "maxItems": 20,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["contract_id", "published_at", "lane_id", "output"],
-                    "properties": {
-                        "contract_id": {"type": "string", "minLength": 1},
-                        "published_at": {"type": "string", "minLength": 1},
-                        "lane_id": {"type": "string", "enum": ["code_context", "data_context"]},
-                        "output": {},
-                    },
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    lane: {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["contract_id", "published_at"],
+                            "properties": {
+                                "contract_id": {"type": "string", "minLength": 1},
+                                "published_at": {"type": "string", "minLength": 1},
+                            },
+                        },
+                    }
+                    for lane in ("code_context", "data_context")
                 },
                 "description": (
-                    "Findings this project published recently, newest first, one "
-                    "entry per eligible lane, for a lane to read before "
-                    "investigating. Already narrowed to the lanes RFC "
-                    "Q00/ouroboros#2153 admits, so the reader has nothing left to "
-                    "select. Absent when the project has published nothing recent, "
-                    "so a lane is never sent to an empty place."
+                    "Where this project's recent findings are, keyed by the lane "
+                    "that produced them: a lane is offered only its own, and the "
+                    "reasoning lanes are absent because a lane that produces no "
+                    "fact that keeps consumes none either (RFC "
+                    "Q00/ouroboros#2167). Each entry is a contract_id to fetch "
+                    "with ouroboros_fetch_artifact and when it was published. "
+                    "Bodies do not travel: carried inline they were duplicated "
+                    "into every lane of the turn, which outgrew what a host "
+                    "accepts inline and cost the turn its fan-out. A lane with "
+                    "none is absent, as is the whole field when the project has "
+                    "published nothing recent."
                 ),
             },
             "last_question": {
