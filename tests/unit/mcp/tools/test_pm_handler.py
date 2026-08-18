@@ -1000,3 +1000,56 @@ async def test_legacy_pm_engine_checks_completion_before_asking_question(
     engine.check_completion.assert_awaited_once_with(state)
     engine.complete_interview.assert_awaited_once_with(state)
     engine.ask_next_question.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "classification", "expected_item"),
+    [
+        ("[decide_later]", "decide_later", "Q4"),
+        ("[deferred]", "deferred", "Q4"),
+    ],
+)
+async def test_skip_metadata_survives_atomic_planner_failure(
+    tmp_path: Path,
+    answer: str,
+    classification: str,
+    expected_item: str,
+) -> None:
+    from ouroboros.core.errors import ProviderError
+
+    engine = PMInterviewEngine.create(
+        llm_adapter=MagicMock(),
+        model="test-model",
+        state_dir=tmp_path,
+    )
+    state = InterviewState(
+        interview_id=f"pm_skip_{classification}",
+        initial_context="ctx",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3", user_response="A3"),
+            InterviewRound(round_number=4, question="Q4", user_response=None),
+        ],
+    )
+    assert (await engine.save_state(state)).is_ok
+    engine.classifications.append(_make_classification(ClassifierOutputType(classification)))
+    engine.plan_next_turn = AsyncMock(return_value=Result.err(ProviderError("timeout")))
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {"session_id": state.interview_id, "answer": answer, "cwd": str(tmp_path)}
+    )
+
+    assert result.is_ok
+    reloaded_engine = PMInterviewEngine.create(
+        llm_adapter=MagicMock(),
+        model="test-model",
+        state_dir=tmp_path,
+    )
+    meta = _load_pm_meta(state.interview_id, tmp_path)
+    assert meta is not None
+    reloaded_engine.restore_meta(meta)
+    combined = reloaded_engine.deferred_items + reloaded_engine.decide_later_items
+    assert expected_item in combined

@@ -1510,6 +1510,9 @@ class PMInterviewHandler:
                         tool_name="ouroboros_pm_interview",
                     )
                 )
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
+
+        completion: dict[str, Any] | None = None
         supports_atomic_turn = (
             isinstance(PMInterviewEngine, type)
             and isinstance(engine, PMInterviewEngine)

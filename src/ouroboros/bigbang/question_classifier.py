@@ -325,7 +325,10 @@ class QuestionClassifier:
         if not isinstance(data, dict):
             raise ValueError("classification payload must be a JSON object")
 
-        category_str = data.get("category", "planning").lower()
+        raw_category = data.get("category", "planning")
+        if not isinstance(raw_category, str):
+            raise ValueError("classification category must be a string")
+        category_str = raw_category.lower()
         if category_str == "decide_later":
             category = QuestionCategory.DECIDE_LATER
         elif category_str == "development":
@@ -334,7 +337,7 @@ class QuestionClassifier:
             category = QuestionCategory.PLANNING
 
         reframed = data.get("reframed_question", original_question)
-        if not reframed or not reframed.strip():
+        if not isinstance(reframed, str) or not reframed.strip():
             reframed = original_question
 
         is_decide_later = bool(data.get("decide_later", False))

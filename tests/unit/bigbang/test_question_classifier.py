@@ -560,3 +560,14 @@ def test_shared_classification_policy_omits_standalone_response_schema() -> None
     assert "**DECIDE_LATER**" in policy
     assert "## Response Format" not in policy
     assert "Respond ONLY with valid JSON" not in policy
+
+
+@pytest.mark.parametrize("category", [None, 7, []])
+def test_parse_rejects_non_string_category(category) -> None:
+    classifier = QuestionClassifier(llm_adapter=MagicMock())
+
+    with pytest.raises(ValueError, match="category must be a string"):
+        classifier._parse_response(
+            json.dumps({"category": category, "reframed_question": "Question?"}),
+            "Question?",
+        )
