@@ -1817,26 +1817,6 @@ async def test_spawn_enters_work_fn_cancelled_when_persisted_cancel_exists(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_spawn_rejects_process_id_in_cancel_control_namespace(tmp_path) -> None:
-    """Caller-supplied process IDs must not collide with cancel-control keys."""
-    from ouroboros.persistence.checkpoint import CheckpointStore
-
-    store = CheckpointStore(base_path=tmp_path)
-    store.initialize()
-    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
-
-    async def work(handle):
-        return None
-
-    with pytest.raises(ValueError):
-        await process.spawn(
-            intent="reserved",
-            process_id="__ouroboros_agent_process_cancel__:external",
-            work_fn=work,
-        )
-
-
-@pytest.mark.asyncio
 async def test_spawn_returns_cancelled_when_cancel_consumption_fails(tmp_path) -> None:
     """Consume cleanup failure must not escape after CANCELLED is recorded."""
     from ouroboros.core.errors import PersistenceError
@@ -1998,26 +1978,6 @@ def test_load_persisted_cancel_consumed_marker_beats_older_cancel(tmp_path) -> N
 
     assert found is False
     assert reason is None
-
-
-@pytest.mark.asyncio
-async def test_spawn_rejects_sanitized_process_id_cancel_control_collision(tmp_path) -> None:
-    """IDs that sanitize into the reserved cancel namespace must be rejected."""
-    from ouroboros.persistence.checkpoint import CheckpointStore
-
-    store = CheckpointStore(base_path=tmp_path)
-    store.initialize()
-    process = AgentProcess(event_store=_FakeEventStore(), checkpoint_store=store)
-
-    async def work(handle):
-        return None
-
-    with pytest.raises(ValueError):
-        await process.spawn(
-            intent="reserved-sanitized",
-            process_id="__ouroboros/agent_process_cancel__:external",
-            work_fn=work,
-        )
 
 
 @pytest.mark.asyncio
@@ -3231,3 +3191,63 @@ async def test_cancel_drain_grace_bounds_uncooperative_work(monkeypatch) -> None
     release.set()
     leftovers = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     await asyncio.gather(*leftovers, return_exceptions=True)
+
+
+def test_cancel_authority_never_crosses_between_distinct_process_ids(tmp_path) -> None:
+    """Two ids that a filename cannot tell apart still get their own cancel state.
+
+    The seed becomes a filename, and the checkpoint store maps ``/``, ``:`` and
+    several other characters onto ``_``. Embedded verbatim, ``a:b`` and ``a_b``
+    named one checkpoint — so cancelling one process cancelled a different one,
+    and a live producer already sat in that space: background MCP jobs use
+    ``mcp_job:<id>`` as their cancel key.
+    """
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+
+    for cancelled, bystander in (("a:b", "a_b"), ("a/b", "a_b"), ("mcp_job:7", "mcp_job_7")):
+        AgentProcessHandle.persist_cancel_signal(cancelled, store=store, reason=f"stop {cancelled}")
+
+        assert AgentProcessHandle.load_persisted_cancel(cancelled, store=store) == (
+            True,
+            f"stop {cancelled}",
+        )
+        assert AgentProcessHandle.load_persisted_cancel(bystander, store=store) == (False, None)
+
+
+@pytest.mark.parametrize(
+    "lookalike",
+    [
+        "__ouroboros_agent_process_cancel__:external",
+        "__ouroboros/agent_process_cancel__:external",
+    ],
+)
+def test_the_control_namespace_is_not_reachable_by_naming_it(tmp_path, lookalike: str) -> None:
+    """What the two spawn refusals protected, asserted as the property itself.
+
+    They rejected process ids that began with the cancel prefix, verbatim or
+    after sanitization, because such an id landed inside the seed and could name
+    the control plane's own key. The refusal was the mechanism; the property was
+    that no caller reaches another's cancel authority by choosing a name.
+
+    Digesting the id makes the property hold with nothing to enforce: these ids
+    are neither privileged nor refused, they simply get their own key like every
+    other. Both spellings the old tests used are kept, since those are the exact
+    inputs whose refusal is being retired.
+    """
+    from ouroboros.orchestrator.agent_process import AgentProcessHandle
+    from ouroboros.persistence.checkpoint import CheckpointStore
+
+    store = CheckpointStore(base_path=tmp_path)
+    store.initialize()
+
+    AgentProcessHandle.persist_cancel_signal(lookalike, store=store, reason="stop lookalike")
+
+    assert AgentProcessHandle.load_persisted_cancel(lookalike, store=store) == (
+        True,
+        "stop lookalike",
+    )
+    assert AgentProcessHandle.load_persisted_cancel("external", store=store) == (False, None)

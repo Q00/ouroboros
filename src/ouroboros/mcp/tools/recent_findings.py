@@ -162,7 +162,10 @@ def _eligible_lane_outputs(body: Any) -> list[tuple[str, Any]]:
     """
     if not isinstance(body, dict):
         return []
-    outputs = body.get("result", {}).get("aggregated_outputs")
+    result = body.get("result")
+    if not isinstance(result, dict):
+        return []
+    outputs = result.get("aggregated_outputs")
     if not isinstance(outputs, list):
         return []
     return [
@@ -209,9 +212,15 @@ def recent_findings_entries(
             break
         try:
             fetched = findings_store.fetch(published.contract_id)
+            lanes = _eligible_lane_outputs(fetched.body)
         except Exception:
+            # Reading the record's shape is inside the boundary, not after it.
+            # A body is whatever was published, so the shapes it can take are
+            # not a list this module can finish writing -- and one that ends up
+            # outside the boundary costs every later finding in the window, not
+            # just its own.
             continue
-        for lane_id, output in _eligible_lane_outputs(fetched.body):
+        for lane_id, output in lanes:
             entries.append(
                 {
                     "contract_id": published.contract_id,

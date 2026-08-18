@@ -155,6 +155,25 @@ def test_applied_prune_returns_the_space_rather_than_only_the_row(tmp_path: Path
     assert _database_path(store).stat().st_size < size_before - report.removed_bytes // 2
 
 
+def test_prune_reports_encoded_bytes_not_characters(tmp_path: Path) -> None:
+    """Every name this number travels under says bytes, so it has to be bytes.
+
+    ``length()`` on a TEXT column counts characters.  A body of accented text
+    is two bytes per character and was reported as one, so the CLI's ``B`` was
+    an undercount for any body that was not ASCII.
+    """
+    store = _store(tmp_path)
+    body = {"note": "é" * 1_000}
+    encoded = len(canonical_artifact_bytes(body))
+    _put(store, "CONTRACT1", body)
+    _age(store, "CONTRACT1", days=200)
+
+    report = store.prune(apply=True, now=NOW)
+
+    assert report.removed_bytes == encoded
+    assert report.candidates[0].body_bytes == encoded
+
+
 def test_contract_id_cannot_be_reused_for_different_content(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = _put(store, "CONTRACT1", {"version": 1})

@@ -38,8 +38,13 @@ class DisposableResultEnvelope(BaseModel, frozen=True):
 
     schema_version: Literal[1] = 1
     # Length is the whole rule.  The character restriction that used to live
-    # here was a path-safe-filename rule, and a contract id stopped being a
-    # filename when the store stopped being a directory.
+    # here was a path-safe-filename rule, and a contract id stopped being this
+    # store's filename when the store stopped being a directory.  It still
+    # reaches one filename -- the AgentProcess cancel checkpoint -- which is
+    # why that key derives from a digest of the id rather than from the id:
+    # the restriction never made that mapping injective anyway, since `:` and
+    # `_` both passed it and the checkpoint store folds the first onto the
+    # second.
     contract_id: str = Field(min_length=1, max_length=128)
     result: DisposableResultSummary
     runtime_id: str = Field(min_length=1, max_length=200)

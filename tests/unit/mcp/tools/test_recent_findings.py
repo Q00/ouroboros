@@ -76,7 +76,11 @@ def _publish(
         },
     }
     canonical = json.dumps(body, sort_keys=True).encode("utf-8")
-    contract_id = f"fanout:{hashlib.sha256(canonical).hexdigest()}"
+    return _publish_body(store, body, contract_id=f"fanout:{hashlib.sha256(canonical).hexdigest()}")
+
+
+def _publish_body(store: ArtifactStore, body: Any, *, contract_id: str) -> str:
+    """Publish one body verbatim, for shapes a fan-out would not produce."""
     memory = DisposableMemory(artifact_store=store)
 
     async def _run() -> Any:
@@ -230,6 +234,25 @@ def test_one_oversized_finding_is_shortened_rather_than_silently_dropped(
     assert "yyyy" in prompt
     assert "[truncated]" in prompt
     assert len(prompt) - len(without_findings) < 25_000
+
+
+def test_a_record_of_an_unexpected_shape_costs_only_itself(
+    store: ArtifactStore,
+) -> None:
+    """Fail-open is per record, so one odd body cannot empty the whole window.
+
+    A body is whatever was published, and `result` need not be an object — a
+    list there used to raise out of retrieval entirely, which meant one such
+    record took every other finding published that day with it, for as long as
+    the freshness window lasted.
+    """
+    _publish_body(store, {"kind": "question_advisory", "result": []}, contract_id="malformed")
+    _publish(store, claim="a finding published after the odd one")
+
+    entries = recent_findings_entries(store)
+
+    assert [entry["lane_id"] for entry in entries] == ["code_context", "data_context"]
+    assert all(entry["contract_id"] != "malformed" for entry in entries)
 
 
 def test_a_finding_older_than_the_window_is_not_offered(

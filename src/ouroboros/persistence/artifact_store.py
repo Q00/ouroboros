@@ -395,7 +395,12 @@ class ArtifactStore:
         try:
             with closing(self._connect_for_write()) as connection:
                 rows = connection.execute(
-                    "SELECT contract_id, length(body), created_at"
+                    # ``CAST(body AS BLOB)`` because ``length()`` on TEXT counts
+                    # characters, and every name this number travels under --
+                    # ``body_bytes``, ``removed_bytes``, the CLI's ``B`` -- says
+                    # bytes.  A body of one accented character is two bytes and
+                    # was being reported as one.
+                    "SELECT contract_id, length(CAST(body AS BLOB)), created_at"
                     " FROM artifacts WHERE body IS NOT NULL"
                 ).fetchall()
                 candidates = _plan_prune(

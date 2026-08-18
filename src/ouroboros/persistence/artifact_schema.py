@@ -19,10 +19,12 @@ def validate_contract_id(contract_id: str) -> str:
     """Return one bounded disposable contract identity.
 
     Length is the whole rule.  The character restriction this used to enforce
-    was a path-safe-filename rule, and a contract id stopped being a filename
-    when the store stopped being a directory.  The envelope validator in
-    ``ouroboros.core.disposable_memory`` grants the same permission, so the two
-    loosened together.
+    was a path-safe-filename rule, and a contract id stopped being this store's
+    filename when the store stopped being a directory.  The envelope validator
+    in ``ouroboros.core.disposable_memory`` grants the same permission, so the
+    two loosened together, and the one boundary downstream that still makes a
+    filename of the id derives its key by digest so this width costs it
+    nothing.
     """
     if not isinstance(contract_id, str) or not 1 <= len(contract_id) <= 128:
         raise ValueError("contract_id must be 1-128 characters")
