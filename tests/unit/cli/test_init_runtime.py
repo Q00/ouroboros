@@ -17,6 +17,7 @@ from ouroboros.cli.commands.init import (
     _resolve_init_llm_backend,
     _run_interview,
     _start_workflow,
+    _workflow_project_dir,
 )
 from ouroboros.cli.main import app
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -39,12 +40,56 @@ class TestInitWorkflowRuntimeHandoff:
         ):
             await _start_workflow(
                 Path("/tmp/generated-seed.yaml"),
-                use_orchestrator=True,
                 runtime_backend="codex",
             )
 
         mock_run_orchestrator.assert_awaited_once()
         assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_start_workflow_runs_without_the_orchestrator_flag(self) -> None:
+        """Answering yes must execute the Seed, not print a placeholder.
+
+        The handoff used to run only when `--orchestrator` was passed and
+        otherwise printed "Standard workflow execution not yet implemented",
+        so the confirmation named an action it did not perform.
+        """
+        mock_run_orchestrator = AsyncMock()
+
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            await _start_workflow(Path("/tmp/generated-seed.yaml"))
+
+        mock_run_orchestrator.assert_awaited_once()
+
+    def test_workflow_project_dir_is_the_invocation_directory(self, tmp_path: Path) -> None:
+        """A Seed in the seed store must not send the agent into the seed store."""
+        seed_path = tmp_path / "seed_generated.yaml"
+        seed_path.write_text(
+            "goal: add deadlines\nbrownfield_context:\n  project_type: greenfield\n",
+            encoding="utf-8",
+        )
+
+        assert _workflow_project_dir(seed_path) == Path.cwd()
+
+    def test_workflow_project_dir_defers_to_a_brownfield_target(self, tmp_path: Path) -> None:
+        """A Seed that names its own target keeps precedence over the cwd."""
+        seed_path = tmp_path / "seed_brownfield.yaml"
+        seed_path.write_text(
+            f"goal: add deadlines\nbrownfield_context:\n  target_dir: {tmp_path}\n",
+            encoding="utf-8",
+        )
+
+        assert _workflow_project_dir(seed_path) is None
+
+    def test_workflow_project_dir_survives_an_unreadable_seed(self, tmp_path: Path) -> None:
+        """Resolution must not crash the handoff on a malformed Seed."""
+        seed_path = tmp_path / "seed_broken.yaml"
+        seed_path.write_text("goal: [unclosed", encoding="utf-8")
+
+        assert _workflow_project_dir(seed_path) == Path.cwd()
 
     @pytest.mark.asyncio
     async def test_aborted_interview_does_not_report_completion_or_generate_seed(

@@ -648,8 +648,8 @@ async def _run_interview(
         if should_start_workflow:
             await _start_workflow(
                 seed_path,
-                use_orchestrator,
                 runtime_backend=workflow_runtime_backend,
+                project_dir=_workflow_project_dir(seed_path),
             )
 
     finally:
@@ -809,42 +809,67 @@ async def _generate_seed_from_interview(
     return seed_path, SeedGenerationResult.SUCCESS
 
 
+def _workflow_project_dir(seed_path: Path) -> Path | None:
+    """Directory the generated Seed should be built in.
+
+    An interview is conducted from the project it is about, so the invocation
+    directory is the project — without this the seed's own location decides,
+    and a Seed written to ``~/.ouroboros/seeds`` sends the agent to build
+    inside the seed store.
+
+    Returns ``None`` when the Seed names a brownfield target directory, so the
+    Seed's own target keeps precedence over where the person happened to stand.
+    """
+    try:
+        seed_data = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return Path.cwd()
+
+    brownfield_context = (seed_data or {}).get("brownfield_context")
+    if isinstance(brownfield_context, dict):
+        target_dir = brownfield_context.get("target_dir")
+        if isinstance(target_dir, str) and target_dir.strip():
+            return None
+
+    return Path.cwd()
+
+
 async def _start_workflow(
     seed_path: Path,
-    use_orchestrator: bool = False,
     parallel: bool = True,
     runtime_backend: str | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     """Start workflow from generated seed.
 
     Args:
         seed_path: Path to the seed YAML file.
-        use_orchestrator: Whether to use Claude Code orchestrator.
         parallel: Execute independent ACs in parallel. Default: True.
         runtime_backend: Optional runtime backend for orchestrator execution.
+        project_dir: Directory to execute in. ``None`` lets the run command
+            resolve it from the Seed, matching ``ouroboros run workflow``.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
 
-    if use_orchestrator:
-        # Direct function call instead of subprocess
-        from ouroboros.cli.commands.run import _run_orchestrator
+    # One execution path, the same one `ouroboros run workflow` takes by
+    # default. The previous non-orchestrator branch printed "not yet
+    # implemented" and returned, so answering yes to "Start workflow now?"
+    # did nothing unless the caller had also passed --orchestrator.
+    from ouroboros.cli.commands.run import _run_orchestrator
 
-        try:
-            await _run_orchestrator(
-                seed_path,
-                resume_session=None,
-                parallel=parallel,
-                runtime_backend=runtime_backend,
-            )
-        except typer.Exit:
-            pass  # Normal exit
-        except KeyboardInterrupt:
-            print_info("Workflow interrupted.")
-    else:
-        # Standard workflow (placeholder for now)
-        print_info(f"Would execute workflow from: {seed_path}")
-        print_info("Standard workflow execution not yet implemented.")
+    try:
+        await _run_orchestrator(
+            seed_path,
+            resume_session=None,
+            parallel=parallel,
+            runtime_backend=runtime_backend,
+            project_dir=project_dir,
+        )
+    except typer.Exit:
+        pass  # Normal exit
+    except KeyboardInterrupt:
+        print_info("Workflow interrupted.")
 
 
 def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
