@@ -9,6 +9,7 @@ from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import InterviewEngine, InterviewRound, InterviewState
 from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -129,3 +130,31 @@ async def test_plan_returns_question_when_score_fields_are_invalid(tmp_path) -> 
     assert result.is_ok
     assert result.value.question == "Which constraint matters most?"
     assert result.value.ambiguity is None
+
+
+async def test_interview_handler_uses_one_atomic_completion_after_three_answers(tmp_path) -> None:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_response(_payload())))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    state = InterviewState(
+        interview_id="interview_atomic_handler",
+        initial_context="Build a report generator",
+        rounds=[
+            InterviewRound(round_number=1, question="Who uses it?", user_response="Analysts"),
+            InterviewRound(round_number=2, question="What output?", user_response="CSV"),
+            InterviewRound(round_number=3, question="What is constrained?", user_response=None),
+        ],
+    )
+    assert (await engine.save_state(state)).is_ok
+    handler = InterviewHandler(
+        interview_engine=engine,
+        llm_adapter=adapter,
+        data_dir=tmp_path,
+    )
+
+    result = await handler.handle({"session_id": state.interview_id, "answer": "No network calls"})
+
+    assert result.is_ok
+    assert "What observable result proves this is complete?" in result.value.text_content
+    assert result.value.meta["ambiguity_score"] == 0.29
+    adapter.complete.assert_awaited_once()
