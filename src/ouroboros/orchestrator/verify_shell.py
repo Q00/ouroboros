@@ -16,8 +16,8 @@ allowed to soften what "verified" means.
 Bash, specifically — not "some POSIX shell". A ``sh`` substitute reads the same
 text differently (``echo -e X`` prints ``X`` under bash and ``-e X`` under
 ``sh``), so its verdict is about a different command than the Seed declared.
-The fallback for a machine without bash is the exact shell-free planner, and
-past that, an honest "unverifiable", not a second interpreter.
+The fallback for a machine without Bash is an explicit unavailable result, never
+a second interpreter or a shell emulator.
 
 Priority mirrors the existing ``get_goose_cli_path`` / ``get_pi_cli_path``
 convention: env override -> config -> well-known locations -> PATH.
@@ -48,10 +48,7 @@ class VerifyShellRoute:
     Bash only. A POSIX ``sh`` reads the same command differently — `echo -e X`
     prints `X` under bash and `-e X` under `sh`, so a contract asserting on
     `-e` fails under the shell it was written for and passes under the
-    substitute. Running it there and recording the result as verification
-    would be reporting a verdict about a different command, so a machine with
-    no bash routes through the exact shell-free planner instead, and reports
-    the AC unverifiable when that planner refuses it.
+    substitute. A machine without Bash records verification as unavailable.
 
     ``shell_path`` is always absolute: the path checked during resolution must
     be the path launched, and the gate launches with ``cwd`` set to the
@@ -125,11 +122,11 @@ def _config_value() -> str | None:
 
 def _configured_candidate() -> tuple[str, str] | None:
     env_value = os.environ.get(VERIFY_BASH_ENV_VAR, "").strip()
-    resolved = _executable(env_value)
+    resolved = _validated_executable(env_value)
     if resolved:
         return resolved, "env"
 
-    resolved = _executable(_config_value())
+    resolved = _validated_executable(_config_value())
     if resolved:
         return resolved, "config"
     return None
@@ -170,6 +167,16 @@ def _is_wsl_launcher(resolved_path: str) -> bool:
         return False
 
 
+def _validated_executable(candidate: str | None) -> str | None:
+    """Resolve one candidate and reject every unsafe Windows launcher."""
+    resolved = _executable(candidate)
+    if resolved is None:
+        return None
+    if _running_on_windows() and _is_wsl_launcher(resolved):
+        return None
+    return resolved
+
+
 def _posix_candidates() -> tuple[tuple[str, str], ...]:
     return (
         ("/bin/bash", "posix_default"),
@@ -187,12 +194,9 @@ def _resolve_uncached() -> VerifyShellRoute | None:
     windows = _running_on_windows()
     candidates = _windows_candidates() if windows else _posix_candidates()
     for candidate, source in candidates:
-        resolved = _executable(candidate)
-        if not resolved:
-            continue
-        if windows and _is_wsl_launcher(resolved):
-            continue
-        return VerifyShellRoute(shell_path=resolved, source=source)
+        resolved = _validated_executable(candidate)
+        if resolved:
+            return VerifyShellRoute(shell_path=resolved, source=source)
     return None
 
 

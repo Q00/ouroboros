@@ -211,6 +211,26 @@ def test_windows_never_routes_verification_through_the_wsl_launcher(
     assert resolve_verify_shell() is None
 
 
+@pytest.mark.parametrize("source", ["env", "config"])
+def test_windows_rejects_wsl_launcher_from_configured_routes(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setattr(verify_shell, "_running_on_windows", lambda: True)
+    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    wsl = str(PureWindowsPath(r"C:\Windows") / "System32" / "bash.exe")
+    monkeypatch.setattr(verify_shell.shutil, "which", _which_always(wsl))
+    if source == "env":
+        monkeypatch.setenv(VERIFY_BASH_ENV_VAR, wsl)
+        monkeypatch.setattr(verify_shell, "_config_value", lambda: None)
+    else:
+        monkeypatch.delenv(VERIFY_BASH_ENV_VAR, raising=False)
+        monkeypatch.setattr(verify_shell, "_config_value", lambda: wsl)
+
+    assert resolve_verify_shell() is None
+
+
 def test_windows_still_accepts_a_real_bash_outside_system32(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

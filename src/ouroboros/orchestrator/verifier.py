@@ -99,6 +99,8 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
     }
 )
 
+_UNAVAILABLE_FAILURE_CLASS = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
+
 
 class VerifierStatus(StrEnum):
     """Machine-readable verifier outcome for H1 retry admission."""
@@ -188,6 +190,21 @@ class VerifierVerdict:
                 f"not a recognized taxonomy value. Valid: {valid}, or None."
             )
             raise VerifierContractError(msg)
+        unavailable_claimed = (
+            self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            or status is VerifierStatus.UNAVAILABLE
+            or (not self.passed and retry_admission is RetryAdmission.ACCEPT)
+        )
+        unavailable_valid = (
+            not self.passed
+            and self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            and status is VerifierStatus.UNAVAILABLE
+            and retry_admission is RetryAdmission.ACCEPT
+        )
+        if unavailable_claimed and not unavailable_valid:
+            raise VerifierContractError(
+                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE and ACCEPT"
+            )
         if self.passed and status is not VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=True) must have status PASS"
             raise VerifierContractError(msg)
@@ -220,7 +237,7 @@ def _normalize_verifier_status(
             return VerifierStatus.PASS
         if failure_class == "BLOCKED":
             return VerifierStatus.BLOCKED
-        if failure_class == "TRANSCRIPT_MISSING_INFRASTRUCTURE":
+        if failure_class == _UNAVAILABLE_FAILURE_CLASS:
             return VerifierStatus.UNAVAILABLE
         return VerifierStatus.FAIL
     try:
@@ -267,7 +284,7 @@ def _normalize_evidence_used(evidence_used: tuple[str, ...]) -> tuple[str, ...]:
 def _default_retry_admission_for_failure_class(
     failure_class: str | None,
 ) -> RetryAdmission:
-    if failure_class == "TRANSCRIPT_MISSING_INFRASTRUCTURE":
+    if failure_class == _UNAVAILABLE_FAILURE_CLASS:
         return RetryAdmission.ACCEPT
     if failure_class == "FABRICATION_SUSPECTED":
         return RetryAdmission.ESCALATE_MODEL

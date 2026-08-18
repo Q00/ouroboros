@@ -8480,10 +8480,7 @@ class OrchestratorRunner:
         if mode == "block":
             return Result.err(
                 OrchestratorError(
-                    message=(
-                        "Acceptance criteria carry no deterministic verify_command "
-                        "(missing, or proven to always pass) and no exemption reason"
-                    ),
+                    message=("Acceptance criteria carry no verify_command and no exemption reason"),
                     details={
                         "gate": "seed.verify_command_gate",
                         "mode": mode,
