@@ -16,7 +16,12 @@ import structlog
 import typer
 import yaml
 
-from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.ambiguity import (
+    AMBIGUITY_THRESHOLD,
+    AmbiguityScore,
+    AmbiguityScorer,
+    qualifies_for_seed_completion,
+)
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
@@ -58,6 +63,11 @@ from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+# Retry budget for the per-round scorer that runs between two interactive
+# prompts. The scorer's own default is unlimited retries, which would hang the
+# interview loop instead of falling back to the score-blind prompt.
+_LOOP_AMBIGUITY_MAX_RETRIES = 3
 
 
 class SeedGenerationResult(Enum):
@@ -257,12 +267,56 @@ async def _get_init_event_store():
     return event_store
 
 
+async def _refresh_ambiguity(
+    engine: InterviewEngine,
+    state: InterviewState,
+    scorer: AmbiguityScorer | None,
+) -> AmbiguityScore | None:
+    """Score the in-progress interview and persist the snapshot on state.
+
+    The stored snapshot is what turns on the seed-closer perspective and the
+    ambiguity block in the question prompt, so a failed score must clear it
+    rather than leave a stale one behind (the same contract the MCP live
+    scoring path follows).
+    """
+    if scorer is None:
+        return None
+
+    with console.status("[cyan]Measuring ambiguity...[/]", spinner="dots"):
+        score_result = await scorer.score(state)
+
+    if score_result.is_err:
+        state.clear_stored_ambiguity()
+        log.warning(
+            "cli.init.live_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(score_result.error),
+        )
+    else:
+        score = score_result.value
+        state.store_ambiguity(
+            score=score.overall_score,
+            breakdown=score.breakdown.model_dump(mode="json"),
+        )
+
+    save_result = await engine.save_state(state)
+    if save_result.is_err:
+        log.warning(
+            "cli.init.persist_live_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(save_result.error),
+        )
+
+    return None if score_result.is_err else score_result.value
+
+
 async def _run_interview_loop(
     engine: InterviewEngine,
     state: InterviewState,
     *,
     event_store=None,
     disabled_event_stores: set[int] | None = None,
+    scorer: AmbiguityScorer | None = None,
 ) -> InterviewState:
     """Run the interview question loop until completion or user exit.
 
@@ -271,9 +325,15 @@ async def _run_interview_loop(
     - Rounds 4-15: Ask "Continue?" after each round
     - Rounds 16+: Ask "Continue?" with diminishing returns warning
 
+    From the first confirmation round on, ambiguity is measured before the
+    prompt so the user is asked the question the score actually implies:
+    "proceed to Seed?" once the score qualifies, "more questions?" otherwise.
+
     Args:
         engine: Interview engine instance.
         state: Current interview state.
+        scorer: Optional ambiguity scorer. When omitted, the loop keeps the
+            score-blind confirmation prompt.
 
     Returns:
         Updated interview state.
@@ -351,10 +411,25 @@ async def _run_interview_loop(
 
         # Tiered confirmation logic
         if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-            should_continue = Confirm.ask(
-                "Continue with more questions?",
-                default=True,
-            )
+            score = await _refresh_ambiguity(engine, state, scorer)
+            if score is not None:
+                console.print(
+                    f"[muted]Ambiguity score: {score.overall_score:.2f} "
+                    f"(Seed threshold: <= {AMBIGUITY_THRESHOLD})[/]"
+                )
+            if score is not None and qualifies_for_seed_completion(
+                score,
+                is_brownfield=state.is_brownfield,
+            ):
+                should_continue = not Confirm.ask(
+                    "[bold cyan]Ambiguity is low enough — proceed to Seed generation?[/]",
+                    default=True,
+                )
+            else:
+                should_continue = Confirm.ask(
+                    "Continue with more questions?",
+                    default=True,
+                )
             if not should_continue:
                 complete_result = await engine.complete_interview(state)
                 if complete_result.is_ok:
@@ -408,6 +483,13 @@ async def _run_interview(
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
         model=get_clarification_model(llm_backend),
     )
+    # Bounded retries: the loop scorer runs between two interactive prompts,
+    # so an unresolvable scoring failure must surface, not retry forever.
+    loop_scorer = AmbiguityScorer(
+        llm_adapter=llm_adapter,
+        model=get_clarification_model(llm_backend),
+        max_retries=_LOOP_AMBIGUITY_MAX_RETRIES,
+    )
 
     # Load or start interview
     if resume_id:
@@ -443,6 +525,7 @@ async def _run_interview(
             state,
             event_store=loop_event_store,
             disabled_event_stores=disabled_event_stores,
+            scorer=loop_scorer,
         )
 
         # Outer loop for retry on high ambiguity
@@ -500,6 +583,7 @@ async def _run_interview(
                     state,
                     event_store=loop_event_store,
                     disabled_event_stores=disabled_event_stores,
+                    scorer=loop_scorer,
                 )
                 continue
 
