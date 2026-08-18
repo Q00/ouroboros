@@ -481,6 +481,13 @@ class InterviewState(BaseModel):
         if detected_terms:
             self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
         self.invalidate_requirement_distillation()
+        # The ambiguity snapshot is derived from the answered rounds, exactly
+        # like the distillation above, so it dies where its inputs change
+        # rather than at each call site that remembers to clear it. Leaving it
+        # to callers let a durable save land rounds from revision N+1 next to a
+        # score from revision N: an interrupted process then resumed with a
+        # score that _select_perspectives reads as current.
+        self.clear_stored_ambiguity()
         self.mark_updated()
         return round_data
 
@@ -731,8 +738,10 @@ class InterviewEngine:
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
     # Opening span of the base agent prompt that survives trimming ahead of the
-    # perspective panel: the role boundaries, context boundaries, and response
-    # format that keep the generator asking questions instead of answering them.
+    # perspective panel: the CRITICAL ROLE BOUNDARIES section, which forbids the
+    # generator from answering its own question. Deliberately small — the
+    # dynamic header already carries "Your ONLY job is to ask questions", and a
+    # larger floor starves panels that callers reserve budget for.
     _BASE_PROMPT_ROLE_FLOOR_CHARS = 500
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
     suppress_tool_use_prompt_cues: bool = False
@@ -1316,11 +1325,10 @@ class InterviewEngine:
         # prompt before falling back to hard-truncating the header.
         #
         # The base prompt opens with the role boundaries that keep the model an
-        # interviewer ("NEVER say I will implement", "always end with a
-        # question"). Those must outrank the panel: a growing header or panel
-        # otherwise pushes them out entirely, which is exactly when they matter
-        # most — a late round with a stored ambiguity snapshot and the
-        # seed-closer perspective attached.
+        # interviewer ("NEVER say I will implement"). Those must outrank the
+        # panel: a growing header or panel otherwise pushes them out entirely,
+        # which is exactly when they matter most — a late round with a stored
+        # ambiguity snapshot and the seed-closer perspective attached.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]

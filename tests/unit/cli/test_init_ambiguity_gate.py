@@ -12,7 +12,7 @@ import pytest
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
-from ouroboros.cli.commands.init import _run_interview_loop
+from ouroboros.cli.commands.init import SeedGenerationResult, _run_interview_loop
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 
@@ -123,7 +123,7 @@ async def test_seed_ready_score_offers_seed_instead_of_more_questions(
     engine = FakeEngine()
     scorer = FakeScorer(Result.ok(_score(0.15)))
 
-    final_state = await _run_interview_loop(engine, state, scorer=scorer)
+    final_state = (await _run_interview_loop(engine, state, scorer=scorer)).state
 
     assert scorer.calls == 1
     assert prompts == [_SEED_PROMPT]
@@ -173,6 +173,114 @@ async def test_scoring_failure_clears_snapshot_and_falls_back(prompts: list[str]
     assert scorer.calls == 1
     assert prompts == [_MORE_QUESTIONS_PROMPT]
     # A stale snapshot must not survive a failed rescore.
+    assert state.ambiguity_score is None
+    assert state.ambiguity_breakdown is None
+
+
+@pytest.mark.asyncio
+async def test_seed_approval_crosses_the_loop_boundary(prompts: list[str]) -> None:
+    """Approving at the score-aware prompt must not be asked again outside.
+
+    The loop returns the decision, not only the completed state, so the outer
+    flow can start generation instead of re-asking "proceed to generate Seed
+    specification?" — a second prompt would let the user decline the action
+    they just approved.
+    """
+    state = _state_at_confirmation_round()
+    scorer = FakeScorer(Result.ok(_score(0.15)))
+
+    outcome = await _run_interview_loop(FakeEngine(), state, scorer=scorer)
+
+    assert outcome.seed_generation_approved
+    assert outcome.state.is_complete
+    # Carried so generation reuses it instead of sampling a second score that
+    # could disagree and drop the user into the "too ambiguous" menu.
+    assert outcome.approved_score is not None
+    assert outcome.approved_score.overall_score == 0.15
+
+
+@pytest.mark.asyncio
+async def test_stopping_questions_without_a_qualifying_score_is_not_seed_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answering "no" to more questions ends the interview but approves nothing."""
+
+    def fake_confirm(prompt: str, **_kwargs) -> bool:
+        return False
+
+    async def fake_prompt(_prompt: str) -> str:
+        return "Deadlines are an optional card attribute."
+
+    monkeypatch.setattr("ouroboros.cli.commands.init.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("ouroboros.cli.commands.init.multiline_prompt_async", fake_prompt)
+
+    state = _state_at_confirmation_round()
+    scorer = FakeScorer(Result.ok(_score(0.45, clarity=0.5)))
+
+    outcome = await _run_interview_loop(FakeEngine(), state, scorer=scorer)
+
+    assert outcome.state.is_complete
+    assert not outcome.seed_generation_approved
+
+
+@pytest.mark.asyncio
+async def test_approved_score_starts_generation_without_a_second_score(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """One affirmative answer must actually start generation.
+
+    Without carrying the approved score, generation samples an independent
+    second score; a disagreeing sample drops the user into the "too ambiguous"
+    menu immediately after they approved generation.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from ouroboros.cli.commands import init as init_module
+
+    scorer_constructed = False
+
+    def _scorer_factory(*_args, **_kwargs):
+        nonlocal scorer_constructed
+        scorer_constructed = True
+        raise AssertionError("generation must not sample a second score")
+
+    generator = MagicMock()
+    generator.generate = AsyncMock(return_value=Result.err(ProviderError("stop here")))
+    monkeypatch.setattr(init_module, "AmbiguityScorer", _scorer_factory)
+    monkeypatch.setattr(init_module, "SeedGenerator", lambda *_args, **_kwargs: generator)
+
+    engine = MagicMock()
+    engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+    state = _state_at_confirmation_round()
+
+    seed_path, result = await init_module._generate_seed_from_interview(
+        state,
+        MagicMock(),
+        engine=engine,
+        approved_score=_score(0.15),
+    )
+
+    assert not scorer_constructed
+    assert seed_path is None
+    # Generation was reached (and failed on the stubbed generator), which is the
+    # point: approval was not re-litigated by a second score.
+    assert result == SeedGenerationResult.CANCELLED
+    generator.generate.assert_awaited_once()
+
+
+def test_recording_an_answer_invalidates_the_previous_snapshot() -> None:
+    """A durable save must never pair round N+1 with the score from round N.
+
+    ``record_answer`` clears the snapshot where the inputs change, so an
+    interruption between the answer's save and the rescore resumes with no
+    score rather than a stale one that could activate the seed-closer.
+    """
+    state = _state_at_confirmation_round()
+    state.store_ambiguity(score=0.18, breakdown={"from": "revision N"})
+
+    state.record_answer("Q3", "A3")
+
     assert state.ambiguity_score is None
     assert state.ambiguity_breakdown is None
 

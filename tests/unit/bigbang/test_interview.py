@@ -1244,6 +1244,38 @@ class TestInterviewEngineSystemPrompt:
 
         assert "### seed-closer" in prompt
 
+    @pytest.mark.asyncio
+    async def test_resume_after_recording_an_answer_loads_no_stale_score(
+        self, tmp_path: Path
+    ) -> None:
+        """The durable file must never pair new rounds with an old score.
+
+        The window this closes: an answer is accepted and saved, then the
+        process dies before the rescore lands. Resuming must not read the
+        previous revision's score as current, because
+        ``_select_perspectives`` would treat it as closure evidence for an
+        interview whose inputs have since changed.
+        """
+        engine = InterviewEngine(llm_adapter=MagicMock(), state_dir=tmp_path)
+        state = InterviewState(
+            interview_id="interview_resume",
+            initial_context="Add deadlines to the kanban widget",
+        )
+        state.record_answer("Q1", "A1")
+        state.store_ambiguity(score=0.18, breakdown={"from": "revision N"})
+
+        record_result = await engine.record_response(state, "A2", "Q2")
+        assert record_result.is_ok
+        # Only the answer's save happens — the rescore never runs.
+        save_result = await engine.save_state(record_result.value)
+        assert save_result.is_ok
+
+        resumed = await engine.load_state("interview_resume")
+        assert resumed.is_ok
+        assert resumed.value.ambiguity_score is None
+        assert resumed.value.ambiguity_breakdown is None
+        assert len(resumed.value.rounds) == 2
+
     def test_closure_round_keeps_role_boundaries_alongside_seed_closer(self) -> None:
         """A closure round must not trade the interviewer role for the closer.
 

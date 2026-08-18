@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewState, InterviewStatus
 from ouroboros.cli.commands.init import (
+    InterviewLoopOutcome,
     SeedGenerationResult,
     _generate_seed_from_interview,
     _get_adapter,
@@ -69,7 +70,7 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
             patch(
                 "ouroboros.cli.commands.init._run_interview_loop",
-                new=AsyncMock(return_value=aborted_state),
+                new=AsyncMock(return_value=InterviewLoopOutcome(state=aborted_state)),
             ),
             patch(
                 "ouroboros.cli.commands.init._get_init_event_store",
@@ -111,7 +112,12 @@ class TestInitWorkflowRuntimeHandoff:
         engine = MagicMock()
         engine.start_interview = AsyncMock(return_value=Result.ok(initial_state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
-        run_loop = AsyncMock(side_effect=[completed_state, aborted_state])
+        run_loop = AsyncMock(
+            side_effect=[
+                InterviewLoopOutcome(state=completed_state),
+                InterviewLoopOutcome(state=aborted_state),
+            ]
+        )
         generate_seed = AsyncMock(
             side_effect=[
                 (None, SeedGenerationResult.CONTINUE_INTERVIEW),
