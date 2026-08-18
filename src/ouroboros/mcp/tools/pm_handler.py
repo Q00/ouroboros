@@ -28,6 +28,7 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.bigbang.ambiguity import qualifies_for_seed_completion
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
@@ -1548,7 +1549,10 @@ class PMInterviewHandler:
                 answered_rounds = decision_round_count(state)
                 if (
                     answered_rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT
-                    and turn.ambiguity.is_ready_for_seed
+                    and qualifies_for_seed_completion(
+                        turn.ambiguity,
+                        is_brownfield=state.is_brownfield,
+                    )
                 ):
                     completion = {
                         "interview_complete": True,

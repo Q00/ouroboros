@@ -9,8 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.bigbang.ambiguity import (
+    AmbiguityScore,
+    ComponentScore,
+    ScoreBreakdown,
+)
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
-from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine, PMInterviewTurnPlan
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     ClassifierOutputType,
@@ -1053,3 +1058,88 @@ async def test_skip_metadata_survives_atomic_planner_failure(
     reloaded_engine.restore_meta(meta)
     combined = reloaded_engine.deferred_items + reloaded_engine.decide_later_items
     assert expected_item in combined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_brownfield", "goal_clarity", "context_clarity"),
+    [
+        (False, 0.70, None),
+        (True, 0.90, 0.55),
+    ],
+)
+async def test_atomic_pm_floor_failure_continues_interview(
+    tmp_path: Path,
+    is_brownfield: bool,
+    goal_clarity: float,
+    context_clarity: float | None,
+) -> None:
+    engine = PMInterviewEngine.create(
+        llm_adapter=MagicMock(),
+        model="test-model",
+        state_dir=tmp_path,
+    )
+    state = InterviewState(
+        interview_id=f"pm_floor_failure_{is_brownfield}",
+        initial_context="Build a planning workflow",
+        is_brownfield=is_brownfield,
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3", user_response="A3"),
+        ],
+    )
+    assert (await engine.save_state(state)).is_ok
+    ambiguity = AmbiguityScore(
+        overall_score=0.18,
+        breakdown=ScoreBreakdown(
+            goal_clarity=ComponentScore(
+                name="Goal Clarity",
+                clarity_score=goal_clarity,
+                weight=0.35 if is_brownfield else 0.40,
+                justification="Needs one more decision.",
+            ),
+            constraint_clarity=ComponentScore(
+                name="Constraint Clarity",
+                clarity_score=0.90,
+                weight=0.25 if is_brownfield else 0.30,
+                justification="Clear.",
+            ),
+            success_criteria_clarity=ComponentScore(
+                name="Success Criteria Clarity",
+                clarity_score=0.90,
+                weight=0.25 if is_brownfield else 0.30,
+                justification="Clear.",
+            ),
+            context_clarity=(
+                ComponentScore(
+                    name="Context Clarity",
+                    clarity_score=context_clarity,
+                    weight=0.15,
+                    justification="Repository context needs one more decision.",
+                )
+                if context_clarity is not None
+                else None
+            ),
+        ),
+    )
+    next_question = "Which unresolved dimension should we clarify?"
+    engine.plan_next_turn = AsyncMock(
+        return_value=Result.ok(
+            PMInterviewTurnPlan(
+                question=next_question,
+                ambiguity=ambiguity,
+                classification=_make_classification(ClassifierOutputType.PASSTHROUGH),
+                raw_payload={"next_question": next_question},
+            )
+        )
+    )
+    engine.complete_interview = AsyncMock(wraps=engine.complete_interview)
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle({"session_id": state.interview_id, "cwd": str(tmp_path)})
+
+    assert result.is_ok
+    assert result.value.meta["is_complete"] is False
+    assert result.value.meta["question"] == next_question
+    engine.complete_interview.assert_not_awaited()
