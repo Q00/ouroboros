@@ -31,11 +31,14 @@ jobs:
 
       - name: Run ruff
         run: |
-          uv run ruff check src/ tests/
+          uv run ruff check src/ tests/ scripts/check-config-reference-contract.py
 
       - name: Run ruff format check
         run: |
-          uv run ruff format --check src/ tests/
+          uv run ruff format --check src/ tests/ scripts/check-config-reference-contract.py
+
+      - name: Verify config reference contract
+        run: uv run python scripts/check-config-reference-contract.py
 
   mypy:
     name: MyPy Type Check
