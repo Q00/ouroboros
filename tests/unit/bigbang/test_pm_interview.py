@@ -1321,6 +1321,60 @@ class TestCheckCompletion:
         )
         assert "RECOVERED_SUMMARY" in scored
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("is_brownfield", "scores"),
+        [
+            (
+                False,
+                {
+                    "goal_clarity_score": 0.70,
+                    "constraint_clarity_score": 0.95,
+                    "success_criteria_clarity_score": 0.95,
+                },
+            ),
+            (
+                True,
+                {
+                    "goal_clarity_score": 0.95,
+                    "constraint_clarity_score": 0.95,
+                    "success_criteria_clarity_score": 0.95,
+                    "context_clarity_score": 0.55,
+                },
+            ),
+        ],
+    )
+    async def test_component_floor_failure_continues_legacy_interview(
+        self,
+        tmp_path: Path,
+        is_brownfield: bool,
+        scores: dict[str, float],
+    ) -> None:
+        payload: dict[str, float | str] = {}
+        for field, score in scores.items():
+            payload[field] = score
+            payload[field.replace("_score", "_justification")] = "Needs one more decision."
+        adapter = MagicMock()
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id=f"test_pm_legacy_floor_{is_brownfield}",
+            initial_context="Build a task manager",
+            is_brownfield=is_brownfield,
+            codebase_context="Existing repository" if is_brownfield else "",
+            rounds=[
+                InterviewRound(round_number=1, question="Who uses it?", user_response="Teams"),
+                InterviewRound(round_number=2, question="What problem?", user_response="Planning"),
+                InterviewRound(round_number=3, question="How measured?", user_response="Adoption"),
+            ],
+        )
+
+        result = await engine.check_completion(state)
+
+        assert result is None
+        assert state.ambiguity_score is not None
+        assert state.ambiguity_score <= 0.2
+
 
 class TestRecordResponse:
     """Test response recording delegation."""

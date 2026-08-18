@@ -28,7 +28,11 @@ from typing import Any
 
 import structlog
 
-from ouroboros.bigbang.ambiguity import AmbiguityScore, AmbiguityScorer
+from ouroboros.bigbang.ambiguity import (
+    AmbiguityScore,
+    AmbiguityScorer,
+    qualifies_for_seed_completion,
+)
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
@@ -1062,7 +1066,7 @@ Restored brownfield classifier context, if present:
                 breakdown=ambiguity.breakdown.model_dump(mode="json"),
             )
 
-            if ambiguity.is_ready_for_seed:
+            if qualifies_for_seed_completion(ambiguity, is_brownfield=state.is_brownfield):
                 log.info(
                     "pm.completion.ambiguity_resolved",
                     session_id=state.interview_id,
