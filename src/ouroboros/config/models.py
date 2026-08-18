@@ -502,6 +502,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "grok_build",
         "zcode",
         "zcode_cli",
+        "host",
+        "host_dispatch",
     }
 )
 
@@ -670,6 +672,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "antigravity",
         "grok",
         "zcode",
+        "host",
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 

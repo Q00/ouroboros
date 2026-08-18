@@ -9554,6 +9554,55 @@ class TestRuntimeOnlyBackendSetup:
         assert data["orchestrator"]["runtime_backend"] == runtime
 
 
+class TestHostRuntimeSetup:
+    """``host`` has no CLI to detect at all: unlike the runtime-only backends
+    above, ``--runtime host`` must configure
+    ``orchestrator.runtime_backend: host`` with no ``*_cli_path`` and without
+    a `_detect_runtimes()` entry — this is what dsh's ``cordis.patch.yml``
+    now defaults to (see ``integrations/dsh-plugin``)."""
+
+    def test_setup_host_writes_runtime_only_config(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_host()
+
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+        assert "host_cli_path" not in data["orchestrator"]
+        # Runtime-only: the completion-only llm.backend is never set to it.
+        assert data.get("llm", {}).get("backend") != "host"
+        # The persisted config must round-trip through schema validation.
+        from ouroboros.config.models import OuroborosConfig
+
+        OuroborosConfig.model_validate(data)
+
+    def test_setup_runtime_host_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+        """`setup --runtime host --non-interactive` configures the backend
+        rather than failing with 'Unsupported runtime' (the prior contract gap
+        docs/cli-reference.md advertised but the dispatcher never implemented)."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
+
+        assert "Unsupported runtime" not in result.output
+        assert result.exit_code == 0, result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 
