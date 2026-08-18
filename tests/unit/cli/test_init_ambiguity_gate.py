@@ -269,6 +269,85 @@ async def test_approved_score_starts_generation_without_a_second_score(
     generator.generate.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [("3", SeedGenerationResult.CANCELLED), ("1", SeedGenerationResult.CONTINUE_INTERVIEW)],
+)
+async def test_failed_component_floor_blocks_generation_despite_low_overall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    choice: str,
+    expected: SeedGenerationResult,
+) -> None:
+    """A score the loop rejected must not walk into generation unforced.
+
+    Overall 0.15 is under the threshold while every component floor fails. The
+    loop asks "Continue with more questions?" for exactly this score, so the
+    generation boundary must reach the same verdict instead of generating
+    silently on the overall number alone.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from ouroboros.cli.commands import init as init_module
+
+    generator = MagicMock()
+    generator.generate = AsyncMock(side_effect=AssertionError("must not generate unforced"))
+    monkeypatch.setattr(init_module, "SeedGenerator", lambda *_args, **_kwargs: generator)
+    monkeypatch.setattr(init_module.Prompt, "ask", lambda *_args, **_kwargs: choice)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(init_module, "print_warning", warnings.append)
+
+    engine = MagicMock()
+    engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+    state = _state_at_confirmation_round()
+
+    seed_path, result = await init_module._generate_seed_from_interview(
+        state,
+        MagicMock(),
+        engine=engine,
+        approved_score=_score(0.15, clarity=0.5),
+    )
+
+    assert seed_path is None
+    assert result == expected
+    generator.generate.assert_not_awaited()
+    # The overall score is under the threshold, so naming it would read as a
+    # contradiction. The blocked dimensions are the reason.
+    assert warnings and "dimensions are still unclear" in warnings[0]
+    assert "Goal Clarity" in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_failed_component_floor_forces_generation_when_user_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Choosing "generate anyway" must actually force past the same gate."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from ouroboros.cli.commands import init as init_module
+
+    generator = MagicMock()
+    generator.generate = AsyncMock(return_value=Result.err(ProviderError("stop here")))
+    monkeypatch.setattr(init_module, "SeedGenerator", lambda *_args, **_kwargs: generator)
+    monkeypatch.setattr(init_module.Prompt, "ask", lambda *_args, **_kwargs: "2")
+    monkeypatch.setattr(init_module, "print_warning", lambda *_args, **_kwargs: None)
+
+    engine = MagicMock()
+    engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+    await init_module._generate_seed_from_interview(
+        _state_at_confirmation_round(),
+        MagicMock(),
+        engine=engine,
+        approved_score=_score(0.15, clarity=0.5),
+    )
+
+    assert generator.generate.await_args.kwargs["force"] is True
+
+
 def test_recording_an_answer_invalidates_the_previous_snapshot() -> None:
     """A durable save must never pair round N+1 with the score from round N.
 

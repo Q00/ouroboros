@@ -84,6 +84,18 @@ AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
 # model locally while still tripling the original 4.8k interview budget.
 AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 14_000
 
+# The two rules that make a generated turn a question at all. They live in the
+# dynamic header — which every build preserves first — instead of only inside
+# the loaded agent prompt, whose tail is the first thing the character budget
+# trims. Leaving them there made their survival depend on where they happen to
+# sit in a markdown file and on how large the header and perspective panel grew
+# that round: in a late round with a stored ambiguity snapshot, the response
+# format was silently dropped from the prompt that needed it most.
+RESPONSE_CONTRACT = (
+    "Response contract: emit exactly ONE question and end with it. "
+    "Never announce implementation work — another agent does that later."
+)
+
 _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - You are only an interviewer.
 - Generate exactly one Socratic question that reduces requirements ambiguity.
@@ -737,12 +749,6 @@ class InterviewEngine:
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
-    # Opening span of the base agent prompt that survives trimming ahead of the
-    # perspective panel: the CRITICAL ROLE BOUNDARIES section, which forbids the
-    # generator from answering its own question. Deliberately small — the
-    # dynamic header already carries "Your ONLY job is to ask questions", and a
-    # larger floor starves panels that callers reserve budget for.
-    _BASE_PROMPT_ROLE_FLOOR_CHARS = 500
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
     suppress_tool_use_prompt_cues: bool = False
     # When True, ``ask_next_question`` generates three persona candidates
@@ -1272,12 +1278,14 @@ class InterviewEngine:
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
 
@@ -1324,25 +1332,20 @@ class InterviewEngine:
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
         #
-        # The base prompt opens with the role boundaries that keep the model an
-        # interviewer ("NEVER say I will implement"). Those must outrank the
-        # panel: a growing header or panel otherwise pushes them out entirely,
-        # which is exactly when they matter most — a late round with a stored
-        # ambiguity snapshot and the seed-closer perspective attached.
+        # The interviewer contract does not compete for this budget: it rides in
+        # the dynamic header, which is preserved first. Reserving a slice of the
+        # base agent prompt for the same rules was tried and removed — it bought
+        # one guarantee twice and took the characters from the perspective panel
+        # and, at saturated caps, from the user's own retained context.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
             perspective_panel = ""
             base_budget = 0
+        elif len(perspective_panel) > available_after_header:
+            perspective_panel = perspective_panel[:available_after_header]
+            base_budget = 0
         else:
-            reserved_base = min(
-                len(base_prompt),
-                self._BASE_PROMPT_ROLE_FLOOR_CHARS,
-                available_after_header,
-            )
-            panel_budget = available_after_header - reserved_base
-            if len(perspective_panel) > panel_budget:
-                perspective_panel = perspective_panel[:panel_budget]
             base_budget = available_after_header - len(perspective_panel)
 
         trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
@@ -1486,8 +1489,8 @@ class InterviewEngine:
             # reasons, one budget and one substantive: the panel is trimmed
             # from the tail, so appending the closer would drop it in exactly
             # the rounds it exists for; and researcher/simplifier drilling is
-            # the behavior closure is meant to stop. The freed characters go
-            # back to the base prompt's role boundaries.
+            # the behavior closure is meant to stop. The characters this frees
+            # are what let the base agent prompt survive the same round.
             perspectives = [
                 InterviewPerspective.SEED_CLOSER,
                 InterviewPerspective.BREADTH_KEEPER,
