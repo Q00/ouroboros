@@ -472,9 +472,14 @@ class ArtifactStore:
         if not self._database_path.exists():
             return None
         connection = sqlite3.connect(f"{self._database_path.as_uri()}?mode=ro", uri=True)
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
-        ).fetchone():
+        try:
+            found = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
+            ).fetchone()
+        except BaseException:
+            connection.close()
+            raise
+        if found:
             return connection
         connection.close()
         return None
