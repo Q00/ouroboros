@@ -93,8 +93,8 @@ async def test_plan_keeps_question_context_and_scoring_view_separate(tmp_path) -
     messages = adapter.complete.call_args.args[0]
     assert "Also include category for PM routing." in messages[0].content
     assert "No network calls" in "\n".join(message.content for message in messages)
-    scoring_section = messages[0].content.split("decision-authority view", 1)[1]
-    assert "What is constrained?" in scoring_section
+    assert "answers in rounds 3 are observations" in messages[0].content
+    assert "do not count them as resolved requirements" in messages[0].content
 
 
 async def test_plan_fails_recoverably_when_question_is_missing(tmp_path) -> None:
