@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import InterviewEngine, InterviewRound, InterviewState
@@ -95,6 +95,8 @@ async def test_plan_keeps_question_context_and_scoring_view_separate(tmp_path) -
     assert "No network calls" in "\n".join(message.content for message in messages)
     assert "answers in rounds 3 are observations" in messages[0].content
     assert "do not count them as resolved requirements" in messages[0].content
+    assert "Score-conditioned question selection" in messages[0].content
+    assert "Seed-closer" in messages[0].content
 
 
 async def test_plan_fails_recoverably_when_question_is_missing(tmp_path) -> None:
@@ -157,4 +159,67 @@ async def test_interview_handler_uses_one_atomic_completion_after_three_answers(
     assert result.is_ok
     assert "What observable result proves this is complete?" in result.value.text_content
     assert result.value.meta["ambiguity_score"] == 0.29
+    adapter.complete.assert_awaited_once()
+
+
+async def test_immediate_adapter_question_still_scores_once(tmp_path) -> None:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_response(_payload())))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    state = _state()
+    planner = InterviewTurnPlanner(
+        engine=engine,
+        scorer=AmbiguityScorer(llm_adapter=adapter, model="test-model"),
+    )
+
+    with patch.object(
+        InterviewState,
+        "next_adapter_question",
+        return_value="Explain the acceptance boundary in your own words.",
+    ):
+        result = await planner.plan(state)
+
+    assert result.is_ok
+    assert result.value.question == "Explain the acceptance boundary in your own words."
+    assert result.value.ambiguity is not None
+    adapter.complete.assert_awaited_once()
+
+
+async def test_handler_immediate_question_preserves_qualifying_streak(tmp_path) -> None:
+    payload = {
+        "next_question": "unused for deterministic adapter turn",
+        "goal_clarity_score": 0.9,
+        "goal_clarity_justification": "clear",
+        "constraint_clarity_score": 0.9,
+        "constraint_clarity_justification": "clear",
+        "success_criteria_clarity_score": 0.9,
+        "success_criteria_clarity_justification": "clear",
+    }
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_response(payload)))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    state = InterviewState(
+        interview_id="interview_adapter_streak",
+        initial_context="Build a report generator",
+        completion_candidate_streak=1,
+        rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3", user_response=None),
+        ],
+    )
+    assert (await engine.save_state(state)).is_ok
+    handler = InterviewHandler(interview_engine=engine, llm_adapter=adapter, data_dir=tmp_path)
+
+    with patch.object(
+        InterviewState,
+        "next_adapter_question",
+        return_value="Explain the acceptance boundary in your own words.",
+    ):
+        result = await handler.handle({"session_id": state.interview_id, "answer": "A3"})
+
+    assert result.is_ok
+    assert result.value.meta["completed"] is True
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.completion_candidate_streak == 2
     adapter.complete.assert_awaited_once()

@@ -52,22 +52,27 @@ class InterviewTurnPlanner:
         additional_scoring_context: str = "",
         extra_response_contract: str = "",
     ) -> Result[InterviewTurnPlan, ProviderError | ValidationError]:
-        """Plan one turn from ``state`` without a score-then-question waterfall."""
+        """Plan one turn without concurrent backend calls."""
+        score_view = scoring_state or state
         prepared_result = self.engine.prepare_next_question(state)
         if prepared_result.is_err:
             return Result.err(prepared_result.error)
         prepared = prepared_result.value
         if prepared.immediate_question is not None:
+            score_result = await self.scorer.score(
+                score_view,
+                is_brownfield=state.is_brownfield,
+                additional_context=additional_scoring_context,
+            )
             return Result.ok(
                 InterviewTurnPlan(
                     question=prepared.immediate_question,
-                    ambiguity=None,
+                    ambiguity=score_result.value if score_result.is_ok else None,
                     raw_payload={"next_question": prepared.immediate_question},
                 )
             )
 
         assert prepared.config is not None
-        score_view = scoring_state or state
         excluded_score_rounds = [
             str(index)
             for index, (source_round, score_round) in enumerate(
@@ -103,8 +108,15 @@ class InterviewTurnPlanner:
 
 ## Atomic Interview Turn Contract
 Produce the next Socratic question and assess requirement clarity from the same
-interview revision. The behavioral rules above apply to `next_question`; do not
-emit a closure announcement in that field.
+interview revision. Compute the clarity fields before selecting `next_question`.
+
+## Score-conditioned question selection
+- Overall ambiguity <= 0.25 activates closure mode: prefer a concise Seed-closer
+  probe and do not open a new topic.
+- Any per-dimension floor failure keeps drilling that weakest dimension even when
+  the overall score is low.
+- Otherwise target the weakest clarity dimension with one concrete,
+  scenario-grounded question while preserving breadth across unresolved tracks.
 
 {scoring_authority_note}
 {context_note}
