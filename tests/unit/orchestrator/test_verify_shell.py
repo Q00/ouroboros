@@ -243,7 +243,7 @@ def test_shell_identity_rejects_retarget_and_content_drift(
         os.symlink(target, alias)
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation not permitted in this environment")
-    monkeypatch.setattr(verify_shell, "_executes_bash_c_semantics", lambda _path: True)
+    monkeypatch.setattr(verify_shell, "_executes_bash_c_semantics", lambda _path, _digest: True)
 
     identity = capture_verify_shell_identity(VerifyShellRoute(str(alias), "config"))
     assert identity is not None
@@ -265,6 +265,24 @@ def test_shell_identity_rejects_executable_that_ignores_bash_arguments(
     identity = capture_verify_shell_identity(VerifyShellRoute(str(impostor), "config"))
 
     assert identity is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX executable scripts")
+def test_persisted_identity_rejects_executable_without_bash_semantics(
+    tmp_path: Path,
+) -> None:
+    impostor = tmp_path / "bash"
+    impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    impostor.chmod(0o755)
+    realpath = str(impostor.resolve())
+    digest = verify_shell._sha256_file(realpath)
+    assert digest is not None
+
+    resolved = verify_shell_path_from_identity(
+        {"path": realpath, "realpath": realpath, "sha256": digest}
+    )
+
+    assert resolved is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses the local POSIX Bash installation")

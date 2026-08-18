@@ -205,15 +205,23 @@ def _sha256_file(path: str) -> str | None:
     return digest.hexdigest()
 
 
+_BASH_CAPABILITY_CACHE: dict[tuple[str, str], bool] = {}
+
+
 _BASH_CAPABILITY_PROBE = '[[ -n "${BASH_VERSION:-}" ]] || exit 96; exit 37'
 
 
-def _executes_bash_c_semantics(path: str) -> bool:
+def _executes_bash_c_semantics(path: str, digest: str) -> bool:
     """Prove one executable implements the Bash ``-c`` contract.
 
     This is a fixed capability handshake executed directly through the OS,
-    never a command parser, translator, fallback shell, or emulator.
+    never a command parser, translator, fallback shell, or emulator. Cache it
+    by content digest so repeated AC gates do not spawn a second probe for the
+    same sealed executable.
     """
+    cache_key = (path, digest)
+    if cache_key in _BASH_CAPABILITY_CACHE:
+        return _BASH_CAPABILITY_CACHE[cache_key]
     try:
         completed = subprocess.run(
             [path, "-c", _BASH_CAPABILITY_PROBE],
@@ -225,8 +233,11 @@ def _executes_bash_c_semantics(path: str) -> bool:
             timeout=3.0,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 37
+        result = False
+    else:
+        result = completed.returncode == 37
+    _BASH_CAPABILITY_CACHE[cache_key] = result
+    return result
 
 
 def capture_verify_shell_identity(route: VerifyShellRoute) -> dict[str, str] | None:
@@ -235,7 +246,7 @@ def capture_verify_shell_identity(route: VerifyShellRoute) -> dict[str, str] | N
     if realpath is None or (_running_on_windows() and _is_wsl_launcher(realpath)):
         return None
     digest = _sha256_file(realpath)
-    if digest is None or not _executes_bash_c_semantics(realpath):
+    if digest is None or not _executes_bash_c_semantics(realpath, digest):
         return None
     return {"path": route.shell_path, "realpath": realpath, "sha256": digest}
 
@@ -259,7 +270,10 @@ def verify_shell_path_from_identity(identity: object) -> str | None:
         return None
     if _running_on_windows() and _is_wsl_launcher(current_realpath):
         return None
-    if _sha256_file(current_realpath) != expected_digest:
+    current_digest = _sha256_file(current_realpath)
+    if current_digest != expected_digest:
+        return None
+    if not _executes_bash_c_semantics(current_realpath, current_digest):
         return None
     return current_realpath
 
@@ -335,6 +349,7 @@ def resolve_verify_shell() -> VerifyShellRoute | None:
 def reset_verify_shell_cache() -> None:
     """Drop the resolution cache (tests, and env changes inside one process)."""
     _ROUTE_CACHE.clear()
+    _BASH_CAPABILITY_CACHE.clear()
 
 
 def verify_shell_unavailable_reason() -> str:
