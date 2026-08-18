@@ -680,6 +680,11 @@ async def _run_orchestrator(
         project_dir=project_dir,
         fallback_dir=project_fallback_dir,
     )
+    # Always visible, never inferred by the reader: this is the directory the
+    # agent will write in. Seed metadata, a brownfield target, a caller's
+    # fallback, and `--project-dir` can each decide it, so printing the winner
+    # is the only way the person knows before the first write lands.
+    print_info(f"Project directory: {project_dir}")
     session_repo = SessionRepository(event_store)
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None

@@ -740,21 +740,24 @@ ouroboros run minimal_seed.yaml
 
 ### CLI Flag Warnings
 
-#### `--runtime` without `--orchestrator` (init command)
+#### `--runtime` and `--orchestrator` (init command)
 
-**Symptom:**
-```
-Warning: --runtime only affects the workflow execution step when --orchestrator is enabled.
-```
+The two flags act on different stages, and neither gates the other:
 
-**Cause:** `--runtime` (e.g., `--runtime codex`) was passed to `ouroboros init` without `--orchestrator`. The `--runtime` flag only controls which agent runtime backend is used when the generated seed is immediately handed off to workflow execution. Without `--orchestrator`, the workflow handoff step uses a placeholder.
+- `--runtime` selects the agent runtime for the workflow handoff — the execution
+  that starts when you accept "Start workflow now?". It applies whether or not
+  `--orchestrator` is passed.
+- `--orchestrator` selects Claude Code as the LLM backend for the *interview and
+  seed generation*, and is equivalent to `--llm-backend claude_code`.
 
-**Behavior:** This is a **warning only** — the interview and seed generation proceed normally. The runtime flag has no effect.
-
-**Fix:** Add `--orchestrator` if you want to use the specified runtime backend for the post-generation workflow step:
 ```bash
-ouroboros init start --orchestrator --runtime codex "Build a REST API"
+# Interview on the configured backend, execute the Seed with the Codex runtime
+ouroboros init start --runtime codex "Build a REST API"
 ```
+
+Earlier releases warned that `--runtime` had no effect without `--orchestrator`,
+because the handoff without that flag printed a placeholder instead of executing.
+The handoff now always runs, so the warning is gone.
 
 ---
 

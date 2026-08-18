@@ -1153,11 +1153,6 @@ def start(
     if debug:
         print_info("Debug mode enabled - showing verbose logs")
 
-    if runtime and not orchestrator:
-        print_warning(
-            "--runtime only affects the workflow execution step when --orchestrator is enabled."
-        )
-
     # Show mode info
     selected_llm_backend = _resolve_init_llm_backend(
         orchestrator,
