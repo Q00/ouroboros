@@ -191,6 +191,26 @@ async def _terminate(proc: asyncio.subprocess.Process, job: _WindowsJob | None =
             await asyncio.wait_for(proc.wait(), timeout=1.0)
 
 
+async def _terminate_shielded(
+    proc: asyncio.subprocess.Process, job: _WindowsJob | None = None
+) -> bool:
+    """Reach a bounded terminal process state before propagating cancellation.
+
+    Returns whether another cancellation arrived while cleanup was in flight.
+    The cleanup task itself remains shielded so repeated cancellation cannot
+    detach an owned verifier process.
+    """
+    cleanup = asyncio.create_task(_terminate(proc, job))
+    cancelled_during_cleanup = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+    await cleanup
+    return cancelled_during_cleanup
+
+
 async def _run_process(
     argv: Sequence[str],
     *,
@@ -216,7 +236,8 @@ async def _run_process(
             job = _create_windows_job(proc.pid)
             _resume_windows_process(proc.pid)
         except Exception as exc:
-            await _terminate(proc, job)
+            if await _terminate_shielded(proc, job):
+                raise asyncio.CancelledError
             return VerifyRun(returncode=1, output="", start_error=str(exc))
 
     try:
@@ -225,8 +246,12 @@ async def _run_process(
             timeout=timeout_seconds,
         )
     except TimeoutError:
-        await _terminate(proc, job)
+        if await _terminate_shielded(proc, job):
+            raise asyncio.CancelledError
         return VerifyRun(returncode=1, output="", timed_out=True)
+    except BaseException:
+        await _terminate_shielded(proc, job)
+        raise
     finally:
         if job is not None:
             job.close()

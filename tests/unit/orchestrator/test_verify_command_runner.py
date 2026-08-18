@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import shlex
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -59,6 +60,38 @@ async def test_run_with_shell_reports_timeout(tmp_path: Path) -> None:
 
     assert run.timed_out is True
     assert run.start_error is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX process groups")
+@pytest.mark.asyncio
+async def test_posix_cancellation_kills_and_reaps_process_group(tmp_path: Path) -> None:
+    route = _route_or_skip()
+    started = tmp_path / "started.txt"
+    escaped = tmp_path / "escaped.txt"
+    command = (
+        f"printf started > {shlex.quote(str(started))}; "
+        f"sleep 0.4; printf escaped > {shlex.quote(str(escaped))}"
+    )
+    task = asyncio.create_task(
+        run_with_shell(
+            route.argv(command),
+            cwd=str(tmp_path),
+            env=dict(os.environ),
+            timeout_seconds=30,
+        )
+    )
+    for _ in range(100):
+        if started.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert started.exists()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.5)
+
+    assert not escaped.exists()
 
 
 @pytest.mark.asyncio
