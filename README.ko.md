@@ -267,7 +267,7 @@ ouroboros setup                         # 런타임 설정
 ```
 homebrew-core에는 아직 등록되지 않은 자가 호스팅 탭입니다. PyPI에 게시된 것과 동일한 패키지를 설치합니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
