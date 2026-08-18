@@ -571,3 +571,15 @@ def test_parse_rejects_non_string_category(category) -> None:
             json.dumps({"category": category, "reframed_question": "Question?"}),
             "Question?",
         )
+
+
+@pytest.mark.parametrize("field", ["decide_later", "defer_to_dev"])
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_parse_rejects_non_boolean_routing_flags(field, value) -> None:
+    classifier = QuestionClassifier(llm_adapter=MagicMock())
+
+    with pytest.raises(ValueError, match=rf"{field} must be a boolean"):
+        classifier._parse_response(
+            json.dumps({"category": "planning", field: value}),
+            "Question?",
+        )

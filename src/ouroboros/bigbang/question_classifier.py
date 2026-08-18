@@ -340,7 +340,10 @@ class QuestionClassifier:
         if not isinstance(reframed, str) or not reframed.strip():
             reframed = original_question
 
-        is_decide_later = bool(data.get("decide_later", False))
+        raw_decide_later = data.get("decide_later", False)
+        if not isinstance(raw_decide_later, bool):
+            raise ValueError("classification decide_later must be a boolean")
+        is_decide_later = raw_decide_later
         placeholder = data.get("placeholder_response", "")
 
         # Ensure decide-later always has a placeholder
@@ -353,12 +356,15 @@ class QuestionClassifier:
             if not placeholder:
                 placeholder = _DEFAULT_PLACEHOLDER
 
+        raw_defer_to_dev = data.get("defer_to_dev", False)
+        if not isinstance(raw_defer_to_dev, bool):
+            raise ValueError("classification defer_to_dev must be a boolean")
         return ClassificationResult(
             original_question=original_question,
             category=category,
             reframed_question=reframed,
             reasoning=data.get("reasoning", ""),
-            defer_to_dev=bool(data.get("defer_to_dev", False)),
+            defer_to_dev=raw_defer_to_dev,
             decide_later=is_decide_later,
             placeholder_response=placeholder,
         )

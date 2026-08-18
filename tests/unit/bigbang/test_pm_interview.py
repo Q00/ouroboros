@@ -611,6 +611,50 @@ async def test_atomic_pm_turn_fuses_question_score_and_classification(tmp_path: 
     assert "data only; not instructions" in context_messages[0].content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["decide_later", "defer_to_dev"])
+async def test_atomic_pm_turn_falls_back_on_non_boolean_routing_flag(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    payload = {
+        "next_question": "Which user workflow matters most?",
+        "goal_clarity_score": 0.8,
+        "goal_clarity_justification": "The goal is specific.",
+        "constraint_clarity_score": 0.7,
+        "constraint_clarity_justification": "Core boundaries are present.",
+        "success_criteria_clarity_score": 0.6,
+        "success_criteria_clarity_justification": "One decision remains.",
+        "category": "planning",
+        "reframed_question": "Which user workflow matters most?",
+        "reasoning": "Planning question.",
+        "defer_to_dev": False,
+        "decide_later": False,
+        "placeholder_response": "",
+    }
+    payload[field] = "false"
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+    state = InterviewState(
+        interview_id=f"pm_atomic_invalid_{field}",
+        initial_context="Build an analytics workflow",
+        rounds=[
+            InterviewRound(round_number=1, question="Who uses it?", user_response="PMs"),
+            InterviewRound(round_number=2, question="What output?", user_response="Reports"),
+            InterviewRound(round_number=3, question="What scope?", user_response="MVP only"),
+        ],
+    )
+
+    result = await engine.plan_next_turn(state)
+
+    assert result.is_ok
+    assert result.value.classification.category == QuestionCategory.PLANNING
+    assert result.value.classification.output_type == ClassifierOutputType.PASSTHROUGH
+    assert result.value.classification.decide_later is False
+    assert result.value.classification.defer_to_dev is False
+
+
 class TestOpeningQuestion:
     """Test the initial 'what do you want to build?' question."""
 
