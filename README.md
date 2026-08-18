@@ -231,7 +231,7 @@ ouroboros setup --runtime copilot            # discovers models live, picks a de
                                              # registers MCP server in ~/.copilot/mcp-config.json
 ```
 
-Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is narrower than it looks: the static map covers `claude-opus-4-6` and `claude-sonnet-4-5`, any ID already containing a `.` passes through unchanged, and the hyphen-to-dot fallback rewrites *every* hyphen, so the current default `claude-opus-4-8` becomes `claude.opus.4.8` and misses. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid dotted ID explicitly. See [#1995](https://github.com/Q00/ouroboros/issues/1995) and the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
+Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is catalog-gated: the current direct and OpenRouter Opus defaults resolve to Copilot's published `claude-opus-5`, while legacy Anthropic versions convert only their trailing numeric separator and only when the discovered catalog contains the exact candidate. Unknown IDs remain unchanged so Copilot reports an explicit unavailable-model error instead of silently selecting a different model. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid ID explicitly. See the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
 
 See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 

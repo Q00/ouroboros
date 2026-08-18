@@ -2136,14 +2136,15 @@ def _normalize_configured_models_for_backend(
 
     # Match the shipped roster element-wise against current + legacy shipped
     # defaults (#1324), so a roster persisted before a pin bump (e.g. the old
-    # OpenRouter Opus slug in the consensus slot) still normalizes to the
-    # backend-safe sentinel for Claude-incapable backends instead of leaking an
-    # unrunnable id.
+    # OpenRouter Opus slug in the consensus slot) resolves exactly like the
+    # current shipped roster. Claude-incapable backends receive their safe
+    # sentinel; Claude-capable backends receive the current provider pin rather
+    # than replaying a retired model id.
     is_shipped_roster = len(normalized) == len(default_models) and all(
         candidate in recognized_shipped_defaults(default)
         for candidate, default in zip(normalized, default_models, strict=True)
     )
-    if _resolve_llm_backend_for_models(backend) in _SENTINEL_DEFAULT_BACKENDS and is_shipped_roster:
+    if is_shipped_roster:
         return _default_models_for_backend(default_models, backend=backend)
 
     return normalized

@@ -253,7 +253,7 @@ class TestCommandBuilding:
 
     def test_command_maps_current_default_from_catalog(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot")
-        catalog = [CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+        catalog = [CopilotModel(id=DEFAULT_OPUS_MODEL, family=DEFAULT_OPUS_MODEL)]
 
         with patch(
             "ouroboros.copilot.model_discovery.list_copilot_models",
@@ -262,7 +262,7 @@ class TestCommandBuilding:
             command = adapter._build_command(model=DEFAULT_OPUS_MODEL)
 
         idx = command.index("--model")
-        assert command[idx + 1] == "claude-opus-4.8"
+        assert command[idx + 1] == DEFAULT_OPUS_MODEL
 
     def test_command_uses_agent_over_model_when_runtime_profile_set(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", runtime_profile="worker")
