@@ -31,6 +31,7 @@ from ouroboros.orchestrator.host_dispatch import (
     HostDispatchBridge,
     HostDispatchNotBoundError,
     HostDispatchRuntime,
+    _read_submission,
     bind_host_dispatch_bridge,
 )
 from ouroboros.orchestrator.runtime_factory import (
@@ -323,6 +324,37 @@ class TestFanoutReentry:
         assert result.is_ok
         assert result.value.meta["status"] == "complete"
         assert bridge._pending[dispatch_id].result == "host worker output"
+
+    @pytest.mark.asyncio
+    async def test_undispatched_lane_is_terminal_failure_not_success(
+        self, registry: FanoutRegistry, bridge: HostDispatchBridge
+    ) -> None:
+        """A host that could not spawn a subagent must not complete as success.
+
+        The shared fan-out contract lets a lane declare
+        ``{"key": ..., "undispatched": true}`` when the host never ran a
+        child. For execution, that means no work happened at all — treating
+        it as a completed empty result would let an acceptance criterion pass
+        with nothing ever executed.
+        """
+        handler = SubmitFanoutResultsHandler(fanout_registry=registry, host_dispatch_bridge=bridge)
+        dispatch_id = bridge.park(session_id="sess_ud", execution_id=None, payload={"prompt": "p"})
+        assert dispatch_id is not None
+        result = await handler.handle(
+            {
+                "fanout_id": dispatch_id,
+                "session_id": "sess_ud",
+                "correlation_key": HOST_EXECUTION_CORRELATION_KEY,
+                "results": [{"key": HOST_EXECUTION_RESULT_KEY, "undispatched": True}],
+            }
+        )
+        assert result.is_ok
+        assert result.value.meta["status"] == "complete"
+        pending = bridge._pending[dispatch_id]
+        assert pending.submitted
+        content, success = _read_submission(pending.result)
+        assert success is False
+        assert "undispatched" in content
 
     @pytest.mark.asyncio
     async def test_session_mismatch_fails_closed(

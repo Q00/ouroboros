@@ -30,6 +30,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.orchestrator.host_dispatch import HOST_EXECUTION_RESULT_KEY
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -216,7 +217,12 @@ class SubmitFanoutResultsHandler:
                     "server that issued this dispatch)",
                     tool_name="ouroboros_submit_fanout_results",
                 )
-            return self.host_dispatch_bridge.submit(fanout_id, prepared.provided)
+            undispatched_keys = prepared.completion_report.get("undispatched_keys") or ()
+            return self.host_dispatch_bridge.submit(
+                fanout_id,
+                prepared.provided,
+                undispatched=HOST_EXECUTION_RESULT_KEY in undispatched_keys,
+            )
         if self.disposable_memory is None:
             return MCPToolError(
                 "terminal fan-out synthesis requires a configured disposable artifact service",

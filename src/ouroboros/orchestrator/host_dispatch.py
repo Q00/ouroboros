@@ -200,7 +200,13 @@ class HostDispatchBridge:
         )
         return dispatch_id
 
-    def submit(self, dispatch_id: str, provided: Mapping[str, Any]) -> dict[str, Any]:
+    def submit(
+        self,
+        dispatch_id: str,
+        provided: Mapping[str, Any],
+        *,
+        undispatched: bool = False,
+    ) -> dict[str, Any]:
         """Deliver a validated host submission to its parked waiter.
 
         Correlation/session guards already ran in ``prepare_fanout_results``;
@@ -208,6 +214,15 @@ class HostDispatchBridge:
         consumed, or poisoned by a newer attempt reports ``stale_dispatch``
         rather than waking anything — a late submission for attempt N must
         never land after attempt N+1 started.
+
+        ``undispatched=True`` means the shared fan-out contract's declaration
+        that the host never spawned a child for this lane
+        (``{"key": "result", "undispatched": true}``) was accepted upstream.
+        That is a terminal execution failure, not an empty success: without
+        this, ``provided`` holds no ``result`` value, ``pending.result``
+        would land as ``None``, and ``_read_submission(None)`` reads a bare
+        ``None`` as a successful empty result — work that never ran would
+        complete as if it had.
         """
         pending = self._pending.get(dispatch_id)
         if pending is None or pending.poisoned or pending.submitted:
@@ -223,7 +238,16 @@ class HostDispatchBridge:
                     "ouroboros_job_wait and act on the dispatches it lists."
                 ),
             }
-        pending.result = provided.get(HOST_EXECUTION_RESULT_KEY)
+        if undispatched:
+            pending.result = {
+                "success": False,
+                "final_message": (
+                    f"Host reported dispatch {dispatch_id} as undispatched: "
+                    "no subagent was ever spawned for it, so no work ran."
+                ),
+            }
+        else:
+            pending.result = provided.get(HOST_EXECUTION_RESULT_KEY)
         pending.submitted = True
         pending.event.set()
         log.info("host_dispatch.submitted", dispatch_id=dispatch_id)
