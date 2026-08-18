@@ -9,7 +9,12 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, AmbiguityScorer, dimension_specs
-from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+from ouroboros.bigbang.interview import (
+    AGENT_SDK_CLI_FIXED_FRAMING_CHARS,
+    AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
+    InterviewEngine,
+    InterviewState,
+)
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
@@ -63,7 +68,21 @@ class InterviewTurnPlanner:
 
         assert prepared.config is not None
         score_view = scoring_state or state
-        score_context = self.scorer._build_interview_context(score_view)
+        excluded_score_rounds = [
+            str(index)
+            for index, (source_round, score_round) in enumerate(
+                zip(state.rounds, score_view.rounds, strict=False),
+                start=1,
+            )
+            if source_round.user_response is not None and score_round.user_response is None
+        ]
+        scoring_authority_note = ""
+        if excluded_score_rounds:
+            scoring_authority_note = (
+                "For clarity scoring only, answers in rounds "
+                f"{', '.join(excluded_score_rounds)} are observations, not user decisions; "
+                "do not count them as resolved requirements.\n"
+            )
         dimensions = dimension_specs(is_brownfield=state.is_brownfield)
         dimension_lines = "\n".join(
             f"- {spec.key}: {spec.rubric} Weight={spec.weight:.2f}." for spec in dimensions
@@ -87,10 +106,7 @@ Produce the next Socratic question and assess requirement clarity from the same
 interview revision. The behavioral rules above apply to `next_question`; do not
 emit a closure announcement in that field.
 
-Use this decision-authority view only for the clarity fields:
----
-{score_context}
----
+{scoring_authority_note}
 {context_note}
 Clarity dimensions:
 {dimension_lines}
@@ -104,12 +120,22 @@ Respond ONLY with one JSON object. Required fields:
 {extra_contract}
 No prose, Markdown fences, or second JSON object.
 """
-        messages = list(prepared.messages)
-        system = messages[0]
-        messages[0] = Message(
-            role=MessageRole.SYSTEM,
-            content=system.content + atomic_contract,
+        system_content = prepared.messages[0].content + atomic_contract
+        history_budget = max(
+            0,
+            self.engine._MAX_TOTAL_PROMPT_CHARS
+            - len(system_content)
+            - AGENT_SDK_CLI_FIXED_FRAMING_CHARS
+            - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
         )
+        conversation_history = self.engine._trim_messages_to_budget(
+            list(prepared.conversation_history),
+            max_chars=history_budget,
+        )
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_content),
+            *conversation_history,
+        ]
         config = prepared.config
         completion = await self.engine._require_llm_adapter().complete(messages, config)
         if completion.is_err:
