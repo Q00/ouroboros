@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +13,7 @@ import pytest
 
 from ouroboros.orchestrator import verify_command_runner
 from ouroboros.orchestrator.verify_command_runner import (
+    _run_process,
     _spawn_kwargs,
     _terminate,
     _WindowsJob,
@@ -74,7 +77,63 @@ async def test_run_with_shell_reports_start_error(tmp_path: Path) -> None:
 def test_windows_spawn_uses_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
 
-    assert "creationflags" in _spawn_kwargs()
+    assert _spawn_kwargs()["creationflags"] & 0x00000004
+
+
+@pytest.mark.asyncio
+async def test_windows_assigns_job_before_resuming_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
+    order: list[str] = []
+    process = SimpleNamespace(
+        pid=321,
+        communicate=AsyncMock(return_value=(b"", None)),
+        returncode=0,
+        wait=AsyncMock(),
+        kill=MagicMock(),
+    )
+    monkeypatch.setattr(
+        verify_command_runner.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=process),
+    )
+    job = _WindowsJob(handle=object(), close_handle=lambda _handle: order.append("close"))
+    monkeypatch.setattr(
+        verify_command_runner,
+        "_create_windows_job",
+        lambda _pid: order.append("assign") or job,
+    )
+    monkeypatch.setattr(
+        verify_command_runner,
+        "_resume_windows_process",
+        lambda _pid: order.append("resume"),
+    )
+
+    run = await _run_process(("bash.exe", "-c", "exit 0"), cwd=".", env={}, timeout_seconds=1)
+
+    assert run.returncode == 0
+    assert order == ["assign", "resume", "close"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process containment")
+@pytest.mark.asyncio
+async def test_windows_timeout_kills_immediate_background_child(tmp_path: Path) -> None:
+    route = _route_or_skip()
+    marker = tmp_path / "escaped-child.txt"
+    code = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).write_text('escaped')"
+    command = f'{sys.executable!r} -c "{code}" & sleep 5'
+
+    run = await run_with_shell(
+        route.argv(command),
+        cwd=str(tmp_path),
+        env=dict(os.environ),
+        timeout_seconds=0.05,
+    )
+    await asyncio.sleep(1.25)
+
+    assert run.timed_out is True
+    assert not marker.exists()
 
 
 @pytest.mark.asyncio

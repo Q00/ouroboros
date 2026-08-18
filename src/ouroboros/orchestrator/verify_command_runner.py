@@ -118,10 +118,55 @@ def _running_on_windows() -> bool:
 
 
 def _spawn_kwargs() -> dict[str, object]:
-    """Create an independently terminable verifier process group."""
+    """Create a verifier process that cannot execute before containment."""
     if _running_on_windows():
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)}
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        suspended = getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+        return {"creationflags": new_group | suspended}
     return {"start_new_session": True}
+
+
+def _resume_windows_process(pid: int) -> None:
+    """Resume the primary thread only after Job Object assignment."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+    try:
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        has_thread = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while has_thread:
+            if entry.th32OwnerProcessID == pid:
+                thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)
+                if not thread:
+                    raise OSError(ctypes.get_last_error(), "OpenThread failed")
+                try:
+                    if kernel32.ResumeThread(thread) == 0xFFFFFFFF:
+                        raise OSError(ctypes.get_last_error(), "ResumeThread failed")
+                finally:
+                    kernel32.CloseHandle(thread)
+                return
+            has_thread = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    raise OSError("suspended verifier thread was not found")
 
 
 async def _terminate_windows_process_tree(
@@ -191,8 +236,9 @@ async def _run_process(
     if _running_on_windows():
         try:
             job = _create_windows_job(proc.pid)
+            _resume_windows_process(proc.pid)
         except Exception as exc:
-            await _terminate(proc)
+            await _terminate(proc, job)
             return VerifyRun(returncode=1, output="", start_error=str(exc))
 
     try:
