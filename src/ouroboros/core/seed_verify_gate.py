@@ -1,17 +1,15 @@
-"""Deterministic gate over acceptance criteria that nothing can verify.
+"""Deterministic-gate eligibility for acceptance criteria.
 
-An AC carrying a ``verify_command`` is judged by the orchestrator running that
-command itself (``_run_ac_verify_gate``): immune both to a worker grading its
-own homework and to a lost transcript. An AC without one falls back to matching
-the worker's typed evidence against its runtime transcript — the only path that
-can be gamed, and the only path that collapses when transcript collection
-fails.
+Every AC remains subject to worker evidence and runtime-transcript review. A
+``verify_command`` adds an orchestrator-owned machine check; it never replaces
+transcript obligations and can never recover a failed worker result. Missing
+transcript or verifier infrastructure preserves completed worker success as
+explicitly unverified rather than manufacturing a pass or redispatching work.
 
-So the gate pushes criteria toward ``verify_command`` and asks for an explicit
-per-AC reason when that is genuinely not feasible. It is deliberately staged:
+This gate asks each criterion to provide that additional deterministic command
+or an explicit per-AC reason why it is not feasible. It is deliberately staged:
 ``warn`` surfaces violations without changing behavior, ``block`` refuses the
-run. Nothing here inspects or rewrites the command — it only asks whether a
-deterministic judgment exists at all.
+run. Nothing here inspects or rewrites the command.
 """
 
 from __future__ import annotations
