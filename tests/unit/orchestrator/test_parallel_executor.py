@@ -70,6 +70,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_level_coordinator_runtime_scope,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.leaf_dispatcher import (
     _attach_bash_filesystem_effects,
     _BashFilesystemLeaseTracker,
@@ -103,7 +104,7 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
-from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verifier import VerifierStatus, VerifierVerdict
 from ouroboros.persistence.checkpoint import CheckpointStore
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
@@ -5350,6 +5351,17 @@ def _greeting_repro_messages(edit_path: str) -> tuple[AgentMessage, ...]:
             tool_name=None,
             data={"subtype": "tool_result", "output": "OK", "exit_code": 0},
         ),
+        AgentMessage(
+            type="tool",
+            content="run tests",
+            tool_name="Bash",
+            data={"tool_input": {"command": _GREETING_TEST_COMMAND}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="1 passed",
+            data={"subtype": "tool_result", "output": "1 passed", "exit_code": 0},
+        ),
         AgentMessage(type="result", content="done", data={}),
     )
 
@@ -5358,6 +5370,7 @@ _GREETING_AC = "hello.py defines greet(name) returning the string Hello, <name>"
 _GREETING_INNER_COMMAND = (
     "python3 -c \"from hello import greet; assert greet('World') == 'Hello, World!'; print('OK')\""
 )
+_GREETING_TEST_COMMAND = "python -m pytest -q"
 
 
 def test_atomic_verifier_rejects_absolute_transcript_path_when_cwd_is_unknown() -> None:
@@ -5427,7 +5440,8 @@ def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
+                "commands_run": [_GREETING_INNER_COMMAND, _GREETING_TEST_COMMAND],
+                "tests_passed": [_GREETING_TEST_COMMAND],
             }
         ),
         ac_content=_GREETING_AC,
@@ -5957,8 +5971,8 @@ def test_files_touched_rejects_conflicting_top_level_and_nested_call_ids(tmp_pat
     )
 
 
-def test_effective_schema_delegates_contract_command_evidence() -> None:
-    """An active contract gate replaces transcript command and test evidence."""
+def test_contract_keeps_transcript_evidence_requirements() -> None:
+    """An active verify gate adds evidence without weakening the profile."""
     profile = load_profile("code")
 
     schema = _effective_evidence_schema_for_ac(
@@ -5967,9 +5981,6 @@ def test_effective_schema_delegates_contract_command_evidence() -> None:
         has_success_contract=True,
         verify_gate_active=True,
     )
-
-    assert schema.required == ("files_touched",)
-
     artifact_schema = _effective_evidence_schema_for_ac(
         profile,
         "Implement the module.",
@@ -5978,7 +5989,9 @@ def test_effective_schema_delegates_contract_command_evidence() -> None:
         verify_gate_active=True,
     )
 
-    assert artifact_schema.required == ()
+    expected = ("files_touched", "commands_run", "tests_passed")
+    assert schema.required == expected
+    assert artifact_schema.required == expected
 
 
 def test_legacy_ac_keeps_transcript_backed_evidence() -> None:
@@ -6010,10 +6023,8 @@ def test_contract_ac_retains_transcript_backed_evidence_when_verify_gate_inactiv
     assert schema.required == ("files_touched", "commands_run", "tests_passed")
 
 
-def test_contract_ac_with_artifacts_delegates_all_evidence_when_verify_gate_active() -> None:
-    """An active contract gate replaces all evidence when it checks artifacts too."""
+def test_contract_with_artifacts_keeps_all_evidence_when_verify_gate_active() -> None:
     profile = load_profile("code")
-
     schema = _effective_evidence_schema_for_ac(
         profile,
         "Implement the module.",
@@ -6021,23 +6032,18 @@ def test_contract_ac_with_artifacts_delegates_all_evidence_when_verify_gate_acti
         has_expected_artifacts=True,
         verify_gate_active=True,
     )
+    assert schema.required == ("files_touched", "commands_run", "tests_passed")
 
-    assert schema.required == ()
 
-
-def test_contract_ac_verifier_delegates_command_evidence() -> None:
-    """Contract ACs do not transcript-gate commands_run or tests_passed.
-
-    Only files_touched is checked without expected artifacts; command execution and
-    test success are delegated to the orchestrator verify gate.
-    """
+def test_contract_ac_verifier_still_checks_transcript_evidence() -> None:
     executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
     verdict = executor._verify_atomic_evidence_against_runtime_messages(
         messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
+                "commands_run": [_GREETING_INNER_COMMAND, _GREETING_TEST_COMMAND],
+                "tests_passed": [_GREETING_TEST_COMMAND],
             }
         ),
         ac_content=_GREETING_AC,
@@ -6047,15 +6053,15 @@ def test_contract_ac_verifier_delegates_command_evidence() -> None:
     assert verdict.passed is True, verdict.reasons
 
 
-def test_contract_ac_with_expected_artifacts_verifier_delegates_all_evidence() -> None:
-    """Contract AC artifacts and command execution are verified by the gate."""
+def test_contract_artifacts_do_not_excuse_unbacked_transcript_claims() -> None:
     executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
     verdict = executor._verify_atomic_evidence_against_runtime_messages(
         messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["not-backed-by-transcript.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
+                "commands_run": [_GREETING_INNER_COMMAND, _GREETING_TEST_COMMAND],
+                "tests_passed": [_GREETING_TEST_COMMAND],
             }
         ),
         ac_content=_GREETING_AC,
@@ -6063,8 +6069,8 @@ def test_contract_ac_with_expected_artifacts_verifier_delegates_all_evidence() -
         has_expected_artifacts=True,
         verify_gate_active=True,
     )
-
-    assert verdict.passed is True, verdict.reasons
+    assert verdict.passed is False
+    assert "files_touched" in verdict.reasons[0]
 
 
 def test_legacy_ac_verifier_keeps_strict_formal_runner_tests_passed() -> None:
@@ -9181,11 +9187,11 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_ran"] is False
 
     @pytest.mark.asyncio
-    async def test_contract_ac_with_artifacts_ignores_transcript_claims(
+    async def test_contract_ac_with_artifacts_keeps_transcript_obligations(
         self,
         tmp_path,
     ) -> None:
-        """The verify gate owns artifact and command proof for contract ACs."""
+        """A passing gate does not excuse malformed transcript evidence."""
         command = f"{sys.executable} -c \"print('OK')\""
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
@@ -9238,25 +9244,20 @@ class TestParallelACExecutor:
             ),
         )
 
-        assert result.success is True
-        assert result.error is None
-        assert result.typed_evidence is not None
-        assert result.typed_evidence.data == {}
-        assert runtime.last_prompt is not None
-        assert "directly (commands_run)" not in runtime.last_prompt
-        assert "ensure they exist in the workspace" in runtime.last_prompt
+        assert result.success is False
+        assert result.error is not None
+        assert "missing fields: tests_passed" in result.error
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["required_fields"] == []
-        assert evidence_event.data["typed_evidence_valid"] is True
-        assert evidence_event.data["verifier_passed"] is True
-        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == [
+        assert evidence_event.data["required_fields"] == [
             "files_touched",
             "commands_run",
+            "tests_passed",
         ]
+        assert evidence_event.data["typed_evidence_valid"] is False
 
     @pytest.mark.asyncio
     async def test_contract_ac_missing_artifact_rejected_when_verify_gate_disabled(
@@ -9331,8 +9332,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_valid"] is False
 
     @pytest.mark.asyncio
-    async def test_fat_harness_mode_rejects_missing_typed_evidence(self) -> None:
-        """Fat-harness mode gates atomic success on profile evidence."""
+    async def test_fat_harness_preserves_work_when_transcript_is_missing(self) -> None:
+        """Missing transcript infrastructure produces unverified success."""
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
@@ -9358,23 +9359,22 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is False
-        assert result.error is not None
-        assert "Evidence is not valid JSON" in result.error
-        assert result.final_message.startswith("Evidence is not valid JSON")
+        assert result.success is True
+        assert result.error is None
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
 
         report = render_parallel_verification_report(
             ParallelExecutionResult(
                 results=(result,),
-                success_count=0,
-                failure_count=1,
+                success_count=1,
+                failure_count=0,
                 total_messages=len(result.messages),
             ),
             total_acceptance_criteria=1,
         )
-        assert "[FAILED]" in report
-        assert "Evidence is not valid JSON" in report
-        assert "Runtime final message:" in report
+        assert "[COMPLETED]" in report
+        assert "Succeeded without machine verification" in report
 
         evidence_event = next(
             event
@@ -9382,15 +9382,16 @@ class TestParallelACExecutor:
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["observe_only"] is False
-        assert evidence_event.data["enforced"] is True
+        assert evidence_event.data["enforced"] is False
         assert evidence_event.data["fat_harness_mode"] is True
-        assert "Evidence is not valid JSON" in evidence_event.data["enforcement_error"]
-        assert evidence_event.data["verifier_ran"] is False
+        assert evidence_event.data["enforcement_error"] is None
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_status"] == "UNAVAILABLE"
 
         terminal_event = next(
-            event for event in appended_events if event.type == "execution.session.failed"
+            event for event in appended_events if event.type == "execution.session.completed"
         )
-        assert "Evidence is not valid JSON" in terminal_event.data["error"]
+        assert terminal_event.data["success"] is True
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_accepts_valid_typed_evidence(self) -> None:
@@ -9668,8 +9669,8 @@ class TestParallelACExecutor:
         assert "files_touched" in evidence_event.data["missing_fields"]
 
     @pytest.mark.asyncio
-    async def test_fat_harness_mode_rejects_unbacked_typed_evidence(self) -> None:
-        """Default verifier rejects final-message-only self-reported evidence."""
+    async def test_fat_harness_marks_final_only_evidence_unverified(self) -> None:
+        """Final-only evidence is preserved as success but remains unverified."""
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
@@ -9700,10 +9701,14 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is False
-        assert result.error is not None
-        assert "Fat-harness verifier failed" in result.error
-        assert "no runtime transcript evidence supports" in result.error
+        assert result.success is True
+        assert result.error is None
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
+        assert (
+            result.atomic_verifier_verdict.failure_class
+            == FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value
+        )
 
         evidence_event = next(
             event
@@ -9713,7 +9718,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["verifier_ran"] is True
         assert evidence_event.data["verifier_passed"] is False
-        assert evidence_event.data["verifier_failure_class"] == "EVIDENCE_MISSING"
+        assert (
+            evidence_event.data["verifier_failure_class"]
+            == FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value
+        )
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_allows_bash_generated_file_and_whole_suite_test(
@@ -11366,10 +11374,10 @@ class TestParallelACExecutor:
         ]
 
     @pytest.mark.asyncio
-    async def test_fat_harness_accepts_artifact_success_contract_with_incomplete_typed_evidence(
+    async def test_fat_harness_marks_incomplete_artifact_evidence_unverified(
         self, tmp_path: Any
     ) -> None:
-        """Artifact ACs may be proven by expected_artifacts + verify_command."""
+        """A passing artifact command cannot erase missing transcript evidence."""
         (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
@@ -11407,10 +11415,9 @@ class TestParallelACExecutor:
         assert result.error is None
         assert result.typed_evidence is not None
         assert result.typed_evidence_validation is not None
-        assert result.typed_evidence_validation.ok is True
-        assert result.typed_evidence_validation.missing_fields == ()
+        assert result.typed_evidence_validation.ok is False
         assert result.atomic_verifier_verdict is not None
-        assert result.atomic_verifier_verdict.passed is True
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
         assert not any(
             call.args and call.args[0] == "parallel_executor.ac.verifier_rejected"
             for call in log_mock.warning.call_args_list
@@ -11422,19 +11429,16 @@ class TestParallelACExecutor:
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["typed_evidence_present"] is True
-        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["typed_evidence_valid"] is False
         assert evidence_event.data["enforcement_error"] is None
         assert evidence_event.data["has_success_contract"] is True
         assert evidence_event.data["has_expected_artifacts"] is True
         assert evidence_event.data["verify_gate_active"] is True
-        assert evidence_event.data["verifier_ran"] is True
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_status"] == "UNAVAILABLE"
 
     @pytest.mark.asyncio
-    async def test_fat_harness_accepts_artifact_contract_without_typed_evidence(
-        self, tmp_path: Any
-    ) -> None:
-        """A passing artifact gate may replace every profile evidence field."""
+    async def test_fat_harness_preserves_artifact_without_transcript(self, tmp_path: Any) -> None:
+        """A missing transcript yields unverified success, not a rerun."""
         (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
@@ -11471,13 +11475,13 @@ class TestParallelACExecutor:
         assert result.success is True
         assert result.error is None
         assert result.typed_evidence is None
-        assert result.atomic_verifier_verdict is None
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["required_fields"] == []
         assert evidence_event.data["typed_evidence_present"] is False
         assert evidence_event.data["enforcement_error"] is None
 
@@ -11518,17 +11522,20 @@ class TestParallelACExecutor:
             ),
         )
 
-        assert result.success is False
-        assert result.error is not None
-        assert "Evidence is not valid JSON" in result.error
+        assert result.success is True
+        assert result.error is None
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["required_fields"] == ["files_touched"]
-        assert evidence_event.data["typed_evidence_present"] is False
-        assert evidence_event.data["enforcement_error"] is not None
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
 
     @pytest.mark.asyncio
     async def test_contract_verify_gate_is_single_shot_across_atomic_and_final_gate(
@@ -11599,10 +11606,8 @@ class TestParallelACExecutor:
         assert finalized.success is True
 
     @pytest.mark.asyncio
-    async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
-        self, tmp_path: Any
-    ) -> None:
-        """Artifact contracts can recover runtime false-negatives."""
+    async def test_verify_gate_never_recovers_failed_artifact_result(self, tmp_path: Any) -> None:
+        """Verification does not rewrite a failed worker execution."""
         (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
         seed = Seed.from_dict(
             {
@@ -11650,7 +11655,7 @@ class TestParallelACExecutor:
             outcome=ACExecutionOutcome.FAILED,
         )
 
-        recovered = await executor._apply_verify_gate(
+        gated = await executor._apply_verify_gate(
             seed=seed,
             ac_index=0,
             result=failed,
@@ -11658,14 +11663,9 @@ class TestParallelACExecutor:
             execution_id="exec_123",
         )
 
-        assert recovered.success is True
-        assert recovered.error is None
-        assert recovered.outcome == ACExecutionOutcome.SUCCEEDED
-        recovery_event = next(
-            event for event in appended_events if event.type == "execution.verify.recovered"
-        )
-        assert recovery_event.data["prior_error"] == "memory pressure timeout after artifact write"
-        assert recovery_event.data["expected_artifacts"] == ["output.txt"]
+        assert gated is failed
+        assert gated.success is False
+        assert not any(event.type == "execution.verify.recovered" for event in appended_events)
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_surfaces_operational_verifier_error(self) -> None:

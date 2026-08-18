@@ -8457,6 +8457,52 @@ class OrchestratorRunner:
 
         return await self.execute_precreated_session(**execute_kwargs)
 
+    def _apply_verify_command_gate(
+        self, seed: Seed
+    ) -> Result[SessionTracker, OrchestratorError] | None:
+        """Surface — or refuse — criteria nothing can deterministically judge.
+
+        Returns ``None`` when preparation may continue, which is every case in
+        the ``warn`` stage. Only the ``block`` stage produces an error.
+        """
+        from ouroboros.core.seed_verify_gate import (
+            render_verify_command_gate_warning,
+            unverifiable_criteria,
+            verify_command_gate_mode,
+        )
+
+        findings = unverifiable_criteria(seed)
+        if not findings:
+            return None
+
+        mode = verify_command_gate_mode()
+        indices = [finding.display_index for finding in findings]
+        if mode == "block":
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Acceptance criteria carry no deterministic verify_command "
+                        "(missing, or proven to always pass) and no exemption reason"
+                    ),
+                    details={
+                        "gate": "seed.verify_command_gate",
+                        "mode": mode,
+                        "unverifiable_ac_indices": indices,
+                        "guidance": render_verify_command_gate_warning(findings),
+                    },
+                )
+            )
+        log.warning(
+            "orchestrator.seed.verify_command_gate_warning",
+            mode=mode,
+            unverifiable_ac_indices=indices,
+            unverifiable_ac_count=len(findings),
+        )
+        # Text, not markup interpolation: descriptions and commands are seed
+        # text and may contain Rich tags (`[/yellow]` would raise MarkupError).
+        self._console.print(Text(render_verify_command_gate_warning(findings), style="yellow"))
+        return None
+
     async def prepare_session(
         self,
         seed: Seed,
@@ -8484,6 +8530,12 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
+        # The verify-command gate runs here, at new-session preparation, so
+        # sessions already in flight are never re-judged under a gate that was
+        # tightened after they started.
+        gate_result = self._apply_verify_command_gate(seed)
+        if gate_result is not None:
+            return gate_result
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None

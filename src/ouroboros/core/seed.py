@@ -473,6 +473,15 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         default=None,
         description="Literal string required in verify_command combined stdout and stderr",
     )
+    verify_exemption_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why this criterion cannot carry a verify_command. Required by the "
+            "seed verify-command gate for criteria the orchestrator cannot "
+            "judge deterministically; it is a per-AC, explicit escape hatch, "
+            "never a blanket opt-out"
+        ),
+    )
     investment: InvestmentSpec | None = Field(default=None)
 
     @model_validator(mode="before")
@@ -501,6 +510,16 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _strip_description(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("verify_exemption_reason", mode="before")
+    @classmethod
+    def _strip_verify_exemption_reason(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or _is_none_sentinel(stripped):
+                return None
+            return stripped
         return value
 
     @field_validator("verify_command", mode="before")
@@ -570,7 +589,11 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     @property
     def has_success_contract(self) -> bool:
-        """Return True when explicit evidence fields are populated."""
+        """Return whether the criterion declares deterministic verification fields.
+
+        A contract adds evidence but never removes transcript obligations or
+        overrides the worker execution outcome.
+        """
         return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
 
     def with_materialized_semantic_key(self) -> AcceptanceCriterionSpec:
@@ -585,6 +608,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             not self.has_success_contract
             and self.investment is None
             and self.semantic_ac_key is None
+            and self.verify_exemption_reason is None
         ):
             return self.description
         data: dict[str, Any] = {"description": self.description}
@@ -596,6 +620,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:
             data["output_assertion"] = self.output_assertion
+        if self.verify_exemption_reason:
+            data["verify_exemption_reason"] = self.verify_exemption_reason
         if self.investment is not None:
             data["investment"] = self.investment.model_dump(mode="json", exclude_none=True)
         return data

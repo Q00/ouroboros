@@ -107,6 +107,7 @@ from ouroboros.config.models import (
     ResilienceConfig,
     RuntimeControlsConfig,
     RuntimeProfileConfig,
+    SeedConfig,
     TelemetryConfig,
     TierConfig,
     get_config_dir,
@@ -118,6 +119,7 @@ __all__ = [
     # Models
     "OuroborosConfig",
     "CredentialsConfig",
+    "SeedConfig",
     "TelemetryConfig",
     "TierConfig",
     "ModelConfig",

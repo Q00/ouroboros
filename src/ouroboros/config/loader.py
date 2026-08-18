@@ -1365,6 +1365,31 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
+def get_configured_verify_bash_path() -> str | None:
+    """Get ``orchestrator.verify_bash_path`` — config only, never the env.
+
+    The usual env-then-config accessor shape is deliberately not used here.
+    :func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell` reads
+    ``OUROBOROS_VERIFY_BASH`` itself, and reaches this function only after
+    finding that value stale; an accessor that returned the environment first
+    would hand back the same stale path and hide the configured shell entirely.
+    Executability is checked by that caller, which falls through to its own
+    candidate list when the configured value no longer resolves.
+
+    Returns:
+        Configured shell path or None.
+    """
+    try:
+        config = load_config()
+        verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)
+        if verify_bash_path:
+            return str(Path(verify_bash_path).expanduser())
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_pi_cli_path() -> str | None:
     """Get Pi CLI path from environment variable or config file.
 

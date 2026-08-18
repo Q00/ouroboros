@@ -141,7 +141,7 @@ class TestVerifierVerdict:
             VerifierVerdict(passed=True, retry_admission="RETRY")
 
     def test_fail_cannot_use_accept_retry_admission(self) -> None:
-        with pytest.raises(ValueError, match="cannot have retry_admission ACCEPT"):
+        with pytest.raises(ValueError, match="Only an unavailable verifier"):
             VerifierVerdict(
                 passed=False,
                 reasons=("bad",),
