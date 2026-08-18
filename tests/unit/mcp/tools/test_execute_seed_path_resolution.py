@@ -154,3 +154,25 @@ class TestResolveSeedContent:
         assert result.is_err
         assert "Working directory does not exist" in str(result.error)
         assert getattr(result.error, "tool_name", None) == "ouroboros_execute_seed"
+
+    async def test_direct_execute_seed_rejects_host_runtime(self, tmp_path: Path) -> None:
+        """The direct (fire-and-forget) entry has no JobManager job, so a
+        host dispatch parked there would have no ``job_wait``/``job_status``
+        surface for the caller to submit a result through. Only the
+        job-tracked ``ouroboros_start_execute_seed`` path may select the
+        ``host`` runtime.
+        """
+        handler = ExecuteSeedHandler(agent_runtime_backend="host")
+
+        result = await handler.handle(
+            {
+                "cwd": str(tmp_path),
+                "seed_content": "goal: no host dispatch\nacceptance_criteria:\n  - reject\n",
+                "max_iterations": 1,
+                "skip_qa": True,
+            }
+        )
+
+        assert result.is_err
+        assert "ouroboros_start_execute_seed" in str(result.error)
+        assert getattr(result.error, "tool_name", None) == "ouroboros_execute_seed"

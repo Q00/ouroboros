@@ -1197,6 +1197,30 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         Returns:
             Result containing execution result or error.
         """
+        if not synchronous:
+            # The direct (fire-and-forget) entry has no JobManager job, so a
+            # parked host dispatch would have no ``job_wait``/``job_status``
+            # surface through which the caller could discover its
+            # ``fanout_id`` and submit a result. Only the job-tracked path
+            # (``StartExecuteSeedHandler``, which calls back in with
+            # ``synchronous=True``) can service a host dispatch.
+            from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+
+            try:
+                resolved_runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+            except Exception:
+                resolved_runtime_backend = None
+            if resolved_runtime_backend == "host":
+                return Result.err(
+                    MCPToolError(
+                        "The 'host' agent runtime dispatches execution to the "
+                        "calling MCP host and requires job tracking so "
+                        "job_wait/job_status can surface pending_host_dispatches. "
+                        "Use ouroboros_start_execute_seed (ooo run) instead of "
+                        "ouroboros_execute_seed.",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
         cwd_result = self._resolve_dispatch_cwd_result(
             arguments.get("cwd"), tool_name="ouroboros_execute_seed"
         )

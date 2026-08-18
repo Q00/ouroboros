@@ -49,6 +49,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -311,6 +312,25 @@ def bind_host_dispatch_bridge(
         return
     adapter.bind_bridge(bridge)
     adapter.bind_dispatch_scope(session_id=session_id, execution_id=execution_id)
+
+
+def reject_host_runtime_for_evolve(backend: str, *, phase: str) -> None:
+    """Fail fast when ``host`` is selected for evolve/Ralph execution.
+
+    Evolve/Ralph jobs have no per-session dispatch scope: ``bind_dispatch_scope``
+    requires a bound ``session_id``, and ``EvolutionaryLoop`` carries no session
+    identity through its executor callback. Binding without scope would park a
+    dispatch that can never be discovered or submitted against — it would die
+    later with ``host_dispatch_scope_missing`` instead of failing here.
+    """
+    if backend != "host":
+        return
+    raise ConfigError(
+        f"The 'host' agent runtime is not supported for evolve/Ralph {phase}: "
+        "these jobs have no per-session dispatch scope for the host "
+        "bridge to correlate submissions against. Use an executable "
+        "runtime (claude-cli, codex, opencode, ...) for evolve/ralph."
+    )
 
 
 class HostDispatchRuntime:
