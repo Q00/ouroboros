@@ -1284,7 +1284,9 @@ class JobStatusHandler:
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
 
         pending_host_dispatches = host_dispatch_status.pending_host_dispatches(
-            self.host_dispatch_bridge, snapshot
+            self.host_dispatch_bridge,
+            snapshot,
+            announce=False,
         )
         if pending_host_dispatches:
             text += host_dispatch_status.pending_host_dispatch_suffix(pending_host_dispatches)

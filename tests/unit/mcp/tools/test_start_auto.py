@@ -2973,3 +2973,63 @@ class TestAutoRunSuccessorWiring:
 
         assert rebuilt is not original
         assert rebuilt.start_evaluate_handler is injected
+
+    def test_host_runtime_ignores_irrelevant_global_opencode_mode(self) -> None:
+        """A host execute stage must reuse its composed handler and bridge."""
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+
+        bridge = object()
+        original = StartExecuteSeedHandler(
+            execute_handler=ExecuteSeedHandler(
+                agent_runtime_backend="host",
+                opencode_mode="plugin",
+                host_dispatch_bridge=bridge,
+            ),
+            agent_runtime_backend="host",
+            opencode_mode="plugin",
+        )
+
+        resolved = _execution_start_handler(
+            original,
+            llm_backend=None,
+            agent_runtime_backend="host",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        assert resolved is original
+        assert resolved._execute_handler.host_dispatch_bridge is bridge
+
+    def test_rebuild_preserves_host_dispatch_bridge(self) -> None:
+        """A genuine runtime switch must not clone away composed dependencies."""
+        from ouroboros.mcp.tools.auto_handler import _execution_start_handler
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+
+        bridge = object()
+        original = StartExecuteSeedHandler(
+            execute_handler=ExecuteSeedHandler(
+                agent_runtime_backend="codex",
+                host_dispatch_bridge=bridge,
+            ),
+            agent_runtime_backend="codex",
+        )
+
+        rebuilt = _execution_start_handler(
+            original,
+            llm_backend=None,
+            agent_runtime_backend="host",
+            opencode_mode=None,
+            mcp_manager=None,
+            mcp_tool_prefix="",
+        )
+
+        assert rebuilt is not original
+        assert rebuilt._execute_handler.host_dispatch_bridge is bridge

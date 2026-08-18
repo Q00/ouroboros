@@ -195,6 +195,39 @@ class TestDispatchRoundTrip:
         assert bridge.pending_for_session("sess_dl") == []
 
     @pytest.mark.asyncio
+    async def test_submission_after_deadline_is_not_delivered(
+        self, bridge: HostDispatchBridge
+    ) -> None:
+        runtime = HostDispatchRuntime(
+            bridge=bridge,
+            heartbeat_interval_seconds=0.2,
+            dispatch_deadline_seconds=0.05,
+        )
+        runtime.bind_dispatch_scope(session_id="sess_late")
+        submission_status: dict[str, Any] = {}
+
+        async def late_host() -> None:
+            pending: list[dict[str, Any]] = []
+            while not pending:
+                await asyncio.sleep(0.005)
+                pending = bridge.pending_for_session("sess_late")
+            await asyncio.sleep(0.06)
+            submission_status.update(
+                bridge.submit(
+                    pending[0]["fanout_id"],
+                    {HOST_EXECUTION_RESULT_KEY: "too late"},
+                )
+            )
+
+        task = asyncio.create_task(late_host())
+        messages = [message async for message in runtime.execute_task("do it before deadline")]
+        await task
+
+        assert submission_status["status"] == "deadline_exceeded"
+        assert messages[-1].is_error
+        assert messages[-1].data.get("error_code") == "host_dispatch_deadline_exceeded"
+
+    @pytest.mark.asyncio
     async def test_missing_session_scope_fails_closed(self, bridge: HostDispatchBridge) -> None:
         # A sessionless dispatch would bind no submit guard and surface in no
         # job poll; the attempt must fail instead of parking invisibly.
@@ -254,6 +287,25 @@ class TestDispatchRoundTrip:
         bridge._pending[dispatch_id].announced_at -= 10_000.0
         again = bridge.pending_for_session("sess_an")
         assert len(again) == 1 and again[0]["reannounce"] is True
+
+    def test_read_only_observation_does_not_consume_announcement(
+        self, bridge: HostDispatchBridge
+    ) -> None:
+        dispatch_id = bridge.park(
+            session_id="sess_observe",
+            execution_id=None,
+            payload={"prompt": "p"},
+        )
+        assert dispatch_id is not None
+
+        observed = bridge.pending_for_session("sess_observe", announce=False)
+        assert len(observed) == 1
+        assert observed[0]["actionable"] is False
+
+        actionable = bridge.pending_for_session("sess_observe")
+        assert len(actionable) == 1
+        assert actionable[0]["actionable"] is True
+        assert actionable[0]["dispatch_id"] == dispatch_id
 
     def test_park_refuses_empty_session(self, bridge: HostDispatchBridge) -> None:
         with pytest.raises(ValueError):
@@ -355,6 +407,42 @@ class TestFanoutReentry:
         content, success = _read_submission(pending.result)
         assert success is False
         assert "undispatched" in content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [None, "", {}, [], {"success": "false"}, {"success": True}],
+    )
+    async def test_empty_or_malformed_execution_content_does_not_consume_dispatch(
+        self,
+        registry: FanoutRegistry,
+        bridge: HostDispatchBridge,
+        content: Any,
+    ) -> None:
+        handler = SubmitFanoutResultsHandler(
+            fanout_registry=registry,
+            host_dispatch_bridge=bridge,
+        )
+        dispatch_id = bridge.park(
+            session_id="sess_invalid",
+            execution_id=None,
+            payload={"prompt": "p"},
+        )
+        assert dispatch_id is not None
+
+        result = await handler.handle(
+            {
+                "fanout_id": dispatch_id,
+                "session_id": "sess_invalid",
+                "correlation_key": HOST_EXECUTION_CORRELATION_KEY,
+                "results": [{"key": HOST_EXECUTION_RESULT_KEY, "content": content}],
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "invalid_result_entry"
+        assert bridge._pending[dispatch_id].submitted is False
+        assert bridge._pending[dispatch_id].result is None
 
     @pytest.mark.asyncio
     async def test_session_mismatch_fails_closed(

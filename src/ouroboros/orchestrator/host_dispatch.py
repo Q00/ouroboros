@@ -110,12 +110,15 @@ class _PendingDispatch:
     execution_id: str | None
     payload: dict[str, Any]
     created_at: float
+    deadline_at: float | None = None
     event: asyncio.Event = field(default_factory=asyncio.Event)
     # Set by ``submit`` before the event: the waiter reads the field, so a
     # cross-loop ``Event.set`` race degrades to one heartbeat of latency, not
     # a lost result.
     result: Any = None
     submitted: bool = False
+    submitted_at: float | None = None
+    expired: bool = False
     poisoned: bool = False
     # Monotonic time this dispatch was last listed to a poller. Re-announcing
     # on every ~5s job_wait would make a compliant host spawn duplicate
@@ -156,6 +159,7 @@ class HostDispatchBridge:
         session_id: str,
         execution_id: str | None,
         payload: dict[str, Any],
+        deadline_at: float | None = None,
     ) -> str | None:
         """Durably register one dispatch and return its ``dispatch_id``.
 
@@ -191,6 +195,7 @@ class HostDispatchBridge:
             execution_id=execution_id,
             payload=dict(payload),
             created_at=time.monotonic(),
+            deadline_at=deadline_at,
         )
         log.info(
             "host_dispatch.parked",
@@ -218,11 +223,11 @@ class HostDispatchBridge:
         ``undispatched=True`` means the shared fan-out contract's declaration
         that the host never spawned a child for this lane
         (``{"key": "result", "undispatched": true}``) was accepted upstream.
-        That is a terminal execution failure, not an empty success: without
-        this, ``provided`` holds no ``result`` value, ``pending.result``
-        would land as ``None``, and ``_read_submission(None)`` reads a bare
-        ``None`` as a successful empty result — work that never ran would
-        complete as if it had.
+        That is a terminal execution failure, not an empty success.
+
+        Malformed or absence-equivalent content remains retryable: it does not
+        consume the live dispatch. Only a substantive string/object or an
+        explicit ``{"success": false}`` failure may wake the execution engine.
         """
         pending = self._pending.get(dispatch_id)
         if pending is None or pending.poisoned or pending.submitted:
@@ -238,6 +243,22 @@ class HostDispatchBridge:
                     "ouroboros_job_wait and act on the dispatches it lists."
                 ),
             }
+
+        submitted_at = time.monotonic()
+        if pending.deadline_at is not None and submitted_at >= pending.deadline_at:
+            pending.expired = True
+            pending.event.set()
+            return {
+                "status": "deadline_exceeded",
+                "fanout_id": dispatch_id,
+                "kind": FANOUT_KIND_HOST_EXECUTION,
+                "error": (
+                    "The host result arrived after this dispatch's acceptance "
+                    "deadline. The engine did NOT receive it; keep pumping "
+                    "ouroboros_job_wait for the terminal job state or a fresh dispatch."
+                ),
+            }
+
         if undispatched:
             pending.result = {
                 "success": False,
@@ -247,8 +268,19 @@ class HostDispatchBridge:
                 ),
             }
         else:
-            pending.result = provided.get(HOST_EXECUTION_RESULT_KEY)
+            if HOST_EXECUTION_RESULT_KEY not in provided:
+                return _invalid_submission_response(
+                    dispatch_id,
+                    "The required execution result lane was absent.",
+                )
+            submitted_result = provided[HOST_EXECUTION_RESULT_KEY]
+            validation_error = _host_submission_validation_error(submitted_result)
+            if validation_error is not None:
+                return _invalid_submission_response(dispatch_id, validation_error)
+            pending.result = submitted_result
+
         pending.submitted = True
+        pending.submitted_at = submitted_at
         pending.event.set()
         log.info("host_dispatch.submitted", dispatch_id=dispatch_id)
         return {
@@ -274,19 +306,19 @@ class HostDispatchBridge:
             pending.poisoned = True
             pending.event.set()
 
-    def pending_for_session(self, session_id: str | None) -> list[dict[str, Any]]:
-        """Return the open dispatches a host should spawn, oldest first.
+    def pending_for_session(
+        self,
+        session_id: str | None,
+        *,
+        announce: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return the open dispatches correlated to ``session_id``.
 
-        Fail-closed on scope: records always carry a session (``park`` refuses
-        otherwise), and a caller that cannot name one gets nothing — a job
-        poll must never be handed another session's work.
-
-        Announce-once semantics: each listing stamps ``announced_at``, and a
-        dispatch is not re-listed until ``ANNOUNCE_TTL_SECONDS`` later. Job
-        polls repeat every few seconds; re-announcing on each one would have
-        a compliant host spawning duplicate workers into the same cwd. A
-        re-listing after the TTL carries ``"reannounce": true`` so the host
-        knows to spawn only if its earlier worker is truly gone.
+        ``announce=True`` is the active ``job_wait`` delivery path: it claims
+        each returned announcement until ``ANNOUNCE_TTL_SECONDS`` elapses.
+        ``announce=False`` is the read-only ``job_status`` observation path:
+        it exposes pending identity without consuming the active host's sole
+        announcement.
         """
         if not session_id:
             return []
@@ -296,13 +328,21 @@ class HostDispatchBridge:
             for pending in self._pending.values()
             if not pending.submitted
             and not pending.poisoned
+            and not pending.expired
             and pending.session_id == session_id
-            and (pending.announced_at is None or now - pending.announced_at >= ANNOUNCE_TTL_SECONDS)
+            and (
+                not announce
+                or pending.announced_at is None
+                or now - pending.announced_at >= ANNOUNCE_TTL_SECONDS
+            )
         ]
         rows.sort(key=lambda pending: pending.created_at)
-        reannounced = {pending.dispatch_id for pending in rows if pending.announced_at is not None}
-        for pending in rows:
-            pending.announced_at = now
+        reannounced = {
+            pending.dispatch_id for pending in rows if announce and pending.announced_at is not None
+        }
+        if announce:
+            for pending in rows:
+                pending.announced_at = now
         return [
             {
                 "dispatch_id": pending.dispatch_id,
@@ -312,6 +352,7 @@ class HostDispatchBridge:
                 "result_correlation_key": HOST_EXECUTION_RESULT_KEY,
                 "submit_tool": "ouroboros_submit_fanout_results",
                 "session_id": pending.session_id,
+                "actionable": announce,
                 "reannounce": pending.dispatch_id in reannounced,
                 "subagents": [pending.payload],
             }
@@ -518,6 +559,7 @@ class HostDispatchRuntime:
                 session_id=self._session_id,
                 execution_id=self._execution_id,
                 payload=payload,
+                deadline_at=deadline,
             )
             if dispatch_id is None:
                 yield AgentMessage(
@@ -544,9 +586,13 @@ class HostDispatchRuntime:
                         data={"subtype": "error", "error_code": "host_dispatch_cancelled"},
                     )
                     return
+                if pending.expired:
+                    yield self._deadline_result(dispatch_id)
+                    return
                 if pending.submitted:
                     break
                 if time.monotonic() >= deadline:
+                    pending.expired = True
                     yield self._deadline_result(dispatch_id)
                     return
                 try:
@@ -691,14 +737,48 @@ class HostDispatchRuntime:
         )
 
 
-def _read_submission(result: Any) -> tuple[str, bool]:
-    """Normalize a submitted lane content into (final_message, success).
+def _invalid_submission_response(dispatch_id: str, error: str) -> dict[str, Any]:
+    return {
+        "status": "invalid_result_entry",
+        "fanout_id": dispatch_id,
+        "kind": FANOUT_KIND_HOST_EXECUTION,
+        "error": error,
+        "retry_contract": (
+            "The live dispatch was not consumed. Retry the same fanout_id with "
+            "a non-empty worker result, or declare the lane undispatched if no child ran."
+        ),
+    }
 
-    The host's submission is free-form (its subagent's final text, or a small
-    object). Success defaults to True — the server-side verify gate, not the
-    host's self-report, is the arbiter — except when the host explicitly
-    reports failure via ``{"success": false}``.
-    """
+
+def _host_submission_validation_error(result: Any) -> str | None:
+    """Return a fail-closed validation error for unusable host output."""
+    if isinstance(result, str):
+        return None if result.strip() else "Host execution content must not be empty."
+    if not isinstance(result, Mapping):
+        return "Host execution content must be a non-empty string or object."
+    if not result:
+        return "Host execution content must not be an empty object."
+    if "success" in result and not isinstance(result["success"], bool):
+        return "Host execution content.success must be a boolean when provided."
+    if result.get("success") is False:
+        return None
+    substantive = any(
+        key != "success"
+        and value is not None
+        and (not isinstance(value, str) or bool(value.strip()))
+        and (not isinstance(value, (Mapping, list, tuple)) or bool(value))
+        for key, value in result.items()
+    )
+    if not substantive:
+        return "Successful host execution content must include substantive output."
+    return None
+
+
+def _read_submission(result: Any) -> tuple[str, bool]:
+    """Normalize one already-validated host result into message and success."""
+    validation_error = _host_submission_validation_error(result)
+    if validation_error is not None:
+        return "Host dispatch returned an invalid result.", False
     if isinstance(result, Mapping):
         success = result.get("success") is not False
         for key in ("final_message", "content", "summary", "output"):
@@ -708,9 +788,7 @@ def _read_submission(result: Any) -> tuple[str, bool]:
         import json
 
         return json.dumps(dict(result), ensure_ascii=False, sort_keys=True), success
-    if isinstance(result, str):
-        return result, True
-    return str(result), True
+    return result, True
 
 
 __all__ = [

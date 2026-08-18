@@ -2292,10 +2292,11 @@ def _authoring_seed_handler(
 def _handler_matches_runtime(
     handler: object, agent_runtime_backend: str | None, opencode_mode: str | None
 ) -> bool:
-    return (
-        getattr(handler, "agent_runtime_backend", None) == agent_runtime_backend
-        and getattr(handler, "opencode_mode", None) == opencode_mode
-    )
+    handler_runtime = getattr(handler, "agent_runtime_backend", None)
+    return handler_runtime == agent_runtime_backend and _resolved_opencode_mode(
+        handler_runtime,
+        getattr(handler, "opencode_mode", None),
+    ) == _resolved_opencode_mode(agent_runtime_backend, opencode_mode)
 
 
 def _execution_start_handler(
@@ -2331,6 +2332,9 @@ def _execution_start_handler(
         opencode_mode=opencode_mode,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        session_signal_hub=getattr(original_execute, "session_signal_hub", None),
+        host_dispatch_bridge=getattr(original_execute, "host_dispatch_bridge", None),
+        seed_handoff_registry=getattr(original_execute, "seed_handoff_registry", None),
     )
     # Without the successor stack the run cannot enqueue the evaluation it
     # delegates to and finishes with ``evaluation_status="enqueue_failed"``.

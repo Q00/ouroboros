@@ -108,8 +108,10 @@ class SubmitFanoutResultsHandler:
                 "correlation field for that child. A child you could not spawn "
                 "at all is exactly {key, undispatched: true}; never invent output. "
                 "Missing required keys return `status=partial`; retry with EVERY lane. "
-                "A complete submission returns a bounded disposable artifact envelope; "
-                "fetch its body with the MCP tool `ouroboros_fetch_artifact`."
+                "Completed advisory fan-outs return a bounded disposable artifact "
+                "envelope for `ouroboros_fetch_artifact`. Host-execution submissions "
+                "instead acknowledge delivery to the execution engine; keep polling "
+                "`ouroboros_job_wait` for verification and further dispatches."
             ),
             parameters=(
                 MCPToolParameter(

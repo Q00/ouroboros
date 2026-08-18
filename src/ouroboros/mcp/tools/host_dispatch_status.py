@@ -15,18 +15,22 @@ import structlog
 log = structlog.get_logger(__name__)
 
 
-def pending_host_dispatches(bridge: Any | None, snapshot: Any) -> list[dict[str, Any]]:
-    """Return open host-execution dispatches correlated to this job's session.
+def pending_host_dispatches(
+    bridge: Any | None,
+    snapshot: Any,
+    *,
+    announce: bool = True,
+) -> list[dict[str, Any]]:
+    """Return host dispatches correlated to this job's session.
 
-    Terminal jobs list nothing: a dispatch that outlived its job is stale by
-    definition and surfacing it would send the host to work for a run that can
-    no longer accept the result.
+    ``announce=False`` is read-only observation for ``job_status``; only
+    ``job_wait`` claims an actionable announcement.
     """
     if bridge is None or snapshot.is_terminal:
         return []
     session_id = getattr(snapshot.links, "session_id", None)
     try:
-        return list(bridge.pending_for_session(session_id))
+        return list(bridge.pending_for_session(session_id, announce=announce))
     except Exception:  # pragma: no cover - defensive: never break job polling
         log.warning("mcp.tool.job.pending_host_dispatches_failed", exc_info=True)
         return []
@@ -38,13 +42,20 @@ def pending_host_dispatches_meta_field(pending: list[dict[str, Any]]) -> dict[st
 
 
 def pending_host_dispatch_suffix(pending: list[dict[str, Any]]) -> str:
+    if not any(item.get("actionable") is True for item in pending):
+        return (
+            f"\n\nPending host dispatches: {len(pending)} — informational only. "
+            "Call `ouroboros_job_wait` for an actionable announcement; a "
+            "read-only `ouroboros_job_status` poll never claims or consumes it."
+        )
     return (
         f"\n\nPending host dispatches: {len(pending)} — spawn one subagent per "
-        "entry in `meta.pending_host_dispatches`, giving it the entry's worker "
-        "`prompt` and running it in the entry's `subagents[0].context."
-        "working_directory`. Then call `ouroboros_submit_fanout_results` with "
-        "the entry's `fanout_id`, `session_id`, `correlation_key` = the "
-        "entry's `result_correlation_key`, and results = "
+        "actionable entry in `meta.pending_host_dispatches`, giving it the entry's "
+        "worker `prompt` and running it in the entry's "
+        "`subagents[0].context.working_directory`. Then call "
+        "`ouroboros_submit_fanout_results` with the entry's `fanout_id`, "
+        "`session_id`, `correlation_key` = the entry's "
+        "`result_correlation_key`, and results = "
         '[{"key": "result", "content": <the subagent\'s final output>}]. '
         "Each dispatch is announced once — spawn each `dispatch_id` exactly "
         "once, never again on later polls (a `reannounce: true` entry means "
