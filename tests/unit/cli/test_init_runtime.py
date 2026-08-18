@@ -17,7 +17,6 @@ from ouroboros.cli.commands.init import (
     _resolve_init_llm_backend,
     _run_interview,
     _start_workflow,
-    _workflow_project_dir,
 )
 from ouroboros.cli.main import app
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -64,32 +63,29 @@ class TestInitWorkflowRuntimeHandoff:
 
         mock_run_orchestrator.assert_awaited_once()
 
-    def test_workflow_project_dir_is_the_invocation_directory(self, tmp_path: Path) -> None:
-        """A Seed in the seed store must not send the agent into the seed store."""
-        seed_path = tmp_path / "seed_generated.yaml"
-        seed_path.write_text(
-            "goal: add deadlines\nbrownfield_context:\n  project_type: greenfield\n",
-            encoding="utf-8",
-        )
+    @pytest.mark.asyncio
+    async def test_start_workflow_passes_the_invocation_directory_as_fallback(self) -> None:
+        """The handoff supplies a fallback dir; the run command still decides.
 
-        assert _workflow_project_dir(seed_path) == Path.cwd()
+        `init` deliberately does not read the Seed to pick a directory. A second
+        reader of the same metadata can disagree with the run command's own
+        rules — a stale `target_dir` was honored here and rejected there, which
+        landed execution back in `~/.ouroboros/seeds`.
+        """
+        mock_run_orchestrator = AsyncMock()
 
-    def test_workflow_project_dir_defers_to_a_brownfield_target(self, tmp_path: Path) -> None:
-        """A Seed that names its own target keeps precedence over the cwd."""
-        seed_path = tmp_path / "seed_brownfield.yaml"
-        seed_path.write_text(
-            f"goal: add deadlines\nbrownfield_context:\n  target_dir: {tmp_path}\n",
-            encoding="utf-8",
-        )
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            await _start_workflow(
+                Path("/tmp/generated-seed.yaml"),
+                project_fallback_dir=Path("/tmp/project"),
+            )
 
-        assert _workflow_project_dir(seed_path) is None
-
-    def test_workflow_project_dir_survives_an_unreadable_seed(self, tmp_path: Path) -> None:
-        """Resolution must not crash the handoff on a malformed Seed."""
-        seed_path = tmp_path / "seed_broken.yaml"
-        seed_path.write_text("goal: [unclosed", encoding="utf-8")
-
-        assert _workflow_project_dir(seed_path) == Path.cwd()
+        kwargs = mock_run_orchestrator.await_args.kwargs
+        assert kwargs["project_fallback_dir"] == Path("/tmp/project")
+        assert "project_dir" not in kwargs
 
     @pytest.mark.asyncio
     async def test_aborted_interview_does_not_report_completion_or_generate_seed(

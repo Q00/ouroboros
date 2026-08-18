@@ -649,7 +649,7 @@ async def _run_interview(
             await _start_workflow(
                 seed_path,
                 runtime_backend=workflow_runtime_backend,
-                project_dir=_workflow_project_dir(seed_path),
+                project_fallback_dir=Path.cwd(),
             )
 
     finally:
@@ -809,36 +809,11 @@ async def _generate_seed_from_interview(
     return seed_path, SeedGenerationResult.SUCCESS
 
 
-def _workflow_project_dir(seed_path: Path) -> Path | None:
-    """Directory the generated Seed should be built in.
-
-    An interview is conducted from the project it is about, so the invocation
-    directory is the project — without this the seed's own location decides,
-    and a Seed written to ``~/.ouroboros/seeds`` sends the agent to build
-    inside the seed store.
-
-    Returns ``None`` when the Seed names a brownfield target directory, so the
-    Seed's own target keeps precedence over where the person happened to stand.
-    """
-    try:
-        seed_data = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return Path.cwd()
-
-    brownfield_context = (seed_data or {}).get("brownfield_context")
-    if isinstance(brownfield_context, dict):
-        target_dir = brownfield_context.get("target_dir")
-        if isinstance(target_dir, str) and target_dir.strip():
-            return None
-
-    return Path.cwd()
-
-
 async def _start_workflow(
     seed_path: Path,
     parallel: bool = True,
     runtime_backend: str | None = None,
-    project_dir: Path | None = None,
+    project_fallback_dir: Path | None = None,
 ) -> None:
     """Start workflow from generated seed.
 
@@ -846,8 +821,12 @@ async def _start_workflow(
         seed_path: Path to the seed YAML file.
         parallel: Execute independent ACs in parallel. Default: True.
         runtime_backend: Optional runtime backend for orchestrator execution.
-        project_dir: Directory to execute in. ``None`` lets the run command
-            resolve it from the Seed, matching ``ouroboros run workflow``.
+        project_fallback_dir: Directory to build in when the Seed does not say
+            where it belongs. An interview is conducted from the project it is
+            about, so the invocation directory stands in for the Seed file's
+            folder — otherwise a Seed written to ``~/.ouroboros/seeds`` makes
+            the Seed store the workspace. Seed metadata and a valid brownfield
+            target still win; the run command weighs all of that in one place.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
@@ -864,7 +843,7 @@ async def _start_workflow(
             resume_session=None,
             parallel=parallel,
             runtime_backend=runtime_backend,
-            project_dir=project_dir,
+            project_fallback_dir=project_fallback_dir,
         )
     except typer.Exit:
         pass  # Normal exit
