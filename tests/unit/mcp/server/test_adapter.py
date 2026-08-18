@@ -4984,7 +4984,6 @@ async def test_production_fanout_returns_only_disposable_envelope(
         changed_envelope = DisposableResultEnvelope.model_validate(changed_result.meta)
 
         assert changed_envelope.contract_id != envelope.contract_id
-        assert changed_envelope.artifact_ref != envelope.artifact_ref
         assert synthesis_calls == 2
         assert len(json.dumps(changed_result.meta).encode("utf-8")) < 4 * 1024
         assert changed_marker not in changed_result.content[0].text

@@ -11,6 +11,7 @@ import pytest
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.mcp.tools.job_observer import extract_job_observer_inline_handoff
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
@@ -228,6 +229,13 @@ async def test_ralph_handler_returns_job_id_and_completes_loop() -> None:
         assert started.is_ok
         job_id = started.value.meta["job_id"]
         assert job_id.startswith("job_")
+        assert (
+            extract_job_observer_inline_handoff(
+                started.value.text_content,
+                expected_job_id=job_id,
+            )
+            == started.value.meta["job_observer"]
+        )
 
         snapshot = await job_manager.get_snapshot(job_id)
         # 60s rather than 30s: GitHub Actions runners under load have been

@@ -46,16 +46,14 @@ from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import ArtifactStore
 
 
 def _bounded_submit(
     registry: FanoutRegistry,
     project_dir: Any,
 ) -> tuple[SubmitFanoutResultsHandler, DisposableMemory]:
-    disposable = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore.for_project(project_dir)
-    )
+    disposable = DisposableMemory(artifact_store=ArtifactStore.for_project(project_dir))
     return (
         SubmitFanoutResultsHandler(
             fanout_registry=registry,
@@ -575,11 +573,12 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert submit_result.is_ok, submit_result
     envelope = submit_result.unwrap().meta
     contract_id = envelope["contract_id"]
-    contract_component = disposable.artifact_store._manifest_path(contract_id).parent.name
+    # The colon-carrying fanout id is stored and fetched verbatim below; the
+    # store has no filesystem layout left for the id's characters to violate.
     assert contract_id.startswith("fanout:")
-    assert contract_id not in str(disposable.artifact_store._manifest_path(contract_id))
-    assert len(contract_component) == 64
-    assert set(contract_component) <= set("0123456789abcdef")
+    digest_component = contract_id.removeprefix("fanout:")
+    assert len(digest_component) == 64
+    assert set(digest_component) <= set("0123456789abcdef")
     out = disposable.fetch(envelope["contract_id"]).body
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
@@ -633,9 +632,8 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     ``status`` and the fields it implies; a complete one answers with the
     disposable-memory envelope, which has no ``status`` of its own -- its
     ``result.status`` is that subsystem's word for its own run, and the envelope
-    is ``extra="forbid"`` because ``artifact_validation`` re-parses the same
-    model out of the manifest event. So the tool cannot add a discriminator
-    without making the reply stop being that model.
+    is ``extra="forbid"``. So the tool cannot add a discriminator without making
+    the reply stop being that model.
 
     ``contract_id`` is the discriminator it already has: only the completed
     reply carries one. The PM and interview skills both read it, and the PM

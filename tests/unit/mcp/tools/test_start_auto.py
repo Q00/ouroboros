@@ -39,6 +39,10 @@ from ouroboros.mcp.tools.auto_handler import (
     _reconcile_execution_job_snapshot,
 )
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
+from ouroboros.mcp.tools.job_observer import (
+    JOB_OBSERVER_INLINE_OPEN,
+    extract_job_observer_inline_handoff,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -86,6 +90,7 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
 
 _AUTO_ID_RE = re.compile(r"auto_[0-9a-f]+")
 _UUID_HEX_RE = re.compile(r"\b[0-9a-f]{32}\b")
+_JOB_ID_RE = re.compile(r"job_(?:auto_)?[0-9a-f]+")
 
 
 def _linux_owner_identity(pid: int, *, start_ticks: int = 111) -> dict[str, object]:
@@ -118,6 +123,19 @@ def _normalize_detached_auto_response(value):
     if isinstance(value, (list, tuple)):
         return [_normalize_detached_auto_response(item) for item in value]
     if isinstance(value, str):
+        if JOB_OBSERVER_INLINE_OPEN in value:
+            visible = value[: value.rfind(JOB_OBSERVER_INLINE_OPEN)].rstrip()
+            job_id_line = next(line for line in visible.splitlines() if line.startswith("job_id: "))
+            observer = extract_job_observer_inline_handoff(
+                value,
+                expected_job_id=job_id_line.removeprefix("job_id: "),
+            )
+            assert observer is not None
+            return {
+                "visible_text": _normalize_detached_auto_response(visible),
+                "job_observer": _normalize_detached_auto_response(observer),
+            }
+        value = _JOB_ID_RE.sub("job_<id>", value)
         value = _AUTO_ID_RE.sub("auto_<id>", value)
         value = _UUID_HEX_RE.sub("<uuid>", value)
         return value
@@ -148,7 +166,14 @@ def _assert_detached_start_text_has_guidance_with_handles(
     auto_session_id: str,
 ) -> None:
     text = result.text_content
-    assert text == (
+    observer = extract_job_observer_inline_handoff(
+        text,
+        expected_job_id=job_id,
+        expected_session_id=auto_session_id,
+    )
+    assert observer == result.meta["job_observer"]
+    visible_text = text[: text.rfind(JOB_OBSERVER_INLINE_OPEN)].rstrip()
+    assert visible_text == (
         "Started background auto session.\n\n"
         "Status: queued\n"
         f"job_id: {job_id}\n"

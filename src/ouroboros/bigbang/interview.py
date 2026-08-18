@@ -84,6 +84,18 @@ AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
 # model locally while still tripling the original 4.8k interview budget.
 AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 14_000
 
+# The two rules that make a generated turn a question at all. They live in the
+# dynamic header — which every build preserves first — instead of only inside
+# the loaded agent prompt, whose tail is the first thing the character budget
+# trims. Leaving them there made their survival depend on where they happen to
+# sit in a markdown file and on how large the header and perspective panel grew
+# that round: in a late round with a stored ambiguity snapshot, the response
+# format was silently dropped from the prompt that needed it most.
+RESPONSE_CONTRACT = (
+    "Response contract: emit exactly ONE question and end with it. "
+    "Never announce implementation work — another agent does that later."
+)
+
 _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - You are only an interviewer.
 - Generate exactly one Socratic question that reduces requirements ambiguity.
@@ -481,6 +493,13 @@ class InterviewState(BaseModel):
         if detected_terms:
             self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
         self.invalidate_requirement_distillation()
+        # The ambiguity snapshot is derived from the answered rounds, exactly
+        # like the distillation above, so it dies where its inputs change
+        # rather than at each call site that remembers to clear it. Leaving it
+        # to callers let a durable save land rounds from revision N+1 next to a
+        # score from revision N: an interrupted process then resumed with a
+        # score that _select_perspectives reads as current.
+        self.clear_stored_ambiguity()
         self.mark_updated()
         return round_data
 
@@ -1259,12 +1278,14 @@ class InterviewEngine:
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
 
@@ -1310,6 +1331,12 @@ class InterviewEngine:
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
+        #
+        # The interviewer contract does not compete for this budget: it rides in
+        # the dynamic header, which is preserved first. Reserving a slice of the
+        # base agent prompt for the same rules was tried and removed — it bought
+        # one guarantee twice and took the characters from the perspective panel
+        # and, at saturated caps, from the user's own retained context.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
@@ -1458,7 +1485,17 @@ class InterviewEngine:
             state.ambiguity_score is not None
             and state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
         ):
-            perspectives.append(InterviewPerspective.SEED_CLOSER)
+            # Closure rounds run a narrower panel, led by the closer. Two
+            # reasons, one budget and one substantive: the panel is trimmed
+            # from the tail, so appending the closer would drop it in exactly
+            # the rounds it exists for; and researcher/simplifier drilling is
+            # the behavior closure is meant to stop. The characters this frees
+            # are what let the base agent prompt survive the same round.
+            perspectives = [
+                InterviewPerspective.SEED_CLOSER,
+                InterviewPerspective.BREADTH_KEEPER,
+                InterviewPerspective.ARCHITECT,
+            ]
 
         if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
             perspectives.append(InterviewPerspective.ARCHITECT)

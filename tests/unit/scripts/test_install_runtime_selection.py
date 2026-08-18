@@ -20,6 +20,41 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 
+_SHELL_QUOTE_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,:/@%+=-"
+)
+
+
+def _expected_shell_quote(value: str) -> str:
+    """Mirror install.sh's `_shell_quote` — ASCII-only, one shell word.
+
+    The installer cannot delegate to `printf %q`: bash 3.2, the macOS system
+    bash, escapes only part of a multibyte character and emits invalid UTF-8.
+    So the expectation is spelled out here rather than read back out of bash.
+    """
+    if not value:
+        return "$''"
+    if all(char in _SHELL_QUOTE_SAFE for char in value):
+        return value
+    body = "".join(
+        char
+        if char in _SHELL_QUOTE_SAFE
+        else "".join(f"\\{byte:03o}" for byte in char.encode("utf-8"))
+        for char in value
+    )
+    return f"$'{body}'"
+
+
+def _shell_word_reads_back_as(quoted: str, expected: str) -> bool:
+    """A quoted word must survive the shell as exactly the original name."""
+    read_back = subprocess.run(
+        ["bash", "-c", f"printf '%sEND' {quoted}"],
+        check=True,
+        capture_output=True,
+    )
+    return read_back.stdout == expected.encode("utf-8") + b"END"
+
+
 # Test-only variables read by the fake commands below (never by install.sh):
 # keeping the stub bodies free of per-test paths makes their content identical
 # across tests, which is what lets _write_executable share one on-disk copy.
@@ -2572,13 +2607,8 @@ def test_installer_quotes_profile_in_manual_recovery_command(
         for line in result.stdout.splitlines()
         if "Manual install: " in line
     ]
-    quoted_profile = subprocess.run(
-        ["bash", "-c", "printf '%q' \"$1\"", "_", profile_name],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LC_ALL": "C"},
-    ).stdout
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
     assert manual_commands == [
         'dsh plugin --profile web add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
         f'dsh plugin --profile {quoted_profile} add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
@@ -2609,13 +2639,8 @@ def test_installer_quotes_profile_in_success_log(tmp_path: Path, profile_name: s
     )
 
     assert result.returncode == 0, result.stderr
-    quoted_profile = subprocess.run(
-        ["bash", "-c", "printf '%q' \"$1\"", "_", profile_name],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LC_ALL": "C"},
-    ).stdout
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
     expected_status = f"dsh profile {quoted_profile}: Ouroboros tools installed"
     assert sum(line.endswith(expected_status) for line in result.stdout.splitlines()) == 1
     assert profile_name not in result.stdout
