@@ -66,9 +66,10 @@ from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
-# Retry budget for the per-round scorer that runs between two interactive
-# prompts. The scorer's own default is unlimited retries, which would hang the
-# interview loop instead of falling back to the score-blind prompt.
+# Retry budget for the per-round scorer, which runs between two interactive
+# prompts. ``AmbiguityScorer`` defaults to 10 attempts with doubling token
+# budgets; a person waiting at a prompt should see the score-blind fallback
+# well before that. Matches the MCP live-scoring budget.
 _LOOP_AMBIGUITY_MAX_RETRIES = 3
 
 
