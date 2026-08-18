@@ -178,6 +178,7 @@ async def _terminate_windows_process_tree(
         return
     system_root = os.environ.get("SYSTEMROOT", "").strip() or r"C:\Windows"
     taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+    killer: asyncio.subprocess.Process | None = None
     try:
         killer = await asyncio.create_subprocess_exec(
             taskkill,
@@ -192,6 +193,11 @@ async def _terminate_windows_process_tree(
         if killer.returncode != 0:
             raise RuntimeError("taskkill failed")
     except Exception:
+        if killer is not None:
+            with contextlib.suppress(ProcessLookupError):
+                killer.kill()
+            with contextlib.suppress(TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(killer.wait(), timeout=1.0)
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 

@@ -159,7 +159,9 @@ async def test_windows_taskkill_failure_has_bounded_parent_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(verify_command_runner, "_running_on_windows", lambda: True)
-    killer = SimpleNamespace(communicate=AsyncMock(), returncode=1)
+    killer = SimpleNamespace(
+        communicate=AsyncMock(), returncode=1, kill=MagicMock(), wait=AsyncMock()
+    )
     monkeypatch.setattr(
         verify_command_runner.asyncio,
         "create_subprocess_exec",
@@ -171,6 +173,8 @@ async def test_windows_taskkill_failure_has_bounded_parent_fallback(
 
     process.kill.assert_called_once()
     process.wait.assert_awaited_once()
+    killer.kill.assert_called_once()
+    killer.wait.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -185,6 +189,8 @@ async def test_windows_taskkill_operational_failure_is_bounded(
         killer = SimpleNamespace(
             communicate=AsyncMock(side_effect=TimeoutError),
             returncode=None,
+            kill=MagicMock(),
+            wait=AsyncMock(),
         )
         create = AsyncMock(return_value=killer)
     monkeypatch.setattr(verify_command_runner.asyncio, "create_subprocess_exec", create)
@@ -193,6 +199,9 @@ async def test_windows_taskkill_operational_failure_is_bounded(
     await _terminate(process)
 
     process.kill.assert_called_once()
+    if failure == "timeout":
+        killer.kill.assert_called_once()
+        killer.wait.assert_awaited_once()
     process.wait.assert_awaited_once()
 
 
