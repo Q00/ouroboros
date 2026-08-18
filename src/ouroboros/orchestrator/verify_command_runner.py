@@ -12,7 +12,6 @@ from collections.abc import Callable, Mapping, Sequence
 import contextlib
 from dataclasses import dataclass
 import os
-from pathlib import PureWindowsPath
 import subprocess
 
 
@@ -169,42 +168,15 @@ def _resume_windows_process(pid: int) -> None:
     raise OSError("suspended verifier thread was not found")
 
 
-async def _terminate_windows_process_tree(
-    proc: asyncio.subprocess.Process, job: _WindowsJob | None = None
-) -> None:
-    """Terminate the whole verifier tree with a Job Object or bounded fallback."""
-    if job is not None:
-        job.close()
-        return
-    system_root = os.environ.get("SYSTEMROOT", "").strip() or r"C:\Windows"
-    taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
-    killer: asyncio.subprocess.Process | None = None
-    try:
-        killer = await asyncio.create_subprocess_exec(
-            taskkill,
-            "/PID",
-            str(proc.pid),
-            "/T",
-            "/F",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(killer.communicate(), timeout=5.0)
-        if killer.returncode != 0:
-            raise RuntimeError("taskkill failed")
-    except Exception:
-        if killer is not None:
-            with contextlib.suppress(ProcessLookupError):
-                killer.kill()
-            with contextlib.suppress(TimeoutError, ProcessLookupError):
-                await asyncio.wait_for(killer.wait(), timeout=1.0)
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-
-
 async def _terminate(proc: asyncio.subprocess.Process, job: _WindowsJob | None = None) -> None:
     if _running_on_windows():
-        await _terminate_windows_process_tree(proc, job)
+        if job is not None:
+            job.close()
+        else:
+            # Job assignment failed before ResumeThread, so this process is
+            # still suspended and cannot have descendants to terminate.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
     else:
         import signal
 

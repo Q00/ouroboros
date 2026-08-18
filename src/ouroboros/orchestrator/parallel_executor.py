@@ -7085,6 +7085,10 @@ class ParallelACExecutor:
             fat_harness_mode=self._fat_harness_mode,
             atomic_verifier=self._authority_verifier,
             reasoning_effort=self._reasoning_effort,
+            # Preserve the parent's sealed verification contract across the
+            # alternate backend; defaults must not re-enable or lengthen it.
+            run_verify_commands=self._run_verify_commands,
+            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             # The router's backend-mismatch guard makes it inert on a different
             # backend, so passing it to the alt-harness executor is safe.
             model_router=self._model_router,

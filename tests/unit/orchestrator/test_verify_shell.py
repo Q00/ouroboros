@@ -232,7 +232,9 @@ def test_windows_rejects_wsl_launcher_from_configured_routes(
     assert resolve_verify_shell() is None
 
 
-def test_shell_identity_rejects_retarget_and_content_drift(tmp_path: Path) -> None:
+def test_shell_identity_rejects_retarget_and_content_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "bash"
     target.write_bytes(b"bash-v1")
     target.chmod(0o755)
@@ -241,6 +243,7 @@ def test_shell_identity_rejects_retarget_and_content_drift(tmp_path: Path) -> No
         os.symlink(target, alias)
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation not permitted in this environment")
+    monkeypatch.setattr(verify_shell, "_executes_bash_c_semantics", lambda _path: True)
 
     identity = capture_verify_shell_identity(VerifyShellRoute(str(alias), "config"))
     assert identity is not None
@@ -249,6 +252,30 @@ def test_shell_identity_rejects_retarget_and_content_drift(tmp_path: Path) -> No
 
     target.write_bytes(b"bash-v2")
     assert verify_shell_path_from_identity(identity) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX executable scripts")
+def test_shell_identity_rejects_executable_that_ignores_bash_arguments(
+    tmp_path: Path,
+) -> None:
+    impostor = tmp_path / "bash"
+    impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    impostor.chmod(0o755)
+
+    identity = capture_verify_shell_identity(VerifyShellRoute(str(impostor), "config"))
+
+    assert identity is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses the local POSIX Bash installation")
+def test_shell_identity_accepts_real_bash() -> None:
+    route = resolve_verify_shell()
+    if route is None:
+        pytest.skip("bash is not installed")
+
+    identity = capture_verify_shell_identity(route)
+
+    assert identity is not None
 
 
 def test_windows_wsl_alias_is_rejected_after_normalization(

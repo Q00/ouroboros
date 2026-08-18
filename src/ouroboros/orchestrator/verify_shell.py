@@ -34,6 +34,7 @@ import ntpath
 import os
 from pathlib import Path, PureWindowsPath
 import shutil
+import subprocess
 
 VERIFY_BASH_ENV_VAR = "OUROBOROS_VERIFY_BASH"
 
@@ -204,13 +205,37 @@ def _sha256_file(path: str) -> str | None:
     return digest.hexdigest()
 
 
+_BASH_CAPABILITY_PROBE = '[[ -n "${BASH_VERSION:-}" ]] || exit 96; exit 37'
+
+
+def _executes_bash_c_semantics(path: str) -> bool:
+    """Prove one executable implements the Bash ``-c`` contract.
+
+    This is a fixed capability handshake executed directly through the OS,
+    never a command parser, translator, fallback shell, or emulator.
+    """
+    try:
+        completed = subprocess.run(
+            [path, "-c", _BASH_CAPABILITY_PROBE],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=sanitized_verify_environment(),
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 37
+
+
 def capture_verify_shell_identity(route: VerifyShellRoute) -> dict[str, str] | None:
     """Seal the canonical executable and its content, not a mutable alias."""
     realpath = _executable(route.shell_path)
     if realpath is None or (_running_on_windows() and _is_wsl_launcher(realpath)):
         return None
     digest = _sha256_file(realpath)
-    if digest is None:
+    if digest is None or not _executes_bash_c_semantics(realpath):
         return None
     return {"path": route.shell_path, "realpath": realpath, "sha256": digest}
 
