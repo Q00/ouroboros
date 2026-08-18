@@ -8,7 +8,15 @@ from typing import Any
 
 import structlog
 
-from ouroboros.bigbang.ambiguity import AmbiguityScore, AmbiguityScorer, dimension_specs
+from ouroboros.bigbang.ambiguity import (
+    BROWNFIELD_CONTEXT_CLARITY_FLOOR,
+    CONSTRAINT_CLARITY_FLOOR,
+    GOAL_CLARITY_FLOOR,
+    SUCCESS_CRITERIA_CLARITY_FLOOR,
+    AmbiguityScore,
+    AmbiguityScorer,
+    dimension_specs,
+)
 from ouroboros.bigbang.interview import (
     AGENT_SDK_CLI_FIXED_FRAMING_CHARS,
     AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
@@ -103,6 +111,14 @@ class InterviewTurnPlanner:
             if state.is_brownfield
             else ""
         )
+        floor_lines = [
+            f"- goal_clarity >= {GOAL_CLARITY_FLOOR:.2f}",
+            f"- constraint_clarity >= {CONSTRAINT_CLARITY_FLOOR:.2f}",
+            f"- success_criteria_clarity >= {SUCCESS_CRITERIA_CLARITY_FLOOR:.2f}",
+        ]
+        if state.is_brownfield:
+            floor_lines.append(f"- context_clarity >= {BROWNFIELD_CONTEXT_CLARITY_FLOOR:.2f}")
+        completion_floor_lines = "\n".join(floor_lines)
         extra_contract = f"\n{extra_response_contract.strip()}\n" if extra_response_contract else ""
         atomic_contract = f"""
 
@@ -113,8 +129,10 @@ interview revision. Compute the clarity fields before selecting `next_question`.
 ## Score-conditioned question selection
 - Overall ambiguity <= 0.25 activates closure mode: prefer a concise Seed-closer
   probe and do not open a new topic.
-- Any per-dimension floor failure keeps drilling that weakest dimension even when
-  the overall score is low.
+- Apply these canonical completion floors:
+{completion_floor_lines}
+- Any floor failure keeps drilling the weakest failing dimension even when the
+  overall ambiguity is <= 0.25.
 - Otherwise target the weakest clarity dimension with one concrete,
   scenario-grounded question while preserving breadth across unresolved tracks.
 
@@ -140,9 +158,11 @@ No prose, Markdown fences, or second JSON object.
             - AGENT_SDK_CLI_FIXED_FRAMING_CHARS
             - AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS,
         )
+        preserve_prefix_messages = prepared.preserve_prefix_messages
         conversation_history = self.engine._trim_messages_to_budget(
             list(prepared.conversation_history),
             max_chars=history_budget,
+            preserve_prefix_messages=preserve_prefix_messages,
         )
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_content),

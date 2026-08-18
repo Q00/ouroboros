@@ -711,6 +711,7 @@ class PreparedInterviewQuestion:
     config: CompletionConfig | None = None
     system_prompt: str = ""
     conversation_history: tuple[Message, ...] = ()
+    preserve_prefix_messages: int = 0
 
 
 @dataclass
@@ -959,6 +960,7 @@ class InterviewEngine:
                 config=config,
                 system_prompt=system_prompt,
                 conversation_history=tuple(conversation_history),
+                preserve_prefix_messages=preserve_prefix_messages,
             )
         )
 

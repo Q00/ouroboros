@@ -6,7 +6,12 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
-from ouroboros.bigbang.interview import InterviewEngine, InterviewRound, InterviewState
+from ouroboros.bigbang.interview import (
+    AGENT_SDK_CLI_FIXED_FRAMING_CHARS,
+    InterviewEngine,
+    InterviewRound,
+    InterviewState,
+)
 from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
@@ -223,3 +228,82 @@ async def test_handler_immediate_question_preserves_qualifying_streak(tmp_path) 
     reloaded = (await engine.load_state(state.interview_id)).value
     assert reloaded.completion_candidate_streak == 2
     adapter.complete.assert_awaited_once()
+
+
+async def test_atomic_contract_renders_canonical_completion_floors(tmp_path) -> None:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_response(_payload())))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    planner = InterviewTurnPlanner(
+        engine=engine,
+        scorer=AmbiguityScorer(llm_adapter=adapter, model="test-model"),
+    )
+
+    result = await planner.plan(_state())
+
+    assert result.is_ok
+    prompt = adapter.complete.call_args.args[0][0].content
+    assert "goal_clarity >= 0.75" in prompt
+    assert "constraint_clarity >= 0.65" in prompt
+    assert "success_criteria_clarity >= 0.70" in prompt
+    assert "context_clarity >= 0.60" not in prompt
+
+
+async def test_atomic_contract_renders_brownfield_completion_floor(tmp_path) -> None:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=Result.ok(
+            _response(
+                {
+                    **_payload(),
+                    "context_clarity_score": 0.8,
+                    "context_clarity_justification": "The repository context is explicit.",
+                }
+            )
+        )
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    planner = InterviewTurnPlanner(
+        engine=engine,
+        scorer=AmbiguityScorer(llm_adapter=adapter, model="test-model"),
+    )
+
+    result = await planner.plan(_state().model_copy(update={"is_brownfield": True}))
+
+    assert result.is_ok
+    prompt = adapter.complete.call_args.args[0][0].content
+    assert "context_clarity >= 0.60" in prompt
+
+
+async def test_atomic_retrim_preserves_long_context_overflow_prefix(tmp_path) -> None:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_response(_payload())))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path, model="test-model")
+    planner = InterviewTurnPlanner(
+        engine=engine,
+        scorer=AmbiguityScorer(llm_adapter=adapter, model="test-model"),
+    )
+    state = InterviewState(
+        interview_id="interview_atomic_long_context",
+        initial_context=("X" * 3489) + "TAIL_MARKER",
+        rounds=[
+            InterviewRound(
+                round_number=index,
+                question=f"What detail matters next? {index}",
+                user_response="Y" * 800,
+            )
+            for index in range(1, 9)
+        ],
+    )
+
+    result = await planner.plan(state)
+
+    assert result.is_ok
+    messages = adapter.complete.call_args.args[0]
+    prompt_content = "\n".join(message.content for message in messages)
+    assert "Additional initial context omitted" in prompt_content
+    assert "TAIL_MARKER" in prompt_content
+    assert (
+        engine._message_budget_cost(messages) + AGENT_SDK_CLI_FIXED_FRAMING_CHARS
+        <= engine._MAX_TOTAL_PROMPT_CHARS
+    )
