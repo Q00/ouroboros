@@ -40,7 +40,7 @@ from ouroboros.mcp.tools.recent_findings import (
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_schema import lane_scoped_contract_id
+from ouroboros.persistence.artifact_errors import ArtifactNotFoundError
 from ouroboros.persistence.artifact_store import ArtifactStore
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
@@ -224,7 +224,7 @@ def test_a_lane_told_its_count_can_tell_a_failed_fetch_from_an_empty_project(
 
     prompt = _lane_prompts(_attach(roster, store, tool_name="ouroboros_interview"))["code_context"]
 
-    assert "published 2 findings" in prompt
+    assert "You are offered 2 recent findings" in prompt
     assert "cannot reach that tool" in prompt
 
 
@@ -261,9 +261,8 @@ def test_a_record_of_an_unexpected_shape_costs_only_itself(store: ArtifactStore)
 
     by_lane = recent_findings_by_lane(store)
 
-    assert [entry["contract_id"] for entry in by_lane["code_context"]] == [
-        lane_scoped_contract_id(good, "code_context")
-    ]
+    assert [entry["contract_id"] for entry in by_lane["code_context"]] == [good]
+    assert [entry["lane_id"] for entry in by_lane["code_context"]] == ["code_context"]
 
 
 def test_another_fanout_kind_is_not_offered(store: ArtifactStore) -> None:
@@ -321,42 +320,90 @@ def _publish_distinguishable(store: ArtifactStore) -> str:
     return _publish_body(store, body, contract_id=f"fanout:{hashlib.sha256(canonical).hexdigest()}")
 
 
-def test_fetching_the_offered_id_returns_only_the_requesting_lane(
-    roster: list[dict[str, str]], store: ArtifactStore
+def test_fetching_an_offered_finding_returns_only_the_requesting_lane(
+    store: ArtifactStore,
 ) -> None:
-    """The address a lane is given names the lane, so what comes back is its own.
+    """The lane_id offered beside a contract is what narrows the body to one lane.
 
-    A fan-out publishes one artifact carrying every lane it dispatched. Offering
-    that artifact's own id -- grouped per lane but identical across them -- told
-    a lane the body was its own and handed it every sibling's output, because a
-    turn's id is the only address such a body has. What closes it is the
-    address, not a rule the child is asked to follow: there is nothing in a
-    one-lane body to select from.
+    A fan-out publishes one artifact carrying every lane it dispatched, so its
+    contract id names the turn: fetching it handed a lane every sibling's output
+    while the prompt said the body was its own.
     """
     _publish_distinguishable(store)
 
-    offered = recent_findings_by_lane(store)
-    fetched = store.fetch(offered["code_context"][0]["contract_id"]).body
+    entry = recent_findings_by_lane(store)["code_context"][0]
+    fetched = store.fetch_lane(entry["contract_id"], entry["lane_id"]).body
 
     assert fetched == {"finding": "the code says CODE-ONLY"}
     assert "DATA-ONLY" not in json.dumps(fetched)
     assert "CONTRARIAN-ONLY" not in json.dumps(fetched)
 
 
-def test_each_lane_fetches_its_own_output_from_the_same_fan_out(store: ArtifactStore) -> None:
-    """Two lanes of one turn are handed two addresses, not one shared one."""
+def test_each_lane_reads_its_own_output_of_the_same_fan_out(store: ArtifactStore) -> None:
+    """One contract, two lanes, two bodies -- the contract id is shared, the lane is not."""
     _publish_distinguishable(store)
 
     offered = recent_findings_by_lane(store)
-    code = offered["code_context"][0]["contract_id"]
-    data = offered["data_context"][0]["contract_id"]
+    code, data = offered["code_context"][0], offered["data_context"][0]
 
-    assert code != data
-    assert store.fetch(code).body == {"finding": "the code says CODE-ONLY"}
-    assert store.fetch(data).body == {"finding": "the rows say DATA-ONLY"}
+    assert code["contract_id"] == data["contract_id"]
+    assert (code["lane_id"], data["lane_id"]) == ("code_context", "data_context")
+    assert store.fetch_lane(code["contract_id"], code["lane_id"]).body == {
+        "finding": "the code says CODE-ONLY"
+    }
+    assert store.fetch_lane(data["contract_id"], data["lane_id"]).body == {
+        "finding": "the rows say DATA-ONLY"
+    }
 
 
-def test_an_unscoped_contract_id_still_fetches_the_whole_body(store: ArtifactStore) -> None:
+@pytest.mark.parametrize(
+    "output",
+    [
+        pytest.param("advice written as plain prose", id="string"),
+        pytest.param(42, id="int"),
+        pytest.param(3.5, id="float"),
+        pytest.param(True, id="bool-true"),
+        pytest.param(False, id="bool-false"),
+        pytest.param(None, id="null"),
+        pytest.param(["a", "b"], id="array"),
+        pytest.param({"finding": "x"}, id="object"),
+        pytest.param("", id="empty-string"),
+    ],
+)
+def test_every_json_native_lane_output_survives_a_scoped_fetch(
+    store: ArtifactStore, output: Any
+) -> None:
+    """Fan-out submission accepts any JSON-native content, so a read must return it.
+
+    ``json_extract`` decodes to a SQL value -- prose loses its quotes, ``true``
+    arrives as ``1``, ``null`` as absence -- so an extraction that only survived
+    objects and arrays lost every other lane output it was handed.
+    """
+    body = {
+        "kind": "question_advisory",
+        "result": {"aggregated_outputs": [{"lane_id": "code_context", "output": output}]},
+    }
+    contract_id = _publish_body(store, body, contract_id="fanout:json-native")
+
+    assert store.fetch_lane(contract_id, "code_context").body == output
+
+
+def test_an_ordinary_contract_id_containing_a_hash_is_still_reachable(
+    store: ArtifactStore,
+) -> None:
+    """Length is the whole identity rule, so ``ordinary#id`` is a valid stored key.
+
+    Folding a lane into the contract id gave that string a second reading, and
+    the artifact stored under it went missing. The lane travels as its own
+    value, so there is no address to take apart.
+    """
+    contract_id = _publish_body(store, {"kind": "other", "note": "kept"}, contract_id="ordinary#id")
+
+    assert store.fetch(contract_id).body == {"kind": "other", "note": "kept"}
+    assert store.replay(contract_id).body == {"kind": "other", "note": "kept"}
+
+
+def test_an_unscoped_fetch_still_returns_the_whole_fan_out(store: ArtifactStore) -> None:
     """Every caller outside the advisory path passes a plain id and must be untouched."""
     contract_id = _publish_distinguishable(store)
 
@@ -369,10 +416,26 @@ def test_an_unscoped_contract_id_still_fetches_the_whole_body(store: ArtifactSto
     ]
 
 
-def test_a_lane_absent_from_a_fan_out_has_no_address_in_it(store: ArtifactStore) -> None:
-    """Scoping to a lane the body does not carry is absence, not someone else's output."""
+def test_a_lane_absent_from_a_fan_out_is_absence_not_a_sibling(store: ArtifactStore) -> None:
+    """Scoping to a lane the body does not carry returns nothing, never someone else's."""
     contract_id = _publish_distinguishable(store)
 
     assert store.fetch_lane_if_exists(contract_id, "web_context") is None
-    with pytest.raises(Exception, match="does not exist"):
-        store.fetch(lane_scoped_contract_id(contract_id, "web_context"))
+    with pytest.raises(ArtifactNotFoundError):
+        store.fetch_lane(contract_id, "web_context")
+
+
+def test_the_prompt_hands_over_both_values_the_fetch_needs(
+    roster: list[dict[str, str]], store: ArtifactStore
+) -> None:
+    """A lane cannot narrow the artifact without the lane_id, so the block carries it."""
+    contract_id = _publish(store)
+
+    prompt = _lane_prompts(_attach(roster, store, tool_name="ouroboros_interview"))["code_context"]
+
+    assert f"`contract_id`: `{contract_id}`" in prompt
+    assert "`lane_id`: `code_context`" in prompt
+    # The count is what a lane says when the tool is unreachable, and the list is
+    # capped -- so it is stated as what was offered rather than as a total.
+    assert "You are offered 1 recent finding" in prompt
+    assert "you were offered\n1," in prompt

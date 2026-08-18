@@ -42,11 +42,7 @@ from ouroboros.persistence.artifact_errors import (
     ArtifactTooLargeError,
 )
 from ouroboros.persistence.artifact_schema import as_utc as _as_utc
-from ouroboros.persistence.artifact_schema import (
-    canonical_artifact_bytes,
-    lane_scoped_contract_id,
-    split_lane_scoped_contract_id,
-)
+from ouroboros.persistence.artifact_schema import canonical_artifact_bytes
 from ouroboros.persistence.artifact_schema import validate_contract_id as _validate_contract_id
 from ouroboros.persistence.sqlite_connection import configure_writable_sqlite_connection
 
@@ -245,21 +241,7 @@ class ArtifactStore:
         return envelope
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
-        """Explicitly fetch the body referenced by one contract.
-
-        A contract id naming a lane (``<contract>#<lane>``) fetches that lane's
-        output alone; see ``fetch_lane_if_exists``.
-        """
-        base, lane_id = split_lane_scoped_contract_id(contract_id)
-        if lane_id is not None:
-            fetched = self.fetch_lane_if_exists(base, lane_id)
-            if fetched is None:
-                raise ArtifactNotFoundError(
-                    "Artifact contract does not exist",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                )
-            return fetched
+        """Explicitly fetch the body referenced by one contract."""
         fetched = self.fetch_if_exists(contract_id)
         if fetched is None:
             raise ArtifactNotFoundError(
@@ -269,20 +251,42 @@ class ArtifactStore:
             )
         return fetched
 
+    def fetch_lane(self, contract_id: str, lane_id: str) -> FetchedArtifact:
+        """Fetch one lane's output from a fan-out body, raising when absent."""
+        fetched = self.fetch_lane_if_exists(contract_id, lane_id)
+        if fetched is None:
+            raise ArtifactNotFoundError(
+                "Artifact contract does not exist",
+                operation="read",
+                details={"contract_id": contract_id, "lane_id": lane_id},
+            )
+        return fetched
+
     def fetch_lane_if_exists(self, contract_id: str, lane_id: str) -> FetchedArtifact | None:
         """Fetch one lane's output from a fan-out body, or ``None`` if absent.
+
+        A lane is named by its own argument rather than packed into the contract
+        id, so an ordinary id is never read as an address with a lane in it and
+        this method is unreachable except by a caller that meant it.
 
         The whole filter is the ``WHERE`` below.  ``$.lane_id`` is the key the
         fan-out itself assigned from its dispatch roster, so it names the lane
         the server sent the work to; the ``lane_id`` a child happens to write
         inside its own output is not read here and is absent from some bodies.
 
+        Selected with ``->`` rather than ``json_extract``, which returns a
+        decoded SQL value: a lane whose whole output is prose would come back
+        with its JSON quotes gone, ``true`` as ``1``, and ``null``
+        indistinguishable from a missing row.  Fan-out submission accepts any
+        JSON-native content, so an extraction that only survives objects and
+        arrays loses the rest silently.  ``->`` returns JSON for every type.
+
         Returns the lane's output as the body, so a caller that asked for one
         lane is handed one lane -- there is nothing left in it to select.
         """
         contract_id = _validate_contract_id(contract_id)
         row = self._read_one(
-            "SELECT json_extract(lane.value,'$.output'), runtime_id, duration_ms,"
+            "SELECT lane.value -> '$.output', runtime_id, duration_ms,"
             " events_emitted_count, updated_at, body"
             " FROM artifacts, json_each(body,'$.result.aggregated_outputs') AS lane"
             " WHERE contract_id = ? AND json_extract(lane.value,'$.lane_id') = ?",
@@ -291,20 +295,25 @@ class ArtifactStore:
         )
         if row is None:
             return None
-        output_text, runtime_id, duration_ms, events_emitted_count, updated_at, body_text = row
+        output_json, runtime_id, duration_ms, events_emitted_count, updated_at, body_text = row
         if body_text is None:
             raise _tombstoned_read_error(contract_id, tombstoned_at=updated_at)
+        # ``->`` yields SQL NULL only for a lane entry carrying no ``output``
+        # key at all; a JSON ``null`` output arrives as the four-byte ``null``,
+        # exactly as a published body does in ``fetch_if_exists``.
+        if output_json is None:
+            return None
         try:
-            output = json.loads(output_text) if output_text is not None else None
-        except json.JSONDecodeError as exc:
+            output = json.loads(output_json)
+        except (TypeError, json.JSONDecodeError) as exc:
             raise ArtifactIntegrityError(
                 "Artifact body is not valid JSON",
                 operation="read",
-                details={"contract_id": contract_id},
+                details={"contract_id": contract_id, "lane_id": lane_id},
             ) from exc
         return FetchedArtifact(
             envelope=_envelope(
-                lane_scoped_contract_id(contract_id, lane_id),
+                contract_id,
                 runtime_id=runtime_id,
                 duration_ms=duration_ms,
                 events_emitted_count=events_emitted_count,

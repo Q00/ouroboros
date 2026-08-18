@@ -31,37 +31,13 @@ def validate_contract_id(contract_id: str) -> str:
     return contract_id
 
 
-#: Separates a fan-out contract from the lane whose output is wanted.  ``#`` is
-#: not produced by any id this project mints -- a fan-out id is ``fanout:`` and
-#: a hex digest, a call id a UUID -- so a split on it cannot cut an id that was
-#: never lane-scoped.
-_LANE_SCOPE_SEPARATOR = "#"
-
-
-def lane_scoped_contract_id(contract_id: str, lane_id: str) -> str:
-    """Return the address of one lane's output inside one fan-out contract.
-
-    A fan-out publishes one artifact carrying every lane it dispatched, so its
-    contract id names the turn rather than any lane's finding.  Handing that id
-    to a lane hands it every sibling's output as well.  This narrows the
-    address instead of the answer: what is offered names the lane, so what
-    comes back is that lane's and there is nothing in it to select.
-    """
-    return f"{contract_id}{_LANE_SCOPE_SEPARATOR}{lane_id}"
-
-
-def split_lane_scoped_contract_id(contract_id: str) -> tuple[str, str | None]:
-    """Split a possibly lane-scoped address into ``(contract_id, lane_id)``.
-
-    ``lane_id`` is ``None`` for an ordinary contract id, which is what every
-    caller outside the advisory path passes and what this must leave alone.
-    """
-    if not isinstance(contract_id, str):
-        return contract_id, None
-    base, separator, lane_id = contract_id.partition(_LANE_SCOPE_SEPARATOR)
-    if not separator or not base or not lane_id:
-        return contract_id, None
-    return base, lane_id
+# A lane is *not* packed into the contract id.  Naming one lane of a fan-out
+# needs two values, and an encoding that folded them into one string had to be
+# taken apart again by every reader -- which meant deciding what an ordinary id
+# already containing the separator meant.  Length is the whole identity rule
+# above, so ``ordinary#id`` is a valid stored key, and a reader splitting it
+# made a live artifact unreachable.  The two values travel as two values; there
+# is no address to parse and so none to misparse.
 
 
 def validate_json_native(

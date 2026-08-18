@@ -1067,9 +1067,10 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["contract_id", "published_at"],
+                            "required": ["contract_id", "lane_id", "published_at"],
                             "properties": {
                                 "contract_id": {"type": "string", "minLength": 1},
+                                "lane_id": {"type": "string", "minLength": 1},
                                 "published_at": {"type": "string", "minLength": 1},
                             },
                         },
@@ -1081,8 +1082,9 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "that produced them: a lane is offered only its own, and the "
                     "reasoning lanes are absent because a lane that produces no "
                     "fact that keeps consumes none either (RFC "
-                    "Q00/ouroboros#2167). Each entry is a contract_id to fetch "
-                    "with ouroboros_fetch_artifact and when it was published. "
+                    "Q00/ouroboros#2167). Each entry is a contract_id and the "
+                    "lane_id that narrows it, both passed to "
+                    "ouroboros_fetch_artifact, and when it was published. "
                     "Bodies do not travel: carried inline they were duplicated "
                     "into every lane of the turn, which outgrew what a host "
                     "accepts inline and cost the turn its fan-out. A lane with "

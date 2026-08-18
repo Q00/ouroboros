@@ -52,7 +52,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
-from ouroboros.persistence.artifact_schema import lane_scoped_contract_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ouroboros.persistence.artifact_store import ArtifactStore
@@ -128,9 +127,17 @@ def recent_findings_by_lane(
     """Return, per eligible lane, the recent findings that lane itself published.
 
     Keyed by lane id, and a lane with none is absent rather than empty. What
-    each entry carries is ``contract_id`` and ``published_at`` -- where the
-    finding is and when it was made, never what it said. A lane reads its own
-    with ``ouroboros_fetch_artifact``.
+    each entry carries is ``contract_id``, ``lane_id`` and ``published_at`` --
+    where the finding is and when it was made, never what it said. A lane reads
+    its own with ``ouroboros_fetch_artifact``, passing both back.
+
+    **The lane is a second value, not a suffix on the first.** A fan-out
+    publishes one artifact carrying every lane it dispatched, so a contract id
+    names the turn and fetching one returned every sibling's output. Folding the
+    lane into that id narrowed what came back but left a string two readings
+    could claim: contract ids are bounded by length and nothing else, so an
+    ordinary id containing the separator was taken apart and its artifact went
+    missing. Two values travel as two values.
 
     **Bodies do not travel, and that is the whole of it.** They did once: every
     lane of the turn received every eligible finding inline, so one turn carried
@@ -191,7 +198,8 @@ def recent_findings_by_lane(
                 continue
             found.append(
                 {
-                    "contract_id": lane_scoped_contract_id(published.contract_id, lane_id),
+                    "contract_id": published.contract_id,
+                    "lane_id": lane_id,
                     "published_at": published.published_at.isoformat(),
                 }
             )

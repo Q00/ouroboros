@@ -243,9 +243,10 @@ class FetchArtifactHandler:
             name="ouroboros_fetch_artifact",
             description=(
                 "Fetch and integrity-check a disposable Ouroboros artifact by the "
-                "contract_id returned in an artifact envelope. For fan-out completion, "
-                "continue from the synthesis in the returned `body`. This is an explicit "
-                "read and never re-executes the originating work."
+                "contract_id returned in an artifact envelope, or offered to an "
+                "advisory lane beside the lane_id that produced it. For fan-out "
+                "completion, continue from the synthesis in the returned `body`. "
+                "This is an explicit read and never re-executes the originating work."
             ),
             parameters=(
                 MCPToolParameter(
@@ -253,6 +254,17 @@ class FetchArtifactHandler:
                     type=ToolInputType.STRING,
                     description="The contract_id from a disposable artifact envelope.",
                     required=True,
+                ),
+                MCPToolParameter(
+                    name="lane_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Optional. Narrows a fan-out artifact to the output of one "
+                        "lane, returning that lane's body alone. Pass the lane_id "
+                        "offered beside the contract_id; omit it to read the whole "
+                        "artifact."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -277,8 +289,14 @@ class FetchArtifactHandler:
                     tool_name="ouroboros_fetch_artifact",
                 )
             )
+        lane_id = str(arguments.get("lane_id") or "").strip()
         try:
-            fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
+            if lane_id:
+                fetched = await asyncio.to_thread(
+                    self.disposable_memory.fetch_lane, contract_id, lane_id
+                )
+            else:
+                fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
         except (ArtifactStoreError, OSError, ValueError) as exc:
             return Result.err(
                 MCPToolError(
@@ -287,10 +305,12 @@ class FetchArtifactHandler:
                 )
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "contract_id": fetched.envelope.contract_id,
             "body": fetched.body,
         }
+        if lane_id:
+            payload["lane_id"] = lane_id
         return Result.ok(
             MCPToolResult(
                 content=(

@@ -348,10 +348,12 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     the turn parsing its own output rather than dispatching the fan-out. A block
     a lane never receives helps nobody.
 
-    **The count is what makes fetching safe to require.** Naming how many exist
-    before naming the tool means a lane that cannot reach it knows something is
-    there. Without that number, an unreachable tool and an empty project produce
-    the same silence -- the confusion this whole mechanism exists to prevent.
+    **The count is what makes fetching safe to require.** Naming how many are
+    offered before naming the tool means a lane that cannot reach it knows
+    something is there. Without that number, an unreachable tool and an empty
+    project produce the same silence -- the confusion this whole mechanism
+    exists to prevent. Offered, not published: the list is capped, so a count
+    stated as a total would be a number this cannot know.
 
     **They may not be this session's.** A finding describes the system, and the
     system does not change at session granularity -- so the boundary is recency
@@ -373,22 +375,25 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     if not entries:
         return ""
     listing = "\n".join(
-        f"- `{entry.get('contract_id')}` — published {entry.get('published_at')}"
+        f"- `contract_id`: `{entry.get('contract_id')}`,"
+        f" `lane_id`: `{entry.get('lane_id', lane_id)}`"
+        f" — published {entry.get('published_at')}"
         for entry in entries
     )
     count = len(entries)
     plural = "" if count == 1 else "s"
     return f"""## Recently Found Here
-Your lane published {count} finding{plural} in this project within the last day.
-The bodies are not here. Fetch each with the MCP tool `ouroboros_fetch_artifact`,
-passing the id as `contract_id`:
+You are offered {count} recent finding{plural} your lane published in this project
+within the last day. The bodies are not here. Fetch each with the MCP tool
+`ouroboros_fetch_artifact`, passing both values below — the `lane_id` is what
+narrows the artifact to your lane's own output:
 
 {listing}
 
 Read what you fetch, use what helps, and investigate the rest yourself. These
 are a head start, not a substitute.
 
-**If you cannot reach that tool, say so in your finding** — this project has
+**If you cannot reach that tool, say so in your finding** — you were offered
 {count}, so reporting nothing to reuse would be false — then investigate as you
 would have without them.
 

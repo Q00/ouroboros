@@ -165,6 +165,10 @@ class DisposableMemory:
         """Explicitly fetch a disposable body by contract id."""
         return self.artifact_store.fetch(contract_id)
 
+    def fetch_lane(self, contract_id: str, lane_id: str) -> FetchedArtifact:
+        """Explicitly fetch one lane's output from a fan-out body."""
+        return self.artifact_store.fetch_lane(contract_id, lane_id)
+
     def replay(self, contract_id: str) -> FetchedArtifact:
         """Read the original body deterministically; never re-execute."""
         return self.artifact_store.replay(contract_id)
