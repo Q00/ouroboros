@@ -6,6 +6,7 @@ from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -43,6 +44,7 @@ from ouroboros.config.models import (
 )
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
 def _terminate_and_reap_test_process(process: subprocess.Popen[str] | None) -> None:
@@ -10616,6 +10618,44 @@ class TestCopilotSetup:
             assert setup_cmd._install_pi_ooo_bridge() is True
 
         assert bridge_path.stat().st_mtime_ns == first_mtime
+
+    def test_pi_bridge_registers_argument_completions(self) -> None:
+        """The managed bridge should TAB-complete `/ooo` arguments.
+
+        `/ooo <TAB>` lists the dispatchable subcommands and `ooo run <TAB>`
+        lists Seed files from `~/.ouroboros/seeds/`.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+
+        assert "getArgumentCompletions: argumentCompletions" in bridge_source
+        assert "function argumentCompletions(argumentPrefix: string)" in bridge_source
+        assert 'path.join(homedir(), ".ouroboros", "seeds")' in bridge_source
+        assert 'tokens[0].toLowerCase() === "run"' in bridge_source
+
+    def test_pi_bridge_completions_mirror_dispatchable_skills(self) -> None:
+        """Completion subcommands must mirror skills with `mcp_tool` frontmatter.
+
+        The bridge hardcodes the dispatchable subcommand list so completion
+        stays deterministic and offline. This test fails whenever a packaged
+        skill gains or loses `mcp_tool` frontmatter, so the hardcoded list
+        cannot drift silently.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+        completed = set(re.findall(r'cmd: "([a-z0-9][a-z0-9_-]*)"', bridge_source))
+
+        with resolve_packaged_skills_dir(anchor_file=Path(__file__)) as skills_dir:
+            dispatchable = {
+                skill_dir.name
+                for skill_dir in skills_dir.iterdir()
+                if (skill_dir / "SKILL.md").is_file()
+                and re.search(
+                    r"^mcp_tool:",
+                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
+                    re.MULTILINE,
+                )
+            }
+
+        assert completed == dispatchable
 
 
 class TestRuntimeFlagDispatch:
