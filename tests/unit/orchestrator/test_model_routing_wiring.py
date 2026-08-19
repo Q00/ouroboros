@@ -38,6 +38,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.direct_pause_runtime import classify_direct_route_failure
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
@@ -843,7 +844,7 @@ class TestRunnerRouterConstruction:
             content="Missing access to the required deployment account.",
             data={"subtype": "error", "error_type": "PermissionError"},
         )
-        failure = runner._classify_direct_route_failure(final_error)
+        failure = classify_direct_route_failure(final_error)
 
         decision, history = await runner._persist_direct_route_outcome(
             execution_id="exec-direct-blocked",

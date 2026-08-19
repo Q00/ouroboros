@@ -35,6 +35,11 @@ from ouroboros.config._model_defaults import (
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
 )
+from ouroboros.core.attempt_budget import (
+    DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ITERATIONS_PER_AC,
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+)
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
 _SAFE_PROJECT_GUIDANCE_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$")
@@ -226,7 +231,11 @@ class ExecutionConfig(BaseModel, frozen=True):
     """Phase 2 (Execution) configuration.
 
     Attributes:
-        max_iterations_per_ac: Maximum iterations per acceptance criteria
+        max_iterations_per_ac: Maximum tool-bearing agent turns targeted by one
+            acceptance-criterion attempt. Text-only runtimes remain bounded by
+            ``ac_attempt_timeout_seconds``.
+        ac_attempt_timeout_seconds: Hard wall-clock ceiling for one provider
+            attempt, independent of activity and the separate idle watchdog.
         retrospective_interval: Iterations between retrospectives
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
         auto_evaluate: When true, an evaluable terminal `execute_seed` run
@@ -266,7 +275,12 @@ class ExecutionConfig(BaseModel, frozen=True):
             never derives from this setting.
     """
 
-    max_iterations_per_ac: int = Field(default=10, ge=1)
+    max_iterations_per_ac: int = Field(default=DEFAULT_MAX_ITERATIONS_PER_AC, ge=1)
+    ac_attempt_timeout_seconds: int = Field(
+        default=int(DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS),
+        ge=1,
+        le=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    )
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True

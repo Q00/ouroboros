@@ -102,10 +102,13 @@ regex patches.
 
 ### Error bias: attempt-then-bounce is already how the live system works
 
-The live system runs ACs at seed granularity and lets **evaluation bounce**
-failures — 115 ACs executed with *zero* pre-execution atomicity judgments. So the
-work is not *choosing* the error bias (it is empirically attempt-then-bounce); it is
-adding **discipline** to the loop that already exists.
+The live system runs ACs without a pre-execution atomicity judgment and lets
+failed atomic execution or verifier results enter **bounce classification** —
+115 ACs executed with *zero* pre-execution atomicity judgments. So the work is
+not *choosing* the error bias (it is empirically attempt-then-bounce); it is
+adding **discipline** to the loop that already exists. Hard attempt-budget
+exhaustion is the exception: it terminates without bounce classification or a
+successor.
 
 ### Lineage
 
@@ -138,9 +141,20 @@ a known-non-atomic unit to run as atomic must **record that compromise** as an e
 
 ### 3. Discipline on the existing attempt-then-bounce loop
 
-- **Bounded attempts** at seed granularity (the current behavior, made explicit).
-- **Bounce-cause classification** when evaluation rejects: *too-big* vs. *bad-spec*
-  vs. *environment* — only *too-big* should drive a decomposition.
+- **Bounded atomic provider attempts**: the common stream owner cancels at
+  the first observed turn beyond `execution.max_iterations_per_ac` tool-bearing
+  agent turns (default 10), admits no later turn, and enforces
+  `execution.ac_attempt_timeout_seconds` total wall-clock seconds (default 900),
+  independent of activity. Because runtimes differ on whether a tool request is
+  reported before or after its effect, this does not claim universal pre-effect
+  blocking of the boundary turn. Exhaustion is terminal: it bypasses same-AC
+  retry, verification recovery, bounce classification, alternate runtimes, and
+  route successors. Legacy whole-Seed direct/resume calls scale both limits by
+  root AC count and fail closed if the scaled timeout exceeds the exact durable
+  microsecond boundary.
+- **Bounce-cause classification** when an atomic execution or verifier result
+  fails: *too-big* vs. *bad-spec* vs. *environment* — only *too-big* should drive
+  a decomposition.
 - **Bounce-trace as decomposition input**: split from *what was actually attempted
   and what remains*, not from the AC text. This beats splitting from a text-surface
   guess.
@@ -184,8 +198,10 @@ re-grounding is that lesson applied.
    repaired (one retry), or escalated — never silently accepted.
 3. Every forced-atomic compromise appears in the event stream; the live executor's
    split/verdict fields carry **real** inputs (no hardcoded stand-ins).
-4. Evaluation bounces are classified (too-big / bad-spec / environment) and only
-   *too-big* drives a decomposition, seeded from the bounce trace.
+4. Failed atomic execution or verifier results are classified (too-big /
+   bad-spec / environment), and only *too-big* drives a decomposition seeded
+   from the bounce trace. Attempt-budget exhaustion bypasses this classifier and
+   terminates without a successor.
 5. With no LLM available, the fallback records `UNKNOWN` and leaves the failed
    unit untrusted for escalation or human handoff. It never invents children or
    emits a confident keyword verdict; verified fan-out has no heuristic fallback.

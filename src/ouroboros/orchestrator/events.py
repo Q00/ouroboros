@@ -672,6 +672,38 @@ def create_ac_stall_detected_event(
     )
 
 
+def create_ac_attempt_budget_exhausted_event(
+    *,
+    session_id: str,
+    ac_index: int | None,
+    ac_id: str,
+    attempt: int,
+    budget_kind: str,
+    limit: float,
+    observed: float,
+    elapsed_seconds: float,
+) -> BaseEvent:
+    """Record the measured hard boundary that stopped one atomic attempt."""
+
+    return BaseEvent(
+        type="execution.ac.attempt_budget_exhausted",
+        aggregate_type="execution",
+        aggregate_id=ac_id,
+        data={
+            "session_id": session_id,
+            "ac_index": ac_index,
+            "ac_id": ac_id,
+            "attempt": attempt,
+            "budget_kind": budget_kind,
+            "limit": limit,
+            "observed": observed,
+            "elapsed_seconds": elapsed_seconds,
+            "action": "fail_no_successor",
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def create_drift_measured_event(
     execution_id: str,
     goal_drift: float,
@@ -797,6 +829,7 @@ def create_frugality_retrospective_event(
 
 __all__ = [
     "FRUGALITY_RETROSPECTIVE_EVENT_TYPE",
+    "create_ac_attempt_budget_exhausted_event",
     "create_ac_stall_detected_event",
     "create_drift_measured_event",
     "create_execution_terminal_event",

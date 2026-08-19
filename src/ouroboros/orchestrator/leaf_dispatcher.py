@@ -18,7 +18,8 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 import errno
 import os
@@ -26,17 +27,28 @@ from pathlib import Path
 import stat
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
+from ouroboros.core.attempt_budget import (
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+    AttemptBudgetProgress,
+    conservative_timeout_deadline,
+)
 from ouroboros.core.filesystem_capability import (
     DirectoryChainFingerprint,
     NoFollowDirectoryChain,
     nofollow_directory_capabilities_available,
     open_nofollow_directory_chain,
 )
+from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    await_provider_operation_bounded,
+    close_provider_stream_bounded,
+)
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_effective_cwd,
@@ -62,6 +74,73 @@ if TYPE_CHECKING:
     )
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
+log = get_logger(__name__)
+
+
+async def _close_runtime_stream(
+    stream: AsyncGenerator[AgentMessage, None],
+    state: LeafDispatchState,
+    timeout_exhausted: Callable[[], bool],
+) -> None:
+    """Finish provider cleanup even when the consuming attempt is cancelled."""
+    try:
+        with anyio.CancelScope(shield=True):
+            await close_provider_stream_bounded(stream)
+        state.provider_closed = True
+    except Exception as exc:
+        exhaustion = state.attempt_budget_exhaustion
+        if exhaustion is None and not timeout_exhausted():
+            raise
+        log.warning(
+            "parallel_executor.provider_stream.close_unconfirmed_after_exhaustion",
+            budget_kind=(
+                exhaustion.kind.value
+                if exhaustion is not None
+                else AttemptBudgetKind.WALL_CLOCK.value
+            ),
+            error=str(exc),
+        )
+        raise
+
+
+async def _iterate_runtime_stream(
+    stream: AsyncGenerator[AgentMessage, None],
+    *,
+    attempt_timed_out: Callable[[], bool],
+) -> AsyncIterator[AgentMessage]:
+    """Keep the attempt deadline authoritative if provider unwind fails."""
+
+    try:
+        while True:
+            try:
+                message = await await_provider_operation_bounded(anext(stream))
+            except StopAsyncIteration:
+                return
+            yield message
+    except Exception as exc:
+        if not attempt_timed_out():
+            raise
+        log.warning(
+            "parallel_executor.provider_stream.failed_after_attempt_timeout",
+            error=str(exc),
+        )
+
+
+def restored_attempt_budget_exhaustion(
+    progress: AttemptBudgetProgress | None,
+    *,
+    timeout_seconds: float,
+) -> AttemptBudgetExhaustion | None:
+    """Project an already-depleted durable clock before provider entry."""
+
+    if progress is None or progress.remaining_timeout_microseconds != 0:
+        return None
+    return AttemptBudgetExhaustion(
+        kind=AttemptBudgetKind.WALL_CLOCK,
+        limit=timeout_seconds,
+        observed=timeout_seconds,
+    )
+
 
 @dataclass
 class LeafDispatchState:
@@ -81,6 +160,60 @@ class LeafDispatchState:
     final_message: str = ""
     success: bool = False
     stalled: bool = False
+    agentic_step_count: int = 0
+    attempt_budget_snapshot: AttemptBudgetProgress | None = None
+    attempt_started_at: float | None = None
+    attempt_budget_exhaustion: AttemptBudgetExhaustion | None = None
+    provider_entered: bool = False
+    provider_closed: bool = False
+
+    def prepare_attempt_budget(
+        self,
+        *,
+        max_agentic_steps: int,
+        timeout_seconds: float,
+    ) -> AttemptBudgetProgress:
+        """Resolve exact remaining authority before entering a provider."""
+
+        if self.attempt_budget_snapshot is None:
+            self.attempt_budget_snapshot = AttemptBudgetProgress.capture(
+                agentic_steps_consumed=self.agentic_step_count,
+                elapsed_timeout_seconds=0,
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            self.attempt_budget_snapshot = AttemptBudgetProgress.from_contract_data(
+                self.attempt_budget_snapshot.to_contract_data(),
+                max_agentic_steps=max_agentic_steps,
+                timeout_seconds=timeout_seconds,
+            )
+        return self.attempt_budget_snapshot
+
+    def attempt_budget_progress(
+        self,
+        *,
+        max_agentic_steps: int,
+        timeout_seconds: float,
+    ) -> AttemptBudgetProgress:
+        """Capture cumulative finite-resource state at a recoverable pause."""
+
+        snapshot = self.prepare_attempt_budget(
+            max_agentic_steps=max_agentic_steps,
+            timeout_seconds=timeout_seconds,
+        )
+        live_elapsed = (
+            0.0
+            if self.attempt_started_at is None
+            else max(0.0, anyio.current_time() - self.attempt_started_at)
+        )
+        elapsed_progress = snapshot.consume_elapsed_seconds(live_elapsed)
+        return AttemptBudgetProgress(
+            max_agentic_steps=max_agentic_steps,
+            timeout_microseconds=elapsed_progress.timeout_microseconds,
+            agentic_steps_consumed=self.agentic_step_count,
+            remaining_timeout_microseconds=elapsed_progress.remaining_timeout_microseconds,
+        )
 
 
 @dataclass(slots=True)
@@ -679,9 +812,30 @@ class LeafDispatcher:
         label: str,
         indent: str,
         execution_counters: dict[str, int] | None,
+        max_iterations_per_ac: int,
+        ac_attempt_timeout_seconds: float,
     ) -> None:
         """Run the stall-scoped dispatch loop, mutating ``state`` in place."""
         executor = self._executor
+
+        # A durable resume snapshot can validly contain zero remaining
+        # microseconds. Terminalize that already-exhausted attempt without
+        # constructing or iterating a provider stream: an expired CancelScope
+        # created after ``execute_task`` is too late to protect the effect
+        # boundary for async-generator runtimes.
+        if state.attempt_budget_exhaustion is not None:
+            return
+
+        attempt_budget_snapshot = state.prepare_attempt_budget(
+            max_agentic_steps=max_iterations_per_ac,
+            timeout_seconds=ac_attempt_timeout_seconds,
+        )
+        if attempt_budget_snapshot.remaining_timeout_microseconds == 0:
+            state.attempt_budget_exhaustion = restored_attempt_budget_exhaustion(
+                attempt_budget_snapshot,
+                timeout_seconds=ac_attempt_timeout_seconds,
+            )
+            return
 
         lifecycle_event_type = (
             "execution.session.resumed"
@@ -695,19 +849,44 @@ class LeafDispatcher:
         # Stall detection: CancelScope with resettable deadline (RC6)
         last_heartbeat = time.monotonic()
         exec_start = time.monotonic()
+        if state.attempt_started_at is None:
+            state.attempt_started_at = anyio.current_time()
+        attempt_deadline = conservative_timeout_deadline(
+            started_at=state.attempt_started_at,
+            remaining_seconds=attempt_budget_snapshot.remaining_timeout_seconds,
+        )
 
-        with (
-            _BashFilesystemLeaseTracker(task_cwd=task_cwd) as identity_tracker,
-            anyio.CancelScope(
-                deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
-            ) as stall_scope,
-        ):
-            async for message in executor._adapter.execute_task(
-                prompt=prompt,
-                tools=tools,
-                system_prompt=system_prompt,
-                resume_handle=state.runtime_handle,
-                **execute_effort_kwargs,
+        async with AsyncExitStack() as stream_stack:
+            identity_tracker = stream_stack.enter_context(
+                _BashFilesystemLeaseTracker(task_cwd=task_cwd)
+            )
+            message_stream = cast(
+                AsyncGenerator[AgentMessage, None],
+                executor._adapter.execute_task(
+                    prompt=prompt,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    resume_handle=state.runtime_handle,
+                    **execute_effort_kwargs,
+                ),
+            )
+            state.provider_entered = True
+            attempt_scope: anyio.CancelScope | None = None
+            stream_stack.push_async_callback(
+                _close_runtime_stream,
+                message_stream,
+                state,
+                lambda: attempt_scope is not None and attempt_scope.cancel_called,
+            )
+            attempt_scope = stream_stack.enter_context(anyio.CancelScope(deadline=attempt_deadline))
+            stall_scope = stream_stack.enter_context(
+                anyio.CancelScope(
+                    deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
+                )
+            )
+            async for message in _iterate_runtime_stream(
+                message_stream,
+                attempt_timed_out=lambda: attempt_scope.cancel_called,
             ):
                 # Reset stall deadline on every message (RC6 core)
                 stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
@@ -787,6 +966,14 @@ class LeafDispatcher:
                     last_heartbeat = now
 
                 projected = project_runtime_message(message)
+                if projected.is_tool_call:
+                    state.agentic_step_count += 1
+                    if state.agentic_step_count > max_iterations_per_ac:
+                        state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
+                            kind=AttemptBudgetKind.AGENTIC_STEPS,
+                            limit=float(max_iterations_per_ac),
+                            observed=float(state.agentic_step_count),
+                        )
                 await executor._event_emitter.observe_ac_activity(
                     runtime_identity=runtime_identity,
                     execution_id=execution_context_id,
@@ -795,6 +982,12 @@ class LeafDispatcher:
                     projected=projected,
                     is_final=message.is_final,
                 )
+
+                # Stop the runtime at the first observed over-budget tool turn.
+                # Some runtimes expose a request before its effect and others
+                # report it afterward; in both cases no *later* turn is admitted.
+                if state.attempt_budget_exhaustion is not None:
+                    break
 
                 persisted_session_id = executor._runtime_resume_session_id(state.runtime_handle)
                 if not lifecycle_emitted and persisted_session_id:
@@ -890,3 +1083,25 @@ class LeafDispatcher:
 
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
+        if attempt_scope.cancel_called:
+            exhausted_progress = state.attempt_budget_progress(
+                max_agentic_steps=max_iterations_per_ac,
+                timeout_seconds=ac_attempt_timeout_seconds,
+            )
+            state.attempt_budget_snapshot = AttemptBudgetProgress(
+                max_agentic_steps=exhausted_progress.max_agentic_steps,
+                timeout_microseconds=exhausted_progress.timeout_microseconds,
+                agentic_steps_consumed=exhausted_progress.agentic_steps_consumed,
+                remaining_timeout_microseconds=0,
+            )
+            state.attempt_budget_exhaustion = AttemptBudgetExhaustion(
+                kind=AttemptBudgetKind.WALL_CLOCK,
+                limit=ac_attempt_timeout_seconds,
+                observed=max(
+                    ac_attempt_timeout_seconds,
+                    state.attempt_budget_snapshot.elapsed_timeout_seconds(),
+                ),
+            )
+            # A fixed total deadline is a different recovery signal from an
+            # inactivity stall, even if both clocks happen to expire together.
+            state.stalled = False

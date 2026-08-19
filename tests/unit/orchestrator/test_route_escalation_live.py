@@ -14,6 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.core.attempt_budget import (
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+    AttemptBudgetProgress,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     OntologySchema,
@@ -215,6 +220,8 @@ def _live_executor(
     working_directory: str,
     process_local_resume_nonce: str,
     max_concurrent: int = 3,
+    max_iterations_per_ac: int = 10,
+    ac_attempt_timeout_seconds: float = 900,
     session_signal_hub: Any | None = None,
     executor_type: type[ParallelACExecutor] = ParallelACExecutor,
 ) -> ParallelACExecutor:
@@ -239,6 +246,8 @@ def _live_executor(
         model_router=router,
         route_economics=economics,
         ac_retry_attempts=99,
+        max_iterations_per_ac=max_iterations_per_ac,
+        ac_attempt_timeout_seconds=ac_attempt_timeout_seconds,
         cross_harness_redispatch=False,
         process_local_resume_nonce=process_local_resume_nonce,
         session_signal_hub=session_signal_hub,
@@ -301,6 +310,20 @@ def _candidate(executor: ParallelACExecutor, route_id: str):
     assert built is not None
     return next(
         candidate for candidate in built.registry.candidates if candidate.route_id == route_id
+    )
+
+
+def _attempt_budget_progress(
+    executor: ParallelACExecutor,
+    *,
+    agentic_steps_consumed: int = 0,
+    elapsed_timeout_seconds: float = 0,
+) -> AttemptBudgetProgress:
+    return AttemptBudgetProgress.capture(
+        agentic_steps_consumed=agentic_steps_consumed,
+        elapsed_timeout_seconds=elapsed_timeout_seconds,
+        max_agentic_steps=executor._max_iterations_per_ac,
+        timeout_seconds=executor._ac_attempt_timeout_seconds,
     )
 
 
@@ -566,6 +589,82 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     assert [event.data["route_id"] for event in judgments] == calls
     assert [event.data["route_attempt_index"] for event in judgments] == [0, 1, 2]
     assert all(event.data["route_episode_id"] == _episode_id(_seed()) for event in judgments)
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_never_dispatches_route_successor() -> None:
+    """A consumed AC allowance cannot be renewed by bounded Routing D."""
+    executor, _store, events = _executor(enable_decomposition=True)
+    calls: list[str] = []
+    exhaustion = AttemptBudgetExhaustion(
+        kind=AttemptBudgetKind.AGENTIC_STEPS,
+        limit=1.0,
+        observed=2.0,
+    )
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
+        calls.append(route_id)
+        if len(calls) > 1:
+            return [
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="ship it",
+                    success=True,
+                    route_candidate=_candidate(executor, route_id),
+                )
+            ]
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Atomic attempt budget exhausted",
+                messages=(AgentMessage(type="tool", content="attempted", tool_name="Read"),),
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=VerifierVerdict(
+                    passed=False,
+                    reasons=("unfinished scope",),
+                    failure_class=FailureClass.SCOPE_CREEP.value,
+                    retry_admission=RetryAdmission.REDISPATCH,
+                ),
+                route_candidate=_candidate(executor, route_id),
+                attempt_budget_exhaustion=exhaustion,
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.UNKNOWN, False))
+
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == ["compat:claude:frugal"]
+    result = results[0]
+    assert isinstance(result, ACExecutionResult)
+    assert result.success is False
+    assert result.outcome is ACExecutionOutcome.BLOCKED
+    assert result.attempt_budget_exhaustion == exhaustion
+    executor._request_bounce_classification.assert_not_awaited()
+    route_events = [event for event in events if event.type == "execution.ac.route_observed"]
+    assert len(route_events) == 1
+    terminal = route_events[0]
+    assert terminal.data["observation"]["verifier_outcome"] == VerifierOutcome.BLOCKED.value
+    assert terminal.data["observation"]["failure_class"] == FailureClass.BLOCKED.value
+    assert terminal.data["decision"]["action"] == "blocked"
+    assert terminal.data["decision"]["reason"] == EscalationReason.HUMAN_HANDOFF_REQUIRED.value
+    assert terminal.data["human_handoff_required"] is True
 
 
 @pytest.mark.asyncio
@@ -852,6 +951,7 @@ async def test_parallel_usage_limit_pauses_before_route_observation_or_escalatio
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             )
         ]
 
@@ -968,6 +1068,7 @@ async def test_parallel_quota_preempts_completed_sibling_composite_recovery() ->
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             ),
         ]
 
@@ -1037,6 +1138,7 @@ async def test_supported_quota_metadata_never_authorizes_a_route_successor(
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             )
         ]
 
@@ -1099,6 +1201,7 @@ async def test_hostile_quota_mapping_protocol_stops_after_one_route() -> None:
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             )
         ]
 
@@ -1158,6 +1261,7 @@ async def test_quota_metadata_population_overflow_stops_after_one_route() -> Non
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             )
         ]
 
@@ -1675,6 +1779,7 @@ async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_rout
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=cheap,
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             ),
         ]
 
@@ -1819,6 +1924,222 @@ async def test_live_first_route_pause_resumes_same_capsule_and_provider_handle(
             == resume_state["capsule_fingerprint"]
         )
         assert calls[1]["prompt"] == calls[0]["prompt"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_parallel_pause_resume_uses_only_remaining_step_budget(
+    tmp_path: Any,
+) -> None:
+    """The exact resumed leaf cannot regain tool turns consumed before quota."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'step-budget-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[dict[str, Any]] = []
+    yielded_tool_turns = 0
+    closed_streams = 0
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        nonlocal closed_streams, yielded_tool_turns
+        calls.append(dict(kwargs))
+        try:
+            if len(calls) == 1:
+                for index in range(2):
+                    yielded_tool_turns += 1
+                    yield AgentMessage(
+                        type="assistant",
+                        content=f"pre-pause tool {index}",
+                        tool_name="Read",
+                        data={"tool_input": {"file_path": f"before-{index}.txt"}},
+                    )
+                yield AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="step-budget-provider",
+                        cwd=str(tmp_path),
+                        approval_mode="acceptEdits",
+                    ),
+                )
+                return
+            for index in range(3):
+                yielded_tool_turns += 1
+                yield AgentMessage(
+                    type="assistant",
+                    content=f"resumed tool {index}",
+                    tool_name="Read",
+                    data={"tool_input": {"file_path": f"after-{index}.txt"}},
+                )
+            yield AgentMessage(
+                type="result",
+                content="must not reach success",
+                data={"subtype": "success"},
+            )
+        finally:
+            closed_streams += 1
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "2" * 32
+    counters = {"messages_count": 0, "tool_calls_count": 0}
+    run_kwargs = {
+        "seed": _seed(),
+        "batch_executable": [0],
+        "session_id": "session-step-budget-pause",
+        "execution_id": "execution-step-budget-pause",
+        "tools": ["Read"],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0},
+        "execution_counters": counters,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_iterations_per_ac=3,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        assert isinstance(first[0], ACExecutionResult) and not first[0].success
+
+        pauses = await store.query_execution_related_events(
+            "execution-step-budget-pause",
+            event_type="execution.ac.route_paused",
+            limit=2,
+        )
+        progress = pauses[0].data["resume_state"]["attempt_budget_progress"]
+        assert progress["agentic_steps_consumed"] == 2
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_iterations_per_ac=3,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        result = resumed[0]
+        assert isinstance(result, ACExecutionResult) and not result.success
+        assert result.attempt_budget_exhaustion is not None
+        assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
+        assert result.attempt_budget_exhaustion.limit == 3
+        assert result.attempt_budget_exhaustion.observed == 4
+        assert yielded_tool_turns == 4
+        assert counters["tool_calls_count"] == 3
+        assert len(calls) == 2
+        assert calls[1]["resume_handle"].native_session_id == "step-budget-provider"
+        assert closed_streams == 2
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_parallel_pause_resume_uses_only_remaining_wall_clock_budget(
+    tmp_path: Any,
+) -> None:
+    """The exact resumed leaf continues the original fixed deadline."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'time-budget-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[dict[str, Any]] = []
+    closed_streams = 0
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        nonlocal closed_streams
+        calls.append(dict(kwargs))
+        try:
+            yield AgentMessage(
+                type="system",
+                content="provider active",
+                data={"subtype": "progress"},
+            )
+            if len(calls) == 1:
+                await asyncio.sleep(0.5)
+                yield AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="time-budget-provider",
+                        cwd=str(tmp_path),
+                        approval_mode="acceptEdits",
+                    ),
+                )
+                return
+            await asyncio.sleep(2)
+            yield AgentMessage(
+                type="result",
+                content="must not reach success",
+                data={"subtype": "success"},
+            )
+        finally:
+            closed_streams += 1
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "3" * 32
+    run_kwargs = {
+        "seed": _seed(),
+        "batch_executable": [0],
+        "session_id": "session-time-budget-pause",
+        "execution_id": "execution-time-budget-pause",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0},
+        "execution_counters": None,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_iterations_per_ac=100,
+            ac_attempt_timeout_seconds=1,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        assert isinstance(first[0], ACExecutionResult) and not first[0].success
+
+        pauses = await store.query_execution_related_events(
+            "execution-time-budget-pause",
+            event_type="execution.ac.route_paused",
+            limit=2,
+        )
+        progress = pauses[0].data["resume_state"]["attempt_budget_progress"]
+        assert 0 < progress["remaining_timeout_microseconds"] < 600_000
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_iterations_per_ac=100,
+            ac_attempt_timeout_seconds=1,
+        )
+        started = asyncio.get_running_loop().time()
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        resumed_elapsed = asyncio.get_running_loop().time() - started
+
+        result = resumed[0]
+        assert isinstance(result, ACExecutionResult) and not result.success
+        assert result.attempt_budget_exhaustion is not None
+        assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+        assert result.attempt_budget_exhaustion.limit == pytest.approx(1.0)
+        assert result.attempt_budget_exhaustion.observed >= 1.0
+        assert resumed_elapsed < 0.8
+        assert len(calls) == 2
+        assert calls[1]["resume_handle"].native_session_id == "time-budget-provider"
+        assert closed_streams == 2
     finally:
         await store.close()
 
@@ -2837,6 +3158,7 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=cheap,
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             ),
         ]
 
@@ -3178,6 +3500,8 @@ async def test_composite_completion_replay_rejects_non_strict_or_conflicting_sta
         "child_node_drift",
         "unknown_completed_child",
         "capsule_malformed",
+        "budget_missing",
+        "budget_renewed",
         "conflicting_sequence",
     ],
 )
@@ -3224,6 +3548,10 @@ async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
                 messages=(paused_message,),
                 final_message=paused_message.content,
                 runtime_handle=paused_handle,
+                attempt_budget_progress=_attempt_budget_progress(
+                    executor,
+                    agentic_steps_consumed=2,
+                ),
                 depth=1,
             ),
         ),
@@ -3248,6 +3576,18 @@ async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
         partial.data["frames"][0]["completed_children"][0]["provider_transcript"] = []
     elif mutation == "capsule_malformed":
         partial.data["paused_leaf"]["capsule_fingerprint"] = "b" * 64
+    elif mutation == "budget_missing":
+        partial.data["paused_leaf"].pop("attempt_budget_progress")
+    elif mutation == "budget_renewed":
+        conflicting_data = deepcopy(partial.data)
+        conflicting_data["paused_leaf"]["attempt_budget_progress"]["agentic_steps_consumed"] = 1
+        conflicting = BaseEvent(
+            type=partial.type,
+            aggregate_type=partial.aggregate_type,
+            aggregate_id=partial.aggregate_id,
+            data=conflicting_data,
+        )
+        replay_events = [partial, conflicting]
     else:
         conflicting_data = deepcopy(partial.data)
         conflicting_data["frames"][0]["paused_child_index"] = 0
@@ -3339,6 +3679,7 @@ async def test_composite_projection_without_finalized_event_cannot_mint_authorit
                             "ac_capsule_fingerprint": "sha256:" + "e" * 64,
                         },
                     ),
+                    attempt_budget_progress=_attempt_budget_progress(executor),
                     depth=1,
                 ),
             ),
@@ -3399,6 +3740,7 @@ async def test_partial_composite_replay_folds_newest_first_advancing_history() -
                     "ac_capsule_fingerprint": "sha256:" + marker * 64,
                 },
             ),
+            attempt_budget_progress=_attempt_budget_progress(executor),
             depth=1,
         )
 
@@ -3478,6 +3820,7 @@ async def test_valid_4097_composite_pauses_replay_without_a_total_cap(tmp_path: 
                 "ac_capsule_fingerprint": "sha256:" + "d" * 64,
             },
         ),
+        attempt_budget_progress=_attempt_budget_progress(producer),
         depth=1,
     )
     await producer._persist_partial_composite_pause(
@@ -3565,6 +3908,7 @@ async def test_partial_composite_replay_rejects_newer_descendant_path_shortening
                 "ac_capsule_fingerprint": "sha256:" + "b" * 64,
             },
         ),
+        attempt_budget_progress=_attempt_budget_progress(executor),
         depth=2,
     )
     nested = ACExecutionResult(
@@ -3653,6 +3997,7 @@ async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> 
             outcome=ACExecutionOutcome.FAILED,
             route_candidate=cheap,
             runtime_handle=_paused_route_handle(),
+            attempt_budget_progress=_attempt_budget_progress(native),
         ),
         root_ac_index=0,
         session_id="session-1",
@@ -3704,6 +4049,7 @@ async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> N
             retry_attempt=1,
             route_candidate=decision.selected,
             runtime_handle=_paused_route_handle(),
+            attempt_budget_progress=_attempt_budget_progress(executor),
         ),
         root_ac_index=0,
         session_id="session-1",
@@ -3811,6 +4157,7 @@ async def test_parallel_route_replay_rejects_unknown_envelope_fields(
                 success=False,
                 route_candidate=candidate,
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(executor),
             ),
             root_ac_index=0,
             session_id="session-1",
@@ -3847,6 +4194,7 @@ async def test_valid_65_parallel_pause_history_replays_without_a_total_cap(tmp_p
                 success=False,
                 route_candidate=candidate,
                 runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=_attempt_budget_progress(producer),
             ),
             root_ac_index=0,
             session_id="session-1",
@@ -3876,6 +4224,96 @@ async def test_valid_65_parallel_pause_history_replays_without_a_total_cap(tmp_p
         assert state.dispatch_id == "a" * 32
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["missing", "invalid"])
+async def test_parallel_route_pause_rejects_invalid_budget_progress(
+    mutation: str,
+) -> None:
+    executor, store, events = _executor()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    await executor._persist_parallel_route_pause(
+        seed=_seed(),
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            route_candidate=candidate,
+            runtime_handle=_paused_route_handle(),
+            attempt_budget_progress=_attempt_budget_progress(executor),
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        prior_route_ids=(),
+    )
+    pause = next(event for event in events if event.type == "execution.ac.route_paused")
+    if mutation == "missing":
+        pause.data["resume_state"].pop("attempt_budget_progress")
+    else:
+        pause.data["resume_state"]["attempt_budget_progress"]["agentic_steps_consumed"] = (
+            executor._max_iterations_per_ac + 1
+        )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [pause] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="invalid resume state|invalid finite budget"):
+        await executor._load_bounded_route_resume_state(
+            seed=_seed(),
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("renewed_dimension", ["steps", "time"])
+async def test_parallel_route_pause_rejects_renewed_budget_progress(
+    renewed_dimension: str,
+) -> None:
+    executor, store, events = _executor()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    first = _attempt_budget_progress(
+        executor,
+        agentic_steps_consumed=2,
+        elapsed_timeout_seconds=2,
+    )
+    second = _attempt_budget_progress(
+        executor,
+        agentic_steps_consumed=1 if renewed_dimension == "steps" else 2,
+        elapsed_timeout_seconds=2 if renewed_dimension == "steps" else 1,
+    )
+    for progress in (first, second):
+        await executor._persist_parallel_route_pause(
+            seed=_seed(),
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                route_candidate=candidate,
+                runtime_handle=_paused_route_handle(),
+                attempt_budget_progress=progress,
+            ),
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+            prior_route_ids=(),
+        )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="renewed its finite budget"):
+        await executor._load_bounded_route_resume_state(
+            seed=_seed(),
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
 
 
 @pytest.mark.asyncio

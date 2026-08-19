@@ -6,12 +6,13 @@ from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
 from ouroboros.config import MAX_USAGE_LIMIT_PAUSE_SECONDS
+from ouroboros.core.attempt_budget import MAX_AC_ATTEMPT_TIMEOUT_SECONDS
 from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
 from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 4
+CURRENT_EXECUTION_SEMANTICS_VERSION = 5
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
 
 
@@ -25,6 +26,8 @@ class ExecutionSemanticsRejection(NamedTuple):
 _CURRENT_KEYS = frozenset(
     {
         "version",
+        "max_iterations_per_ac",
+        "ac_attempt_timeout_seconds",
         "run_verify_commands",
         "verify_command_timeout_seconds",
         "ac_retry_attempts",
@@ -94,6 +97,8 @@ def valid_execution_semantics_contract(value: object) -> bool:
         or any(type(value.get(key)) is not bool for key in _BOOLEAN_KEYS)
     ):
         return False
+    max_iterations = value.get("max_iterations_per_ac")
+    attempt_timeout = value.get("ac_attempt_timeout_seconds")
     timeout = value.get("verify_command_timeout_seconds")
     retries = value.get("ac_retry_attempts")
     max_depth = value.get("max_decomposition_depth")
@@ -115,7 +120,11 @@ def valid_execution_semantics_contract(value: object) -> bool:
         else max_workers
     )
     return bool(
-        type(timeout) is int
+        type(max_iterations) is int
+        and max_iterations >= 1
+        and type(attempt_timeout) is int
+        and 1 <= attempt_timeout <= MAX_AC_ATTEMPT_TIMEOUT_SECONDS
+        and type(timeout) is int
         and timeout >= 1
         and type(retries) is int
         and retries >= 0
@@ -176,6 +185,10 @@ def pre_adaptive_execution_semantics_rejection(
         return None
     candidate = dict(value)
     candidate["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+    # These values are used only to recognize the exact retired v3 shape.
+    # The contract is always rejected below; no live attempt budget is inferred.
+    candidate["max_iterations_per_ac"] = 1
+    candidate["ac_attempt_timeout_seconds"] = 1
     candidate["adaptive_concurrency_policy"] = adaptive_concurrency_policy(
         initial_limit=initial_limit,
         max_limit=max_limit,

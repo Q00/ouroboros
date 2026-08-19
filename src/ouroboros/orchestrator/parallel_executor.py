@@ -50,6 +50,12 @@ from weakref import ref
 import anyio
 from rich.console import Console
 
+from ouroboros.core.attempt_budget import (
+    DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ITERATIONS_PER_AC,
+    AttemptBudgetProgress,
+    validate_attempt_budget,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -106,6 +112,12 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    AtomicAttemptTerminalizer,
+    ProviderStreamCloseTimeout,
+    build_decomposition_trace_summary,
+    terminalize_bounded_route_exhaustion,
+)
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -153,7 +165,6 @@ from ouroboros.orchestrator.decomposition_policy import (
     legacy_unverified_split_decision,
     parse_decomposition_proposal,
     redact_and_truncate_text,
-    summarize_decomposition_trace,
     validate_decomposition_proposal,
 )
 from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
@@ -331,6 +342,7 @@ from ouroboros.orchestrator.frugality_evidence import (
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
     LeafDispatchState,
+    restored_attempt_budget_exhaustion,
 )
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
@@ -358,6 +370,10 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
     collect_decomposition_depth_warning_paths,
+)
+from ouroboros.orchestrator.parallel_pause_runtime import (
+    persist_parallel_route_pause,
+    project_partial_composite_pause,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -411,7 +427,6 @@ from ouroboros.orchestrator.synapse import (
     target_ended_rejection_event,
 )
 from ouroboros.orchestrator.verifier import (
-    RetryAdmission,
     Verifier,
     VerifierContractError,
     VerifierVerdict,
@@ -576,6 +591,7 @@ _PARALLEL_ROUTE_PAUSE_RESUME_KEYS = frozenset(
         "runtime_scope_id",
         "dispatch_id",
         "capsule_fingerprint",
+        "attempt_budget_progress",
     }
 )
 _PARALLEL_UNCERTAIN_HANDOFF_KEYS = frozenset(
@@ -640,6 +656,7 @@ _PARALLEL_COMPOSITE_PAUSE_LEAF_KEYS = frozenset(
         "runtime_scope_id",
         "dispatch_id",
         "capsule_fingerprint",
+        "attempt_budget_progress",
     }
 )
 _DECOMPOSITION_ATTESTATION_KEYS = frozenset(
@@ -684,6 +701,7 @@ class _PartialCompositeResumeState:
     paused_runtime_scope_id: str | None
     paused_dispatch_id: str | None
     paused_capsule_fingerprint: str | None
+    paused_attempt_budget_progress: AttemptBudgetProgress | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,6 +730,7 @@ class _ParallelRouteResumeState:
     runtime_scope_id: str
     dispatch_id: str
     capsule_fingerprint: str
+    attempt_budget_progress: AttemptBudgetProgress
 
 
 if TYPE_CHECKING:
@@ -2749,6 +2768,8 @@ class ParallelACExecutor:
         enable_decomposition: bool = True,
         decomposition_mode: Literal["bounce_only", "off"] = "bounce_only",
         max_concurrent: int = 3,
+        max_iterations_per_ac: int = DEFAULT_MAX_ITERATIONS_PER_AC,
+        ac_attempt_timeout_seconds: float = DEFAULT_AC_ATTEMPT_TIMEOUT_SECONDS,
         adaptive_max_concurrent: int | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
@@ -2787,6 +2808,9 @@ class ParallelACExecutor:
                 records remain readable, but no live constructor can authorize
                 a new pre-execution decomposition effect.
             max_concurrent: Initial number of concurrent AC executions.
+            max_iterations_per_ac: Tool-bearing turn target per atomic attempt.
+            ac_attempt_timeout_seconds: Fixed wall-clock ceiling per atomic attempt.
+            adaptive_max_concurrent: Maximum adaptive provider-call concurrency.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
@@ -2855,6 +2879,11 @@ class ParallelACExecutor:
             self._max_decomposition_depth
         )
         self._max_concurrent = max_concurrent
+        attempt_budget = validate_attempt_budget(
+            max_iterations_per_ac=max_iterations_per_ac,
+            timeout_seconds=ac_attempt_timeout_seconds,
+        )
+        self._max_iterations_per_ac, self._ac_attempt_timeout_seconds = attempt_budget
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
             replace(inherited_runtime_handle, approval_mode=approval_mode.strip())
@@ -3125,10 +3154,12 @@ class ParallelACExecutor:
         limits = get_attribute(self, "_resolved_backend_limits")
         coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
         return {
-            "version": 2,
+            "version": 3,
             "decomposition_mode": get_attribute(self, "_decomposition_mode"),
             "max_decomposition_depth": get_attribute(self, "_max_decomposition_depth"),
             "max_concurrent": get_attribute(self, "_max_concurrent"),
+            "max_iterations_per_ac": get_attribute(self, "_max_iterations_per_ac"),
+            "ac_attempt_timeout_seconds": get_attribute(self, "_ac_attempt_timeout_seconds"),
             "adaptive_concurrency": get_attribute(self, "_adaptive_concurrency").policy,
             "execution_profile": (
                 get_attribute(self, "_execution_profile").model_dump(mode="json")
@@ -3511,8 +3542,8 @@ class ParallelACExecutor:
         runtime_handle: RuntimeHandle | None,
         *,
         runtime_scope_id: str,
-    ) -> None:
-        await self._ac_runtime_handle_manager._terminate_runtime_handle(
+    ) -> bool:
+        return await self._ac_runtime_handle_manager._terminate_runtime_handle(
             runtime_handle,
             runtime_scope_id=runtime_scope_id,
         )
@@ -3834,6 +3865,11 @@ class ParallelACExecutor:
                         ac_spec=(
                             ac_criterion
                             if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
+                        attempt_budget_progress=(
+                            resume_state.attempt_budget_progress
+                            if resume_state is not None
                             else None
                         ),
                         investment_spec=(
@@ -6085,6 +6121,11 @@ class ParallelACExecutor:
                         if resume_state is not None and idx == first_pending_child
                         else None
                     ),
+                    attempt_budget_progress=(
+                        resume_state.paused_attempt_budget_progress
+                        if resume_state is not None and idx == first_pending_child
+                        else None
+                    ),
                 )
                 if isinstance(sub_results[idx], ACExecutionResult) and _has_usage_limit_pause(
                     sub_results[idx]
@@ -6176,62 +6217,14 @@ class ParallelACExecutor:
         result: ACExecutionResult,
         ac_spec: AcceptanceCriterionSpec | None,
     ) -> DecompositionTraceSummary:
-        """Project one failed attempt into typed counts and enums only."""
-        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        """Project one failed attempt through the bounded trace helper."""
 
-        verdict = result.atomic_verifier_verdict
-        attempted_tool_count = sum(
-            1
-            for message in result.messages
-            if isinstance(message.tool_name, str) and bool(message.tool_name.strip())
+        return build_decomposition_trace_summary(
+            result=result,
+            ac_spec=ac_spec,
+            task_cwd=self._task_cwd,
+            adapter_cwd=self._adapter.working_directory,
         )
-        evidence_field_count = (
-            len(result.typed_evidence.data)
-            if result.typed_evidence is not None and type(result.typed_evidence.data) is dict
-            else 0
-        )
-        verified_artifact_count = 0
-        remaining_artifact_count = 0
-        if ac_spec is not None and ac_spec.expected_artifacts:
-            cwd = Path(self._task_cwd or self._adapter.working_directory or os.getcwd())
-            for artifact in ac_spec.expected_artifacts[:8]:
-                target = Path(artifact)
-                if not target.is_absolute():
-                    target = cwd / target
-                if target.exists():
-                    verified_artifact_count += 1
-                else:
-                    remaining_artifact_count += 1
-
-        try:
-            failure_class = (
-                FailureClass(verdict.failure_class).value
-                if verdict is not None and verdict.failure_class is not None
-                else "UNKNOWN"
-            )
-        except ValueError:
-            failure_class = "UNKNOWN"
-        retry_admission = (
-            verdict.retry_admission.value
-            if verdict is not None and isinstance(verdict.retry_admission, RetryAdmission)
-            else "UNKNOWN"
-        )
-        lines = [
-            f"attempt_message_count={len(result.messages)}",
-            f"attempted_tool_count={attempted_tool_count}",
-            f"typed_evidence_present={result.typed_evidence is not None}",
-            f"evidence_field_count={evidence_field_count}",
-            f"verified_artifact_count={verified_artifact_count}",
-            f"remaining_artifact_count={remaining_artifact_count}",
-            f"failure_class={failure_class}",
-            f"retry_admission={retry_admission}",
-            f"verifier_reason_count={len(verdict.reasons) if verdict is not None else 0}",
-            f"failure_detail_present={bool(result.error or result.final_message)}",
-        ]
-        if ac_spec is not None:
-            lines.append(f"verify_command_present={bool(ac_spec.verify_command)}")
-            lines.append(f"output_assertion_present={bool(ac_spec.output_assertion)}")
-        return summarize_decomposition_trace("\n".join(lines))
 
     async def _dispatch_decomposition_prompt(
         self,
@@ -6614,6 +6607,7 @@ class ParallelACExecutor:
         expected_resume_dispatch_id: str | None = None,
         expected_resume_capsule_fingerprint: str | None = None,
         expected_resume_runtime_scope_id: str | None = None,
+        attempt_budget_progress: AttemptBudgetProgress | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -6782,6 +6776,7 @@ class ParallelACExecutor:
         atomic_retry_attempt = retry_attempt
         stall_retry_budget = 0 if bounded_route_recovery_enabled else MAX_STALL_RETRIES
         max_attempts = retry_attempt + stall_retry_budget + 1
+        atomic_attempt_budget_progress = attempt_budget_progress
         # Stable re-run bundle for a possible cross-harness redispatch (PR-X X1):
         # every param except retry_attempt is fixed across the atomic loop, so it
         # can be replayed verbatim on an alternative runtime.
@@ -6843,13 +6838,15 @@ class ParallelACExecutor:
                 expected_resume_dispatch_id=expected_resume_dispatch_id,
                 expected_resume_capsule_fingerprint=expected_resume_capsule_fingerprint,
                 expected_resume_runtime_scope_id=expected_resume_runtime_scope_id,
+                attempt_budget_progress=atomic_attempt_budget_progress,
             )
+            atomic_attempt_budget_progress = None
             if atomic_result.error != _STALL_SENTINEL:
-                if atomic_result.outcome in {
+                if atomic_result.attempt_budget_exhaustion or atomic_result.outcome in {
                     ACExecutionOutcome.BLOCKED,
                     ACExecutionOutcome.INVALID,
                 }:
-                    # Admission/authority failures are terminal before recovery.
+                    # Admission/authority failures and exhausted budgets are terminal.
                     # Bounce classification and alternate-harness redispatch are
                     # provider effects too; neither may bypass a fail-closed route.
                     return _finalize_node_result(atomic_result)
@@ -7195,6 +7192,8 @@ class ParallelACExecutor:
             console=self._console,
             enable_decomposition=False,
             max_concurrent=1,
+            max_iterations_per_ac=self._max_iterations_per_ac,
+            ac_attempt_timeout_seconds=self._ac_attempt_timeout_seconds,
             checkpoint_store=self._checkpoint_store,
             task_cwd=self._task_cwd,
             execution_profile=self._execution_profile,
@@ -7981,6 +7980,7 @@ Respond with either ATOMIC or the structured JSON object only.
         expected_resume_dispatch_id: str | None = None,
         expected_resume_capsule_fingerprint: str | None = None,
         expected_resume_runtime_scope_id: str | None = None,
+        attempt_budget_progress: AttemptBudgetProgress | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -8063,6 +8063,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 ),
                 "run_verify_commands": self._run_verify_commands,
                 "fat_harness_mode": self._fat_harness_mode,
+                "max_iterations_per_ac": self._max_iterations_per_ac,
+                "ac_attempt_timeout_seconds": self._ac_attempt_timeout_seconds,
                 "investment_spec": (
                     investment_spec.model_dump(mode="json") if investment_spec is not None else None
                 ),
@@ -8120,6 +8122,8 @@ Respond with either ATOMIC or the structured JSON object only.
             and capsule.fingerprint != expected_resume_capsule_fingerprint
         ):
             raise RuntimeError("paused AC capsule fingerprint drifted")
+        if (expected_resume_dispatch_id is None) != (attempt_budget_progress is None):
+            raise RuntimeError("paused AC budget progress crossed its provider boundary")
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -8645,7 +8649,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 node_identity=node_identity,
                 retry_attempt=retry_attempt,
             )
-        dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
+        dispatch_state = LeafDispatchState(
+            messages=messages,
+            runtime_handle=runtime_handle,
+            agentic_step_count=(
+                attempt_budget_progress.agentic_steps_consumed
+                if attempt_budget_progress is not None
+                else 0
+            ),
+            attempt_budget_snapshot=attempt_budget_progress,
+            attempt_budget_exhaustion=restored_attempt_budget_exhaustion(
+                attempt_budget_progress,
+                timeout_seconds=self._ac_attempt_timeout_seconds,
+            ),
+        )
         active_dispatch_id = dispatch_id
         sealed_dispatch_ids: set[str] = set()
         provider_effect_active = False
@@ -8668,6 +8685,23 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(sealed_id)
 
+        attempt_terminalizer = AtomicAttemptTerminalizer(
+            executor=self,
+            dispatch_state=dispatch_state,
+            seal_dispatch=_seal_dispatch,
+            start_time=start_time,
+            runtime_identity=runtime_identity,
+            node_identity=node_identity,
+            execution_context_id=execution_context_id,
+            session_id=session_id,
+            ac_index=ac_index,
+            ac_content=ac_content,
+            retry_attempt=retry_attempt,
+            depth=depth,
+            route_candidate=observed_route_candidate,
+            route_drift_result=_route_drift_blocked_result,
+        )
+
         async def _emit_runtime_failure(error: str) -> None:
             await self._emit_ac_runtime_event(
                 event_type="execution.session.failed",
@@ -8680,20 +8714,6 @@ Respond with either ATOMIC or the structured JSON object only.
                 success=False,
                 error=error,
             )
-
-        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
-            """Close durable recovery state when live admission becomes stale."""
-
-            nonlocal clear_cached_runtime_handle
-            clear_cached_runtime_handle = True
-            await _seal_dispatch(
-                dispatch_id_to_terminalize,
-                reason="live route authority changed before provider entry",
-            )
-            await _emit_runtime_failure(
-                "route admission blocked: live route state changed before provider entry"
-            )
-            return _route_drift_blocked_result()
 
         async def _stream_provider_call(
             *,
@@ -8738,6 +8758,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         label=label,
                         indent=indent,
                         execution_counters=execution_counters,
+                        max_iterations_per_ac=self._max_iterations_per_ac,
+                        ac_attempt_timeout_seconds=self._ac_attempt_timeout_seconds,
                     )
                     provider_completed = True
                 finally:
@@ -8786,12 +8808,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 call_tools=tools,
             )
             if not provider_entered:
-                return await _terminalize_route_drift(active_dispatch_id)
+                clear_cached_runtime_handle = True
+                return await attempt_terminalizer.route_drift(active_dispatch_id)
             runtime_handle = dispatch_state.runtime_handle
             ac_session_id = dispatch_state.ac_session_id
             final_message = dispatch_state.final_message
             success = dispatch_state.success
 
+            if dispatch_state.attempt_budget_exhaustion is not None:
+                clear_cached_runtime_handle = True
+                return await attempt_terminalizer.attempt_budget(active_dispatch_id)
+
+            # Check if stall was detected (CancelScope ate the Cancelled)
             if dispatch_state.stalled:
                 duration = (datetime.now(UTC) - start_time).total_seconds()
                 log.warning(
@@ -8847,6 +8875,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     depth=depth,
                     runtime_handle=runtime_handle,
                     route_candidate=observed_route_candidate,
+                    attempt_budget_progress=dispatch_state.attempt_budget_progress(
+                        max_agentic_steps=self._max_iterations_per_ac,
+                        timeout_seconds=self._ac_attempt_timeout_seconds,
+                    ),
                 )
 
             if signal_target is not None and self._session_signal_hub is not None:
@@ -9014,7 +9046,8 @@ Respond with either ATOMIC or the structured JSON object only.
                                     orchestrator_session_id=session_id,
                                 )
                             )
-                            return await _terminalize_route_drift(follow_up_dispatch_id)
+                            clear_cached_runtime_handle = True
+                            return await attempt_terminalizer.route_drift(follow_up_dispatch_id)
                         await _seal_dispatch(
                             primary_turn.dispatch_id,
                             reason=(
@@ -9061,6 +9094,22 @@ Respond with either ATOMIC or the structured JSON object only.
                             dispatch_state.final_message = primary_turn.final_message
                             continue
                         raise
+
+                    if dispatch_state.attempt_budget_exhaustion is not None:
+                        await self._event_store.append(
+                            create_session_signal_delivery_uncertain_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                detail=(
+                                    "The runtime follow-up exhausted the atomic attempt budget "
+                                    "before an acknowledgement boundary."
+                                ),
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        clear_cached_runtime_handle = True
+                        return await attempt_terminalizer.attempt_budget(follow_up_dispatch_id)
 
                     signal_messages = messages[message_count_before_signal:]
                     acknowledgement_messages = [
@@ -9482,6 +9531,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 runtime_handle=dispatch_state.runtime_handle,
                 route_candidate=observed_route_candidate,
+                outcome=(
+                    ACExecutionOutcome.BLOCKED
+                    if isinstance(e, ProviderStreamCloseTimeout)
+                    else ACExecutionOutcome.FAILED
+                ),
             )
         finally:
             try:
@@ -9894,7 +9948,7 @@ Respond with either ATOMIC or the structured JSON object only.
         for an already-failed AC without a passing contract — is preserved
         (no double-fail for one root cause).
         """
-        if not self._run_verify_commands:
+        if result.attempt_budget_exhaustion or not self._run_verify_commands:
             return result
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
@@ -10268,92 +10322,25 @@ Respond with either ATOMIC or the structured JSON object only.
         expected_route_candidate: RouteCandidate | None = None,
     ) -> None:
         """Bind a quota pause to the exact capsule and resumable provider boundary."""
-
-        from ouroboros.events.base import BaseEvent
-
-        candidate = result.route_candidate
-        if candidate is None:
-            raise RuntimeError("bounded route pause lost its active route candidate")
-        runtime_handle = result.runtime_handle
-        runtime_metadata = runtime_handle.metadata if runtime_handle is not None else {}
-        runtime_scope_id = runtime_metadata.get("session_scope_id")
-        dispatch_id = runtime_metadata.get("ac_dispatch_id")
-        capsule_fingerprint = runtime_metadata.get("ac_capsule_fingerprint")
-        if (
-            runtime_handle is None
-            or not self._is_resumable_runtime_handle(runtime_handle)
-            or not isinstance(runtime_scope_id, str)
-            or not runtime_scope_id
-            or not isinstance(dispatch_id, str)
-            or len(dispatch_id) != 32
-            or any(char not in "0123456789abcdef" for char in dispatch_id)
-            or not isinstance(capsule_fingerprint, str)
-            or len(capsule_fingerprint) != 71
-            or not capsule_fingerprint.startswith("sha256:")
-            or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
-        ):
-            raise RuntimeError("parallel route pause has no exact resumable provider boundary")
-        if result.retry_attempt != len(prior_route_ids):
-            raise RuntimeError("parallel route pause retry attempt crossed route history")
-        if len(retry_prompt_extra) > 16_384:
-            raise RuntimeError("parallel route pause retry prompt exceeds its durable bound")
-        if len(sibling_acs) > len(seed.acceptance_criteria) or any(
-            type(index) is not int
-            or index < 0
-            or index >= len(seed.acceptance_criteria)
-            or content != ac_text(seed.acceptance_criteria[index])
-            for index, content in sibling_acs
-        ):
-            raise RuntimeError("parallel route pause has an invalid sibling population")
-        if prior_route_ids:
-            if route_id_override != candidate.route_id or expected_route_candidate != candidate:
-                raise RuntimeError("parallel successor pause lost its exact route override")
-        elif route_id_override is not None or expected_route_candidate is not None:
-            raise RuntimeError("parallel initial pause invented a route override")
-        criterion = seed.acceptance_criteria[root_ac_index]
-        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
-        await self._event_store.append(
-            BaseEvent(
-                type="execution.ac.route_paused",
-                aggregate_type="execution",
-                aggregate_id=execution_id or session_id,
-                data={
-                    "schema_version": 2,
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "root_ac_index": root_ac_index,
-                    "semantic_ac_key": semantic_ac_key,
-                    "call_site": "parallel",
-                    "episode_id": self._bounded_route_episode_id(
-                        seed,
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        root_ac_index=root_ac_index,
-                    ),
-                    "attempt_index": len(prior_route_ids),
-                    "prior_route_ids": list(prior_route_ids),
-                    "route": candidate.to_contract_data(),
-                    "resume_state": {
-                        "retry_attempt": result.retry_attempt,
-                        "retry_prompt_extra": retry_prompt_extra,
-                        "sibling_acs": [
-                            {"ac_index": index, "content": content}
-                            for index, content in sibling_acs
-                        ],
-                        "route_id_override": route_id_override,
-                        "expected_route_candidate": (
-                            expected_route_candidate.to_contract_data()
-                            if expected_route_candidate is not None
-                            else None
-                        ),
-                        "runtime_scope_id": runtime_scope_id,
-                        "dispatch_id": dispatch_id,
-                        "capsule_fingerprint": capsule_fingerprint,
-                    },
-                    "recoverable_pause": True,
-                    "final_acceptance_declared": False,
-                },
-            )
+        await persist_parallel_route_pause(
+            event_store=self._event_store,
+            seed=seed,
+            result=result,
+            root_ac_index=root_ac_index,
+            session_id=session_id,
+            execution_id=execution_id,
+            episode_id=self._bounded_route_episode_id(
+                seed,
+                execution_id=execution_id,
+                session_id=session_id,
+                root_ac_index=root_ac_index,
+            ),
+            prior_route_ids=prior_route_ids,
+            retry_prompt_extra=retry_prompt_extra,
+            sibling_acs=sibling_acs,
+            route_id_override=route_id_override,
+            expected_route_candidate=expected_route_candidate,
+            is_resumable_runtime_handle=self._is_resumable_runtime_handle,
         )
 
     async def _persist_parallel_uncertain_handoff(
@@ -10398,96 +10385,16 @@ Respond with either ATOMIC or the structured JSON object only.
         node_budget: list[int],
     ) -> tuple[list[dict[str, object]], dict[str, object]]:
         """Project every composite frame down to one exact paused leaf."""
-
-        decision = result.decomposition_decision
-        if not result.is_decomposed or decision is None or not result.sub_results:
-            raise RuntimeError("partial composite pause lost its split result tree")
-        parsed, decision_data, fingerprint = _canonical_decomposition_decision(decision.to_dict())
-        if (
-            parsed.disposition is not DecompositionDisposition.SPLIT
-            or parsed.node_id != node_identity.node_id
-            or result.depth != node_identity.depth
-        ):
-            raise RuntimeError("partial composite pause crossed decomposition node identity")
-
-        paused_child_index = len(result.sub_results) - 1
-        paused_child = result.sub_results[paused_child_index]
-        completed_prefix = result.sub_results[:paused_child_index]
-        if (
-            paused_child_index >= len(parsed.children)
-            or tuple(child.description for child in parsed.children[:paused_child_index])
-            != tuple(child.ac_content for child in completed_prefix)
-            or any(
-                child.ac_index != result.ac_index * 100 + child_index
-                or child.depth != result.depth + 1
-                for child_index, child in enumerate(completed_prefix)
-            )
-            or parsed.children[paused_child_index].description != paused_child.ac_content
-            or paused_child.ac_index != result.ac_index * 100 + paused_child_index
-            or paused_child.depth != result.depth + 1
-            or not _has_usage_limit_pause(paused_child)
-            or any(_has_usage_limit_pause(child) for child in completed_prefix)
-        ):
-            raise RuntimeError("partial composite pause has an invalid child prefix")
-
-        expected_child = node_identity.child(paused_child_index)
-        frame: dict[str, object] = {
-            "completed_children": [
-                _serialize_composite_result_tree(
-                    child,
-                    node_budget=node_budget,
-                    workspace_root=workspace_root,
-                )
-                for child in completed_prefix
-            ],
-            "paused_child_index": paused_child_index,
-            "paused_child_node_id": expected_child.node_id,
-            "paused_child_ac_index": paused_child.ac_index,
-            "paused_child_content": paused_child.ac_content,
-            "paused_child_retry_attempt": paused_child.retry_attempt,
-            "decomposition_decision": decision_data,
-            "decomposition_fingerprint": fingerprint,
-        }
-        if paused_child.is_decomposed:
-            nested_frames, paused_leaf = self._partial_composite_pause_projection(
-                result=paused_child,
-                node_identity=expected_child,
-                workspace_root=workspace_root,
-                node_budget=node_budget,
-            )
-            return [frame, *nested_frames], paused_leaf
-
-        runtime_handle = paused_child.runtime_handle
-        runtime_metadata = runtime_handle.metadata if runtime_handle is not None else {}
-        runtime_scope_id = runtime_metadata.get("session_scope_id")
-        dispatch_id = runtime_metadata.get("ac_dispatch_id")
-        capsule_fingerprint = runtime_metadata.get("ac_capsule_fingerprint")
-        if (
-            runtime_handle is None
-            or not self._is_resumable_runtime_handle(runtime_handle)
-            or runtime_metadata.get("node_id") != expected_child.node_id
-            or not isinstance(runtime_scope_id, str)
-            or not runtime_scope_id
-            or not isinstance(dispatch_id, str)
-            or len(dispatch_id) != 32
-            or any(char not in "0123456789abcdef" for char in dispatch_id)
-            or not isinstance(capsule_fingerprint, str)
-            or len(capsule_fingerprint) != 71
-            or not capsule_fingerprint.startswith("sha256:")
-            or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
-        ):
-            raise RuntimeError(
-                "partial composite pause has no exact resumable leaf provider boundary"
-            )
-        return [frame], {
-            "node_id": expected_child.node_id,
-            "ac_index": paused_child.ac_index,
-            "ac_content": paused_child.ac_content,
-            "retry_attempt": paused_child.retry_attempt,
-            "runtime_scope_id": runtime_scope_id,
-            "dispatch_id": dispatch_id,
-            "capsule_fingerprint": capsule_fingerprint,
-        }
+        return project_partial_composite_pause(
+            result=result,
+            node_identity=node_identity,
+            workspace_root=workspace_root,
+            node_budget=node_budget,
+            canonical_decomposition_decision=_canonical_decomposition_decision,
+            serialize_composite_result_tree=_serialize_composite_result_tree,
+            has_usage_limit_pause=_has_usage_limit_pause,
+            is_resumable_runtime_handle=self._is_resumable_runtime_handle,
+        )
 
     async def _persist_partial_composite_pause(
         self,
@@ -10522,7 +10429,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": root_ac_index,
@@ -11232,7 +11139,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=session_id,
                     execution_counters=execution_counters,
                 )
-                value = round_results[round_position]
+                value = terminalize_bounded_route_exhaustion(round_results[round_position])
                 results[positions[ac_idx]] = value
                 if isinstance(value, _BatchInterruptedForRecoverablePause):
                     continue
@@ -11893,7 +11800,7 @@ Respond with either ATOMIC or the structured JSON object only.
             root_ac_index = data.get("root_ac_index")
             if (
                 type(data.get("schema_version")) is not int
-                or data.get("schema_version") != 2
+                or data.get("schema_version") != 3
                 or data.get("execution_id") != execution_id
                 or data.get("call_site") != "parallel"
                 or type(root_ac_index) is not int
@@ -11924,6 +11831,16 @@ Respond with either ATOMIC or the structured JSON object only.
             leaf_scope_id = raw_leaf.get("runtime_scope_id")
             leaf_dispatch_id = raw_leaf.get("dispatch_id")
             leaf_capsule_fingerprint = raw_leaf.get("capsule_fingerprint")
+            try:
+                leaf_attempt_budget_progress = AttemptBudgetProgress.from_contract_data(
+                    raw_leaf.get("attempt_budget_progress"),
+                    max_agentic_steps=self._max_iterations_per_ac,
+                    timeout_seconds=self._ac_attempt_timeout_seconds,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "partial composite replay has invalid finite budget progress"
+                ) from exc
             if (
                 not isinstance(leaf_scope_id, str)
                 or not leaf_scope_id
@@ -12004,6 +11921,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     paused_capsule_fingerprint=(
                         leaf_capsule_fingerprint if is_leaf_frame else None
                     ),
+                    paused_attempt_budget_progress=(
+                        leaf_attempt_budget_progress if is_leaf_frame else None
+                    ),
                 )
                 previous = prior_frame_states.get((root_ac_index, decision.node_id))
                 if previous is not None and (
@@ -12011,6 +11931,16 @@ Respond with either ATOMIC or the structured JSON object only.
                     or state.completed_children[: len(previous.completed_children)]
                     != previous.completed_children
                     or state.decision != previous.decision
+                    or (
+                        state.paused_attempt_budget_progress is not None
+                        and previous.paused_attempt_budget_progress is not None
+                        and (
+                            state.paused_attempt_budget_progress.agentic_steps_consumed
+                            < previous.paused_attempt_budget_progress.agentic_steps_consumed
+                            or state.paused_attempt_budget_progress.remaining_timeout_microseconds
+                            > previous.paused_attempt_budget_progress.remaining_timeout_microseconds
+                        )
+                    )
                 ):
                     raise RuntimeError("partial composite replay has a conflicting state sequence")
                 prior_frame_states[(root_ac_index, decision.node_id)] = state
@@ -12469,7 +12399,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             if (
                 type(data.get("schema_version")) is not int
-                or data.get("schema_version") != 2
+                or data.get("schema_version") != 3
                 or data.get("execution_id") != execution_id
                 or data.get("call_site") != "parallel"
                 or data.get("recoverable_pause") is not True
@@ -12516,6 +12446,16 @@ Respond with either ATOMIC or the structured JSON object only.
             runtime_scope_id = raw_resume_state.get("runtime_scope_id")
             dispatch_id = raw_resume_state.get("dispatch_id")
             capsule_fingerprint = raw_resume_state.get("capsule_fingerprint")
+            try:
+                attempt_budget_progress = AttemptBudgetProgress.from_contract_data(
+                    raw_resume_state.get("attempt_budget_progress"),
+                    max_agentic_steps=self._max_iterations_per_ac,
+                    timeout_seconds=self._ac_attempt_timeout_seconds,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "parallel route pause has invalid finite budget progress"
+                ) from exc
             if (
                 type(retry_attempt) is not int
                 or retry_attempt != attempt_index
@@ -12592,6 +12532,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_scope_id=runtime_scope_id,
                 dispatch_id=dispatch_id,
                 capsule_fingerprint=capsule_fingerprint,
+                attempt_budget_progress=attempt_budget_progress,
             )
 
             history = histories[root_ac_index]
@@ -12661,6 +12602,14 @@ Respond with either ATOMIC or the structured JSON object only.
             prior_unresolved = unresolved_pauses.get(root_ac_index)
             if prior_unresolved is not None and prior_unresolved != paused_candidate:
                 raise RuntimeError("parallel route pause has conflicting unconsumed snapshots")
+            prior_resume_state = unresolved_pause_states.get(root_ac_index)
+            if prior_resume_state is not None and (
+                parsed_resume_state.attempt_budget_progress.agentic_steps_consumed
+                < prior_resume_state.attempt_budget_progress.agentic_steps_consumed
+                or parsed_resume_state.attempt_budget_progress.remaining_timeout_microseconds
+                > prior_resume_state.attempt_budget_progress.remaining_timeout_microseconds
+            ):
+                raise RuntimeError("parallel route pause renewed its finite budget")
             unresolved_pauses[root_ac_index] = paused_candidate
             unresolved_pause_states[root_ac_index] = parsed_resume_state
 

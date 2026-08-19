@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Mapping
-from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -46,8 +45,9 @@ from ouroboros.config import (
     get_llm_model_for_role,
     get_usage_limit_pause_seconds,
 )
+from ouroboros.core.attempt_budget import AttemptBudgetProgress
 from ouroboros.core.conductor import ConductorDirective
-from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
+from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.execution_preferences import (
     ResolvedExecutionPreferences,
     execution_preferences_from_contract,
@@ -84,6 +84,13 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
 )
 from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    DirectAttemptBudget,
+    direct_bounded_route_runtime_active,
+    shielded_aclosing,
+    should_emit_progress_event,
+    terminate_runtime_handle,
+)
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -103,6 +110,20 @@ from ouroboros.orchestrator.decomposition_limits import (
     has_durable_decomposition_replay,
     validate_max_decomposition_depth,
 )
+from ouroboros.orchestrator.direct_pause_runtime import (
+    DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY as _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY,
+)
+from ouroboros.orchestrator.direct_pause_runtime import (
+    DirectRouteResumeState,
+    RecoverableFailurePause,
+    classify_direct_route_failure,
+    has_exact_resumable_runtime_handle,
+    persist_direct_pause_runtime_state,
+)
+from ouroboros.orchestrator.direct_pause_runtime import (
+    mapping_has_exact_keys as _mapping_has_exact_keys,
+)
+from ouroboros.orchestrator.errors import ExecutionCancelledError, OrchestratorError
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_execution_terminal_event,
@@ -211,11 +232,10 @@ from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
-from ouroboros.resilience.lateral import ThinkingPersona
 from ouroboros.resilience.recovery import (
     RecoveryActionKind,
     RecoveryPlanner,
-    RecoverySnapshot,
+    build_runner_recovery_snapshot,
     create_recovery_applied_event,
     get_run_recovery_protocol_prompt,
 )
@@ -254,29 +274,6 @@ _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
         "final_acceptance_declared",
     }
 )
-
-
-def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
-    """Inspect at most one key beyond a finite durable-contract schema."""
-
-    if not isinstance(value, Mapping):
-        return False
-    try:
-        iterator = iter(value)
-    except Exception:
-        return False
-    seen: set[str] = set()
-    for index in range(len(expected) + 1):
-        try:
-            key = next(iterator)
-        except StopIteration:
-            return len(seen) == len(expected)
-        except Exception:
-            return False
-        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
-            return False
-        seen.add(key)
-    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,28 +341,6 @@ class OrchestratorResult:
 
 
 @dataclass(frozen=True, slots=True)
-class RecoverableFailurePause:
-    """Structured pause decision for recoverable final runtime failures."""
-
-    pause_kind: str
-    reason: str
-    resume_hint: str
-    pause_seconds: int | None = None
-    resume_after: datetime | None = None
-    coordinator_owner: CoordinatorQuotaPause | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _DirectRouteResumeState:
-    """Exact nonterminal Routing D state owned by the direct runner."""
-
-    episode_id: str
-    attempt_index: int
-    prior_route_ids: tuple[str, ...]
-    candidate: RouteCandidate
-
-
-@dataclass(frozen=True, slots=True)
 class _PendingLifecycleIntent:
     """Process-local lifecycle transition retained for exact-owner replay."""
 
@@ -384,21 +359,6 @@ class _PendingLifecycleIntent:
 # =============================================================================
 # Errors
 # =============================================================================
-
-
-class OrchestratorError(OuroborosError):
-    """Error during orchestrator execution."""
-
-    pass
-
-
-class ExecutionCancelledError(OuroborosError):
-    """Raised when an execution is cancelled via the cancellation set."""
-
-    def __init__(self, session_id: str, reason: str = "Cancelled by user") -> None:
-        self.session_id = session_id
-        self.reason = reason
-        super().__init__(f"Execution cancelled for session {session_id}: {reason}")
 
 
 # =============================================================================
@@ -1065,6 +1025,8 @@ class OrchestratorRunner:
         # never introduce an unconfigured model or cost.
         self._route_economics = _economics_config
         _execution_config = _config.execution
+        self._max_iterations_per_ac = _execution_config.max_iterations_per_ac
+        self._ac_attempt_timeout_seconds = _execution_config.ac_attempt_timeout_seconds
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
@@ -1666,74 +1628,6 @@ class OrchestratorRunner:
                 },
             )
 
-    @staticmethod
-    def _classify_direct_route_failure(message: AgentMessage | None) -> Any:
-        """Classify a direct final error without inventing retry permission.
-
-        Direct execution has no leaf ``Attempt`` object, so consume explicit
-        provider/verifier metadata first and recognize only unambiguous hard
-        preconditions in the final error text.  Everything else remains the
-        conservative evidence-missing class.
-        """
-
-        from ouroboros.orchestrator.failure_taxonomy import (
-            FailureClass,
-            classify_hard_precondition,
-        )
-
-        if message is None or not (message.is_final and message.is_error):
-            return FailureClass.EVIDENCE_MISSING
-        return (
-            classify_hard_precondition(message.content, message.data)
-            or FailureClass.EVIDENCE_MISSING
-        )
-
-    @staticmethod
-    def _has_exact_resumable_runtime_handle(runtime_handle: RuntimeHandle | None) -> bool:
-        """Return whether a pause can reconnect to an existing provider session."""
-
-        return bool(
-            runtime_handle is not None
-            and runtime_handle.can_resume
-            and not runtime_handle.is_terminal
-        )
-
-    async def _persist_exact_direct_pause_runtime_handle(
-        self,
-        *,
-        session_id: str,
-        runtime_handle: RuntimeHandle | None,
-        messages_processed: int,
-    ) -> bool:
-        """Durably bind a direct PAUSED transition to provider continuity."""
-
-        if not self._has_exact_resumable_runtime_handle(runtime_handle):
-            return False
-        assert runtime_handle is not None
-        progress: dict[str, Any] = {
-            "messages_processed": messages_processed,
-            "runtime": runtime_handle.to_session_state_dict(),
-            "runtime_backend": runtime_handle.backend,
-        }
-        if runtime_handle.backend == "claude" and runtime_handle.native_session_id:
-            progress["agent_session_id"] = runtime_handle.native_session_id
-        try:
-            persisted = await self._session_repo.track_progress(session_id, progress)
-        except Exception:
-            log.exception(
-                "orchestrator.runner.direct_pause_handle_persist_failed",
-                session_id=session_id,
-            )
-            return False
-        if persisted.is_err:
-            log.warning(
-                "orchestrator.runner.direct_pause_handle_persist_failed",
-                session_id=session_id,
-                error=str(persisted.error),
-            )
-            return False
-        return True
-
     async def _persist_direct_route_outcome(
         self,
         *,
@@ -1866,7 +1760,7 @@ class OrchestratorRunner:
         *,
         execution_id: str,
         session_id: str,
-    ) -> _DirectRouteResumeState | None:
+    ) -> DirectRouteResumeState | None:
         """Resume only an explicitly paused direct route; seal completed effects."""
         from ouroboros.orchestrator.route_compat import (
             build_compat_escalation_registry,
@@ -1927,6 +1821,7 @@ class OrchestratorRunner:
             "attempt_index",
             "prior_route_ids",
             "route",
+            "attempt_budget_progress",
             "recoverable_pause",
             "final_acceptance_declared",
         }
@@ -1965,6 +1860,7 @@ class OrchestratorRunner:
         prior_route_ids = tuple(row[0].route_id for row in parsed_rows)
         pause_data: dict[str, Any] | None = None
         paused_candidate: RouteCandidate | None = None
+        paused_budget_progress: AttemptBudgetProgress | None = None
         async for pause_event in replay_execution_events_chronologically(
             self._event_store,
             execution_id=execution_id,
@@ -1983,7 +1879,7 @@ class OrchestratorRunner:
                 )
             if (
                 not _mapping_has_exact_keys(superseded, frozenset(expected_pause_keys))
-                or superseded.get("schema_version") != 1
+                or superseded.get("schema_version") != 2
                 or superseded.get("execution_id") != execution_id
                 or superseded.get("session_id") != session_id
                 or superseded.get("root_ac_index") is not None
@@ -2001,6 +1897,9 @@ class OrchestratorRunner:
             superseded_index = superseded["attempt_index"]
             try:
                 superseded_candidate = RouteCandidate.from_contract_data(superseded.get("route"))
+                superseded_budget_progress = AttemptBudgetProgress.from_contract_data(
+                    superseded.get("attempt_budget_progress")
+                )
             except (TypeError, ValueError) as exc:
                 raise OrchestratorError(
                     message="Refusing to replay invalid superseded direct route pause state",
@@ -2025,6 +1924,17 @@ class OrchestratorRunner:
                 != len(prior_route_ids) + 1
                 or paused_candidate is not None
                 and paused_candidate != superseded_candidate
+                or paused_budget_progress is not None
+                and (
+                    superseded_budget_progress.max_agentic_steps
+                    != paused_budget_progress.max_agentic_steps
+                    or superseded_budget_progress.timeout_microseconds
+                    != paused_budget_progress.timeout_microseconds
+                    or superseded_budget_progress.agentic_steps_consumed
+                    < paused_budget_progress.agentic_steps_consumed
+                    or superseded_budget_progress.remaining_timeout_microseconds
+                    > paused_budget_progress.remaining_timeout_microseconds
+                )
             ):
                 raise OrchestratorError(
                     message="Refusing to replay inconsistent direct route pause history",
@@ -2035,8 +1945,9 @@ class OrchestratorRunner:
             # while validating every superseded row in bounded-memory pages.
             pause_data = superseded
             paused_candidate = superseded_candidate
+            paused_budget_progress = superseded_budget_progress
 
-        if pause_data is None or paused_candidate is None:
+        if pause_data is None or paused_candidate is None or paused_budget_progress is None:
             if not direct_events:
                 return None
             latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
@@ -2211,11 +2122,12 @@ class OrchestratorRunner:
                     message="Refusing to replay a paused route that was not cheapest eligible",
                     details={"execution_id": execution_id, "session_id": session_id},
                 )
-        return _DirectRouteResumeState(
+        return DirectRouteResumeState(
             episode_id=expected_episode,
             attempt_index=pause_data["attempt_index"],
             prior_route_ids=prior_route_ids,
             candidate=paused_candidate,
+            attempt_budget_progress=paused_budget_progress,
         )
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
@@ -3913,6 +3825,8 @@ class OrchestratorRunner:
         )
         return {
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
+            "max_iterations_per_ac": self._max_iterations_per_ac,
+            "ac_attempt_timeout_seconds": self._ac_attempt_timeout_seconds,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
@@ -7254,20 +7168,6 @@ class OrchestratorRunner:
             ),
         )
 
-    def _bounded_route_runtime_active(self) -> bool:
-        """Return whether this runner can authorize a Routing D provider effect."""
-        return bool(
-            has_durable_decomposition_replay(self._max_decomposition_depth)
-            and self._model_router is not None
-            and self._route_economics is not None
-            and getattr(
-                getattr(self._adapter, "capabilities", None),
-                "model_override_support",
-                ParamSupport.IGNORED,
-            )
-            is ParamSupport.NATIVE
-        )
-
     @classmethod
     def _resume_retry_pause(cls, message: AgentMessage) -> RecoverableFailurePause | None:
         """Return a pause decision for recoverable resume-bootstrap failures."""
@@ -7406,55 +7306,6 @@ class OrchestratorRunner:
             return None
 
         return selected_pause
-
-    async def _terminate_runtime_handle(
-        self,
-        runtime_handle: RuntimeHandle | None,
-        *,
-        session_id: str,
-        context: str,
-    ) -> None:
-        """Best-effort live runtime termination for handles that remain controllable."""
-        if runtime_handle is None or not runtime_handle.can_terminate:
-            return
-
-        try:
-            terminated = await runtime_handle.terminate()
-        except Exception as exc:
-            log.warning(
-                "orchestrator.runner.runtime_handle_terminate_failed",
-                session_id=session_id,
-                context=context,
-                backend=runtime_handle.backend,
-                error=str(exc),
-            )
-            return
-
-        if terminated:
-            log.info(
-                "orchestrator.runner.runtime_handle_terminated",
-                session_id=session_id,
-                context=context,
-                backend=runtime_handle.backend,
-            )
-
-    def _should_emit_progress_event(
-        self,
-        message: AgentMessage,
-        messages_processed: int,
-    ) -> bool:
-        """Determine whether a message should emit a persisted progress event."""
-        projected = project_runtime_message(message)
-        runtime_backend = message.resume_handle.backend if message.resume_handle else None
-        return (
-            message.is_final
-            or messages_processed % PROGRESS_EMIT_INTERVAL == 0
-            or projected.is_tool_call
-            or projected.thinking is not None
-            or message.type == "system"
-            or runtime_backend == "opencode"
-            or projected.is_tool_result
-        )
 
     async def _update_and_persist_progress(
         self,
@@ -9295,10 +9146,20 @@ class OrchestratorRunner:
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
             recoverable_failure_pause: RecoverableFailurePause | None = None
+            direct_pause_budget_progress: AttemptBudgetProgress | None = None
             last_direct_final_message: AgentMessage | None = None
             direct_route_candidate: Any | None = None
-            direct_bounded_routing = self._bounded_route_runtime_active()
+            direct_bounded_routing = direct_bounded_route_runtime_active(
+                max_decomposition_depth=self._max_decomposition_depth,
+                model_router=self._model_router,
+                route_economics=self._route_economics,
+                adapter=self._adapter,
+            )
             direct_terminal_blocked = False
+            direct_attempt_budget = DirectAttemptBudget.from_execution_semantics(
+                execution_semantics,
+                root_ac_count=len(seed.acceptance_criteria),
+            )
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -9315,12 +9176,14 @@ class OrchestratorRunner:
                 nonlocal last_tool
                 nonlocal messages_processed
                 nonlocal recoverable_failure_pause
+                nonlocal direct_pause_budget_progress
                 nonlocal success
                 nonlocal tracker
                 nonlocal direct_route_candidate
                 nonlocal last_direct_final_message
                 nonlocal direct_terminal_blocked
 
+                direct_pause_budget_progress = None
                 active_runtime_handle = resume_handle
                 self._announce_param_degradations(
                     system_prompt=system_prompt,
@@ -9354,18 +9217,26 @@ class OrchestratorRunner:
                     )
                     if cancelled_result is not None:
                         return active_runtime_handle
-                async with aclosing(
-                    self._adapter.execute_task(  # type: ignore[type-var]
-                        prompt=prompt,
-                        tools=merged_tools,
-                        system_prompt=system_prompt,
-                        resume_handle=active_runtime_handle,
-                        **effort_kwargs,
-                    )
-                ) as message_stream:
-                    async for message in message_stream:
+                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                    prompt=direct_attempt_budget.decorate_prompt(prompt),
+                    tools=merged_tools,
+                    system_prompt=system_prompt,
+                    resume_handle=active_runtime_handle,
+                    **effort_kwargs,
+                )
+                bounded_stream = direct_attempt_budget.wrap(message_stream)
+                async with (
+                    bounded_stream.lifetime(),
+                    shielded_aclosing(
+                        bounded_stream,
+                        close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
+                    ),
+                ):
+                    async for message in bounded_stream:
                         messages_processed += 1
                         projected = project_runtime_message(message)
+                        if message.resume_handle is not None:
+                            active_runtime_handle = message.resume_handle
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
@@ -9385,9 +9256,6 @@ class OrchestratorRunner:
                             messages_processed,
                             tracker.session_id,
                         )
-                        if message.resume_handle is not None:
-                            active_runtime_handle = message.resume_handle
-
                         # Update workflow state tracker
                         state_tracker.process_runtime_message(message)
 
@@ -9457,7 +9325,7 @@ class OrchestratorRunner:
                         if tool_event is not None:
                             await self._event_store.append(tool_event)
 
-                        if self._should_emit_progress_event(message, messages_processed):
+                        if should_emit_progress_event(message, messages_processed):
                             progress_event = self._build_progress_event(
                                 tracker.session_id,
                                 message,
@@ -9498,6 +9366,21 @@ class OrchestratorRunner:
                                 ],
                             )
 
+                if bounded_stream.exhaustion is not None and cancelled_result is None:
+                    final_message = await direct_attempt_budget.terminalize(
+                        stream=bounded_stream,
+                        event_store=self._event_store,
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
+                        runtime_handle=active_runtime_handle,
+                        context="runner_direct",
+                    )
+                    active_runtime_handle = None
+                    last_direct_final_message = None
+                    recoverable_failure_pause = None
+                    success = False
+                    direct_terminal_blocked = True
+
                 if direct_bounded_routing and cancelled_result is None:
                     cancelled_result = await self._handle_requested_cancellation(
                         session_id=tracker.session_id,
@@ -9507,13 +9390,18 @@ class OrchestratorRunner:
                         expected_root_indices=range(len(seed.acceptance_criteria)),
                     )
 
+                if recoverable_failure_pause is not None:
+                    direct_pause_budget_progress = direct_attempt_budget.progress()
                 if (
                     recoverable_failure_pause is not None
-                    and direct_bounded_routing
-                    and not await self._persist_exact_direct_pause_runtime_handle(
+                    and direct_pause_budget_progress is not None
+                    and not await persist_direct_pause_runtime_state(
+                        session_repo=self._session_repo,
                         session_id=tracker.session_id,
                         runtime_handle=active_runtime_handle,
                         messages_processed=messages_processed,
+                        attempt_budget_progress=direct_pause_budget_progress,
+                        require_exact_handle=True,
                     )
                 ):
                     # A quota signal without provider continuity cannot authorize
@@ -9527,34 +9415,6 @@ class OrchestratorRunner:
                     )
 
                 return active_runtime_handle
-
-            def _build_recovery_snapshot() -> RecoverySnapshot:
-                unfinished = [
-                    f"{ac.index}. {ac.content}"
-                    for ac in state_tracker.state.acceptance_criteria
-                    if ac.status.value != "completed"
-                ]
-                unfinished_text = "\n".join(unfinished[:5]) or "None"
-                problem_context = (
-                    f"Goal: {seed.goal}\n"
-                    f"Unfinished acceptance criteria:\n{unfinished_text}\n\n"
-                    f"Previous final message:\n{final_message[:1000]}"
-                )
-                current_approach = (
-                    "The first run attempted the seed normally and ended without "
-                    "satisfying the workflow. Continue from the current repository "
-                    "state, but avoid repeating the same failed path."
-                )
-                return RecoverySnapshot(
-                    problem_context=problem_context,
-                    current_approach=current_approach,
-                    messages_processed=messages_processed,
-                    completed_count=state_tracker.state.completed_count,
-                    total_count=state_tracker.state.total_count,
-                    final_error=final_message,
-                    used_personas=tuple(ThinkingPersona(persona) for persona in recovery_personas),
-                    interventions_used=recovery_interventions_used,
-                )
 
             with Status(
                 f"[bold cyan]Executing: {seed.goal[:50]}...[/]",
@@ -9590,6 +9450,7 @@ class OrchestratorRunner:
                         if direct_bounded_routing and direct_route_candidate is not None:
                             from ouroboros.events.base import BaseEvent
 
+                            assert direct_pause_budget_progress is not None
                             pause_episode = (
                                 "route:" + hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
                             )
@@ -9599,7 +9460,7 @@ class OrchestratorRunner:
                                     aggregate_type="execution",
                                     aggregate_id=exec_id,
                                     data={
-                                        "schema_version": 1,
+                                        "schema_version": 2,
                                         "execution_id": exec_id,
                                         "session_id": tracker.session_id,
                                         "root_ac_index": None,
@@ -9608,6 +9469,9 @@ class OrchestratorRunner:
                                         "attempt_index": len(direct_route_history),
                                         "prior_route_ids": list(direct_route_history),
                                         "route": direct_route_candidate.to_contract_data(),
+                                        "attempt_budget_progress": (
+                                            direct_pause_budget_progress.to_contract_data()
+                                        ),
                                         "recoverable_pause": True,
                                         "final_acceptance_declared": False,
                                     },
@@ -9634,7 +9498,7 @@ class OrchestratorRunner:
                         prior_route_ids=direct_route_history,
                         candidate=direct_route_candidate,
                         success=success,
-                        failure_class=self._classify_direct_route_failure(last_direct_final_message)
+                        failure_class=classify_direct_route_failure(last_direct_final_message)
                         if not direct_terminal_blocked
                         else FailureClass.BLOCKED,
                     )
@@ -9663,7 +9527,7 @@ class OrchestratorRunner:
                         "session and satisfy the same Seed contracts."
                     )
                     # A route change never resumes the previous provider session.
-                    await self._terminate_runtime_handle(
+                    await terminate_runtime_handle(
                         runtime_handle,
                         session_id=tracker.session_id,
                         context="bounded_route_escalation",
@@ -9678,12 +9542,22 @@ class OrchestratorRunner:
                 if (
                     cancelled_result is None
                     and not success
+                    and not direct_terminal_blocked
                     and recoverable_failure_pause is None
                     and runtime_handle is not None
                     and not direct_bounded_routing
                 ):
                     planner = RecoveryPlanner()
-                    recovery_action = planner.plan(_build_recovery_snapshot())
+                    recovery_action = planner.plan(
+                        build_runner_recovery_snapshot(
+                            goal=seed.goal,
+                            acceptance_criteria=state_tracker.state.acceptance_criteria,
+                            final_message=final_message,
+                            messages_processed=messages_processed,
+                            recovery_personas=recovery_personas,
+                            interventions_used=recovery_interventions_used,
+                        )
+                    )
                     if (
                         recovery_action.kind == RecoveryActionKind.INJECT_LATERAL_DIRECTIVE
                         and recovery_action.directive
@@ -10005,7 +9879,7 @@ class OrchestratorRunner:
             )
         finally:
             if not runtime_handle_transferred_to_pause:
-                await self._terminate_runtime_handle(
+                await terminate_runtime_handle(
                     runtime_handle,
                     session_id=tracker.session_id,
                     context="execute",
@@ -10229,6 +10103,8 @@ class OrchestratorRunner:
             enable_decomposition=execution_semantics["enable_decomposition"],
             decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
+            max_iterations_per_ac=execution_semantics["max_iterations_per_ac"],
+            ac_attempt_timeout_seconds=execution_semantics["ac_attempt_timeout_seconds"],
             adaptive_max_concurrent=max_parallel_workers,
             max_decomposition_depth=max_decomposition_depth,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -11270,9 +11146,31 @@ Note: This is a resumed session. Please continue from where execution was interr
             live_runtime_handle = runtime_handle
             runtime_handle_transferred_to_pause = False
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
-            resume_route_state: _DirectRouteResumeState | None = None
+            resume_route_state: DirectRouteResumeState | None = None
+            resume_pause_budget_progress: AttemptBudgetProgress | None = None
             last_resume_final_message: AgentMessage | None = None
             resume_terminal_blocked = False
+            direct_attempt_budget = DirectAttemptBudget.from_execution_semantics(
+                execution_semantics,
+                root_ac_count=len(seed.acceptance_criteria),
+            )
+            try:
+                persisted_direct_budget_progress = AttemptBudgetProgress.from_contract_data(
+                    tracker.progress.get(_DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY),
+                    max_agentic_steps=direct_attempt_budget.max_agentic_steps,
+                    timeout_seconds=direct_attempt_budget.timeout_seconds,
+                )
+            except ValueError as exc:
+                raise OrchestratorError(
+                    message="Refusing to resume without valid direct attempt budget progress",
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": "attempt_budget_progress_invalid",
+                        "human_handoff_required": True,
+                    },
+                ) from exc
+            direct_attempt_budget.resume_progress = persisted_direct_budget_progress
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
@@ -11287,12 +11185,24 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     session_id=session_id,
                 )
-                if resume_route_state is not None and not self._has_exact_resumable_runtime_handle(
-                    runtime_handle
+                if (
+                    resume_route_state is not None
+                    and resume_route_state.attempt_budget_progress
+                    != persisted_direct_budget_progress
                 ):
                     raise OrchestratorError(
+                        message=("Refusing to resume mismatched direct attempt budget progress"),
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                            "resume_blocked": "attempt_budget_progress_conflict",
+                            "human_handoff_required": True,
+                        },
+                    )
+                if not has_exact_resumable_runtime_handle(runtime_handle):
+                    raise OrchestratorError(
                         message=(
-                            "Refusing to replay a paused direct route without its exact "
+                            "Refusing to replay a paused direct attempt without its exact "
                             "resumable provider handle"
                         ),
                         details={
@@ -11328,18 +11238,26 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                     if cancelled_result is not None:
                         return cancelled_result
-                async with aclosing(
-                    self._adapter.execute_task(  # type: ignore[type-var]
-                        prompt=resume_prompt,
-                        tools=merged_tools,
-                        system_prompt=system_prompt,
-                        resume_handle=runtime_handle,
-                        **effort_kwargs,
-                    )
-                ) as message_stream:
-                    async for message in message_stream:
+                message_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                    prompt=direct_attempt_budget.decorate_prompt(resume_prompt),
+                    tools=merged_tools,
+                    system_prompt=system_prompt,
+                    resume_handle=runtime_handle,
+                    **effort_kwargs,
+                )
+                bounded_stream = direct_attempt_budget.wrap(message_stream)
+                async with (
+                    bounded_stream.lifetime(),
+                    shielded_aclosing(
+                        bounded_stream,
+                        close_error_is_observe_only=lambda: bounded_stream.exhaustion is not None,
+                    ),
+                ):
+                    async for message in bounded_stream:
                         messages_processed += 1
                         projected = project_runtime_message(message)
+                        if message.resume_handle is not None:
+                            live_runtime_handle = message.resume_handle
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
@@ -11359,9 +11277,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                             messages_processed,
                             session_id,
                         )
-                        if message.resume_handle is not None:
-                            live_runtime_handle = message.resume_handle
-
                         # Update workflow state tracker
                         state_tracker.process_runtime_message(message)
 
@@ -11430,7 +11345,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         if tool_event is not None:
                             await self._event_store.append(tool_event)
 
-                        if self._should_emit_progress_event(message, messages_processed):
+                        if should_emit_progress_event(message, messages_processed):
                             progress_event = self._build_progress_event(
                                 session_id,
                                 message,
@@ -11450,13 +11365,33 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 ],
                             )
 
+                if bounded_stream.exhaustion is not None and cancelled_result is None:
+                    final_message = await direct_attempt_budget.terminalize(
+                        stream=bounded_stream,
+                        event_store=self._event_store,
+                        execution_id=tracker.execution_id,
+                        session_id=session_id,
+                        runtime_handle=live_runtime_handle,
+                        context="runner_resume",
+                    )
+                    live_runtime_handle = None
+                    last_resume_final_message = None
+                    recoverable_resume_failure = None
+                    success = False
+                    resume_terminal_blocked = True
+
+                if recoverable_resume_failure is not None:
+                    resume_pause_budget_progress = direct_attempt_budget.progress()
                 if (
                     recoverable_resume_failure is not None
-                    and resume_route_state is not None
-                    and not await self._persist_exact_direct_pause_runtime_handle(
+                    and resume_pause_budget_progress is not None
+                    and not await persist_direct_pause_runtime_state(
+                        session_repo=self._session_repo,
                         session_id=session_id,
                         runtime_handle=live_runtime_handle,
                         messages_processed=messages_processed,
+                        attempt_budget_progress=resume_pause_budget_progress,
+                        require_exact_handle=True,
                     )
                 ):
                     recoverable_resume_failure = None
@@ -11465,6 +11400,33 @@ Note: This is a resumed session. Please continue from where execution was interr
                     final_message = (
                         f"{final_message}\nRecoverable provider pause rejected: no exact "
                         "resumable handle is available; human handoff required."
+                    )
+                if recoverable_resume_failure is not None and resume_route_state is not None:
+                    from ouroboros.events.base import BaseEvent
+
+                    assert resume_pause_budget_progress is not None
+                    await self._event_store.append(
+                        BaseEvent(
+                            type="execution.ac.route_paused",
+                            aggregate_type="execution",
+                            aggregate_id=tracker.execution_id,
+                            data={
+                                "schema_version": 2,
+                                "execution_id": tracker.execution_id,
+                                "session_id": session_id,
+                                "root_ac_index": None,
+                                "call_site": "runner",
+                                "episode_id": resume_route_state.episode_id,
+                                "attempt_index": resume_route_state.attempt_index,
+                                "prior_route_ids": list(resume_route_state.prior_route_ids),
+                                "route": resume_route_state.candidate.to_contract_data(),
+                                "attempt_budget_progress": (
+                                    resume_pause_budget_progress.to_contract_data()
+                                ),
+                                "recoverable_pause": True,
+                                "final_acceptance_declared": False,
+                            },
+                        )
                     )
 
                 if resume_route_state is not None and cancelled_result is None:
@@ -11503,7 +11465,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     failure_class=(
                         FailureClass.BLOCKED
                         if resume_terminal_blocked
-                        else self._classify_direct_route_failure(last_resume_final_message)
+                        else classify_direct_route_failure(last_resume_final_message)
                     ),
                 )
                 cancelled_result = await self._handle_requested_cancellation(
@@ -11517,7 +11479,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     if cancelled_result is not None:
                         break
                     assert decision.selected is not None
-                    await self._terminate_runtime_handle(
+                    await terminate_runtime_handle(
                         live_runtime_handle,
                         session_id=session_id,
                         context="bounded_route_resume_escalation",
@@ -11546,23 +11508,32 @@ Note: This is a resumed session. Please continue from where execution was interr
                     final_message = ""
                     last_resume_final_message = None
                     recoverable_resume_failure = None
+                    resume_pause_budget_progress = None
+                    successor_stream = self._adapter.execute_task(  # type: ignore[type-var]
+                        prompt=direct_attempt_budget.decorate_prompt(
+                            build_task_prompt(seed, strategy=strategy)
+                            + "\n\nThe resumed route failed. Continue in a fresh "
+                            "session and satisfy the same Seed contracts."
+                        ),
+                        tools=merged_tools,
+                        system_prompt=system_prompt,
+                        resume_handle=None,
+                        **successor_kwargs,
+                    )
+                    bounded_successor_stream = direct_attempt_budget.wrap(successor_stream)
                     async with (
-                        aclosing(
-                            self._adapter.execute_task(  # type: ignore[type-var]
-                                prompt=(
-                                    build_task_prompt(seed, strategy=strategy)
-                                    + "\n\nThe resumed route failed. Continue in a fresh "
-                                    "session and satisfy the same Seed contracts."
-                                ),
-                                tools=merged_tools,
-                                system_prompt=system_prompt,
-                                resume_handle=None,
-                                **successor_kwargs,
-                            )
-                        ) as successor_stream
+                        bounded_successor_stream.lifetime(),
+                        shielded_aclosing(
+                            bounded_successor_stream,
+                            close_error_is_observe_only=lambda: (
+                                bounded_successor_stream.exhaustion is not None
+                            ),
+                        ),
                     ):
-                        async for message in successor_stream:
+                        async for message in bounded_successor_stream:
                             messages_processed += 1
+                            if message.resume_handle is not None:
+                                live_runtime_handle = message.resume_handle
                             if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
                                 cancelled_result = await self._handle_requested_cancellation(
                                     session_id=session_id,
@@ -11579,8 +11550,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 messages_processed,
                                 session_id,
                             )
-                            if message.resume_handle is not None:
-                                live_runtime_handle = message.resume_handle
                             state_tracker.process_runtime_message(message)
                             if message.is_final:
                                 last_resume_final_message = message
@@ -11593,6 +11562,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                                         "usage_limit_pause_seconds"
                                     ],
                                 )
+                    if bounded_successor_stream.exhaustion is not None and cancelled_result is None:
+                        final_message = await direct_attempt_budget.terminalize(
+                            stream=bounded_successor_stream,
+                            event_store=self._event_store,
+                            execution_id=tracker.execution_id,
+                            session_id=session_id,
+                            runtime_handle=live_runtime_handle,
+                            context="runner_resume_successor",
+                        )
+                        live_runtime_handle = None
+                        last_resume_final_message = None
+                        recoverable_resume_failure = None
+                        success = False
+                        resume_terminal_blocked = True
+                    if recoverable_resume_failure is not None:
+                        resume_pause_budget_progress = direct_attempt_budget.progress()
                     if cancelled_result is None:
                         cancelled_result = await self._handle_requested_cancellation(
                             session_id=session_id,
@@ -11604,10 +11589,14 @@ Note: This is a resumed session. Please continue from where execution was interr
                     if cancelled_result is not None:
                         break
                     if recoverable_resume_failure is not None:
-                        if not await self._persist_exact_direct_pause_runtime_handle(
+                        assert resume_pause_budget_progress is not None
+                        if not await persist_direct_pause_runtime_state(
+                            session_repo=self._session_repo,
                             session_id=session_id,
                             runtime_handle=live_runtime_handle,
                             messages_processed=messages_processed,
+                            attempt_budget_progress=resume_pause_budget_progress,
+                            require_exact_handle=True,
                         ):
                             recoverable_resume_failure = None
                             resume_terminal_blocked = True
@@ -11625,7 +11614,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 aggregate_type="execution",
                                 aggregate_id=tracker.execution_id,
                                 data={
-                                    "schema_version": 1,
+                                    "schema_version": 2,
                                     "execution_id": tracker.execution_id,
                                     "session_id": session_id,
                                     "root_ac_index": None,
@@ -11634,6 +11623,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                                     "attempt_index": len(route_history),
                                     "prior_route_ids": list(route_history),
                                     "route": successor.to_contract_data(),
+                                    "attempt_budget_progress": (
+                                        resume_pause_budget_progress.to_contract_data()
+                                    ),
                                     "recoverable_pause": True,
                                     "final_acceptance_declared": False,
                                 },
@@ -11656,8 +11648,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                         prior_route_ids=route_history,
                         candidate=successor,
                         success=success,
-                        failure_class=self._classify_direct_route_failure(
-                            last_resume_final_message
+                        failure_class=(
+                            FailureClass.BLOCKED
+                            if resume_terminal_blocked
+                            else classify_direct_route_failure(last_resume_final_message)
                         ),
                     )
                     cancelled_result = await self._handle_requested_cancellation(
@@ -11945,7 +11939,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             )
         finally:
             if not runtime_handle_transferred_to_pause:
-                await self._terminate_runtime_handle(
+                await terminate_runtime_handle(
                     live_runtime_handle,
                     session_id=session_id,
                     context="resume",

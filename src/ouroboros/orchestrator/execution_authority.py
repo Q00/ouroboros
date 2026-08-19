@@ -50,8 +50,8 @@ _MAX_RUNTIME_EXECUTABLE_BYTES = 64 * 1024 * 1024
 _CLOSED_RUNTIME_IMPLEMENTATIONS: dict[type[object], tuple[str, object, object]] = {}
 
 _EXECUTOR_COMPONENT_VERSIONS = {
-    "parallel_ac_executor": "parallel-ac-executor/v2",
-    "leaf_dispatcher": "leaf-dispatcher/v1",
+    "parallel_ac_executor": "parallel-ac-executor/v3",
+    "leaf_dispatcher": "leaf-dispatcher/v2",
     "level_coordinator": "level-coordinator/v1",
     "rate_limit_gate": "rate-limit-gate/v1",
 }

@@ -292,7 +292,21 @@ costs a full agent session. Sub-ACs recurse within a bounded depth.
 
 Key constraints:
 - `DEFAULT_MAX_DECOMPOSITION_DEPTH = 2`; any non-negative depth remains accepted through Seed/env/CLI for backward compatibility. Depths `0..4` may use Routing D crash replay: the maximum five-way tree has 780 child nodes and the completion/pause envelope is derived from that durable boundary. Larger values execute through the historical legacy parallel path without the Routing D resume-owner guarantee. At the configured cap a non-atomic unit executes as atomic with a recorded depth warning.
-- Failures are handled by an attempt-then-bounce loop (bounded retries + evaluation feedback) rather than ever-deeper pre-execution splitting
+- Ordinary failures are handled by an attempt-then-bounce loop rather than
+  ever-deeper pre-execution splitting. Each atomic provider attempt targets at
+  most `execution.max_iterations_per_ac` tool-bearing agent turns (default 10):
+  the common stream owner cancels at the first observed over-budget turn and
+  admits no later turn. `execution.ac_attempt_timeout_seconds` is a fixed total
+  wall-clock bound (default 900, maximum 9,007,199,254 seconds so its durable
+  microseconds remain exact). Activity resets the separate idle watchdog but
+  never either boundary. Provider finalization gets a separate finite shutdown
+  grace (one second, followed by a 100 ms cancellation observation); a wedged
+  finalizer cannot keep the exhausted attempt alive indefinitely, and cleanup
+  failure cannot replace the typed exhaustion. Budget exhaustion is terminal
+  and bypasses same-AC retry, verification recovery, bounce classification,
+  alternate runtimes, and route successors. Legacy whole-Seed direct/resume
+  calls deterministically scale both per-AC limits by the number of root ACs
+  and fail closed if the scaled timeout would exceed the durable boundary.
 - Children are dependency-sorted and executed within each level
 
 Values above `4` remain executable on the legacy path, but cannot authorize

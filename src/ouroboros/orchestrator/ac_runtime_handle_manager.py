@@ -938,10 +938,10 @@ class ACRuntimeHandleManager:
         runtime_handle: RuntimeHandle | None,
         *,
         runtime_scope_id: str,
-    ) -> None:
-        """Best-effort termination for live AC-scoped runtimes."""
+    ) -> bool:
+        """Terminate a live AC-scoped runtime and report confirmed closure."""
         if runtime_handle is None or not runtime_handle.can_terminate:
-            return
+            return True
 
         try:
             terminated = await runtime_handle.terminate()
@@ -952,7 +952,7 @@ class ACRuntimeHandleManager:
                 backend=runtime_handle.backend,
                 error=str(exc),
             )
-            return
+            return False
 
         if terminated:
             log.info(
@@ -960,6 +960,7 @@ class ACRuntimeHandleManager:
                 runtime_scope_id=runtime_scope_id,
                 backend=runtime_handle.backend,
             )
+        return terminated
 
     @staticmethod
     def _resolve_ac_runtime_identity(

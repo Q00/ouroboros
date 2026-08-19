@@ -187,6 +187,8 @@ def is_retryable_failure(result: ACExecutionResult | BaseException) -> bool:
         and not result.success
         and not result.is_blocked
         and not result.is_invalid
+        # A hard attempt allowance cannot be renewed by any retry owner.
+        and result.attempt_budget_exhaustion is None
         and result.error != _STALL_SENTINEL
     )
 
