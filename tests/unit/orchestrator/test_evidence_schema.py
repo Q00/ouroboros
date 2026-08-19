@@ -147,7 +147,10 @@ class TestExtractEvidence:
     def test_bare_non_json_fence_still_rejected_without_later_json_fence(self) -> None:
         text = 'summary\n```python\ndef hello():\n    return "hello"\n```\n'
 
-        with pytest.raises(EvidenceError, match="not valid JSON"):
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
             extract_evidence(text)
 
     def test_empty_text_rejected(self) -> None:
@@ -161,6 +164,53 @@ class TestExtractEvidence:
     def test_malformed_json(self) -> None:
         with pytest.raises(EvidenceError, match="not valid JSON"):
             extract_evidence("{not: json}")
+
+    def test_prose_before_json_fallback_recovered(self) -> None:
+        """Models running on smaller tiers (adaptive mode) sometimes emit
+        prose markers like ``[AC_COMPLETE: 6]`` or a summary paragraph
+        *before* the final evidence JSON block. The extractor must skip
+        that prose and still parse the JSON."""
+        text = (
+            "[AC_COMPLETE: 6]\n"
+            "All tests pass, graceful failure handling confirmed.\n\n"
+            '{"files_touched": ["src/graceful.ts"],'
+            ' "commands_run": ["npx jest"],'
+            ' "tests_passed": ["graceful.test.ts::test_basic"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data == {
+            "files_touched": ["src/graceful.ts"],
+            "commands_run": ["npx jest"],
+            "tests_passed": ["graceful.test.ts::test_basic"],
+        }
+
+    def test_unfenced_json_after_prose_only_brace_fallback(self) -> None:
+        """Fallback should also work when there's no fence at all, just
+        prose before a bare JSON object starting with ``{``."""
+        text = (
+            "All done. Here's the evidence:\n"
+            '{"files_touched": ["a.ts"], "commands_run": ["npm test"], '
+            '"tests_passed": ["a.test.ts"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["a.ts"]
+
+    def test_non_json_brace_before_evidence_still_recovered(self) -> None:
+        """A stray non-JSON ``{`` in the prose (e.g. a code snippet) must
+        not stop the fallback from finding the real evidence object later."""
+        text = (
+            "Applied patch to {config.host} placeholder.\n"
+            '{"files_touched": ["b.ts"], "commands_run": ["npm test"], '
+            '"tests_passed": ["b.test.ts"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["b.ts"]
+
+    def test_list_payload_not_rescued_by_inner_object(self) -> None:
+        """A top-level list parses successfully at the trusted position, so
+        its inner objects must never be adopted as evidence."""
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence('[{"files_touched": ["a.ts"]}]')
 
     def test_non_object_payload(self) -> None:
         with pytest.raises(EvidenceError, match="must be a JSON object"):
