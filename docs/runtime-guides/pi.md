@@ -83,7 +83,8 @@ orchestrator:
 For a normal execution task, Ouroboros launches:
 
 ```text
-pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
+pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
+  [--append-system-prompt <SYSTEM>] [--tools <TOOLS>] <PROMPT>
 ```
 
 | Argument | Why |
@@ -91,7 +92,15 @@ pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
 | `--mode json` | Requests Pi's headless JSONL event stream |
 | `--model` | Optional model override passed by the caller |
 | `--session` | Optional native Pi session id for targeted resume |
+| `--append-system-prompt` | Native delivery of Ouroboros' `system_prompt` parameter (appended to Pi's base coding prompt) |
+| `--tools` | Native tool allow-list: Pi's own flag enables only the listed tools. Claude-style names (`Read`, `Bash`, …) are mapped to Pi's lowercase built-ins (`read`, `bash`, …); unknown names pass through for extension tools |
 | `<PROMPT>` | The composed task prompt from Ouroboros |
+
+The native parameter flags are probed once via `pi --help`. Pi binaries without
+`--append-system-prompt` / `--tools` keep the previous behavior: system
+instructions and tool guidance are composed into the user message as text, and
+the runtime declares `system_prompt_support` / `tool_restriction_support` as
+`translated` instead of `native`.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal
