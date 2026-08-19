@@ -161,6 +161,13 @@ to Pi with a deterministic unsupported-dispatch exit code so the normal Pi
 session can continue handling the input instead of receiving a hard bridge
 failure.
 
+The registered `/ooo` command also provides TAB argument completion through Pi's
+native `getArgumentCompletions` surface: `/ooo <TAB>` lists the dispatchable
+subcommands with one-line descriptions, and `ooo run <TAB>` lists Seed files
+from `~/.ouroboros/seeds/`. Completion is deterministic and offline — the
+subcommand list mirrors the packaged skills that declare `mcp_tool` frontmatter
+and a unit test keeps the two in sync.
+
 For `ooo auto`, the dispatcher owns the background job lifecycle. After
 `ouroboros_start_auto` returns a `job_id`, the dispatch process polls
 `ouroboros_job_wait` and fetches `ouroboros_job_result` when the job reaches a

@@ -3588,8 +3588,64 @@ def _pi_ooo_bridge_source_text() -> str:
  * Managed by `ouroboros setup --runtime pi`.
  * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
  * shared skill dispatcher instead of sending them to the model as chat.
+ * The registered `/ooo` command also provides TAB argument completion for
+ * dispatchable subcommands and Seed files.
  */
+import {{ readdirSync }} from "node:fs";
+import {{ homedir }} from "node:os";
+import * as path from "node:path";
 import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
+
+type CompletionItem = {{ value: string; label: string; description?: string }};
+
+// Dispatchable `ooo` subcommands: the packaged skills whose SKILL.md declares
+// `mcp_tool` frontmatter, i.e. the commands the shared dispatcher can execute
+// as one deterministic MCP call. Kept in sync by a unit test.
+const DISPATCHABLE_COMMANDS: Array<{{ cmd: string; description: string }}> = [
+  {{ cmd: "auto", description: "Interview, Seed generation, and run handoff" }},
+  {{ cmd: "interview", description: "Socratic interview to clarify requirements" }},
+  {{ cmd: "run", description: "Execute a Seed specification" }},
+  {{ cmd: "seed", description: "Generate a Seed from an interview session" }},
+  {{ cmd: "status", description: "Session status and drift check" }},
+  {{ cmd: "ralph", description: "Evolutionary loop until QA passes" }},
+];
+
+function matchesPrefix(value: string, prefix: string): boolean {{
+  return value.toLowerCase().startsWith(prefix.toLowerCase());
+}}
+
+function seedFileCompletions(prefix: string): CompletionItem[] | null {{
+  let names: string[];
+  try {{
+    names = readdirSync(path.join(homedir(), ".ouroboros", "seeds"));
+  }} catch {{
+    return null;
+  }}
+  const items = names
+    .filter(
+      (name) =>
+        (name.endsWith(".yaml") || name.endsWith(".yml")) && matchesPrefix(name, prefix),
+    )
+    .map((name) => ({{ value: name, label: name, description: "Seed file" }}));
+  return items.length > 0 ? items : null;
+}}
+
+// TAB completions for `/ooo <TAB>`: dispatchable subcommands for the first
+// argument, Seed files from `~/.ouroboros/seeds/` for `ooo run <TAB>`.
+function argumentCompletions(argumentPrefix: string): CompletionItem[] | null {{
+  const tokens = argumentPrefix.replace(/^\\s+/, "").split(/\\s+/);
+  const completing = tokens[tokens.length - 1] ?? "";
+  if (tokens.length <= 1) {{
+    const items = DISPATCHABLE_COMMANDS.filter((entry) =>
+      matchesPrefix(entry.cmd, completing),
+    ).map((entry) => ({{ value: entry.cmd, label: entry.cmd, description: entry.description }}));
+    return items.length > 0 ? items : null;
+  }}
+  if (tokens[0].toLowerCase() === "run" && tokens.length === 2) {{
+    return seedFileCompletions(completing);
+  }}
+  return null;
+}}
 
 const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
 const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
@@ -3637,6 +3693,7 @@ async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): 
 export default function ouroborosBridge(pi: ExtensionAPI) {{
   pi.registerCommand("ooo", {{
     description: "Dispatch an Ouroboros ooo command",
+    getArgumentCompletions: argumentCompletions,
     handler: async (args, ctx) => {{
       const text = `ooo ${{args}}`.trim();
       await dispatch(pi, text, ctx);
