@@ -48,6 +48,8 @@ class InstallSurface:
 def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return None, f"invalid UTF-8 at byte {exc.start}: {exc.reason}"
     except OSError as exc:
         return None, str(exc)
     try:
