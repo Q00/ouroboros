@@ -78,6 +78,56 @@ def test_build_command_uses_documented_json_prompt_argument() -> None:
     ]
 
 
+def test_build_command_passes_native_system_prompt_and_tools_when_supported() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = True
+
+    command = runtime._build_command(
+        prompt="Do the task",
+        system_prompt="Be a careful test runner.",
+        tools=["Read", "Edit", "Bash", "custom_tool"],
+    )
+
+    assert command == [
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "--append-system-prompt",
+        "Be a careful test runner.",
+        "--tools",
+        "read,edit,bash,custom_tool",
+        "Do the task",
+    ]
+
+
+def test_build_command_skips_native_flags_when_unsupported() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = False
+
+    command = runtime._build_command(
+        prompt="Do the task",
+        system_prompt="Be a careful test runner.",
+        tools=["Read"],
+    )
+
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_capabilities_follow_probed_native_param_support() -> None:
+    native = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    native._native_param_flags = True
+    legacy = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    legacy._native_param_flags = False
+
+    assert native.capabilities.system_prompt_support == ParamSupport.NATIVE
+    assert native.capabilities.tool_restriction_support == ParamSupport.NATIVE
+    assert legacy.capabilities.system_prompt_support == ParamSupport.TRANSLATED
+    assert legacy.capabilities.tool_restriction_support == ParamSupport.TRANSLATED
+    # Pi has no approval gate: permission mode stays ignored either way.
+    assert native.capabilities.permission_mode_support == ParamSupport.IGNORED
+    assert legacy.capabilities.permission_mode_support == ParamSupport.IGNORED
+
+
 def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None:
     default_runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
     requested_runtime = PiRuntime(
@@ -295,6 +345,76 @@ async def test_execute_task_streams_delta_and_final_result() -> None:
     assert result.data == {"subtype": "success", "returncode": 0}
     assert result.resume_handle is not None
     assert result.resume_handle.native_session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_passes_params_natively_when_supported() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = True
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [
+            msg async for msg in runtime.execute_task("Do it", tools=["Read"], system_prompt="Sys")
+        ]
+
+    assert mock_exec.call_args.args == (
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "--append-system-prompt",
+        "Sys",
+        "--tools",
+        "read",
+        "Do it",
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_task_composes_params_into_prompt_when_unsupported() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = False
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [
+            msg async for msg in runtime.execute_task("Do it", tools=["Read"], system_prompt="Sys")
+        ]
+
+    assert mock_exec.call_args.args == (
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "## System Instructions\nSys\n\n## Tooling Guidance\nPrefer these tools:\n- Read\n\nDo it",
+    )
 
 
 @pytest.mark.asyncio
