@@ -324,22 +324,50 @@ class TestResolveSeedProjectPath:
         assert result.path is None
         assert result.rejected is False
 
-    def test_reference_existing_file_returned_for_caller_to_normalize(
+    def test_relative_file_reference_returns_stable_base_as_root(
         self,
         tmp_path: Path,
     ) -> None:
-        """An existing-file reference is returned so the caller can collapse it.
+        """A relative existing-file reference names ``stable_base`` as the root.
 
-        ``_resolve_cli_project_dir`` follows this with
-        ``_directory_for_runtime`` to use the file's parent directory as
-        the runtime cwd. Filtering files at the resolver level would
-        regress that established behavior.
+        The reference resolved *because* ``stable_base`` is the base its
+        seed-relative paths were written against, so the project root is
+        ``stable_base`` — not the file's parent. Collapsing to the parent
+        pushed the runtime cwd into a subdirectory and made every AC's
+        ``expected_artifacts`` (same relative-path convention) unresolvable
+        (#2194).
         """
         target_file = tmp_path / "src" / "events.py"
         target_file.parent.mkdir(parents=True)
         target_file.write_text("# fixture file")
 
         refs = [SimpleNamespace(path="src/events.py", role="primary")]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = resolve_seed_project_path(seed, stable_base=tmp_path)
+
+        assert result.path == tmp_path.resolve()
+        assert result.rejected is False
+
+    def test_absolute_file_reference_still_returned_for_caller_to_normalize(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An absolute existing-file reference keeps the collapse contract.
+
+        An absolute path carries no information about which base the seed's
+        relative paths were written against, so the resolver returns the file
+        as-is and the caller (``_directory_for_runtime``) collapses it to its
+        parent, as before.
+        """
+        target_file = tmp_path / "src" / "events.py"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text("# fixture file")
+
+        refs = [SimpleNamespace(path=str(target_file), role="primary")]
         seed = SimpleNamespace(
             metadata=None,
             brownfield_context=SimpleNamespace(context_references=refs),

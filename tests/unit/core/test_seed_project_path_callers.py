@@ -171,6 +171,38 @@ class TestCliRunCaller:
 
         assert result == invocation.resolve()
 
+    def test_relative_file_reference_keeps_the_invocation_directory_as_root(
+        self, tmp_path: Path
+    ) -> None:
+        """The interview handoff must not push the cwd into a subdirectory.
+
+        Regression for #2194: a brownfield seed carrying a primary
+        ``context_references`` file (``app/widgets/kanban.js``) collapsed the
+        runtime cwd to the file's parent (``app/widgets``), so every AC's
+        ``expected_artifacts`` — written relative to the project root —
+        resolved to ``app/widgets/app/widgets/...`` and failed verification.
+        """
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_store = tmp_path / "seeds"
+        seed_store.mkdir()
+        seed_file = seed_store / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        invocation = tmp_path / "project"
+        widget = invocation / "app" / "widgets" / "kanban.js"
+        widget.parent.mkdir(parents=True)
+        widget.write_text("// widget\n", encoding="utf-8")
+
+        refs = [SimpleNamespace(path="app/widgets/kanban.js", role="primary")]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = _resolve_cli_project_dir(seed, seed_file, fallback_dir=invocation)
+
+        assert result == invocation.resolve()
+
     @pytest.mark.parametrize("target_kind", ["missing", "file"])
     def test_unusable_brownfield_target_does_not_fall_back_to_the_seed_store(
         self, tmp_path: Path, target_kind: str
