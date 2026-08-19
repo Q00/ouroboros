@@ -42,8 +42,10 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
@@ -10544,22 +10546,26 @@ class TestCopilotSetup:
         """The managed bridge should TAB-complete `/ooo` arguments.
 
         `/ooo <TAB>` lists the dispatchable subcommands and `ooo run <TAB>`
-        lists Seed files from `~/.ouroboros/seeds/`.
+        lists Seed files from `~/.ouroboros/seeds/` as absolute paths so the
+        completed value executes regardless of the Pi session cwd.
         """
         bridge_source = setup_cmd._pi_ooo_bridge_source_text()
 
         assert "getArgumentCompletions: argumentCompletions" in bridge_source
         assert "function argumentCompletions(argumentPrefix: string)" in bridge_source
         assert 'path.join(homedir(), ".ouroboros", "seeds")' in bridge_source
+        assert "value: path.join(seedsDir, name)" in bridge_source
+        assert ".sort()" in bridge_source
         assert 'tokens[0].toLowerCase() === "run"' in bridge_source
 
     def test_pi_bridge_completions_mirror_dispatchable_skills(self) -> None:
-        """Completion subcommands must mirror skills with `mcp_tool` frontmatter.
+        """Completion subcommands must mirror dispatcher-eligible skills.
 
-        The bridge hardcodes the dispatchable subcommand list so completion
-        stays deterministic and offline. This test fails whenever a packaged
-        skill gains or loses `mcp_tool` frontmatter, so the hardcoded list
-        cannot drift silently.
+        Eligibility is derived through ``resolve_skill_dispatch`` itself —
+        frontmatter loading, ``normalize_mcp_frontmatter`` validation, and
+        template resolution — instead of a textual ``mcp_tool:`` grep, so a
+        body example or an invalid/missing ``mcp_args`` mapping cannot make
+        an undispatchable skill look dispatchable.
         """
         bridge_source = setup_cmd._pi_ooo_bridge_source_text()
         completed = set(re.findall(r'cmd: "([a-z0-9][a-z0-9_-]*)"', bridge_source))
@@ -10569,14 +10575,59 @@ class TestCopilotSetup:
                 skill_dir.name
                 for skill_dir in skills_dir.iterdir()
                 if (skill_dir / "SKILL.md").is_file()
-                and re.search(
-                    r"^mcp_tool:",
-                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
-                    re.MULTILINE,
+                and isinstance(
+                    resolve_skill_dispatch(
+                        ResolveRequest(prompt=f"ooo {skill_dir.name}", cwd=Path.cwd())
+                    ),
+                    Resolved,
                 )
             }
 
         assert completed == dispatchable
+
+    async def test_pi_bridge_run_completion_value_round_trips_to_global_seed(
+        self, tmp_path: Path
+    ) -> None:
+        """Absolute Seed completion values must stay executable end to end.
+
+        The `run` dispatcher forwards ``seed_path`` unchanged and the seed
+        resolver treats relative paths as session-cwd-relative, degrading a
+        missing file to inline YAML. Completion therefore advertises absolute
+        store paths; this test pins that contract from the completed value
+        through router resolution to seed loading.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        completed_value = str(seeds_dir / "demo.yaml")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        resolved = resolve_skill_dispatch(
+            ResolveRequest(prompt=f"ooo run {completed_value}", cwd=session_cwd)
+        )
+        assert isinstance(resolved, Resolved)
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == completed_value
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            loaded = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": completed_value},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+            bare_name = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": "demo.yaml"},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+
+        assert loaded.is_ok
+        assert loaded.value == "goal: demo\n"
+        # The pre-fix completion shape: a bare name never reaches the global
+        # store from a session cwd and degrades to inline YAML.
+        assert bare_name.is_ok
+        assert bare_name.value == "demo.yaml"
 
 
 class TestRuntimeFlagDispatch:

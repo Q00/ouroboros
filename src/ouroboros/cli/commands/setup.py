@@ -3615,23 +3615,33 @@ function matchesPrefix(value: string, prefix: string): boolean {{
 }}
 
 function seedFileCompletions(prefix: string): CompletionItem[] | null {{
+  const seedsDir = path.join(homedir(), ".ouroboros", "seeds");
   let names: string[];
   try {{
-    names = readdirSync(path.join(homedir(), ".ouroboros", "seeds"));
+    names = readdirSync(seedsDir);
   }} catch {{
     return null;
   }}
+  // Completion values carry the absolute store path: the `run` dispatcher
+  // resolves relative seed paths against the Pi session cwd, so a bare
+  // filename would only execute when the same file also exists there.
+  // Names containing whitespace are skipped because the dispatcher
+  // tokenizes the dispatched command on whitespace.
   const items = names
-    .filter(
-      (name) =>
-        (name.endsWith(".yaml") || name.endsWith(".yml")) && matchesPrefix(name, prefix),
-    )
-    .map((name) => ({{ value: name, label: name, description: "Seed file" }}));
+    .filter((name) => name.endsWith(".yaml") || name.endsWith(".yml"))
+    .filter((name) => !/\\s/.test(name) && matchesPrefix(name, prefix))
+    .sort()
+    .map((name) => ({{
+      value: path.join(seedsDir, name),
+      label: name,
+      description: "Seed file",
+    }}));
   return items.length > 0 ? items : null;
 }}
 
 // TAB completions for `/ooo <TAB>`: dispatchable subcommands for the first
-// argument, Seed files from `~/.ouroboros/seeds/` for `ooo run <TAB>`.
+// argument, Seed files from `~/.ouroboros/seeds/` for `ooo run <TAB>`
+// (inserted as absolute paths so the value executes from any session cwd).
 function argumentCompletions(argumentPrefix: string): CompletionItem[] | null {{
   const tokens = argumentPrefix.replace(/^\\s+/, "").split(/\\s+/);
   const completing = tokens[tokens.length - 1] ?? "";
