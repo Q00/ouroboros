@@ -4646,7 +4646,7 @@ def test_lateral_persona_panel_metadata_is_structured_without_prose_parsing() ->
     panel = lateral.metadata.orchestration["lateral_panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["dispatch_modes"] == ["plugin", "host_driven", "host_decides", "sequential"]
     assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {

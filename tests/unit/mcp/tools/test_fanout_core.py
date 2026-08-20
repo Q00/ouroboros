@@ -806,6 +806,72 @@ def test_interview_handler_threads_state_dir_into_registry(tmp_path: Any) -> Non
 
 
 @pytest.mark.asyncio
+async def test_lateral_and_submit_emit_privacy_safe_dispatch_telemetry(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_subagent_dispatch",
+        lambda properties: captured.append(properties),
+    )
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(
+        agent_runtime_backend="gemini",
+        fanout_registry=registry,
+    )
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": ["researcher", "contrarian"],
+        }
+    )
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    submit, _ = _bounded_submit(registry, tmp_path)
+    submitted = await submit.handle(
+        {
+            "correlation_key": "context.persona",
+            "fanout_id": fanout_id,
+            "results": [
+                {"key": "researcher", "content": "r"},
+                {"key": "contrarian", "undispatched": True},
+            ],
+        }
+    )
+
+    assert submitted.is_ok
+    assert captured[0] == {
+        "phase": "emitted",
+        "fanout_kind": "lateral_persona_panel",
+        "payload_count": 2,
+        "invocation_surface": "internal_runtime",
+        "dispatch_authority": "internal_runtime",
+        "host_family": "unknown",
+        "host_identity_status": "unknown",
+        "host_capability": "undeclared",
+        "capability_source": "none",
+        "delivery_mode": "inline_runtime",
+        "execution_preference": "sequential",
+        "fallback_strategy": "sequential",
+        "configured_worker_backend": "gemini",
+        "host_worker_mismatch": False,
+        "decision_reason": "configured_internal_runtime",
+        "contract_version": "v2",
+        "fanout_reentry_available": True,
+    }
+    assert captured[1] == {
+        "phase": "submitted",
+        "fanout_kind": "lateral_persona_panel",
+        "submission_status": "complete",
+        "expected_count": 2,
+        "received_count": 1,
+        "undispatched_count": 1,
+        "contract_version": "v2",
+    }
+
+
+@pytest.mark.asyncio
 async def test_lateral_handler_registers_fanout_and_submit_tool_synthesizes(
     tmp_path: Any,
 ) -> None:

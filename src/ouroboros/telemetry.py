@@ -376,6 +376,76 @@ _MCP_SERVE_STARTED_KEYS = frozenset(
         "ci",
     }
 )
+_SUBAGENT_DISPATCH_KEYS = frozenset(
+    {
+        "phase",
+        "fanout_kind",
+        "payload_count",
+        "invocation_surface",
+        "dispatch_authority",
+        "host_family",
+        "host_identity_status",
+        "host_capability",
+        "capability_source",
+        "delivery_mode",
+        "execution_preference",
+        "fallback_strategy",
+        "configured_worker_backend",
+        "host_worker_mismatch",
+        "decision_reason",
+        "contract_version",
+        "fanout_reentry_available",
+        "submission_status",
+        "expected_count",
+        "received_count",
+        "undispatched_count",
+        "frontdoor",
+        "first_command_surface",
+        "app_version",
+        "os",
+        "python_version",
+        "ci",
+    }
+)
+
+_SUBAGENT_DISPATCH_ENUMS: dict[str, frozenset[str]] = {
+    "phase": frozenset({"emitted", "submitted"}),
+    "fanout_kind": frozenset(
+        {"lateral_persona_panel", "question_advisory", "code_investigation", "unknown"}
+    ),
+    "invocation_surface": frozenset({"mcp_host", "internal_runtime"}),
+    "dispatch_authority": frozenset({"mcp_host", "internal_runtime", "passive_bridge"}),
+    "host_family": frozenset({"claude_code", "codex", "opencode", "other_known", "unknown"}),
+    "host_identity_status": frozenset({"known", "unknown"}),
+    "host_capability": frozenset({"parallel", "sequential", "unavailable", "undeclared"}),
+    "capability_source": frozenset(
+        {"mcp_extension", "trusted_server_option", "passive_bridge", "none"}
+    ),
+    "delivery_mode": frozenset({"passive_bridge", "inline_host", "inline_runtime"}),
+    "execution_preference": frozenset({"parallel", "sequential"}),
+    "fallback_strategy": frozenset({"sequential", "none"}),
+    "decision_reason": frozenset(
+        {
+            "passive_bridge_detected",
+            "declared_parallel",
+            "declared_sequential",
+            "host_capability_undeclared",
+            "configured_internal_runtime",
+        }
+    ),
+    "contract_version": frozenset({"v2"}),
+    "submission_status": frozenset(
+        {
+            "complete",
+            "partial",
+            "invalid_result_entry",
+            "unknown_fanout_id",
+            "correlation_mismatch",
+            "unknown_kind",
+            "publication_failed",
+        }
+    ),
+}
 _FIRST_COMMAND_SURFACES = frozenset(
     {"setup_complete", "readme_quickstart", "getting_started", "unknown"}
 )
@@ -976,6 +1046,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _WORKFLOW_OUTCOME_KEYS
     if event == "mcp_serve_started":
         return _MCP_SERVE_STARTED_KEYS
+    if event == "subagent_dispatch":
+        return _SUBAGENT_DISPATCH_KEYS
     return None
 
 
@@ -1075,6 +1147,44 @@ def capture_tool_call(
         else:
             properties["ok"] = ok
         capture("command_run", properties)
+    except Exception:
+        pass
+
+
+def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
+    """Capture one privacy-safe fan-out contract or re-entry boundary.
+
+    Values are closed enums and bounded counts. Unknown/custom strings are
+    folded before ``capture`` so raw client names, backend names, identifiers,
+    prompts, and outputs can never reach PostHog through this event.
+    """
+    try:
+        safe: dict[str, Any] = {}
+        for key, value in properties.items():
+            allowed = _SUBAGENT_DISPATCH_ENUMS.get(key)
+            if allowed is not None:
+                if isinstance(value, str) and value in allowed:
+                    safe[key] = value
+                continue
+            if key in {
+                "payload_count",
+                "expected_count",
+                "received_count",
+                "undispatched_count",
+            }:
+                if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 64:
+                    safe[key] = value
+                continue
+            if key in {"host_worker_mismatch", "fanout_reentry_available"}:
+                if isinstance(value, bool):
+                    safe[key] = value
+                continue
+            if key == "configured_worker_backend":
+                from ouroboros.backends.capabilities import get_backend_capability
+
+                capability = get_backend_capability(str(value))
+                safe[key] = capability.name if capability is not None else "other"
+        capture("subagent_dispatch", safe)
     except Exception:
         pass
 
@@ -1297,5 +1407,6 @@ __all__ = [
     "flush",
     "is_enabled",
     "set_context",
+    "capture_subagent_dispatch",
     "show_first_run_notice",
 ]

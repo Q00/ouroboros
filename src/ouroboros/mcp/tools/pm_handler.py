@@ -52,6 +52,7 @@ from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
 from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.question_advisory import attach_question_advisory
@@ -59,7 +60,6 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     build_pm_interview_subagent,
     dispatch_plugin_terminal,
-    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -405,7 +405,10 @@ class PMInterviewHandler:
             repository_roster=pm_repository_roster(
                 pm_meta.get("brownfield_repos") if pm_meta else None
             ),
-            dispatch_mode=resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode),
+            dispatch_mode=resolve_request_subagent_dispatch(
+                self.agent_runtime_backend,
+                self.opencode_mode,
+            ),
             runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
             fanout_registry=self.fanout_registry,

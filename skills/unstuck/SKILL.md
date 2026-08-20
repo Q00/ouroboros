@@ -107,13 +107,17 @@ Two pieces matter:
 - **Hidden HTML comment** — markdown viewers render nothing for `<!-- ... -->`, so the block doesn't pollute the human-visible output.
 - **Base64 body** — base64's alphabet is `[A-Za-z0-9+/=]`, which can never produce the sequence `-->`. So even if a user-supplied `problem_context` or `current_approach` contains `-->` (HTML/JS debugging is the obvious case), the encoded body cannot prematurely close the wrapper and leak the dispatch into the visible markdown.
 
-Decoded, the body is JSON:
+Decoded, the body is JSON. An MCP host that did not declare subagent capability
+receives the neutral shape:
 
 ```json
-{"dispatch_mode": "sequential", "legacy_dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
+{"dispatch_mode": "host_decides", "host_action": "dispatch_subagents_if_supported", "execution_preference": "parallel", "fallback_strategy": "sequential", "persona_count": N, "payloads": [...]}
 ```
 
-To recover: locate the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->` at the end of `content`, base64-decode it, then `JSON.parse`. (See `tests/unit/mcp/tools/test_lateral_think_handler.py::_extract_inline_dispatch` for the canonical extraction helper.)
+An explicitly sequential execution authority receives `dispatch_mode="sequential"`
+with `legacy_dispatch_mode="inline_fallback"` for compatibility. To recover:
+locate the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n`
+and `\n-->` at the end of `content`, base64-decode it, then `JSON.parse`.
 
 #### Shape A — `dispatch_mode = "plugin"` (OpenCode plugin mode only)
 
@@ -134,7 +138,7 @@ If you expected plugin mode but the response is inline text (neither `_subagent`
 The handler ran the prompt builder internally and returned ready-to-use markdown:
 
 - Solo response: a single `# Lateral Thinking: <approach>` block followed by the reframing prompt.
-- Debate response (`dispatch_mode = "sequential"`; `legacy_dispatch_mode = "inline_fallback"` may also be present): N such blocks concatenated with `\n\n---\n\n` separators.
+- Debate response: N such blocks concatenated with `\n\n---\n\n` separators. The dispatch block distinguishes declared `host_driven`, capability-neutral `host_decides`, and explicit `sequential` execution.
 
 ##### Solo (any runtime)
 
@@ -150,22 +154,23 @@ Driving fan-out from this dispatch block — instead of from the joined human-di
 - **Separator collision** — `\n\n---\n\n` can legitimately appear inside a user-supplied `problem_context` or `current_approach`, so splitting the joined text would over-fragment and corrupt prompts. The dispatch block uses a unique versioned sentinel that user content cannot collide with.
 - **Behavioral drift across runtimes** — the dispatch block carries the same canonical payloads `_subagents` carries, so debate results don't diverge by environment.
 
-1. Locate the dispatch block at the end of the MCP response's `content` text — the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->`. Base64-decode the captured body, then `JSON.parse` to get `{dispatch_mode, persona_count, payloads}`. If the block is missing (older handler that pre-dates the v1 sentinel), fall through to the constrained-runtime path below — *do not* split the joined text.
+1. Locate the dispatch block at the end of the MCP response's `content` text. Base64-decode the captured body, then `JSON.parse` to get `{dispatch_mode, host_action, persona_count, payloads}`. If the block is missing, fall through to the constrained-runtime path below — *do not* split the joined text.
 2. Surface a short "what the lateral toolkit suggests" header to the user, with the markdown above the dispatch block, so the MCP call is visible as a real product surface, not silent.
-3. Spawn N persona subagents in parallel — one per entry in `payloads` — using your host's native subagent mechanism. Each child receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded, with strict isolation per child. The user sees "Running N agents…".
-   - **Claude Code** → emit N `Task` calls (`general-purpose` subagent) in a **single message** so they run concurrently.
-   - **Codex** → Codex subagents are triggered by explicit natural-language delegation, not a callable tool name (do NOT call `multi_agent_v1.spawn_agent` — it does not exist). In one turn, explicitly spawn one Codex subagent per payload, hand each child its payload `prompt` + `context`, wait for all children, then continue.
+3. If `host_action="dispatch_subagents_if_supported"`, use the host's native parallel mechanism when available and otherwise process the same payloads sequentially. If `host_action="spawn_subagents"`, spawn N persona subagents in parallel. Each child receives the payload's `prompt` verbatim plus its `context`, with strict isolation per child.
+   - **Claude Code** → emit N `Task` calls (`general-purpose` subagent) in a **single message** so they run concurrently when the Task surface is available.
+   - **Codex** → explicitly delegate one Codex subagent per payload in one turn; do not call a nonexistent `multi_agent_v1.spawn_agent` tool.
 4. Wait for all N to return.
 5. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 6. Synthesize per the **Synthesize** block below.
 
 ##### Debate, constrained runtime without sub-agent dispatch
 
-If the response is stamped with `dispatch_mode="sequential"` and the host has no
-native parallel primitive, process each payload in order. Correlate every result
-by `result_correlation_key` (normally `context.persona`), then synthesize after
-the last payload. Treat `legacy_dispatch_mode="inline_fallback"` as compatibility
-metadata only; do not use it to override the canonical sequential contract.
+If the response is stamped with `dispatch_mode="sequential"`, or with
+`dispatch_mode="host_decides"` and the host has no native parallel primitive,
+process each payload in order. Correlate every result by
+`result_correlation_key` (normally `context.persona`), then synthesize after the
+last payload. Treat `legacy_dispatch_mode="inline_fallback"` as compatibility
+metadata only.
 
 ##### Debate, runtime cannot dispatch sub-agents (constrained subprocess, no Task surface)
 
