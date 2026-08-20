@@ -559,6 +559,46 @@ def test_inherited_sdk_uses_login_shell_recovered_path(monkeypatch, tmp_path) ->
     assert run_mcp_server.await_args.args[4] == "claude_mcp"
 
 
+def test_shell_hydrated_non_sdk_selector_is_authoritative(monkeypatch, tmp_path) -> None:
+    _clear_runtime_selection(monkeypatch)
+
+    def hydrate() -> None:
+        monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", hydrate)
+    _installed_clis(monkeypatch, "claude", "codex")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    assert run_mcp_server.await_args.args[4] == "codex"
+    assert "serving with 'claude-cli'" not in result.output
+
+
+def test_shell_hydrated_explicit_sdk_selector_still_fails(monkeypatch, tmp_path) -> None:
+    _clear_runtime_selection(monkeypatch)
+
+    def hydrate() -> None:
+        monkeypatch.setenv("OUROBOROS_RUNTIME", "claude")
+
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", hydrate)
+    _installed_clis(monkeypatch, "claude", "codex")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
 def test_no_installed_cli_keeps_the_original_refusal(monkeypatch, tmp_path) -> None:
     """With nothing to serve with, the actionable error is still the answer."""
     _clear_runtime_selection(monkeypatch)

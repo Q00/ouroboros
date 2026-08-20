@@ -546,7 +546,6 @@ def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str]
         os.environ.get(key, "").strip() for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
     ):
         return None
-    _ensure_shell_env()
     for backend, public_name, configured_path, command in _SDK_RUNTIME_STANDINS:
         executable = configured_path() or command
         if shutil.which(executable):
@@ -1245,6 +1244,10 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # Detached MCP hosts often inherit a minimal environment. Hydrate before
+    # resolving selector provenance so login-shell/cache OUROBOROS_* choices
+    # remain authoritative rather than being mistaken for the shipped default.
+    _ensure_shell_env()
     # Resolve the exact backend the composition root would use before touching
     # nested-process state, shell state, persistence, or runtime adapters. A
     # missing option inherits config and ultimately defaults to the SDK-backed
