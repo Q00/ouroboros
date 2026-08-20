@@ -4476,7 +4476,7 @@ class TestClaudeSetup:
     def test_native_windows_auto_skips_persistent_mcp_registration(self, tmp_path: Path) -> None:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="auto") is True
 
@@ -4485,14 +4485,14 @@ class TestClaudeSetup:
     def test_native_windows_stdio_fails_closed(self, tmp_path: Path) -> None:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="stdio") is False
 
     def test_native_windows_http_mode_writes_explicit_loopback_url(self, tmp_path: Path) -> None:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="http") is True
 
@@ -4502,7 +4502,7 @@ class TestClaudeSetup:
     def test_native_windows_http_fails_without_launchable_mcp(self, tmp_path: Path) -> None:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
             patch("ouroboros.cli.commands.setup._codex_release_mcp_launcher", return_value=None),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="http") is False
@@ -4515,7 +4515,7 @@ class TestClaudeSetup:
         config.write_text("[mcp_servers.ouroboros]\n", encoding="utf-8")
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
             patch(
                 "ouroboros.cli.commands.setup._codex_release_mcp_launcher",
                 return_value=("uvx", ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]),

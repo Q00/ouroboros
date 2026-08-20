@@ -76,6 +76,7 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
 )
+from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
@@ -436,14 +437,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-_CODEX_HTTP_MCP_SECTION = """# Ouroboros native-Windows HTTP MCP (explicit opt-in; no persistence).
-[mcp_servers.ouroboros]
-url = "http://127.0.0.1:8765/mcp"
-"""
-_CODEX_HTTP_MCP_COMMAND = (
-    "ouroboros mcp serve --runtime codex --llm-backend codex "
-    "--transport streamable-http --host 127.0.0.1 --port 8765"
-)
 
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
@@ -549,10 +542,6 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "agent_runtime_coordinator": "standard",
     "agent_runtime_evaluation": "deep",
 }
-
-
-def _is_native_windows() -> bool:
-    return os.name == "nt"
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
@@ -1217,57 +1206,22 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    if _is_native_windows():
-        if mode == "stdio":
-            print_error(
-                "Native-Windows Codex Desktop stdio MCP can terminate the app server. "
-                "Use --mcp-mode http and run the printed loopback server command, or use WSL 2."
-            )
-            return False
-        if mode == "auto":
-            codex_config = resolve_codex_home() / "config.toml"
-            if codex_config.exists():
-                try:
-                    parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
-                except tomllib.TOMLDecodeError:
-                    print_error(f"Could not parse {codex_config} — Codex setup not saved.")
-                    return False
-                if _codex_mcp_entry_from_toml(parsed) is not None:
-                    print_info("Preserved existing Codex MCP config on native Windows.")
-                    return True
-            print_info(
-                "Skipped persistent MCP registration on native Windows. "
-                "Use --mcp-mode http for the explicit loopback HTTP topology."
-            )
-            return True
-        if mode == "http":
-            launcher = _codex_release_mcp_launcher()
-            if launcher is None:
-                print_error("Could not find a launchable MCP [mcp] command for explicit HTTP mode.")
-                return False
-            command, launcher_args = launcher
-            http_args = [
-                *launcher_args,
-                "--transport",
-                "streamable-http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8765",
-            ]
-            rendered_section = _CODEX_HTTP_MCP_SECTION
-            print_info(
-                "Start the MCP server before opening Codex Desktop: "
-                + " ".join([command, *(json.dumps(arg) for arg in http_args)])
-            )
-        else:
-            rendered_section = _render_codex_mcp_section()
+    if is_native_windows():
+        handled, success, section = apply_windows_codex_mcp_mode(
+            mode,
+            codex_config=resolve_codex_home() / "config.toml",
+            launcher=_codex_release_mcp_launcher() if mode == "http" else None,
+            print_error=print_error,
+            print_info=print_info,
+        )
+        if handled and (not success or section is None):
+            return success
+        rendered_section = section if handled else _render_codex_mcp_section()
     else:
         if mode == "http":
             print_error("--mcp-mode http is only for native Windows Codex Desktop.")
             return False
         rendered_section = _render_codex_mcp_section()
-
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
