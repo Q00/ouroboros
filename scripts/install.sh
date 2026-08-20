@@ -1362,6 +1362,7 @@ elif command -v ouroboros &>/dev/null; then
   OUROBOROS_SETUP_CMD="ouroboros"
 fi
 
+
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
 if [ -n "$RUNTIME" ] && [ -n "$OUROBOROS_SETUP_CMD" ]; then
@@ -1388,6 +1389,42 @@ if [ -n "$OUROBOROS_SETUP_CMD" ]; then
   _info "Refreshing runtime artifacts for detected runtimes"
   "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
+_decimal_at_least() {
+  local left right
+  left="${1#${1%%[!0]*}}"
+  right="${2#${2%%[!0]*}}"
+  [ -n "$left" ] || left=0
+  [ -n "$right" ] || right=0
+  if [ "${#left}" -ne "${#right}" ]; then
+    [ "${#left}" -gt "${#right}" ]
+  else
+    [ "$left" = "$right" ] || [[ "$left" > "$right" ]]
+  fi
+}
+
+_ensure_omp_tool_call_timeout() {
+  local omp_bin current
+  omp_bin="$(command -v omp 2>/dev/null || true)"
+  if [ -z "$omp_bin" ]; then
+    return 0
+  fi
+  current="$("$omp_bin" config get extensionHandlers.toolCallTimeoutMs 2>/dev/null || true)"
+  case "$current" in
+    ''|*[!0-9]*) ;;
+    *)
+      if _decimal_at_least "$current" 60000; then
+        return 0
+      fi
+      ;;
+  esac
+  if "$omp_bin" config set extensionHandlers.toolCallTimeoutMs 60000 >/dev/null 2>&1; then
+    _ok "OMP MCP tool timeout set to 60s"
+  else
+    _warn "Could not set OMP MCP tool timeout; run: omp config set extensionHandlers.toolCallTimeoutMs 60000"
+  fi
+}
+
+_ensure_omp_tool_call_timeout
 
 # 5. Claude Code integration. The default Claude selection and its explicit
 # SDK alias stay on MCP 1.x. The plugin-owned MCP launcher starts MCP 2 in a

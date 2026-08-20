@@ -702,6 +702,18 @@ def _parse_question_candidate(persona: str, response: str) -> QuestionCandidate 
     return QuestionCandidate(persona=persona, question=question, target_dimension=target)
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedInterviewQuestion:
+    """Provider-ready question request or an immediate deterministic question."""
+
+    immediate_question: str | None = None
+    messages: tuple[Message, ...] = ()
+    config: CompletionConfig | None = None
+    system_prompt: str = ""
+    conversation_history: tuple[Message, ...] = ()
+    preserve_prefix_messages: int = 0
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -864,20 +876,21 @@ class InterviewEngine:
 
         return Result.ok(state)
 
-    async def ask_next_question(
-        self, state: InterviewState
-    ) -> Result[str, ProviderError | ValidationError]:
-        """Generate the next question based on current state.
+    def prepare_next_question(
+        self,
+        state: InterviewState,
+    ) -> Result[PreparedInterviewQuestion, ValidationError]:
+        """Build the canonical provider request for the next interview question.
 
-        Args:
-            state: Current interview state.
-
-        Returns:
-            Result containing the next question or error.
+        The ordinary question path and the atomic turn planner share this exact
+        prompt-budgeting boundary. This prevents a fused turn from drifting from
+        the long-context, glossary, reference, and PM-steering behavior already
+        owned by :class:`InterviewEngine`.
         """
         if state.is_complete and state.needs_initial_context_summary:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
-
+            return Result.ok(
+                PreparedInterviewQuestion(immediate_question=self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            )
         if state.is_complete:
             return Result.err(
                 ValidationError(
@@ -886,15 +899,17 @@ class InterviewEngine:
                     value=state.status,
                 )
             )
+
         effective_initial_context = self._effective_initial_context(state)
         if effective_initial_context is None:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            return Result.ok(
+                PreparedInterviewQuestion(immediate_question=self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            )
 
         adapter_question = state.next_adapter_question()
         if adapter_question is not None:
-            return Result.ok(adapter_question)
+            return Result.ok(PreparedInterviewQuestion(immediate_question=adapter_question))
 
-        # Build the context from previous rounds
         conversation_history = self._build_conversation_history(
             state,
             initial_context=effective_initial_context,
@@ -913,10 +928,6 @@ class InterviewEngine:
             max_chars=history_budget,
             preserve_prefix_messages=preserve_prefix_messages,
         )
-
-        # Generate next question. Budget against estimated serialized CLI
-        # prompt cost, not raw message content, because CLI adapters add
-        # framing around every message before sending prompts to the model.
         history_cost = self._message_budget_cost(conversation_history)
         system_prompt_budget = min(
             self._MAX_SYSTEM_PROMPT_CHARS,
@@ -930,10 +941,10 @@ class InterviewEngine:
             initial_context=effective_initial_context,
             max_chars=system_prompt_budget,
         )
-        messages = [
+        messages = (
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             *conversation_history,
-        ]
+        )
 
         assert self.model is not None
         config = CompletionConfig(
@@ -943,7 +954,29 @@ class InterviewEngine:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
+        return Result.ok(
+            PreparedInterviewQuestion(
+                messages=messages,
+                config=config,
+                system_prompt=system_prompt,
+                conversation_history=tuple(conversation_history),
+                preserve_prefix_messages=preserve_prefix_messages,
+            )
+        )
 
+    async def ask_next_question(
+        self, state: InterviewState
+    ) -> Result[str, ProviderError | ValidationError]:
+        """Generate the next question based on current state."""
+        prepared_result = self.prepare_next_question(state)
+        if prepared_result.is_err:
+            return Result.err(prepared_result.error)
+        prepared = prepared_result.value
+        if prepared.immediate_question is not None:
+            return Result.ok(prepared.immediate_question)
+
+        assert prepared.config is not None
+        messages = list(prepared.messages)
         log.debug(
             "interview.generating_question",
             interview_id=state.interview_id,
@@ -951,22 +984,17 @@ class InterviewEngine:
             message_count=len(messages),
         )
 
-        # Question candidate panel (K2): three persona candidates + deterministic
-        # selection. Falls through to the single call when disabled, when no
-        # per-dimension breakdown is stored, or when no valid candidate is
-        # produced — so existing behavior is always reachable.
         if self.question_candidate_panel:
             candidate = await self._select_question_from_candidates(
                 state,
-                system_prompt=system_prompt,
-                conversation_history=conversation_history,
-                config=config,
+                system_prompt=prepared.system_prompt,
+                conversation_history=list(prepared.conversation_history),
+                config=prepared.config,
             )
             if candidate is not None:
                 return Result.ok(candidate)
 
-        result = await self._require_llm_adapter().complete(messages, config)
-
+        result = await self._require_llm_adapter().complete(messages, prepared.config)
         if result.is_err:
             log.warning(
                 "interview.question_generation_failed",
@@ -977,14 +1005,12 @@ class InterviewEngine:
             return Result.err(result.error)
 
         question = result.value.content.strip()
-
         log.info(
             "interview.question_generated",
             interview_id=state.interview_id,
             round_number=state.current_round_number,
             question_length=len(question),
         )
-
         return Result.ok(question)
 
     async def _select_question_from_candidates(

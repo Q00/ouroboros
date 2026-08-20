@@ -48,6 +48,7 @@ from ouroboros.bigbang.requirement_distillation import (
     seed_readiness_details,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
@@ -219,6 +220,7 @@ _INTERVIEW_COMPLETION_PHRASES = (
     "no ambiguity remains",
     "no ambiguity left",
 )
+_INTERVIEW_STRUCTURED_COMPLETION_PREFIX = "[from-user][refined][closure]"
 
 
 def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
@@ -315,6 +317,9 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
         and not allow_auto_safe_default_completion
     ):
         return False
+
+    if stripped.startswith(_INTERVIEW_STRUCTURED_COMPLETION_PREFIX):
+        return True
 
     normalized = _normalize_interview_answer(answer)
     if not normalized:
@@ -1630,6 +1635,25 @@ class InterviewHandler:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    @staticmethod
+    def _apply_interview_score(
+        state: InterviewState,
+        score: AmbiguityScore,
+        *,
+        advance_streak: bool = True,
+        reset_on_failure: bool = True,
+    ) -> None:
+        """Apply one canonical ambiguity result to persisted interview state."""
+        qualifies = qualifies_for_seed_completion(score, is_brownfield=state.is_brownfield)
+        if advance_streak:
+            _update_completion_candidate_streak(state, score)
+        elif reset_on_failure and not qualifies:
+            _reset_stale_completion_streak(state)
+        state.store_ambiguity(
+            score=score.overall_score,
+            breakdown=score.breakdown.model_dump(mode="json"),
+        )
+
     async def _score_interview_state(
         self,
         llm_adapter: LLMAdapter,
@@ -1680,22 +1704,11 @@ class InterviewHandler:
             return None
 
         score = score_result.value
-        qualifies = qualifies_for_seed_completion(
+        self._apply_interview_score(
+            state,
             score,
-            is_brownfield=state.is_brownfield,
-        )
-        if advance_streak:
-            # Standard routing: single helper owns both bump-on-qualify
-            # and reset-on-fail so the two are never out of sync.
-            _update_completion_candidate_streak(state, score)
-        elif reset_on_failure and not qualifies:
-            # Explicit-done path (or any caller that owns the increment):
-            # we still MUST share the stale-streak reset contract so a
-            # weak rescore cannot let a stored streak survive.
-            _reset_stale_completion_streak(state)
-        state.store_ambiguity(
-            score=score.overall_score,
-            breakdown=score.breakdown.model_dump(mode="json"),
+            advance_streak=advance_streak,
+            reset_on_failure=reset_on_failure,
         )
         return score
 
@@ -3088,22 +3101,62 @@ class InterviewHandler:
             # question generation failures downstream
             await engine.save_state(state)
 
-            # Only score ambiguity when completion is actually
-            # possible. Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
-            # result cannot trigger early exit, so the LLM call
-            # (~3-8 s) is pure waste. Once scoring starts, run it
-            # before question generation so the next prompt sees
-            # the latest ambiguity snapshot, closure threshold,
-            # and completion-candidate streak.
+            # Once completion is possible, plan the new ambiguity snapshot and
+            # next question atomically. This keeps the score→question dependency
+            # without imposing two serial provider calls or requiring adapter
+            # concurrency. Earlier rounds keep the ordinary question-only path.
             answered = _count_answered_rounds(state)
-            if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                # Scoring must complete before question generation:
-                # _score_interview_state mutates state.ambiguity_score,
-                # completion_candidate_streak, and ambiguity_breakdown.
-                # ask_next_question reads those fields to build the
-                # system prompt (closure mode, seed-ready, streak).
-                # Running them in parallel would give the question
-                # generator stale routing context.
+            supports_atomic_turn = isinstance(InterviewEngine, type) and isinstance(
+                engine, InterviewEngine
+            )
+            if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT and supports_atomic_turn:
+                backend = _handler_llm_backend(self.llm_backend, "clarification")
+                scorer = AmbiguityScorer(
+                    llm_adapter=llm_adapter,
+                    model=get_llm_model_for_role("clarification", backend=backend),
+                    max_retries=_LIVE_AMBIGUITY_MAX_RETRIES,
+                )
+                planner = InterviewTurnPlanner(engine=engine, scorer=scorer)
+                question_generation_started_at = time.perf_counter()
+                question_result: Any = None
+                try:
+                    turn_result = await planner.plan(state)
+                finally:
+                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                if turn_result.is_err:
+                    live_score = None
+                    question_result = Result.err(turn_result.error)
+                else:
+                    turn = turn_result.value
+                    live_score = turn.ambiguity
+                    if live_score is None:
+                        state.clear_stored_ambiguity()
+                        _reset_stale_completion_streak(state)
+                    else:
+                        self._apply_interview_score(state, live_score)
+                    lateral_review_meta = _maybe_record_lateral_review_advisory(
+                        state,
+                        previous_milestone=previous_milestone,
+                        score=live_score,
+                    )
+                    if (
+                        live_score is not None
+                        and qualifies_for_seed_completion(
+                            live_score,
+                            is_brownfield=state.is_brownfield,
+                        )
+                        and state.completion_candidate_streak >= AUTO_COMPLETE_STREAK_REQUIRED
+                    ):
+                        return await self._complete_interview_response(
+                            engine,
+                            state,
+                            session_id,
+                            live_score,
+                            turn_started_at=turn_started_at,
+                            question_generation_duration_ms=question_generation_duration_ms,
+                        )
+                    question_result = Result.ok(turn.question)
+            elif answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
                 ambiguity_scoring_started_at = time.perf_counter()
                 try:
                     live_score = await self._score_interview_state(llm_adapter, state)

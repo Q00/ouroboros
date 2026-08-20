@@ -632,6 +632,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Append `[refined]` to the prefix when sending the structured payload to
    MCP (e.g., `[from-user][refined]`). MCP treats refined answers as
    high-confidence ground truth for ambiguity scoring.
+   When the refined answer explicitly closes the interview, add the language-independent
+   `[closure]` marker: `[from-user][refined][closure]`. Do not encode closure by
+   matching natural-language phrases; the MCP handler treats this marker as the
+   structured human decision and all other answers continue through normal routing.
 
 6. **Keep a visible ambiguity ledger**:
    Track independent ambiguity tracks (scope, constraints, outputs, verification).

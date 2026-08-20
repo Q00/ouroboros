@@ -2288,6 +2288,52 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     ]
 
 
+def test_installer_configures_omp_after_runtime_setup_source_order() -> None:
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    assert source.rfind("_ensure_omp_tool_call_timeout") > source.index(
+        "setup --runtime $RUNTIME --non-interactive"
+    )
+
+
+def test_installer_preserves_higher_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 120000; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_preserves_oversized_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 9223372036854775808; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_sets_omp_tool_call_timeout_when_omp_is_available(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nprintf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" in calls
+
+
 def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,

@@ -4473,6 +4473,31 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_windows_prepared_file_ignores_synthetic_posix_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with patch.object(runtime_activation.os, "name", "nt"):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
+    def test_posix_prepared_file_still_rejects_broader_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with (
+            patch.object(runtime_activation.os, "name", "posix"),
+            pytest.raises(OSError, match="Prepared file mode exceeds"),
+        ):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
     @pytest.mark.parametrize(
         ("persisted", "profile"),
         [("claude_mcp", "claude-cli"), ("claude", "claude")],
