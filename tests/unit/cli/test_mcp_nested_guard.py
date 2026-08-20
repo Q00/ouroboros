@@ -311,6 +311,7 @@ def _clear_runtime_selection(monkeypatch) -> None:
     monkeypatch.delenv("OUROBOROS_AGENT_RUNTIME", raising=False)
     monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", lambda: None)
     # An inherited SDK default now looks for an installed CLI to serve with, so
     # what is on the developer's PATH would otherwise decide these outcomes.
     _installed_clis(monkeypatch)
@@ -484,6 +485,78 @@ def test_env_selected_sdk_runtime_still_fails(monkeypatch, tmp_path) -> None:
         result = runner.invoke(app, ["serve"])
 
     _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
+def test_legacy_env_selected_sdk_runtime_still_fails(monkeypatch, tmp_path) -> None:
+    """OUROBOROS_RUNTIME is an explicit selector too and must not be replaced."""
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "claude", "codex")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "claude")
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
+def test_inherited_sdk_uses_configured_claude_cli_path(monkeypatch, tmp_path) -> None:
+    _clear_runtime_selection(monkeypatch)
+    configured_cli = tmp_path / "tools" / "claude-custom"
+    configured_cli.parent.mkdir()
+    configured_cli.write_text("", encoding="utf-8")
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n"
+        "  runtime_backend: claude\n"
+        f"  cli_path: {configured_cli}\n"
+        "llm:\n  backend: claude\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp.shutil.which",
+        lambda command: str(configured_cli) if command == str(configured_cli) else None,
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    assert run_mcp_server.await_args.args[4] == "claude_mcp"
+
+
+def test_inherited_sdk_uses_login_shell_recovered_path(monkeypatch, tmp_path) -> None:
+    _clear_runtime_selection(monkeypatch)
+    hydrated = False
+
+    def hydrate() -> None:
+        nonlocal hydrated
+        hydrated = True
+
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", hydrate)
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.mcp.shutil.which",
+        lambda command: f"/login/bin/{command}" if hydrated and command == "claude" else None,
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    assert hydrated is True
+    assert run_mcp_server.await_args.args[4] == "claude_mcp"
 
 
 def test_no_installed_cli_keeps_the_original_refusal(monkeypatch, tmp_path) -> None:

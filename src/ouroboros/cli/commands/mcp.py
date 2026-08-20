@@ -27,7 +27,12 @@ from ouroboros import telemetry as usage_telemetry
 from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
-from ouroboros.config import get_agent_runtime_backend
+from ouroboros.config import (
+    get_agent_runtime_backend,
+    get_cli_path,
+    get_codex_cli_path,
+    get_opencode_cli_path,
+)
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
@@ -518,38 +523,33 @@ def _effective_mcp_server_runtime(runtime: AgentRuntimeBackend | None) -> str:
 
 
 # Executable stand-ins for the in-process ``claude`` SDK runtime, in preference
-# order. ``claude-cli`` is first because it is the same engine out of process,
-# so a user who inherited the SDK default gets the runtime they meant.
-# Each row is (CLI on PATH, canonical backend, the spelling a user would type).
-# The public spelling is carried rather than derived: ``public_runtime_backend``
-# maps public names onto canonical ones, and telling a user to pass the internal
-# ``claude_mcp`` would name a value the ``--runtime`` option rejects.
-_SDK_RUNTIME_STANDINS: tuple[tuple[str, str, str], ...] = (
-    ("claude", CLAUDE_CLI_RUNTIME_BACKEND, AgentRuntimeBackend.CLAUDE_CLI.value),
-    ("codex", "codex", AgentRuntimeBackend.CODEX.value),
-    ("opencode", "opencode", AgentRuntimeBackend.OPENCODE.value),
+# order. Each row carries the canonical backend, public spelling, configured
+# path resolver, and bare command used by the runtime factory.
+_SDK_RUNTIME_STANDINS = (
+    (CLAUDE_CLI_RUNTIME_BACKEND, AgentRuntimeBackend.CLAUDE_CLI.value, get_cli_path, "claude"),
+    ("codex", AgentRuntimeBackend.CODEX.value, get_codex_cli_path, "codex"),
+    ("opencode", AgentRuntimeBackend.OPENCODE.value, get_opencode_cli_path, "opencode"),
 )
 
 
 def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str] | None:
     """Return an executable runtime to use in place of an inherited SDK default.
 
-    The SDK-backed ``claude`` runtime cannot run inside this process, so a host
-    that reaches serve with it gets no tools at all. When nobody asked for that
-    runtime here — it arrived from config or from the shipped default — an
-    installed CLI is a better answer than a dead server, and the substitution is
-    announced rather than silent.
-
-    An explicit ``--runtime claude`` or ``OUROBOROS_AGENT_RUNTIME=claude`` is
-    left to fail: overriding what the caller just said would be worse than the
-    error.
+    Explicit CLI or environment selections remain authoritative. For inherited
+    config/default selection, hydrate the detached host's login-shell PATH and
+    reuse the backend-specific executable path resolvers used by runtime
+    construction instead of maintaining a narrower availability definition.
     """
     if runtime is not None:
         return None
-    if os.environ.get("OUROBOROS_AGENT_RUNTIME", "").strip():
+    if any(
+        os.environ.get(key, "").strip() for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
+    ):
         return None
-    for command, backend, public_name in _SDK_RUNTIME_STANDINS:
-        if shutil.which(command):
+    _ensure_shell_env()
+    for backend, public_name, configured_path, command in _SDK_RUNTIME_STANDINS:
+        executable = configured_path() or command
+        if shutil.which(executable):
             return backend, public_name
     return None
 
@@ -1270,8 +1270,8 @@ def serve(
         _stderr_console.print(
             Text(
                 "Inherited the 'claude' SDK runtime, which cannot run inside the MCP "
-                f"server; serving with '{standin_name}' instead. Pass --runtime or set "
-                "OUROBOROS_AGENT_RUNTIME to choose.",
+                f"server; serving with '{standin_name}' instead. Pass --runtime, set "
+                "OUROBOROS_AGENT_RUNTIME, or set OUROBOROS_RUNTIME to choose.",
                 style="yellow",
             )
         )
