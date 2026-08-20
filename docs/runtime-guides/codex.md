@@ -120,13 +120,13 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default. On native Windows, default setup creates no stdio child; use explicit `--mcp-mode http` and run the printed loopback server command before opening Codex Desktop. The server is not installed as background persistence.
 - Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
 Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
 
-`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; setup preserves it by default. Use `--mcp-mode stdio` only on supported hosts when you intentionally want a managed command-spawned server. Native Windows refuses that crash-prone topology and offers explicit operator-owned `--mcp-mode http` instead.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 
