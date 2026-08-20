@@ -10595,6 +10595,27 @@ class TestParallelACExecutor:
     def test_pytest_s_argument_is_not_uv_script_mode(self, command: str) -> None:
         assert _looks_like_test_command(command) is True
 
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --with --isolated pytest -q",
+            "uv run --color -- pytest -q",
+        ),
+    )
+    def test_uv_missing_option_values_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --quiet pytest -q",
+            "uv run --verbose pytest -q",
+            "uv run --system-certs pytest -q",
+        ),
+    )
+    def test_uv_current_global_flags_remain_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
     def test_option_bearing_uv_command_backs_its_exact_tests_passed_claim(self) -> None:
         command = "uv run --python 3.12 --with pytest pytest -q"
         message = AgentMessage(

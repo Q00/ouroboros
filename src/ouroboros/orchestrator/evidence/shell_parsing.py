@@ -402,9 +402,12 @@ _UV_FLAG_OPTIONS = frozenset(
         "--no-sync",
         "--offline",
         "--only-dev",
+        "--quiet",
         "--refresh",
         "--reinstall",
+        "--system-certs",
         "--upgrade",
+        "--verbose",
     }
 )
 _UV_SHORT_VALUE_OPTIONS = frozenset({"C", "f", "i", "p", "P", "w"})
@@ -439,7 +442,7 @@ def _uv_run_pytest_operand(parts: list[str]) -> bool:
                 return False
             index += 1
             if not separator:
-                if index >= len(parts):
+                if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
                     return False
                 index += 1
             continue
