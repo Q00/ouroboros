@@ -9,6 +9,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ouroboros.mcp import update_notice
 
 # Load the script as a module
@@ -311,6 +313,23 @@ class TestCheckUpdate:
             result = version_check.check_update()
 
         assert result["update_available"] is False
+
+    @pytest.mark.parametrize(
+        ("current", "latest"),
+        (
+            ("0.51.14rc1.dev1", "0.51.14b2"),
+            ("0.51.14.post1.dev1", "0.51.14.post0"),
+        ),
+    )
+    def test_composed_dev_versions_fail_closed(self, current: str, latest: str) -> None:
+        with (
+            patch.object(version_check, "get_installed_version", return_value=current),
+            patch.object(version_check, "get_latest_version", return_value=latest),
+        ):
+            result = version_check.check_update()
+
+        assert result["update_available"] is False
+        assert result["message"] is None
 
 
 class TestPrerelease:

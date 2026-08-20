@@ -99,6 +99,10 @@ def _version_key(version: str) -> tuple[tuple[int, ...], int, int] | None:
         release_parts.pop()
     release = tuple(release_parts)
     pre_kind = match.group("pre_kind")
+    if match.group("dev_num") is not None and (
+        pre_kind is not None or match.group("post_num") is not None
+    ):
+        return None
     if match.group("dev_num") is not None:
         phase, number = 0, int(match.group("dev_num"))
     elif pre_kind is not None:
