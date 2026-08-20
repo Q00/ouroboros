@@ -733,8 +733,8 @@ def get_cross_harness_redispatch_enabled() -> bool:
     Priority:
         1. OUROBOROS_CROSS_HARNESS_REDISPATCH environment variable
         2. config.yaml execution.cross_harness_redispatch
-        3. True (default: meta-harness recovery is on, but a no-op unless a
-           second runtime backend is actually installed)
+        3. False (default: one run retains one explicitly selected runtime;
+           cross-harness workspace mutation requires explicit opt-in)
     """
     env = _env_flag("OUROBOROS_CROSS_HARNESS_REDISPATCH")
     if env is not None:
@@ -742,7 +742,7 @@ def get_cross_harness_redispatch_enabled() -> bool:
     try:
         return load_config().execution.cross_harness_redispatch
     except ConfigError:
-        return True
+        return False
 
 
 def get_n_version_tournament_enabled() -> bool:
