@@ -141,19 +141,18 @@ def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
 
 def _test_invocation_from_shell_body(body: str) -> str | None:
     """Return a test invocation after conservative shell setup preambles."""
-    for segment, pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body):
-        candidate = _strip_command_output_plumbing(segment)
-        if (
-            _has_trailing_output_filter_pipeline(segment)
-            and not pipefail_enabled
-            and _test_invocation_from_prefix(candidate) is not None
-        ):
-            candidate = segment
-        invocation = _test_invocation_from_prefix(candidate)
-        if invocation is not None:
-            return invocation
+    segments = tuple(_segments_after_safe_shell_preamble_with_pipefail(body))
+    if len(segments) != 1:
         return None
-    return None
+    segment, pipefail_enabled = segments[0]
+    candidate = _strip_command_output_plumbing(segment)
+    if (
+        _has_trailing_output_filter_pipeline(segment)
+        and not pipefail_enabled
+        and _test_invocation_from_prefix(candidate) is not None
+    ):
+        candidate = segment
+    return _test_invocation_from_prefix(candidate)
 
 
 def _single_command_after_safe_shell_preamble(command: str) -> str | None:

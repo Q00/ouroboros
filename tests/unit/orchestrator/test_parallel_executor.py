@@ -10648,6 +10648,31 @@ class TestParallelACExecutor:
             is False
         )
 
+    @pytest.mark.parametrize("shell", ("bash", "/bin/zsh"))
+    def test_wrapped_compound_uv_command_cannot_back_standalone_claim(self, shell: str) -> None:
+        inner = "uv run pytest -q && python scripts/postprocess.py"
+        command = f"{shell} -lc '{inner}'"
+        claim = "uv run pytest -q"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=claim,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
     @pytest.mark.parametrize(
         ("command", "expected"),
         (
