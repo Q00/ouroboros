@@ -72,8 +72,9 @@ def is_loopback_host(host: str) -> bool:
         False: refusing to guess is the safe direction, since the caller uses
         this to decide whether credentials are mandatory.
     """
-    candidate = host.strip().strip("[]").lower().removesuffix(".")
-    if candidate in _LOOPBACK_HOSTNAMES:
+    candidate = host.strip().strip("[]").lower()
+    hostname_candidate = candidate.removesuffix(".")
+    if hostname_candidate in _LOOPBACK_HOSTNAMES:
         return True
     try:
         return ipaddress.ip_address(candidate).is_loopback

@@ -95,6 +95,8 @@ class TestHostClassification:
             "build-box.internal",
             "localhost.localdomain",
             "LOCALHOST.LOCALDOMAIN.",
+            "127.0.0.1.",
+            "127.0.0.2.",
         ],
     )
     def test_routable_hosts_are_not_loopback(self, host: str) -> None:
