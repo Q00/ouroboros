@@ -276,7 +276,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)
-    cross_harness_redispatch: bool = True
+    cross_harness_redispatch: bool = False
     n_version_tournament: bool = False
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True

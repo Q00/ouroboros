@@ -76,6 +76,7 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
 )
+from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
@@ -436,7 +437,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -445,7 +445,7 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "http", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
@@ -544,10 +544,9 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
-    """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "http", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -1205,7 +1204,28 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
+    if is_native_windows():
+        handled, success, section = apply_windows_codex_mcp_mode(
+            mode,
+            codex_config=resolve_codex_home() / "config.toml",
+            launcher=(
+                (sys.executable, list(_CODEX_MODULE_MCP_ARGS))
+                if _is_dev_ouroboros_build()
+                else _codex_release_mcp_launcher()
+            )
+            if mode == "http"
+            else None,
+            print_info=print_info,
+            print_error=print_error,
+        )
+        if handled and (not success or section is None):
+            return success
+        rendered_section = section if handled else _render_codex_mcp_section()
+    else:
+        if mode == "http":
+            print_error("--mcp-mode http is only for native Windows Codex Desktop.")
+            return False
+        rendered_section = _render_codex_mcp_section()
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
@@ -1227,10 +1247,14 @@ def _register_codex_mcp_server(
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+        if (
+            entry is not None
+            and not _codex_mcp_entry_has_endpoint(entry)
+            and mode not in {"stdio", "http"}
+        ):
             print_error(
                 "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+                "Codex setup not saved. Use an explicit replacement mode."
             )
             return False
         if (
@@ -4771,7 +4795,7 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help="Codex MCP config mode: auto preserves native-Windows safety and user entries; http explicitly writes the native-Windows loopback URL; preserve skips MCP changes; stdio replaces with the managed entry on supported hosts.",
         ),
     ] = "auto",
     preserve_existing_llm: Annotated[

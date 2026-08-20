@@ -337,6 +337,7 @@ class TestExecutionConfig:
         assert config.auto_evolve_max_generations == 3
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
+        assert config.cross_harness_redispatch is False
         assert config.context_pack is True
 
     @pytest.mark.parametrize(("raw", "expected"), [(0, 1), (11, 10), (4, 4)])
