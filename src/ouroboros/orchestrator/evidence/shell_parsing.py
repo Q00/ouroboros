@@ -11,141 +11,6 @@ from ouroboros.orchestrator.evidence.common import (
     _normalized_evidence_text,
 )
 
-_UV_RUN_OPTIONS_WITH_VALUES = frozenset(
-    {
-        "--allow-insecure-host",
-        "--cache-dir",
-        "--color",
-        "--config-file",
-        "--config-setting",
-        "--config-settings-package",
-        "--default-index",
-        "--directory",
-        "--env-file",
-        "--exclude-newer",
-        "--exclude-newer-package",
-        "--extra",
-        "--extra-index-url",
-        "--find-links",
-        "--fork-strategy",
-        "--group",
-        "--index",
-        "--index-strategy",
-        "--index-url",
-        "--keyring-provider",
-        "--link-mode",
-        "--no-binary-package",
-        "--no-build-isolation-package",
-        "--no-build-package",
-        "--no-editable-package",
-        "--no-extra",
-        "--no-group",
-        "--only-group",
-        "--package",
-        "--prerelease",
-        "--project",
-        "--python",
-        "--python-platform",
-        "--refresh-package",
-        "--reinstall-package",
-        "--resolution",
-        "--upgrade-package",
-        "--with",
-        "--with-editable",
-        "--with-requirements",
-        "-C",
-        "-f",
-        "-i",
-        "-p",
-        "-P",
-        "-w",
-    }
-)
-_UV_RUN_FLAG_OPTIONS = frozenset(
-    {
-        "--active",
-        "--all-extras",
-        "--all-groups",
-        "--all-packages",
-        "--compile-bytecode",
-        "--exact",
-        "--frozen",
-        "--isolated",
-        "--locked",
-        "--managed-python",
-        "--native-tls",
-        "--no-config",
-        "--no-binary",
-        "--no-build-isolation",
-        "--no-default-groups",
-        "--no-build",
-        "--no-cache",
-        "--no-dev",
-        "--no-editable",
-        "--no-env-file",
-        "--no-index",
-        "--no-managed-python",
-        "--no-project",
-        "--no-progress",
-        "--no-python-downloads",
-        "--no-sources",
-        "--no-sync",
-        "--offline",
-        "--only-dev",
-        "--refresh",
-        "--reinstall",
-        "--upgrade",
-        "-n",
-        "--system-certs",
-        "-q",
-        "-U",
-        "-v",
-    }
-)
-_UV_RUN_SCRIPT_OPTIONS = frozenset({"--gui-script", "--script", "-s"})
-_UV_RUN_MODULE_OPTIONS = frozenset({"--module", "-m"})
-_UV_RUN_NON_EXECUTING_OPTIONS = frozenset({"--help", "-h", "--version", "-V"})
-
-
-def _strip_uv_run_options(parts: list[str]) -> list[str] | None:
-    """Return the executed command, rejecting unknown or mode-changing options."""
-    if len(parts) < 3 or parts[:2] != ["uv", "run"]:
-        return parts
-    index = 2
-    module_mode = False
-    while index < len(parts) and parts[index] != "--" and parts[index].startswith("-"):
-        raw_option = parts[index]
-        option = raw_option.split("=", 1)[0]
-        attached_value: str | None = None
-        if (
-            "=" not in raw_option
-            and len(raw_option) > 2
-            and raw_option[:2] in {"-C", "-f", "-i", "-p", "-P", "-w"}
-        ):
-            option, attached_value = raw_option[:2], raw_option[2:]
-        index += 1
-        if option in _UV_RUN_NON_EXECUTING_OPTIONS or option in _UV_RUN_SCRIPT_OPTIONS:
-            return None
-        if option in _UV_RUN_MODULE_OPTIONS:
-            module_mode = True
-            continue
-        if option in _UV_RUN_FLAG_OPTIONS or re.fullmatch(r"-(?:q+|v+)", option):
-            continue
-        if option not in _UV_RUN_OPTIONS_WITH_VALUES:
-            return None
-        if attached_value is not None:
-            continue
-        if "=" not in raw_option:
-            if index >= len(parts) or parts[index].startswith("-"):
-                return None
-            index += 1
-    if index < len(parts) and parts[index] == "--":
-        index += 1
-    if index >= len(parts):
-        return None
-    command = parts[index:]
-    return ["python", "-m", *command] if module_mode else ["uv", "run", *command]
-
 
 def _looks_like_test_command(command: str) -> bool:
     """Return True for common whole-suite or targeted test invocations."""
@@ -401,7 +266,8 @@ def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
             if maven_skip_property_disables_tests(parts[index + 1]):
                 return True
         if normalized.startswith("--define="):
-            if maven_skip_property_disables_tests(normalized.partition("=")[2]):
+            _, _, define_value = normalized.partition("=")
+            if maven_skip_property_disables_tests(define_value):
                 return True
         if normalized.startswith("-d") and maven_skip_property_disables_tests(normalized[2:]):
             return True
@@ -459,6 +325,27 @@ def _has_unquoted_status_masking_control(command: str) -> bool:
     return False
 
 
+def _uv_run_contains_pytest(parts: list[str]) -> bool:
+    """Recognize pytest selected by uv without reimplementing uv's option grammar.
+
+    This is only a candidate classifier. Evidence acceptance separately requires
+    the exact recorded command, successful structured runtime status, and real
+    pytest success output. Script mode is excluded because a file named pytest
+    can emit arbitrary lookalike text.
+    """
+    if len(parts) < 3 or parts[:2] != ["uv", "run"]:
+        return False
+    tail = parts[2:]
+    if any(part in {"-s", "--script", "--gui-script"} for part in tail):
+        return False
+    for index, part in enumerate(tail):
+        if part in {"-m", "--module"}:
+            return index + 1 < len(tail) and tail[index + 1] in {"pytest", "py.test"}
+        if part in {"pytest", "py.test"}:
+            return True
+    return False
+
+
 def _test_invocation_from_prefix(command: str) -> str | None:
     """Return a normalized test invocation only when it starts the command text.
 
@@ -477,10 +364,6 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     except ValueError:
         parts = command.replace('"', "").replace("'", "").split()
     parts = _strip_env_prefix(parts)
-    uv_parts = _strip_uv_run_options(parts)
-    if uv_parts is None:
-        return None
-    parts = uv_parts
     if not parts:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):
@@ -492,7 +375,7 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         return _normalized_evidence_text(" ".join(parts))
     if len(parts) >= 2 and parts[0] in {"npm", "pnpm", "yarn"} and parts[1] == "test":
         return _normalized_evidence_text(" ".join(parts))
-    if len(parts) >= 3 and parts[:3] == ["uv", "run", "pytest"]:
+    if _uv_run_contains_pytest(parts):
         return _normalized_evidence_text(" ".join(parts))
     if (
         len(parts) >= 3
