@@ -319,7 +319,7 @@ def _has_unquoted_status_masking_control(command: str) -> bool:
             previous = command[index - 1] if index > 0 else ""
             following = command[index + 1] if index + 1 < len(command) else ""
             if previous == "&" or following == "&":
-                continue
+                return True
             if previous not in {">", "<"} and following != ">":
                 return True
     return False
@@ -414,10 +414,10 @@ _UV_SHORT_VALUE_OPTIONS = frozenset({"C", "f", "i", "p", "P", "w"})
 _UV_SHORT_FLAG_OPTIONS = frozenset({"n", "q", "U", "v"})
 
 
-def _uv_run_pytest_operand(parts: list[str]) -> bool:
-    """Parse the uv option prefix and identify the selected program/module."""
+def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
+    """Parse the uv option prefix and return selected pytest plus its arguments."""
     if len(parts) < 3 or parts[:2] != ["uv", "run"]:
-        return False
+        return None
     index = 2
     while index < len(parts):
         token = parts[index]
@@ -427,7 +427,7 @@ def _uv_run_pytest_operand(parts: list[str]) -> bool:
         if not token.startswith("-") or token == "-":
             break
         if token in {"--help", "-h", "--version", "-V", "--script", "-s", "--gui-script"}:
-            return False
+            return None
         if token in {"--module", "-m"}:
             index += 1
             continue
@@ -435,15 +435,15 @@ def _uv_run_pytest_operand(parts: list[str]) -> bool:
             option, separator, _attached = token.partition("=")
             if option in _UV_FLAG_OPTIONS:
                 if separator:
-                    return False
+                    return None
                 index += 1
                 continue
             if option not in _UV_VALUE_OPTIONS:
-                return False
+                return None
             index += 1
             if not separator:
                 if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
-                    return False
+                    return None
                 index += 1
             continue
         cluster = token[1:]
@@ -451,22 +451,21 @@ def _uv_run_pytest_operand(parts: list[str]) -> bool:
         while position < len(cluster):
             option = cluster[position]
             if option in {"h", "s"}:
-                return False
+                return None
             if option == "m" or option in _UV_SHORT_FLAG_OPTIONS:
                 position += 1
                 continue
             if option not in _UV_SHORT_VALUE_OPTIONS:
-                return False
+                return None
             if position + 1 == len(cluster):
                 index += 1
-                if index >= len(parts):
-                    return False
+                if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
+                    return None
             position = len(cluster)
         index += 1
-    if index >= len(parts):
-        return False
-    operand = parts[index]
-    return operand in {"pytest", "py.test"}
+    if index >= len(parts) or parts[index] not in {"pytest", "py.test"}:
+        return None
+    return parts[index:]
 
 
 def _test_invocation_from_prefix(command: str) -> str | None:
@@ -491,14 +490,17 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):
         return None
+    uv_pytest_parts = _uv_run_pytest_parts(parts)
+    if uv_pytest_parts is not None:
+        if _has_non_executing_test_mode(uv_pytest_parts):
+            return None
+        return _normalized_evidence_text(" ".join(parts))
     if _has_non_executing_test_mode(parts):
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:
         return _normalized_evidence_text(" ".join(parts))
     if len(parts) >= 2 and parts[0] in {"npm", "pnpm", "yarn"} and parts[1] == "test":
-        return _normalized_evidence_text(" ".join(parts))
-    if _uv_run_pytest_operand(parts):
         return _normalized_evidence_text(" ".join(parts))
     if (
         len(parts) >= 3

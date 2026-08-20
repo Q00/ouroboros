@@ -10608,6 +10608,49 @@ class TestParallelACExecutor:
     @pytest.mark.parametrize(
         "command",
         (
+            "uv run -p --isolated pytest -q",
+            "uv run -w --isolated pytest -q",
+        ),
+    )
+    def test_uv_missing_short_option_values_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 pytest --collect-only",
+            "uv run -m pytest --setup-only",
+        ),
+    )
+    def test_uv_non_executing_pytest_modes_are_not_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    def test_compound_uv_command_cannot_back_standalone_pytest_claim(self) -> None:
+        command = "uv run --with pytest pytest -q && python scripts/postprocess.py"
+        claim = "uv run --with pytest pytest -q"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=claim,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        (
             "uv run --quiet pytest -q",
             "uv run --verbose pytest -q",
             "uv run --system-certs pytest -q",
