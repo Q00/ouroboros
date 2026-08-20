@@ -10603,6 +10603,25 @@ class TestParallelACExecutor:
     def test_uv_run_supported_option_matrix_remains_test_evidence(self, command: str) -> None:
         assert _looks_like_test_command(command) is True
 
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --no-default-groups pytest -q",
+            "uv run --no-editable-package foo pytest -q",
+            "uv run --no-build-isolation pytest -q",
+            "uv run --no-binary pytest -q",
+            "uv run --system-certs pytest -q",
+            "uv run --no-config pytest -q",
+            "uv run -p3.12 pytest -q",
+        ),
+    )
+    def test_uv_run_current_option_grammar_remains_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize("command", ("uv run -version pytest", "uv run -vanything pytest -q"))
+    def test_uv_run_malformed_short_clusters_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
     def test_option_bearing_uv_command_backs_tests_passed_claim(self) -> None:
         command = "uv run --python 3.12 --with pytest pytest -q"
         message = AgentMessage(

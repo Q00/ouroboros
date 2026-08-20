@@ -37,6 +37,7 @@ _UV_RUN_OPTIONS_WITH_VALUES = frozenset(
         "--no-binary-package",
         "--no-build-isolation-package",
         "--no-build-package",
+        "--no-editable-package",
         "--no-extra",
         "--no-group",
         "--only-group",
@@ -73,6 +74,10 @@ _UV_RUN_FLAG_OPTIONS = frozenset(
         "--locked",
         "--managed-python",
         "--native-tls",
+        "--no-config",
+        "--no-binary",
+        "--no-build-isolation",
+        "--no-default-groups",
         "--no-build",
         "--no-cache",
         "--no-dev",
@@ -91,6 +96,7 @@ _UV_RUN_FLAG_OPTIONS = frozenset(
         "--reinstall",
         "--upgrade",
         "-n",
+        "--system-certs",
         "-q",
         "-U",
         "-v",
@@ -110,16 +116,25 @@ def _strip_uv_run_options(parts: list[str]) -> list[str] | None:
     while index < len(parts) and parts[index] != "--" and parts[index].startswith("-"):
         raw_option = parts[index]
         option = raw_option.split("=", 1)[0]
+        attached_value: str | None = None
+        if (
+            "=" not in raw_option
+            and len(raw_option) > 2
+            and raw_option[:2] in {"-C", "-f", "-i", "-p", "-P", "-w"}
+        ):
+            option, attached_value = raw_option[:2], raw_option[2:]
         index += 1
         if option in _UV_RUN_NON_EXECUTING_OPTIONS or option in _UV_RUN_SCRIPT_OPTIONS:
             return None
         if option in _UV_RUN_MODULE_OPTIONS:
             module_mode = True
             continue
-        if option in _UV_RUN_FLAG_OPTIONS or option.startswith(("-q", "-v")):
+        if option in _UV_RUN_FLAG_OPTIONS or re.fullmatch(r"-(?:q+|v+)", option):
             continue
         if option not in _UV_RUN_OPTIONS_WITH_VALUES:
             return None
+        if attached_value is not None:
+            continue
         if "=" not in raw_option:
             if index >= len(parts) or parts[index].startswith("-"):
                 return None
