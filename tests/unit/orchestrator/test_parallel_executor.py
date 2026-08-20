@@ -62,6 +62,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _shell_command_mutation_targets,
     _text_needs_shell_expansion,
 )
+from ouroboros.orchestrator.evidence.shell_parsing import (
+    _looks_like_test_command,
+    _test_command_invocation,
+)
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_authority import (
     runtime_effect_capabilities_contract,
@@ -10560,6 +10564,46 @@ class TestParallelACExecutor:
         )
         assert evidence_event.data["verifier_passed"] is False
 
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 --with pytest pytest -q",
+            "uv run -p 3.12 -w pytest pytest test_hello.py -q",
+            "uv run --isolated --with=pytest -- pytest -q",
+        ),
+    )
+    def test_option_bearing_uv_run_is_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+        assert _test_command_invocation(command).startswith("uv run pytest")
+
+    def test_option_bearing_uv_collect_only_is_not_test_evidence(self) -> None:
+        command = "uv run --python 3.12 --with pytest pytest --collect-only"
+
+        assert _looks_like_test_command(command) is False
+
+    def test_option_bearing_uv_command_backs_tests_passed_claim(self) -> None:
+        command = "uv run --python 3.12 --with pytest pytest -q"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is True
+        )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("build_case", _ACCEPTED_UNITTEST_CLAIM_CASES)
     async def test_fat_harness_verifier_accepts_backed_unittest_claim(
@@ -14631,6 +14675,10 @@ class TestParallelACExecutor:
         assert result.stages[1].success_count == 1
         assert result.stages[1].blocked_count == 1
         executor._emit_level_started.assert_awaited()
+        assert any(
+            "1 succeeded, 0 failed, 1 blocked, 0 invalid" in str(call)
+            for call in executor._console.print.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_fully_blocked_stage_does_not_start(self) -> None:

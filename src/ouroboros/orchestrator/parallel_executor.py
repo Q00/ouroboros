@@ -2507,8 +2507,10 @@ def render_parallel_verification_report(
         lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
     if parallel_result.failure_count > 0:
         lines.append(f"Failed: {parallel_result.failure_count}")
-    if parallel_result.skipped_count > 0:
-        lines.append(f"Skipped: {parallel_result.skipped_count}")
+    if parallel_result.blocked_count > 0:
+        lines.append(f"Blocked: {parallel_result.blocked_count}")
+    if parallel_result.invalid_count > 0:
+        lines.append(f"Invalid: {parallel_result.invalid_count}")
     unverifiable_indices = [
         result.ac_index + 1
         for result in parallel_result.results
@@ -2584,6 +2586,10 @@ def render_parallel_completion_message(
         lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
     if parallel_result.failure_count > 0:
         lines.append(f"Failed: {parallel_result.failure_count}")
+    if parallel_result.blocked_count > 0:
+        lines.append(f"Blocked: {parallel_result.blocked_count}")
+    if parallel_result.invalid_count > 0:
+        lines.append(f"Invalid: {parallel_result.invalid_count}")
     if parallel_result.skipped_count > 0:
         lines.append(f"Skipped: {parallel_result.skipped_count}")
 
@@ -2593,9 +2599,17 @@ def render_parallel_completion_message(
         if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
             status = "COMPLETED"
             suffix = " (externally satisfied)"
+        elif result.outcome == ACExecutionOutcome.BLOCKED:
+            status = "BLOCKED"
+            suffix = f" — {result.error}" if result.error else ""
+        elif result.outcome == ACExecutionOutcome.INVALID:
+            status = "INVALID"
+            suffix = f" — {result.error}" if result.error else ""
         else:
             status = "COMPLETED" if result.success else "FAILED"
             suffix = f" ({len(result.sub_results)} subtasks)" if result.is_decomposed else ""
+            if not result.success and result.error:
+                suffix += f" — {result.error}"
         lines.append(f"- Task {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
     return "\n".join(lines)
 
@@ -4537,7 +4551,10 @@ class ParallelACExecutor:
 
                 self._console.print(
                     f"[green]Level {level_num} complete: "
-                    f"{level_success} succeeded, {level_failed} failed[/green]"
+                    f"{stage_result.success_count} succeeded, "
+                    f"{stage_result.failure_count} failed, "
+                    f"{stage_result.blocked_count} blocked, "
+                    f"{stage_result.invalid_count} invalid[/green]"
                 )
                 self._flush_console()
 

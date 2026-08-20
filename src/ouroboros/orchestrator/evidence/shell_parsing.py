@@ -11,6 +11,71 @@ from ouroboros.orchestrator.evidence.common import (
     _normalized_evidence_text,
 )
 
+_UV_RUN_OPTIONS_WITH_VALUES = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-extra",
+        "--no-group",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-C",
+        "-f",
+        "-i",
+        "-p",
+        "-P",
+        "-w",
+    }
+)
+
+
+def _strip_uv_run_options(parts: list[str]) -> list[str]:
+    """Remove uv options that precede the command being executed."""
+    if len(parts) < 3 or parts[:2] != ["uv", "run"]:
+        return parts
+    index = 2
+    while index < len(parts) and parts[index] != "--" and parts[index].startswith("-"):
+        raw_option = parts[index]
+        option = raw_option.split("=", 1)[0]
+        index += 1
+        if "=" not in raw_option and option in _UV_RUN_OPTIONS_WITH_VALUES:
+            index += 1
+    if index < len(parts) and parts[index] == "--":
+        index += 1
+    return ["uv", "run", *parts[index:]]
+
 
 def _looks_like_test_command(command: str) -> bool:
     """Return True for common whole-suite or targeted test invocations."""
@@ -343,6 +408,7 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     except ValueError:
         parts = command.replace('"', "").replace("'", "").split()
     parts = _strip_env_prefix(parts)
+    parts = _strip_uv_run_options(parts)
     if not parts:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):

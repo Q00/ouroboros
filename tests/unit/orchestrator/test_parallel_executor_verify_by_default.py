@@ -42,6 +42,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _missing_expected_artifacts,
     _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
+    render_parallel_completion_message,
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
@@ -2190,6 +2191,39 @@ def test_report_surfaces_unverified_success() -> None:
 
     assert "Success: 1/1" in report
     assert "needs confirmation: AC 1" in report
+
+
+def test_completion_message_distinguishes_blocked_and_failure_reasons() -> None:
+    failed = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the tests",
+        success=False,
+        error="unsupported uv evidence command",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+    blocked = ACExecutionResult(
+        ac_index=1,
+        ac_content="Package the result",
+        success=False,
+        error="Skipped: dependency failed",
+        outcome=ACExecutionOutcome.BLOCKED,
+    )
+    parallel_result = ParallelExecutionResult(
+        results=(failed, blocked),
+        success_count=0,
+        failure_count=1,
+        blocked_count=1,
+        skipped_count=1,
+        total_duration_seconds=0.0,
+    )
+
+    message = render_parallel_completion_message(parallel_result, 2)
+
+    assert "Failed: 1" in message
+    assert "Blocked: 1" in message
+    assert "Skipped: 1" in message
+    assert "[FAILED] Run the tests — unsupported uv evidence command" in message
+    assert "[BLOCKED] Package the result — Skipped: dependency failed" in message
 
 
 def test_verify_gate_outcome_roundtrips_the_quarantine_flag() -> None:
