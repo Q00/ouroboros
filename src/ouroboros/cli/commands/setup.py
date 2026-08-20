@@ -47,6 +47,7 @@ from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
+from ouroboros.cli.commands.setup_completion import print_setup_completion
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -3858,15 +3859,18 @@ def _setup_gemini(gemini_path: str) -> None:
     _install_runtime_instruction_artifact("gemini")
 
 
-def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str) -> None:
-    """Configure runtime setup for Antigravity, Grok, or Zcode.
+def _setup_runtime_only_backend(
+    backend: str, cli_path: str | None, cli_config_key: str | None
+) -> None:
+    """Configure runtime setup for Antigravity, Grok, Zcode, or host.
 
     This setup path intentionally sets only ``orchestrator.runtime_backend`` and
-    the CLI path. Antigravity and Grok are runtime-only; Zcode also supports
-    explicit LLM-completion selection, but setup does not silently move
-    ``llm.backend`` because that changes authoring/evaluation traffic.
-    No setup-owned instruction artifact is installed yet — a documented gap in
-    ``docs/runtime-guides/skill-capability-guides.md``.
+    (when applicable) the CLI path. Antigravity and Grok are runtime-only; Zcode
+    also supports explicit LLM-completion selection, but setup does not silently
+    move ``llm.backend`` because that changes authoring/evaluation traffic.
+    ``host`` has no CLI at all — pass ``cli_path=None, cli_config_key=None`` for
+    it. No setup-owned instruction artifact is installed yet — a documented gap
+    in ``docs/runtime-guides/skill-capability-guides.md``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -3890,13 +3894,31 @@ def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str
         orch = {}
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = backend
-    orch[cli_config_key] = cli_path
+    if cli_path is not None and cli_config_key is not None:
+        orch[cli_config_key] = cli_path
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    print_success(f"Configured {backend} runtime (CLI: {cli_path})")
+    if cli_path is not None:
+        print_success(f"Configured {backend} runtime (CLI: {cli_path})")
+    else:
+        print_success(f"Configured {backend} runtime (no CLI — host-driven dispatch)")
     print_info(f"Config saved to: {config_path}")
+
+
+def _setup_host() -> None:
+    """Configure Ouroboros for the ``host`` (CLI-less, host-driven) runtime.
+
+    Nothing to detect: ``host`` dispatches execution to the calling MCP host
+    model instead of spawning a process (``orchestrator/host_dispatch.py``).
+    A terminal ``ooo run`` still rejects it (``cli/commands/run.py``).
+    """
+    _setup_runtime_only_backend("host", None, None)
+    print_info(
+        "'host' only works from an MCP host session pumping "
+        "ouroboros_job_wait (e.g. dsh). A terminal `ooo run` rejects it."
+    )
 
 
 def _setup_antigravity(antigravity_path: str) -> None:
@@ -4750,7 +4772,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode, host).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4800,6 +4822,7 @@ def setup(
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup --runtime gjc        # use GJC[/dim]
     [dim]    ouroboros setup --runtime zcode      # use Zcode[/dim]
+    [dim]    ouroboros setup --runtime host       # dispatch to the calling MCP host[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -5063,14 +5086,13 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_zcode(zcode_path)
+    elif selected in ("host", "host_dispatch"):
+        _setup_host()
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)
 
-    console.print("\n[bold green]Setup complete![/bold green]")
-    console.print("\n[dim]Next steps:[/dim]")
-    console.print('  ouroboros init start "your idea here"')
-    console.print("  ouroboros run workflow seed.yaml\n")
+    print_setup_completion(console, selected)
 
 
 # ── Artifact refresh subcommand ──────────────────────────────────

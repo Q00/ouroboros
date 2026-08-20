@@ -47,6 +47,7 @@ its rendered guide or a documented fallback.
 | Goose | No setup-owned capability artifact yet | Known gap: setup can select Goose as a runtime, but no durable Goose instruction surface or Goose-specific `SkillExecutionCapability` entries are registered yet. Keep skill requirements runtime-neutral and rely on runtime-local operator guidance until a Goose artifact installer exists. |
 | Pi | No setup-owned capability artifact yet | Known gap: Pi has generic rendered capability guidance in the registry, but setup does not yet install it into a durable Pi-owned instruction artifact. Use `render_backend_skill_capability_guide("pi")` when building Pi prompts until a stable artifact surface exists. |
 | Zcode | No setup-owned capability artifact yet | Known gap: Zcode (Z.ai GLM-5 agent, the `zcode` CLI) can be selected as a runtime, but setup does not yet install a durable zcode-owned instruction artifact. Use `render_backend_skill_capability_guide("zcode")` when building Zcode prompts until a stable artifact surface exists. |
+| Host | No setup-owned capability artifact | Host-driven dispatch runtime (`OUROBOROS_AGENT_RUNTIME=host`): the calling MCP host model spawns the execution subagents itself, so the capability surface is the host's own instruction set plus the MCP server instructions; there is no spawned CLI to install an artifact for. |
 
 ## Seed generation client-gate enforcement
 

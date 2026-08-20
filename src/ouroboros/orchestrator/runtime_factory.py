@@ -237,6 +237,22 @@ def _create_gjc_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     )
 
 
+def _create_host_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
+    from ouroboros.orchestrator.host_dispatch import HostDispatchRuntime
+
+    # Constructed unbound: the MCP composition root attaches the shared
+    # HostDispatchBridge afterwards via ``bind_host_dispatch_bridge``.
+    # ``execute_task`` raises ``HostDispatchNotBoundError`` until then, which
+    # is the P1 contract for compositions that never wire a bridge (CLI run
+    # rejects the backend even earlier with its own message).
+    return HostDispatchRuntime(
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        llm_backend=request.llm_backend,
+        model=request.model,
+    )
+
+
 def _create_zcode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
@@ -264,6 +280,7 @@ _AGENT_RUNTIME_FACTORIES: dict[str, Callable[[_AgentRuntimeRequest], AgentRuntim
     "_create_pi_runtime": _create_pi_runtime,
     "_create_gjc_runtime": _create_gjc_runtime,
     "_create_zcode_runtime": _create_zcode_runtime,
+    "_create_host_runtime": _create_host_runtime,
 }
 
 
@@ -286,7 +303,9 @@ def create_agent_runtime(
     resolved_llm_backend = llm_backend or get_llm_backend()
     resolved_cwd = ResolvedWorkerCwd(resolve_worker_cwd(cwd))
     runtime_kwargs = None
-    if resolved_backend != "claude":
+    # ``claude`` and ``host`` take their construction args directly; neither
+    # spawns a CLI, so the codex-command skill dispatcher has nothing to wrap.
+    if resolved_backend not in ("claude", "host"):
         runtime_kwargs = {
             "permission_mode": resolved_permission_mode,
             "model": model,

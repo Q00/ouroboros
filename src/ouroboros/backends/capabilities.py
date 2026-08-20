@@ -499,6 +499,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_name="claude",
         cli_config_key="cli_path",
     ),
+    # Host-driven execution runtime: no process is spawned — ``execute_task``
+    # publishes a dispatch record and the calling MCP host model spawns its own
+    # subagent, then submits the result through
+    # ``ouroboros_submit_fanout_results`` (see orchestrator.host_dispatch).
+    # Host-agnostic: any host honoring the ``host_action=spawn_subagents``
+    # contract qualifies (Claude Code, dsh, Codex Desktop). ``cli_name`` is
+    # None on purpose — there is nothing to spawn — and the backend must stay
+    # OUT of ``_OPENCODE_BACKENDS``/``_CODEX_BACKENDS`` (orchestrator.adapter).
+    BackendCapability(
+        name="host",
+        aliases=("host_dispatch",),
+        supports_runtime=True,
+        # Advisory fan-out and execution dispatch ride the same host primitive,
+        # so one env var (OUROBOROS_AGENT_RUNTIME=host) turns on both. No
+        # concrete mechanism is named: the backend is host-agnostic by design.
+        supports_host_driven_subagents=True,
+    ),
     BackendCapability(
         name="copilot",
         aliases=("copilot_cli",),
@@ -746,7 +763,10 @@ def render_mcp_server_instructions() -> str:
         "`result_correlation_key` named in `meta`, then synthesize while "
         "preserving the user-facing content. With no parallel primitive, process "
         "the payloads sequentially. Keep any user-facing question visible before "
-        "the assistive work it triggers."
+        "the assistive work it triggers. During background execution, keep "
+        "pumping `ouroboros_job_wait` with bounded timeouts: spawn any "
+        "`pending_host_dispatches` the same way and submit each result via "
+        "`ouroboros_submit_fanout_results`."
     )
 
 
