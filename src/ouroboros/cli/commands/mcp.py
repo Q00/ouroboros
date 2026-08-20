@@ -532,6 +532,17 @@ _SDK_RUNTIME_STANDINS = (
 )
 
 
+def _runtime_profile_controls_stage_backends() -> bool:
+    """Return whether stage routing can override the top-level fallback."""
+    try:
+        from ouroboros.config.loader import load_config
+
+        profile = load_config().orchestrator.runtime_profile
+    except Exception:
+        return False
+    return profile is not None and bool(profile.default or profile.stages)
+
+
 def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str] | None:
     """Return an executable runtime to use in place of an inherited SDK default.
 
@@ -545,6 +556,8 @@ def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str]
     if any(
         os.environ.get(key, "").strip() for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
     ):
+        return None
+    if _runtime_profile_controls_stage_backends():
         return None
     for backend, public_name, configured_path, command in _SDK_RUNTIME_STANDINS:
         executable = configured_path() or command

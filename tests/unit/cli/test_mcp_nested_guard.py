@@ -610,6 +610,30 @@ def test_shell_hydrated_explicit_sdk_selector_still_fails(monkeypatch, tmp_path)
     _assert_rejected_before_start(result, run_mcp_server, tmp_path)
 
 
+def test_inherited_sdk_refuses_when_stage_profile_controls_backend(monkeypatch, tmp_path) -> None:
+    _clear_runtime_selection(monkeypatch)
+    _installed_clis(monkeypatch, "claude", "codex")
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n"
+        "  runtime_backend: claude\n"
+        "  runtime_profile:\n"
+        "    default: claude\n"
+        "llm:\n  backend: claude\n",
+        encoding="utf-8",
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+
+
 def test_no_installed_cli_keeps_the_original_refusal(monkeypatch, tmp_path) -> None:
     """With nothing to serve with, the actionable error is still the answer."""
     _clear_runtime_selection(monkeypatch)
