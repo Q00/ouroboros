@@ -19,6 +19,7 @@ def make_pm_engine_mock(**kwargs) -> PMInterviewEngine:
     ``deferred_items=["q1"]``).
     """
     engine = MagicMock(spec=PMInterviewEngine)
+    engine.supports_atomic_turn = False
     engine.deferred_items = []
     engine.decide_later_items = []
     engine.codebase_context = ""
