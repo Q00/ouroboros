@@ -10587,6 +10587,14 @@ class TestParallelACExecutor:
     def test_uv_script_modes_are_not_test_evidence(self, command: str) -> None:
         assert _looks_like_test_command(command) is False
 
+    def test_uv_dependency_named_pytest_does_not_become_program_identity(self) -> None:
+        command = "uv run --with pytest python -c \"print('2 passed in 0.01s')\""
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize("command", ("uv run pytest -s -q", "uv run -- pytest -s -q"))
+    def test_pytest_s_argument_is_not_uv_script_mode(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
     def test_option_bearing_uv_command_backs_its_exact_tests_passed_claim(self) -> None:
         command = "uv run --python 3.12 --with pytest pytest -q"
         message = AgentMessage(

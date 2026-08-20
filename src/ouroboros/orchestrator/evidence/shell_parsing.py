@@ -325,25 +325,145 @@ def _has_unquoted_status_masking_control(command: str) -> bool:
     return False
 
 
-def _uv_run_contains_pytest(parts: list[str]) -> bool:
-    """Recognize pytest selected by uv without reimplementing uv's option grammar.
+_UV_VALUE_OPTIONS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--no-sources-package",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--upgrade-group",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+    }
+)
+_UV_FLAG_OPTIONS = frozenset(
+    {
+        "--active",
+        "--all-extras",
+        "--all-groups",
+        "--all-packages",
+        "--compile-bytecode",
+        "--exact",
+        "--frozen",
+        "--isolated",
+        "--locked",
+        "--managed-python",
+        "--native-tls",
+        "--no-binary",
+        "--no-build",
+        "--no-build-isolation",
+        "--no-cache",
+        "--no-config",
+        "--no-default-groups",
+        "--no-dev",
+        "--no-editable",
+        "--no-env-file",
+        "--no-index",
+        "--no-managed-python",
+        "--no-progress",
+        "--no-project",
+        "--no-python-downloads",
+        "--no-sources",
+        "--no-sync",
+        "--offline",
+        "--only-dev",
+        "--refresh",
+        "--reinstall",
+        "--upgrade",
+    }
+)
+_UV_SHORT_VALUE_OPTIONS = frozenset({"C", "f", "i", "p", "P", "w"})
+_UV_SHORT_FLAG_OPTIONS = frozenset({"n", "q", "U", "v"})
 
-    This is only a candidate classifier. Evidence acceptance separately requires
-    the exact recorded command, successful structured runtime status, and real
-    pytest success output. Script mode is excluded because a file named pytest
-    can emit arbitrary lookalike text.
-    """
+
+def _uv_run_pytest_operand(parts: list[str]) -> bool:
+    """Parse the uv option prefix and identify the selected program/module."""
     if len(parts) < 3 or parts[:2] != ["uv", "run"]:
         return False
-    tail = parts[2:]
-    if any(part in {"-s", "--script", "--gui-script"} for part in tail):
+    index = 2
+    while index < len(parts):
+        token = parts[index]
+        if token == "--":
+            index += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        if token in {"--help", "-h", "--version", "-V", "--script", "-s", "--gui-script"}:
+            return False
+        if token in {"--module", "-m"}:
+            index += 1
+            continue
+        if token.startswith("--"):
+            option, separator, _attached = token.partition("=")
+            if option in _UV_FLAG_OPTIONS:
+                if separator:
+                    return False
+                index += 1
+                continue
+            if option not in _UV_VALUE_OPTIONS:
+                return False
+            index += 1
+            if not separator:
+                if index >= len(parts):
+                    return False
+                index += 1
+            continue
+        cluster = token[1:]
+        position = 0
+        while position < len(cluster):
+            option = cluster[position]
+            if option in {"h", "s"}:
+                return False
+            if option == "m" or option in _UV_SHORT_FLAG_OPTIONS:
+                position += 1
+                continue
+            if option not in _UV_SHORT_VALUE_OPTIONS:
+                return False
+            if position + 1 == len(cluster):
+                index += 1
+                if index >= len(parts):
+                    return False
+            position = len(cluster)
+        index += 1
+    if index >= len(parts):
         return False
-    for index, part in enumerate(tail):
-        if part in {"-m", "--module"}:
-            return index + 1 < len(tail) and tail[index + 1] in {"pytest", "py.test"}
-        if part in {"pytest", "py.test"}:
-            return True
-    return False
+    operand = parts[index]
+    return operand in {"pytest", "py.test"}
 
 
 def _test_invocation_from_prefix(command: str) -> str | None:
@@ -375,7 +495,7 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         return _normalized_evidence_text(" ".join(parts))
     if len(parts) >= 2 and parts[0] in {"npm", "pnpm", "yarn"} and parts[1] == "test":
         return _normalized_evidence_text(" ".join(parts))
-    if _uv_run_contains_pytest(parts):
+    if _uv_run_pytest_operand(parts):
         return _normalized_evidence_text(" ".join(parts))
     if (
         len(parts) >= 3
