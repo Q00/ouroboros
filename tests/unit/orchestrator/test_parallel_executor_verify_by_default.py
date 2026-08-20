@@ -2221,7 +2221,7 @@ def test_completion_message_distinguishes_blocked_and_failure_reasons() -> None:
 
     assert "Failed: 1" in message
     assert "Blocked: 1" in message
-    assert "Skipped: 1" in message
+    assert "\nSkipped:" not in message
     assert "[FAILED] Run the tests — unsupported uv evidence command" in message
     assert "[BLOCKED] Package the result — Skipped: dependency failed" in message
 

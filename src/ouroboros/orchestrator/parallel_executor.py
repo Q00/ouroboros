@@ -2590,8 +2590,6 @@ def render_parallel_completion_message(
         lines.append(f"Blocked: {parallel_result.blocked_count}")
     if parallel_result.invalid_count > 0:
         lines.append(f"Invalid: {parallel_result.invalid_count}")
-    if parallel_result.skipped_count > 0:
-        lines.append(f"Skipped: {parallel_result.skipped_count}")
 
     lines.append("")
     lines.append("Task Status:")

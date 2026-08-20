@@ -10581,6 +10581,28 @@ class TestParallelACExecutor:
 
         assert _looks_like_test_command(command) is False
 
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --help pytest",
+            "uv run --no-project -s pytest",
+            "uv run --unknown-option pytest",
+            "uv run --python pytest",
+        ),
+    )
+    def test_uv_run_non_test_or_unknown_modes_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --fork-strategy fewest --with pytest pytest -q",
+            "uv run -m pytest -q",
+        ),
+    )
+    def test_uv_run_supported_option_matrix_remains_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
     def test_option_bearing_uv_command_backs_tests_passed_claim(self) -> None:
         command = "uv run --python 3.12 --with pytest pytest -q"
         message = AgentMessage(

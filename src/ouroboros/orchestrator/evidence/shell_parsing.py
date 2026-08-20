@@ -27,6 +27,7 @@ _UV_RUN_OPTIONS_WITH_VALUES = frozenset(
         "--extra",
         "--extra-index-url",
         "--find-links",
+        "--fork-strategy",
         "--group",
         "--index",
         "--index-strategy",
@@ -59,22 +60,76 @@ _UV_RUN_OPTIONS_WITH_VALUES = frozenset(
         "-w",
     }
 )
+_UV_RUN_FLAG_OPTIONS = frozenset(
+    {
+        "--active",
+        "--all-extras",
+        "--all-groups",
+        "--all-packages",
+        "--compile-bytecode",
+        "--exact",
+        "--frozen",
+        "--isolated",
+        "--locked",
+        "--managed-python",
+        "--native-tls",
+        "--no-build",
+        "--no-cache",
+        "--no-dev",
+        "--no-editable",
+        "--no-env-file",
+        "--no-index",
+        "--no-managed-python",
+        "--no-project",
+        "--no-progress",
+        "--no-python-downloads",
+        "--no-sources",
+        "--no-sync",
+        "--offline",
+        "--only-dev",
+        "--refresh",
+        "--reinstall",
+        "--upgrade",
+        "-n",
+        "-q",
+        "-U",
+        "-v",
+    }
+)
+_UV_RUN_SCRIPT_OPTIONS = frozenset({"--gui-script", "--script", "-s"})
+_UV_RUN_MODULE_OPTIONS = frozenset({"--module", "-m"})
+_UV_RUN_NON_EXECUTING_OPTIONS = frozenset({"--help", "-h", "--version", "-V"})
 
 
-def _strip_uv_run_options(parts: list[str]) -> list[str]:
-    """Remove uv options that precede the command being executed."""
+def _strip_uv_run_options(parts: list[str]) -> list[str] | None:
+    """Return the executed command, rejecting unknown or mode-changing options."""
     if len(parts) < 3 or parts[:2] != ["uv", "run"]:
         return parts
     index = 2
+    module_mode = False
     while index < len(parts) and parts[index] != "--" and parts[index].startswith("-"):
         raw_option = parts[index]
         option = raw_option.split("=", 1)[0]
         index += 1
-        if "=" not in raw_option and option in _UV_RUN_OPTIONS_WITH_VALUES:
+        if option in _UV_RUN_NON_EXECUTING_OPTIONS or option in _UV_RUN_SCRIPT_OPTIONS:
+            return None
+        if option in _UV_RUN_MODULE_OPTIONS:
+            module_mode = True
+            continue
+        if option in _UV_RUN_FLAG_OPTIONS or option.startswith(("-q", "-v")):
+            continue
+        if option not in _UV_RUN_OPTIONS_WITH_VALUES:
+            return None
+        if "=" not in raw_option:
+            if index >= len(parts) or parts[index].startswith("-"):
+                return None
             index += 1
     if index < len(parts) and parts[index] == "--":
         index += 1
-    return ["uv", "run", *parts[index:]]
+    if index >= len(parts):
+        return None
+    command = parts[index:]
+    return ["python", "-m", *command] if module_mode else ["uv", "run", *command]
 
 
 def _looks_like_test_command(command: str) -> bool:
@@ -331,8 +386,7 @@ def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
             if maven_skip_property_disables_tests(parts[index + 1]):
                 return True
         if normalized.startswith("--define="):
-            _, _, define_value = normalized.partition("=")
-            if maven_skip_property_disables_tests(define_value):
+            if maven_skip_property_disables_tests(normalized.partition("=")[2]):
                 return True
         if normalized.startswith("-d") and maven_skip_property_disables_tests(normalized[2:]):
             return True
@@ -408,7 +462,10 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     except ValueError:
         parts = command.replace('"', "").replace("'", "").split()
     parts = _strip_env_prefix(parts)
-    parts = _strip_uv_run_options(parts)
+    uv_parts = _strip_uv_run_options(parts)
+    if uv_parts is None:
+        return None
+    parts = uv_parts
     if not parts:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):
