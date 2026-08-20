@@ -4504,6 +4504,7 @@ class TestClaudeSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
             patch("ouroboros.cli.commands.setup._codex_release_mcp_launcher", return_value=None),
+            patch("ouroboros.cli.commands.setup._is_dev_ouroboros_build", return_value=False),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="http") is False
 
@@ -4520,6 +4521,7 @@ class TestClaudeSetup:
                 "ouroboros.cli.commands.setup._codex_release_mcp_launcher",
                 return_value=("uvx", ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]),
             ),
+            patch("ouroboros.cli.windows_codex_mcp._launcher_is_usable", return_value=True),
         ):
             assert setup_cmd._register_codex_mcp_server(mode="http") is True
 

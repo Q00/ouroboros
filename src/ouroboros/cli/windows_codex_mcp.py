@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
+import subprocess
 import tomllib
+
+from rich.markup import escape
 
 HTTP_MCP_SECTION = """# Ouroboros native-Windows HTTP MCP (explicit opt-in; no persistence).
 [mcp_servers.ouroboros]
@@ -25,6 +27,20 @@ class WindowsCodexMcpDecision:
 
 def is_native_windows() -> bool:
     return os.name == "nt"
+
+
+def _launcher_is_usable(launcher: tuple[str, list[str]]) -> bool:
+    command, args = launcher
+    try:
+        result = subprocess.run(
+            [command, *args, "--help"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def resolve_windows_codex_mcp_mode(
@@ -74,6 +90,12 @@ def resolve_windows_codex_mcp_mode(
             success=False,
             error="Could not find a launchable MCP [mcp] command for explicit HTTP mode.",
         )
+    if not _launcher_is_usable(launcher):
+        return WindowsCodexMcpDecision(
+            handled=True,
+            success=False,
+            error="The selected MCP launcher failed its `mcp serve --help` activation probe.",
+        )
     command, launcher_args = launcher
     http_args = [
         *launcher_args,
@@ -84,7 +106,7 @@ def resolve_windows_codex_mcp_mode(
         "--port",
         "8765",
     ]
-    rendered = " ".join([command, *(json.dumps(arg) for arg in http_args)])
+    rendered = subprocess.list2cmdline([command, *http_args])
     return WindowsCodexMcpDecision(
         handled=True,
         success=True,
@@ -110,5 +132,5 @@ def apply_windows_codex_mcp_mode(
     if decision.error:
         print_error(decision.error)  # type: ignore[operator]
     if decision.message:
-        print_info(decision.message)  # type: ignore[operator]
+        print_info(escape(decision.message))  # type: ignore[operator]
     return decision.handled, decision.success, decision.rendered_section

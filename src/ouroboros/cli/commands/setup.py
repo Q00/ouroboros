@@ -437,7 +437,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -545,7 +544,6 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
-    """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
     if normalized not in {"auto", "http", "preserve", "stdio"}:
         print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
@@ -1210,9 +1208,15 @@ def _register_codex_mcp_server(
         handled, success, section = apply_windows_codex_mcp_mode(
             mode,
             codex_config=resolve_codex_home() / "config.toml",
-            launcher=_codex_release_mcp_launcher() if mode == "http" else None,
-            print_error=print_error,
+            launcher=(
+                (sys.executable, list(_CODEX_MODULE_MCP_ARGS))
+                if _is_dev_ouroboros_build()
+                else _codex_release_mcp_launcher()
+            )
+            if mode == "http"
+            else None,
             print_info=print_info,
+            print_error=print_error,
         )
         if handled and (not success or section is None):
             return success
