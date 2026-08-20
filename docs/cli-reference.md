@@ -291,7 +291,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
-- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
+- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
