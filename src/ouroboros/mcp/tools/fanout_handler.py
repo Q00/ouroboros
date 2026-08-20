@@ -13,6 +13,7 @@ import structlog
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_submitted
 from ouroboros.mcp.tools.fanout import (
     FanoutRegistry,
     PreparedFanoutSynthesis,
@@ -169,9 +170,39 @@ class SubmitFanoutResultsHandler:
             results=list(raw_results),
             fanout_id=fanout_id,
         )
+        record = self._registry.load(fanout_id)
+        expected_count = len(record.expected_keys) if record is not None else 0
+        received_count = sum(
+            1
+            for item in raw_results
+            if isinstance(item, dict) and "content" in item and "undispatched" not in item
+        )
+        undispatched_count = sum(
+            1 for item in raw_results if isinstance(item, dict) and item.get("undispatched") is True
+        )
         outcome = await self._publish_or_synthesize(prepared, fanout_id=fanout_id)
+        fanout_kind = record.kind if record is not None else "unknown"
         if isinstance(outcome, MCPToolError):
+            record_subagent_dispatch_submitted(
+                fanout_kind=fanout_kind,
+                submission_status="publication_failed",
+                expected_count=expected_count,
+                received_count=received_count,
+                undispatched_count=undispatched_count,
+            )
             return Result.err(outcome)
+        submission_status = (
+            "complete"
+            if isinstance(prepared, PreparedFanoutSynthesis)
+            else str(outcome.get("status") or "unknown_kind")
+        )
+        record_subagent_dispatch_submitted(
+            fanout_kind=fanout_kind,
+            submission_status=submission_status,
+            expected_count=expected_count,
+            received_count=received_count,
+            undispatched_count=undispatched_count,
+        )
         if outcome.get("status") == "unknown_fanout_id":
             return Result.err(
                 MCPToolError(

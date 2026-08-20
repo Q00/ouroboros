@@ -58,6 +58,7 @@ from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
@@ -78,7 +79,6 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
-    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -2665,7 +2665,7 @@ class InterviewHandler:
                             question=question,
                             phase="start",
                             score=live_score,
-                            dispatch_mode=resolve_subagent_dispatch(
+                            dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
                             runtime_backend=self.agent_runtime_backend,
@@ -3313,7 +3313,7 @@ class InterviewHandler:
                             question=pending_question,
                             phase="resume_pending",
                             score=_load_state_ambiguity_score(state),
-                            dispatch_mode=resolve_subagent_dispatch(
+                            dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
                             runtime_backend=self.agent_runtime_backend,
@@ -3592,7 +3592,7 @@ class InterviewHandler:
                     question=question,
                     phase="answer",
                     score=live_score,
-                    dispatch_mode=resolve_subagent_dispatch(
+                    dispatch_mode=resolve_request_subagent_dispatch(
                         self.agent_runtime_backend, self.opencode_mode
                     ),
                     runtime_backend=self.agent_runtime_backend,

@@ -31,6 +31,7 @@ from typing import Any
 import structlog
 
 from ouroboros.backends.capabilities import build_runtime_subagent_orchestration_contract
+from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_emitted
 from ouroboros.mcp.tools.advisory_prompts import (
     _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS,
     _advisory_output_section,
@@ -670,19 +671,11 @@ def attach_question_advisory(
     if code_investigation_request is not None:
         meta["code_investigation_request"] = dict(code_investigation_request)
 
-    contract_backend = runtime_backend
-    if not contract_backend:
-        contract_backend = (
-            "codex"
-            if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN
-            else "opencode"
-            if dispatch_mode is SubagentDispatchMode.PLUGIN_PASSIVE
-            else "gemini"
-        )
     contract = build_runtime_subagent_orchestration_contract(
-        contract_backend,
+        runtime_backend or "unknown",
         directive_metadata=request,
         opencode_mode=opencode_mode,
+        dispatch_mode=dispatch_mode,
     )
     meta["subagent_orchestration_instruction"] = contract.runtime_instruction_handling
     # Advisory lanes are keyed by lane_id; their persona is absent on some
@@ -708,6 +701,13 @@ def attach_question_advisory(
             if repository_roster is not None
             else None
         ),
+    )
+    record_subagent_dispatch_emitted(
+        fanout_kind="question_advisory",
+        payload_count=len(payloads),
+        dispatch_mode=dispatch_mode,
+        worker_backend=runtime_backend,
+        fanout_reentry_available="question_advisory_fanout_id" in meta,
     )
 
 
