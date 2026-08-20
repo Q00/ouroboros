@@ -28,7 +28,11 @@ from typing import Any
 
 import structlog
 
-from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.ambiguity import (
+    AmbiguityScore,
+    AmbiguityScorer,
+    qualifies_for_seed_completion,
+)
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
@@ -51,7 +55,9 @@ from ouroboros.bigbang.question_classifier import (
     ClassifierOutputType,
     QuestionCategory,
     QuestionClassifier,
+    classification_policy_prompt,
 )
+from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.json_utils import extract_json_payload
@@ -168,6 +174,27 @@ def _decision_only_view(state: InterviewState) -> InterviewState:
     return state.model_copy(update={"rounds": projected})
 
 
+def decision_round_count(state: InterviewState) -> int:
+    """Count authoritative PM decisions eligible for completion."""
+    return sum(
+        1
+        for round_data in state.rounds
+        if round_data.user_response is not None
+        and round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+        and round_data.provenance == "user"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PMInterviewTurnPlan:
+    """Atomic PM question, ambiguity result, and routing classification."""
+
+    question: str
+    ambiguity: AmbiguityScore | None
+    classification: ClassificationResult
+    raw_payload: dict[str, Any]
+
+
 @dataclass
 class PMInterviewEngine:
     """PM interview engine — wraps InterviewEngine via composition.
@@ -217,6 +244,8 @@ class PMInterviewEngine:
         pm_seed = await engine.generate_pm_seed(state)
         engine.save_pm_seed(pm_seed)
     """
+
+    supports_atomic_turn = True
 
     inner: InterviewEngine
     classifier: QuestionClassifier
@@ -544,86 +573,26 @@ class PMInterviewEngine:
 
         self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
 
-    async def ask_next_question(
-        self,
-        state: InterviewState,
-    ) -> Result[str, ProviderError | ValidationError]:
-        """Generate and classify the next question.
-
-        Delegates question generation to the inner engine, then classifies
-        the question. Planning questions pass through unchanged. Development
-        questions are reframed for PM audience or deferred.
-
-        Args:
-            state: Current interview state.
-
-        Returns:
-            Result containing the (possibly reframed) question or error.
-        """
-        # Generate question via inner engine
-        question_result = await self.inner.ask_next_question(state)
-
-        if question_result.is_err:
-            return question_result
-
-        question = question_result.value
-        if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
-            return Result.ok(question)
-
-        # Classify the question
-        context = self._build_interview_context(state)
-        classify_result = await self.classifier.classify(
-            question=question,
-            interview_context=context,
-        )
-
-        if classify_result.is_err:
-            # Classification failed — return original question (safe fallback)
-            log.warning("pm.classification_failed", question=question[:100])
-            return question_result
-
-        classification = classify_result.value
+    def _apply_classification(self, classification: ClassificationResult) -> str:
+        """Persist one PM routing decision and return the user-facing question."""
         self.classifications.append(classification)
-
         output_type = classification.output_type
-
         if output_type == ClassifierOutputType.DEFERRED:
-            # Return the question to the caller (main session) so the user
-            # can choose to defer it themselves.  The main session detects
-            # classification == "deferred" via response_meta and offers
-            # a "skip / defer to dev" option.  If the user picks it, the
-            # caller calls skip_as_deferred() which records the deferral
-            # and appends to deferred_items.
-            #
-            # Previously this branch auto-answered and recursed, which could
-            # trigger MCP 120s timeouts on consecutive DEFERRED runs.
             log.info(
                 "pm.question_deferred_candidate",
                 question=classification.original_question[:100],
                 reasoning=classification.reasoning,
                 output_type=output_type,
             )
-            return Result.ok(classification.original_question)
-
+            return classification.original_question
         if output_type == ClassifierOutputType.DECIDE_LATER:
-            # Return the question to the caller (main session) so the user
-            # can choose "decide later" themselves.  The main session detects
-            # classification == "decide_later" via response_meta and offers
-            # the option.  If the user picks it, the caller calls
-            # skip_as_decide_later() which records the placeholder and
-            # appends to decide_later_items.
-            #
-            # Previously this branch auto-answered and recursed, which could
-            # trigger MCP 120s timeouts on consecutive DECIDE_LATER runs.
             log.info(
                 "pm.question_decide_later",
                 question=classification.original_question[:100],
                 reasoning=classification.reasoning,
             )
-            return Result.ok(classification.original_question)
-
+            return classification.original_question
         if output_type == ClassifierOutputType.REFRAMED:
-            # Use the reframed version and track the mapping
             reframed = classification.question_for_pm
             self._reframe_map[reframed] = classification.original_question
             log.info(
@@ -632,15 +601,86 @@ class PMInterviewEngine:
                 reframed=reframed[:100],
                 output_type=output_type,
             )
-            return Result.ok(reframed)
-
-        # PASSTHROUGH — planning question forwarded unchanged to the PM
+            return reframed
         log.debug(
             "pm.question_passthrough",
             question=classification.original_question[:100],
             output_type=output_type,
         )
-        return Result.ok(classification.question_for_pm)
+        return classification.question_for_pm
+
+    async def plan_next_turn(
+        self,
+        state: InterviewState,
+    ) -> Result[PMInterviewTurnPlan, ProviderError | ValidationError]:
+        """Plan PM scoring, question generation, and classification in one call."""
+        additional_context = ""
+        if self.decide_later_items:
+            additional_context = "\n".join(f"- {item}" for item in self.decide_later_items)
+        scorer = AmbiguityScorer(llm_adapter=self.llm_adapter, model=self.model)
+        planner = InterviewTurnPlanner(engine=self.inner, scorer=scorer)
+        response_contract = f"""
+Also include these PM routing fields in the same JSON object:
+"category": "planning"|"development"|"decide_later",
+"reframed_question": "string", "reasoning": "string",
+"defer_to_dev": false|true, "decide_later": false|true,
+"placeholder_response": "string".
+
+Apply this canonical PM routing policy:
+{classification_policy_prompt()}
+"""
+        turn_result = await planner.plan(
+            state,
+            scoring_state=_decision_only_view(state),
+            additional_scoring_context=additional_context,
+            extra_response_contract=response_contract,
+            additional_untrusted_context=self.classifier.codebase_context[:2000],
+        )
+        if turn_result.is_err:
+            return Result.err(turn_result.error)
+        turn = turn_result.value
+        try:
+            classification = self.classifier._parse_response(
+                json.dumps(turn.raw_payload),
+                turn.question,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("pm.atomic_classification_failed", error=str(exc))
+            classification = ClassificationResult(
+                original_question=turn.question,
+                category=QuestionCategory.PLANNING,
+                reframed_question=turn.question,
+                reasoning="Atomic PM classification unavailable; defaulting to planning.",
+            )
+        question = self._apply_classification(classification)
+        return Result.ok(
+            PMInterviewTurnPlan(
+                question=question,
+                ambiguity=turn.ambiguity,
+                classification=classification,
+                raw_payload=turn.raw_payload,
+            )
+        )
+
+    async def ask_next_question(
+        self,
+        state: InterviewState,
+    ) -> Result[str, ProviderError | ValidationError]:
+        """Generate and classify the next question using the legacy two-call path."""
+        question_result = await self.inner.ask_next_question(state)
+        if question_result.is_err:
+            return question_result
+        question = question_result.value
+        if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            return Result.ok(question)
+        classify_result = await self.classifier.classify(
+            question=question,
+            interview_context=self._build_interview_context(state),
+        )
+        if classify_result.is_err:
+            log.warning("pm.classification_failed", question=question[:100])
+            return question_result
+        return Result.ok(self._apply_classification(classify_result.value))
 
     async def record_response(
         self,
@@ -953,14 +993,7 @@ class PMInterviewEngine:
         }
 
     def get_pending_reframe(self) -> dict[str, str] | None:
-        """Return the most recent pending reframe as {reframed, original}, or None.
-
-        Encapsulates access to the internal ``_reframe_map`` so that callers
-        do not need to reach into private state.
-
-        Returns:
-            Dict with 'reframed' and 'original' keys, or None if no pending reframe.
-        """
+        """Return the most recent pending reframe as {reframed, original}, or None."""
         if not self._reframe_map:
             return None
         reframed = next(reversed(self._reframe_map))
@@ -986,38 +1019,11 @@ class PMInterviewEngine:
     ) -> dict[str, Any] | None:
         """Check whether the interview should complete based on ambiguity.
 
-        Completion is determined by ambiguity score only (user controls when
-        to stop, consistent with the regular interview engine):
-
-        After at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT`` answered rounds, the
-        scorer evaluates requirement clarity.  If the score is <= threshold
-        (0.2) the interview is ready for PM generation.
-
-        Args:
-            state: Current interview state.
-
-        Returns:
-            Dict with completion metadata if the interview should end,
-            or ``None`` if the interview should continue.
+        After at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT`` authoritative PM
+        decisions, the scorer evaluates requirement clarity. A score at or below
+        the threshold makes the interview ready for PM generation.
         """
-        # Count decisions, not rounds. Completion asks how many times the person
-        # has judged, and a round is not evidence of that: pending rounds have no
-        # answer yet, the initial-context summary is a recovery artefact, and a
-        # confirmed lane finding occupies a round while being a fact the person
-        # adopted rather than a judgment they made. Counting those would score
-        # readiness a turn early for every question the lanes reported on — and
-        # it is what lets a finding take a round of its own safely at all.
-        answered_rounds = sum(
-            1
-            for r in state.rounds
-            if r.user_response is not None
-            and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
-            # ``r.provenance``, not the marker: consumers read the settled
-            # field, which is the rule ``answer_provenance`` exists to hold
-            # (#1755). They agree today and diverge on the historical envelopes
-            # ``_settle_provenance`` strips.
-            and r.provenance == "user"
-        )
+        answered_rounds = decision_round_count(state)
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
         if answered_rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT:
@@ -1058,7 +1064,7 @@ class PMInterviewEngine:
                 breakdown=ambiguity.breakdown.model_dump(mode="json"),
             )
 
-            if ambiguity.is_ready_for_seed:
+            if qualifies_for_seed_completion(ambiguity, is_brownfield=state.is_brownfield):
                 log.info(
                     "pm.completion.ambiguity_resolved",
                     session_id=state.interview_id,
