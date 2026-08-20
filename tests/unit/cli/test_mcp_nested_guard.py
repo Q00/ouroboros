@@ -49,6 +49,17 @@ def test_nested_guard_exits_cleanly(monkeypatch):
     assert result.exit_code == 0
 
 
+def test_nested_guard_skips_shell_hydration(monkeypatch) -> None:
+    monkeypatch.setenv("_OUROBOROS_NESTED", "1")
+    hydrate = Mock(side_effect=AssertionError("nested serve must not hydrate"))
+    monkeypatch.setattr("ouroboros.cli.commands.mcp._ensure_shell_env", hydrate)
+
+    result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
+
+    assert result.exit_code == 0
+    hydrate.assert_not_called()
+
+
 def test_serve_sets_nested_env_var(monkeypatch):
     """serve() should set _OUROBOROS_NESTED=1 for child processes.
 

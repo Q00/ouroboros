@@ -1244,6 +1244,11 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # Reject recursive server launches before shell hydration or any persistent
+    # cache/environment mutation. The parent runtime already owns the MCP edge.
+    if os.environ.get("_OUROBOROS_NESTED"):
+        _stderr_console.print("[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]")
+        raise typer.Exit(0)
     # Detached MCP hosts often inherit a minimal environment. Hydrate before
     # resolving selector provenance so login-shell/cache OUROBOROS_* choices
     # remain authoritative rather than being mistaken for the shipped default.
@@ -1280,14 +1285,6 @@ def serve(
         )
         selected_runtime = standin_backend
 
-    # Guard: prevent recursive MCP server spawning.
-    # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
-    # inherits this env var. If that runtime's MCP config tries to spawn another
-    # ouroboros server, the nested instance exits cleanly instead of creating a
-    # process tree explosion.
-    if os.environ.get("_OUROBOROS_NESTED"):
-        _stderr_console.print("[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]")
-        raise typer.Exit(0)
     os.environ["_OUROBOROS_NESTED"] = "1"
 
     # Transport is re-validated inside _run_mcp_server; normalize here first so
