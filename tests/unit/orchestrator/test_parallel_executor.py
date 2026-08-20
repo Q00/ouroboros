@@ -10625,6 +10625,47 @@ class TestParallelACExecutor:
     def test_uv_non_executing_pytest_modes_are_not_evidence(self, command: str) -> None:
         assert _looks_like_test_command(command) is False
 
+    def test_uv_preview_features_value_is_test_evidence(self) -> None:
+        command = "uv run --preview-features target-workspace-discovery pytest -q"
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize("option", ("--color=", "--directory="))
+    def test_uv_empty_attached_option_values_fail_closed(self, option: str) -> None:
+        assert _looks_like_test_command(f"uv run {option} pytest -q") is False
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        (
+            ("uv run --preview-features target-workspace-discovery pytest -q", True),
+            ("uv run --color= pytest -q", False),
+            ("uv run --directory= pytest -q", False),
+        ),
+    )
+    def test_uv_long_option_operands_gate_end_to_end_claims(
+        self,
+        command: str,
+        expected: bool,
+    ) -> None:
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is expected
+        )
+
     def test_compound_uv_command_cannot_back_standalone_pytest_claim(self) -> None:
         command = "uv run --with pytest pytest -q && python scripts/postprocess.py"
         claim = "uv run --with pytest pytest -q"

@@ -360,6 +360,7 @@ _UV_VALUE_OPTIONS = frozenset(
         "--project",
         "--python",
         "--python-platform",
+        "--preview-features",
         "--refresh-package",
         "--reinstall-package",
         "--resolution",
@@ -431,7 +432,7 @@ def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
             index += 1
             continue
         if token.startswith("--"):
-            option, separator, _attached = token.partition("=")
+            option, separator, attached = token.partition("=")
             if option in _UV_FLAG_OPTIONS:
                 if separator:
                     return None
@@ -440,7 +441,10 @@ def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
             if option not in _UV_VALUE_OPTIONS:
                 return None
             index += 1
-            if not separator:
+            if separator:
+                if not attached:
+                    return None
+            else:
                 if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
                     return None
                 index += 1
