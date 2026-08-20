@@ -1241,9 +1241,24 @@ def _register_codex_mcp_server(
             )
             return True
         if mode == "http":
+            launcher = _codex_release_mcp_launcher()
+            if launcher is None:
+                print_error("Could not find a launchable MCP [mcp] command for explicit HTTP mode.")
+                return False
+            command, launcher_args = launcher
+            http_args = [
+                *launcher_args,
+                "--transport",
+                "streamable-http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8765",
+            ]
             rendered_section = _CODEX_HTTP_MCP_SECTION
             print_info(
-                f"Start the MCP server before opening Codex Desktop: {_CODEX_HTTP_MCP_COMMAND}"
+                "Start the MCP server before opening Codex Desktop: "
+                + " ".join([command, *(json.dumps(arg) for arg in http_args)])
             )
         else:
             rendered_section = _render_codex_mcp_section()
@@ -1274,10 +1289,14 @@ def _register_codex_mcp_server(
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+        if (
+            entry is not None
+            and not _codex_mcp_entry_has_endpoint(entry)
+            and mode not in {"stdio", "http"}
+        ):
             print_error(
                 "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+                "Codex setup not saved. Use an explicit replacement mode."
             )
             return False
         if (
