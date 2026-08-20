@@ -114,18 +114,15 @@ bounded by the roster, and not checked against the answer contract. This skill
 is self-contained: everything you need is here and in the tool response, so do
 not go looking for exploration rules in another skill's file.
 
-**When `meta.question_advisory_subagents` is present you MUST fan out.** Show
-the question text to the user first, then treat each entry as a spawn-ready
-payload with `title`, `agent`, `prompt`, and `context`, and dispatch every
-payload through your host's native subagent mechanism — Claude Code → **one
-Task/Agent call per payload in one parallel batch**; Codex → one native Codex
-subagent per payload; a runtime with no parallel primitive → process them
-sequentially. Pass each payload's `prompt` unchanged rather than rewriting it.
-
-This holds regardless of dispatch mode: **the payloads themselves are the spawn
-signal.** `meta.question_advisory_host_action=spawn_subagents` is a reinforcing
-cue, not a prerequisite. The only time you skip spawning is when the host has no
-subagent primitive at all.
+**When `meta.question_advisory_subagents` is present you MUST process every
+payload.** Show the question first, then pass each payload's `prompt` unchanged.
+Obey `meta.question_advisory_host_action`: `spawn_subagents` means parallel
+support was declared; `dispatch_subagents_if_supported` means use the host's
+native parallel mechanism when available and process the same payloads
+sequentially otherwise; `process_payloads_sequentially` requires ordered
+processing. Claude Code parallel dispatch is one Task/Agent call per payload in
+one batch; Codex uses one native Codex subagent per payload. The payloads are
+the work contract, while the host action selects the execution strategy.
 
 **Say what is running.** Same shape the regular interview uses: after the
 question, set off by a divider, one line naming how many perspectives are running

@@ -693,6 +693,9 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
         skill = (root / "pm" / "SKILL.md").read_text(encoding="utf-8")
         assert "With a `contract_id`, synthesize" in skill, root
         assert "leave out a lane you submitted as\n`undispatched`" in skill, root
+        assert "dispatch_subagents_if_supported" in skill, root
+        assert "process_payloads_sequentially" in skill, root
+        assert "host action selects the execution strategy" in skill, root
 
 
 @pytest.mark.asyncio
