@@ -10649,6 +10649,39 @@ class TestParallelACExecutor:
         )
 
     @pytest.mark.parametrize(
+        ("command", "expected"),
+        (
+            ("uv run -V pytest", False),
+            ("uv run -C foo=bar pytest -q", True),
+            ("uv run -U pytest -q", True),
+        ),
+    )
+    def test_uv_short_options_preserve_case(self, command: str, expected: bool) -> None:
+        assert _looks_like_test_command(command) is expected
+
+    def test_uv_version_mode_cannot_back_tests_passed_claim(self) -> None:
+        command = "uv run -V pytest"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
         "command",
         (
             "uv run --quiet pytest -q",

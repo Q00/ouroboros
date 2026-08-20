@@ -27,7 +27,7 @@ def _test_command_invocation(command: str) -> str | None:
     as ``| grep passed`` survives the strip and is rejected downstream by
     ``_test_invocation_from_prefix`` rather than being silently dropped.
     """
-    normalized = command.strip().lower()
+    normalized = command.strip()
     if not normalized:
         return None
 
@@ -54,7 +54,7 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
     This must not be used as command proof. It exists only to classify rejected
     evidence forms for diagnostics while preserving the #1208 masking guard.
     """
-    normalized = command.strip().lower()
+    normalized = command.strip()
     if not normalized:
         return None
     direct = _test_invocation_from_prefix(_strip_command_output_plumbing(normalized))
