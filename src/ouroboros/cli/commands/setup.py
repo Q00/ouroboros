@@ -436,6 +436,14 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
+_CODEX_HTTP_MCP_SECTION = """# Ouroboros native-Windows HTTP MCP (explicit opt-in; no persistence).
+[mcp_servers.ouroboros]
+url = "http://127.0.0.1:8765/mcp"
+"""
+_CODEX_HTTP_MCP_COMMAND = (
+    "ouroboros mcp serve --runtime codex --llm-backend codex "
+    "--transport streamable-http --host 127.0.0.1 --port 8765"
+)
 
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
@@ -445,7 +453,7 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "http", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
@@ -543,11 +551,15 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 }
 
 
+def _is_native_windows() -> bool:
+    return os.name == "nt"
+
+
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
     """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "http", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -1205,7 +1217,42 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
+    if _is_native_windows():
+        if mode == "stdio":
+            print_error(
+                "Native-Windows Codex Desktop stdio MCP can terminate the app server. "
+                "Use --mcp-mode http and run the printed loopback server command, or use WSL 2."
+            )
+            return False
+        if mode == "auto":
+            codex_config = resolve_codex_home() / "config.toml"
+            if codex_config.exists():
+                try:
+                    parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+                except tomllib.TOMLDecodeError:
+                    print_error(f"Could not parse {codex_config} — Codex setup not saved.")
+                    return False
+                if _codex_mcp_entry_from_toml(parsed) is not None:
+                    print_info("Preserved existing Codex MCP config on native Windows.")
+                    return True
+            print_info(
+                "Skipped persistent MCP registration on native Windows. "
+                "Use --mcp-mode http for the explicit loopback HTTP topology."
+            )
+            return True
+        if mode == "http":
+            rendered_section = _CODEX_HTTP_MCP_SECTION
+            print_info(
+                f"Start the MCP server before opening Codex Desktop: {_CODEX_HTTP_MCP_COMMAND}"
+            )
+        else:
+            rendered_section = _render_codex_mcp_section()
+    else:
+        if mode == "http":
+            print_error("--mcp-mode http is only for native Windows Codex Desktop.")
+            return False
+        rendered_section = _render_codex_mcp_section()
+
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
@@ -4771,7 +4818,7 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help="Codex MCP config mode: auto preserves native-Windows safety and user entries; http explicitly writes the native-Windows loopback URL; preserve skips MCP changes; stdio replaces with the managed entry on supported hosts.",
         ),
     ] = "auto",
     preserve_existing_llm: Annotated[

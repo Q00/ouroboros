@@ -4473,6 +4473,32 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_native_windows_auto_skips_persistent_mcp_registration(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="auto") is True
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_native_windows_stdio_fails_closed(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="stdio") is False
+
+    def test_native_windows_http_mode_writes_explicit_loopback_url(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is True
+
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config
+
     def test_windows_prepared_file_ignores_synthetic_posix_mode(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.yaml"
 
