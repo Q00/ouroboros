@@ -1935,7 +1935,9 @@ async def test_a_block_after_the_advisory_leaves_no_ownership_claim(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_an_unexpired_deadline_is_never_redefined_as_expired(tmp_path) -> None:
+async def test_an_unexpired_deadline_is_never_redefined_as_expired(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A short-but-live budget must not be treated as spent.
 
     Reserving the append's worst-case latency up front turned an unexpired
@@ -1943,6 +1945,19 @@ async def test_an_unexpired_deadline_is_never_redefined_as_expired(tmp_path) -> 
     the append is a no-op. Disabling Seed QA imposes no such block, so a wired
     evaluator must not either.
     """
+
+    class FrozenTime:
+        @staticmethod
+        def monotonic() -> float:
+            return 1_000.0
+
+        @staticmethod
+        def time() -> float:
+            return 2_000.0
+
+    clock = FrozenTime()
+    monkeypatch.setattr("ouroboros.auto.pipeline.time", clock)
+    monkeypatch.setattr("ouroboros.auto.state.time", clock)
 
     async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
         return _seed()
@@ -1955,8 +1970,8 @@ async def test_an_unexpired_deadline_is_never_redefined_as_expired(tmp_path) -> 
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.max_repair_rounds = 1
-    state.deadline_at = time.monotonic() + 0.5
-    state.deadline_at_epoch = time.time() + 0.5
+    state.deadline_at = clock.monotonic() + 0.5
+    state.deadline_at_epoch = clock.time() + 0.5
     ledger = SeedDraftLedger.from_goal(state.goal)
     _fill_ready(ledger)
     state.ledger = ledger.to_dict()
