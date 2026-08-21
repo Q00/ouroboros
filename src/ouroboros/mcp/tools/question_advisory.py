@@ -321,9 +321,7 @@ def _declared_lanes(catalog: Mapping[str, Any]) -> set[str]:
     }
 
 
-def _recent_findings_section(
-    request: Mapping[str, Any], lane_id: str, *, contracted: bool
-) -> str:
+def _recent_findings_section(request: Mapping[str, Any], lane_id: str, *, contracted: bool) -> str:
     """Return the block carrying what has already been found in this project.
 
     Rendered by presence, like the scores above it: a project with nothing
