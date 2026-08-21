@@ -238,6 +238,10 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
     probe_env = os.environ.copy()
     probe_env["HOME"] = str(probe_home)
     probe_env["USERPROFILE"] = str(probe_home)
+    # The inherited SDK runtime may now fall back to an installed CLI. Keep this
+    # rejection probe independent of the developer machine and login shell.
+    probe_env["PATH"] = os.pathsep.join((str(probe_python.parent), os.defpath))
+    probe_env["SHELL"] = str(probe_home / "missing-shell")
     for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME", "_OUROBOROS_NESTED"):
         probe_env.pop(key, None)
     bare_probe = subprocess.run(
