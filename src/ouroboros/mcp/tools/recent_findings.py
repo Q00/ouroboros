@@ -152,10 +152,11 @@ def recent_findings_by_lane(
     that keeps consumes none either, and handing one a code fact is a new
     capability rather than a cache hit.
 
-    ``lanes`` narrows it further to the lanes of a particular tool that can
-    read at all -- a caller passing none of them gets an empty mapping, which
-    is the honest answer for a tool whose every lane answers under a closed
-    contract. Absent, every eligible lane is returned.
+    ``lanes`` narrows it further to the lanes a particular tool declares.
+    Eligibility follows what a lane produces, never the shape of its answer:
+    a contracted lane is offered its own findings exactly as a prose lane is
+    (#2223) -- what differs is only the offer text it is handed, decided where
+    the prompt is rendered. Absent, every eligible lane is returned.
 
     A store that cannot be read returns nothing, and so does a single record
     that cannot be read: the rest of the store still answers. This is advisory
