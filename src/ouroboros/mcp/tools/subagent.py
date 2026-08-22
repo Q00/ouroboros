@@ -1706,6 +1706,10 @@ def build_pm_interview_subagent(
     if transcript:
         transcript_section = f"\n## Conversation History\n{transcript}\n"
 
+    # A turn's answers arrive under ``answers``, leaving the singular
+    # ``answer`` empty for exactly the turns carrying the most history. The
+    # history is the transcript; ``answer`` only adds one round beneath it.
+    answer_section = f"\n## User's Latest Answer\n{answer}\n" if answer else ""
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
 
@@ -1725,7 +1729,7 @@ constraints.
 
 Begin the PM interview. Ask your first question about product requirements."""
 
-    elif (action == "answer" or action == "resume") and answer:
+    elif (action == "answer" or action == "resume") and (answer or transcript):
         prompt = f"""{system_prompt}
 
 ---
@@ -1737,10 +1741,7 @@ Analyze their answer, classify requirements, and ask the next question.
 
 ## Session ID
 {session_id}
-{transcript_section}
-## User's Latest Answer
-{answer}
-{repos_section}
+{transcript_section}{answer_section}{repos_section}
 Continue the PM interview."""
 
     elif action == "generate":

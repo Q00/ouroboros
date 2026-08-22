@@ -389,6 +389,7 @@ class TestPrdMetaFileLocation:
             "decide_later_items",
             "codebase_context",
             "pending_reframe",
+            "pending_reframes",
             "cwd",
             "brownfield_repos",
             "classifications",
@@ -943,7 +944,6 @@ async def test_atomic_pm_failure_returns_recoverable_session_envelope(tmp_path: 
             InterviewRound(round_number=1, question="Q1", user_response="A1"),
             InterviewRound(round_number=2, question="Q2", user_response="A2"),
             InterviewRound(round_number=3, question="Q3", user_response="A3"),
-            InterviewRound(round_number=4, question="Q4", user_response=None),
         ],
     )
     assert (await engine.save_state(state)).is_ok
@@ -951,7 +951,12 @@ async def test_atomic_pm_failure_returns_recoverable_session_envelope(tmp_path: 
     handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
     result = await handler.handle(
-        {"session_id": state.interview_id, "answer": "A4", "cwd": str(tmp_path)}
+        {
+            "session_id": state.interview_id,
+            "answer": "A4",
+            "last_question": "Q4",
+            "cwd": str(tmp_path),
+        }
     )
 
     assert result.is_ok
@@ -1035,7 +1040,6 @@ async def test_skip_metadata_survives_atomic_planner_failure(
             InterviewRound(round_number=1, question="Q1", user_response="A1"),
             InterviewRound(round_number=2, question="Q2", user_response="A2"),
             InterviewRound(round_number=3, question="Q3", user_response="A3"),
-            InterviewRound(round_number=4, question="Q4", user_response=None),
         ],
     )
     assert (await engine.save_state(state)).is_ok
@@ -1044,7 +1048,12 @@ async def test_skip_metadata_survives_atomic_planner_failure(
     handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
     result = await handler.handle(
-        {"session_id": state.interview_id, "answer": answer, "cwd": str(tmp_path)}
+        {
+            "session_id": state.interview_id,
+            "answer": answer,
+            "last_question": "Q4",
+            "cwd": str(tmp_path),
+        }
     )
 
     assert result.is_ok

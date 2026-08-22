@@ -64,6 +64,7 @@ from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -136,6 +137,15 @@ Respond ONLY with valid JSON in this exact format:
 # before the policy itself.
 _PM_CONTRACT_MARKER = "contract between the PM and the developers"
 
+#: Ceiling on questions per PM turn (RFC #2222 decision 1) — a target the
+#: generator may stay under, never a quota to pad toward.
+MAX_QUESTIONS_PER_TURN = 3
+
+#: Mirrors the planner's closure-mode activation ("Overall ambiguity <= 0.25
+#: activates closure mode ... do not open a new topic"). A companion is by
+#: definition a second topic, so at or below this score the batch is one.
+_CLOSURE_MODE_AMBIGUITY = 0.25
+
 
 def _decision_only_view(state: InterviewState) -> InterviewState:
     """Project ``state`` as the ambiguity scorer should read it.
@@ -193,6 +203,21 @@ class PMInterviewTurnPlan:
     ambiguity: AmbiguityScore | None
     classification: ClassificationResult
     raw_payload: dict[str, Any]
+
+
+#: What a round holds when the user asked to leave the decision open.
+#:
+#: A skip is recorded, not skipped: the round exists so the question is not
+#: asked again, and it says the decision is open rather than answered. These
+#: are named because two runtimes write them — the engine below, and the
+#: plugin path that has no engine to reach — and a second spelling of one
+#: sentence is a transcript whose meaning depends on which runtime took the
+#: call.
+DECIDE_LATER_PLACEHOLDER = "[Decide later] To be determined — user chose to decide later."
+DEFERRED_PLACEHOLDER = (
+    "[Deferred to development phase] This technical decision will be addressed "
+    "during the development interview."
+)
 
 
 @dataclass
@@ -626,6 +651,13 @@ Also include these PM routing fields in the same JSON object:
 "defer_to_dev": false|true, "decide_later": false|true,
 "placeholder_response": "string".
 
+Optionally add "companion_questions": up to {MAX_QUESTIONS_PER_TURN - 1} extra
+questions asked in the same turn, each an object with the same routing fields
+plus "question". Include one only when it targets a different unresolved
+clarity dimension and no answer to another question in this turn could change
+how it should be asked. In closure mode, or when unsure, include none. Never
+rephrase the primary question as a companion.
+
 Apply this canonical PM routing policy:
 {classification_policy_prompt()}
 """
@@ -662,11 +694,133 @@ Apply this canonical PM routing policy:
             )
         )
 
+    async def plan_next_turns(
+        self,
+        state: InterviewState,
+    ) -> Result[list[PMInterviewTurnPlan], ProviderError | ValidationError]:
+        """Plan one PM turn of one to three questions (RFC #2222 decision 1).
+
+        One planner call: the primary question travels exactly as
+        :meth:`plan_next_turn` produces it, and companions ride the same JSON
+        payload under ``companion_questions``. Each companion is classified and
+        applied through the same ``_apply_classification`` path as the primary,
+        so reframe tracking and skip routing do not know batch members apart.
+
+        What is enforced here rather than trusted to the generator:
+
+        * **Closure mode is single-question.** At or below the planner's
+          closure threshold the batch is the primary alone — a companion is a
+          second topic, and closure mode forbids opening one.
+        * **No duplicate question identities in one batch.** Fan-out isolation
+          keys on the normalized question text, so a companion that normalizes
+          to an already-included question is dropped, not dispatched.
+        * **The ceiling.** At most ``MAX_QUESTIONS_PER_TURN`` questions leave,
+          however many the payload carried.
+
+        A malformed companion entry is dropped silently: the primary is the
+        turn, and companions are an optimization the turn must not fail on.
+        What counts as malformed is not decided here — the companion's routing
+        fields go through the primary's own classification parser, so a
+        wrong-typed ``decide_later`` is refused by the same rule in both. What
+        follows the refusal differs, because the two questions do: the primary
+        falls back to a plain planning question, since the turn must have one,
+        while a companion is dropped, since the turn is whole without it.
+        """
+        self._begin_turn()
+        turn_result = await self.plan_next_turn(state)
+        if turn_result.is_err:
+            return Result.err(turn_result.error)
+        primary = turn_result.value
+        plans = [primary]
+
+        ambiguity = primary.ambiguity
+        if ambiguity is not None and ambiguity.overall_score <= _CLOSURE_MODE_AMBIGUITY:
+            return Result.ok(plans)
+
+        seen_identities = {
+            normalize_question_text(primary.question),
+            normalize_question_text(primary.classification.original_question),
+        }
+        raw_companions = primary.raw_payload.get("companion_questions")
+        if not isinstance(raw_companions, list):
+            return Result.ok(plans)
+
+        for raw in raw_companions:
+            if len(plans) >= MAX_QUESTIONS_PER_TURN:
+                break
+            if not isinstance(raw, dict):
+                continue
+            question_text = str(raw.get("question") or "").strip()
+            if not question_text:
+                continue
+            if normalize_question_text(question_text) in seen_identities:
+                continue
+            try:
+                classification = self.classifier._parse_response(json.dumps(raw), question_text)
+            except (KeyError, TypeError, ValueError) as exc:
+                # Same parser, same strictness as the primary: a routing field
+                # of the wrong type is malformed, not a value to coerce.
+                # ``bool("false")`` is True, and a companion routed that way
+                # would offer a skip that discards a question the PM must
+                # answer. Dropping loses one companion; coercing loses an answer.
+                log.warning("pm.companion_classification_rejected", error=str(exc))
+                continue
+            reframes_before = dict(self._reframe_map)
+            shown_question = self._apply_classification(classification)
+            shown_identity = normalize_question_text(shown_question)
+            if shown_identity in seen_identities:
+                # _apply_classification already recorded routing state for a
+                # question this batch will not carry — undo both traces. The
+                # map is restored, not popped: a companion whose own text
+                # differs but which reframes onto the primary's shown question
+                # overwrites the primary's entry, and popping that key would
+                # take the primary's original question with it — leaving the
+                # PM's answer to a reframed question with nothing to bundle.
+                self.classifications.pop()
+                self._reframe_map = reframes_before
+                continue
+            seen_identities.add(normalize_question_text(question_text))
+            seen_identities.add(shown_identity)
+            plans.append(
+                PMInterviewTurnPlan(
+                    question=shown_question,
+                    ambiguity=None,
+                    classification=classification,
+                    raw_payload=dict(raw),
+                )
+            )
+
+        log.info(
+            "pm.turn_batch_planned",
+            interview_id=state.interview_id,
+            batch_size=len(plans),
+        )
+        return Result.ok(plans)
+
+    def _begin_turn(self) -> None:
+        """Drop the previous turn's reframe routing before a new one is planned.
+
+        A reframe maps a *shown* question back to the technical one it came
+        from, and that mapping means something only while the turn that
+        produced it is the turn on the wire. A host abandons a turn simply by
+        not answering it (RFC #2222 revision 4) and the next call plans a fresh
+        one — so a mapping that outlived its turn would attach itself to
+        whatever later question happens to be displayed with the same text, and
+        that decision would be recorded under a technical question nobody was
+        asked.
+
+        This is the same removal the pending list got, at the one address it
+        had left: what is persisted describes the turn being planned now, and
+        planning replaces it rather than adding to it.
+        """
+        self._reframe_map = {}
+
     async def ask_next_question(
         self,
         state: InterviewState,
     ) -> Result[str, ProviderError | ValidationError]:
         """Generate and classify the next question using the legacy two-call path."""
+        self._begin_turn()
         question_result = await self.inner.ask_next_question(state)
         if question_result.is_err:
             return question_result
@@ -767,7 +921,7 @@ Apply this canonical PM routing policy:
 
         return await self.record_response(
             state,
-            user_response="[Decide later] To be determined — user chose to decide later.",
+            user_response=DECIDE_LATER_PLACEHOLDER,
             question=question,
         )
 
@@ -799,9 +953,7 @@ Apply this canonical PM routing policy:
 
         return await self.record_response(
             state,
-            user_response="[Deferred to development phase] "
-            "This technical decision will be addressed during the "
-            "development interview.",
+            user_response=DEFERRED_PLACEHOLDER,
             question=question,
         )
 
@@ -953,6 +1105,13 @@ Apply this canonical PM routing policy:
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):
             self._reframe_map[pending["reframed"]] = pending["original"]
+        # A batched turn can hold several pending reframes at once (RFC #2222);
+        # the full map is persisted beside the legacy single entry.
+        pending_map = meta.get("pending_reframes")
+        if isinstance(pending_map, dict):
+            for reframed, original in pending_map.items():
+                if isinstance(reframed, str) and isinstance(original, str):
+                    self._reframe_map[reframed] = original
 
         # Reinstall PM steering wrapper for resumed sessions
         self._install_pm_steering()

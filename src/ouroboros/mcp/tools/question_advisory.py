@@ -170,12 +170,6 @@ contradiction is the most useful thing you can hand a PRD author.
 this list, that is not evidence and it will be rejected: report it in your
 finding as a repository worth adding, and give it no entry.
 
-**Fill what a carried finding requires.** If any entry carries a claim, set
-`answer_prefix` to `[from-code]`, `requires_user_confirmation` to true, and write
-`user_confirmation_prompt` as the question the user should be asked before your
-finding is recorded on their behalf. There is no prefix that skips that step.
-If no entry carries one, those three fields do not exist in your answer.
-
 **Stop while the answer is still useful.** Read the roster in order and stop
 once you can answer, giving entries only to what you actually opened. A partial
 scope named honestly is a complete answer; an exhaustive search that has not
@@ -287,25 +281,25 @@ def _lane_agent(raw_lane: Mapping[str, Any], persona: str, capability: str) -> s
     return "researcher" if capability in {"inspect_code", "web_research"} else "general"
 
 
-def _open_contract_lanes(catalog: Mapping[str, Any]) -> set[str]:
-    """Return the lanes of one tool whose answer is prose rather than a fixed shape.
+def _declared_lanes(catalog: Mapping[str, Any]) -> set[str]:
+    """Return every lane id one tool's catalog declares.
 
-    A lane answering under a closed contract is not one of them, and the reason
-    is the same on both sides of the exchange. It has nowhere to *use* a
-    finding: what it may return is policy claims read from this question's
-    roster, or aggregates measured here, and a previous turn's finding is
-    neither. And it has nowhere to say it could not fetch one -- its answer
-    shape rejects any field it does not name, so writing that discards the whole
-    answer, and those lanes are required, so the fan-out then cannot complete.
-    Staying silent instead reports having found nothing, which is the confusion
-    this mechanism exists to prevent (RFC Q00/ouroboros#2167).
+    This is the offer set handed to ``recent_findings_by_lane``, which narrows
+    it to the lanes RFC Q00/ouroboros#2167 admits (``code_context``,
+    ``data_context``). Whether a lane answers under a closed contract is not
+    part of the test: eligibility follows what a lane *produces*, and the shape
+    of its answer is a validation concern, not a reuse one (#2223).
 
-    This is half of what decides who is offered a finding; the other half is
-    which lanes produce one worth reusing, which belongs to ``recent_findings``
-    and is applied there. Each list stays with its own reason -- this one is
-    about answer shapes, that one about what a lane's work repeats -- and the
-    two meet where they are passed to each other rather than being restated in
-    one place that would then own neither.
+    It was gated on answer shape once -- a contracted lane was offered nothing,
+    on the reasoning that its closed answer had no field in which to confess a
+    failed fetch. That withheld the head start from exactly the lanes doing the
+    most repeated work (both PM lanes are contracted) to protect a report
+    nobody consumes: a contracted answer carries no reuse statement a reader
+    could be misled by, a fetch that fails degrades to the investigation the
+    lane would have run anyway, and whether reuse happens at all is visible
+    server-side from the ``ouroboros_fetch_artifact`` calls. What the shape
+    still decides is the offer *text* -- a contracted lane is not told to
+    confess in-band; see ``_recent_findings_section``.
 
     Decided here rather than at render time so the request carries only what
     some lane will read. A key nothing renders is a promise the schema makes and
@@ -317,13 +311,11 @@ def _open_contract_lanes(catalog: Mapping[str, Any]) -> set[str]:
     return {
         str(lane.get("lane_id"))
         for lane in lanes
-        if isinstance(lane, Mapping)
-        and lane.get("lane_id")
-        and not isinstance(lane.get("answer_contract"), Mapping)
+        if isinstance(lane, Mapping) and lane.get("lane_id")
     }
 
 
-def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
+def _recent_findings_section(request: Mapping[str, Any], lane_id: str, *, contracted: bool) -> str:
     """Return the block carrying what has already been found in this project.
 
     Rendered by presence, like the scores above it: a project with nothing
@@ -332,7 +324,17 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     (RFC Q00/ouroboros#2167).
 
     Which lanes have a key at all is decided once, where the catalog is read
-    (see ``_open_contract_lanes``); this only renders what it was handed.
+    (see ``_declared_lanes``); this only renders what it was handed.
+
+    ``contracted`` selects what the block asks of a lane that cannot reach the
+    fetch tool. A prose lane says so in its finding -- silence there would read
+    as "nothing to reuse", the confusion RFC Q00/ouroboros#2167 exists to
+    prevent. A contracted lane has no field for that sentence and no reader who
+    would be misled by its absence: its answer carries claims about the
+    system, validated against the roster identically whether the fetch worked,
+    so it is told to keep its shape and investigate -- the offer's failure mode
+    is the exact behaviour the lane had without the offer. Whether it fetched
+    is the server's to observe, from the fetch calls themselves (#2223).
 
     **A place to find them, and nothing to work out about it.** This block used
     to hand over paths and then explain how to arrange what was inside them --
@@ -384,6 +386,13 @@ def _recent_findings_section(request: Mapping[str, Any], lane_id: str) -> str:
     )
     count = len(entries)
     plural = "" if count == 1 else "s"
+    if contracted:
+        unreachable = """**If you cannot reach that tool, investigate as usual.** Either way your answer
+keeps its contracted shape — do not add fields about reuse."""
+    else:
+        unreachable = f"""**If you cannot reach that tool, say so in your finding** — you were offered
+{count}, so reporting nothing to reuse would be false — then investigate as you
+would have without them."""
     return f"""## Recently Found Here
 You are offered {count} recent finding{plural} your lane published in this project
 within the last day. The bodies are not here. Fetch each with the MCP tool
@@ -395,9 +404,7 @@ narrows the artifact to your lane's own output:
 Read what you fetch, use what helps, and investigate the rest yourself. These
 are a head start, not a substitute.
 
-**If you cannot reach that tool, say so in your finding** — you were offered
-{count}, so reporting nothing to reuse would be false — then investigate as you
-would have without them.
+{unreachable}
 
 These may come from other sessions, which chose their own repositories. Report
 only what is true of the repositories *this* question gave you; a claim about
@@ -483,7 +490,11 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
         # Built per lane: a lane is offered only what its own lane published
         # (RFC Q00/ouroboros#2167), so this differs between lanes and is absent
         # for the four that read nothing.
-        recent_findings = _recent_findings_section(request, lane_id)
+        recent_findings = _recent_findings_section(
+            request,
+            lane_id,
+            contracted=isinstance(raw_lane.get("answer_contract"), Mapping),
+        )
         recent_findings_section = f"\n{recent_findings}\n" if recent_findings else ""
         prompt = f"""## Task
 {task_preamble}
@@ -649,7 +660,7 @@ def attach_question_advisory(
         last_question=last_question,
         recent_findings=recent_findings_by_lane(
             findings_store,
-            lanes=_open_contract_lanes(_tool_advisory_catalog(tool_name)),
+            lanes=_declared_lanes(_tool_advisory_catalog(tool_name)),
         ),
     )
     try:

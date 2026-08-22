@@ -2163,3 +2163,272 @@ class TestRestoreMeta:
 
         assert engine.codebase_context == ""
         assert engine.classifier.codebase_context == ""
+
+
+# ── RFC #2222: batched turn planning ─────────────────────────────
+
+
+def _batch_payload(**overrides: object) -> dict[str, object]:
+    """One atomic-turn payload with moderate ambiguity and PM routing fields."""
+    payload: dict[str, object] = {
+        "next_question": "Which user workflow matters most?",
+        "goal_clarity_score": 0.8,
+        "goal_clarity_justification": "The product goal is specific.",
+        "constraint_clarity_score": 0.7,
+        "constraint_clarity_justification": "Core boundaries are present.",
+        "success_criteria_clarity_score": 0.6,
+        "success_criteria_clarity_justification": "One workflow decision remains.",
+        "category": "planning",
+        "reframed_question": "Which user workflow matters most?",
+        "reasoning": "Planning question.",
+        "defer_to_dev": False,
+        "decide_later": False,
+        "placeholder_response": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _batch_state(interview_id: str) -> InterviewState:
+    return InterviewState(
+        interview_id=interview_id,
+        initial_context="Build an analytics workflow",
+        rounds=[
+            InterviewRound(round_number=1, question="Who uses it?", user_response="PMs"),
+            InterviewRound(round_number=2, question="What output?", user_response="Reports"),
+            InterviewRound(round_number=3, question="What scope?", user_response="MVP only"),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_next_turns_carries_independent_companions(tmp_path: Path) -> None:
+    """One planner call, up to three questions out, each classified (RFC #2222)."""
+    payload = _batch_payload(
+        companion_questions=[
+            {
+                "question": "What data retention constraint applies?",
+                "category": "planning",
+                "reframed_question": "What data retention constraint applies?",
+                "reasoning": "Independent constraint dimension.",
+                "defer_to_dev": False,
+                "decide_later": False,
+            },
+            {
+                "question": "Which index strategy should the store use?",
+                "category": "development",
+                "reframed_question": "How fast must saved reports open?",
+                "reasoning": "Technical question needing a PM reframe.",
+                "defer_to_dev": False,
+                "decide_later": False,
+            },
+        ]
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_companions"))
+
+    assert result.is_ok
+    plans = result.value
+    assert [plan.question for plan in plans] == [
+        "Which user workflow matters most?",
+        "What data retention constraint applies?",
+        "How fast must saved reports open?",
+    ]
+    assert plans[2].classification.output_type == ClassifierOutputType.REFRAMED
+    # The reframed companion is tracked exactly as a single-question reframe is.
+    assert engine._reframe_map["How fast must saved reports open?"] == (
+        "Which index strategy should the store use?"
+    )
+    adapter.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_plan_next_turns_closure_mode_is_single_question(tmp_path: Path) -> None:
+    """At or below the closure threshold, companions are dropped (RFC #2222)."""
+    payload = _batch_payload(
+        goal_clarity_score=0.98,
+        constraint_clarity_score=0.97,
+        success_criteria_clarity_score=0.96,
+        companion_questions=[{"question": "A second topic the closure probe must not open?"}],
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_closure"))
+
+    assert result.is_ok
+    assert len(result.value) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_next_turns_drops_duplicates_and_malformed_companions(
+    tmp_path: Path,
+) -> None:
+    """A companion that repeats a question, or carries none, never dispatches."""
+    payload = _batch_payload(
+        companion_questions=[
+            {"question": "Which user workflow matters most?"},  # duplicate of primary
+            {"category": "planning"},  # no question text
+            "not even an object",
+            {"question": "What launch constraint is fixed?"},
+            {"question": "What launch constraint is fixed?"},  # duplicate companion
+            {"question": "A third extra question over the ceiling?"},
+        ]
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_dedupe"))
+
+    assert result.is_ok
+    questions = [plan.question for plan in result.value]
+    assert questions == [
+        "Which user workflow matters most?",
+        "What launch constraint is fixed?",
+        "A third extra question over the ceiling?",
+    ]
+    # One classification per shipped question — dropped companions leave no trace.
+    assert len(engine.classifications) == len(questions)
+
+
+@pytest.mark.asyncio
+async def test_plan_next_turns_rejects_wrong_typed_companion_routing(
+    tmp_path: Path,
+) -> None:
+    """A companion's routing fields are validated, never coerced (RFC #2222).
+
+    ``bool("false")`` is True: a string where a boolean belongs would make a
+    question the PM must answer skip-eligible, and ``[decide_later]`` would
+    then discard it. The companion goes through the primary's own parser, so
+    the wrong-typed one is dropped while a properly typed decide-later
+    companion keeps its skip route.
+    """
+    payload = _batch_payload(
+        companion_questions=[
+            {
+                "question": "What data retention constraint applies?",
+                "category": "planning",
+                "decide_later": "false",  # a string, not a boolean
+            },
+            {
+                "question": "Which decisions can wait until launch scope is known?",
+                "category": "decide_later",
+                "reframed_question": "Which decisions can wait until launch scope is known?",
+                "reasoning": "Deferrable dimension.",
+                "defer_to_dev": False,
+                "decide_later": True,
+                "placeholder_response": "To be decided at launch.",
+            },
+        ]
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_typed_flags"))
+
+    assert result.is_ok
+    questions = [plan.question for plan in result.value]
+    assert questions == [
+        "Which user workflow matters most?",
+        "Which decisions can wait until launch scope is known?",
+    ]
+    assert result.value[1].classification.output_type == ClassifierOutputType.DECIDE_LATER
+    # The rejected companion left no routing state behind.
+    assert len(engine.classifications) == len(questions)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_companion_does_not_take_the_primary_reframe_with_it(
+    tmp_path: Path,
+) -> None:
+    """Undoing a companion restores the reframe map, never pops its key.
+
+    A companion whose own text differs passes the identity gate, then reframes
+    onto the primary's shown question and is dropped for it. Its
+    ``_apply_classification`` has already overwritten the primary's map entry
+    by then, so popping the key would delete the primary's original question —
+    and the PM's answer to a reframed question would have nothing to bundle.
+    """
+    reframed = "How fast must saved reports open?"
+    payload = _batch_payload(
+        next_question="Which index strategy should the store use?",
+        category="development",
+        reframed_question=reframed,
+        reasoning="Technical question needing a PM reframe.",
+        companion_questions=[
+            {
+                "question": "Which storage engine should back the report cache?",
+                "category": "development",
+                "reframed_question": reframed,
+                "reasoning": "Reframes onto the primary's shown question.",
+                "defer_to_dev": False,
+                "decide_later": False,
+            },
+        ],
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_reframe_undo"))
+
+    assert result.is_ok
+    assert [plan.question for plan in result.value] == [reframed]
+    # The primary's reframe survived the companion's undo.
+    assert engine._reframe_map[reframed] == "Which index strategy should the store use?"
+    assert len(engine.classifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_turns_reframe_does_not_attach_to_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """Planning a turn replaces the reframe routing, never adds to it.
+
+    A reframe maps a shown question back to the technical one behind it, and
+    that mapping is meaningful only while its turn is on the wire. A host
+    abandons a turn by not answering it, and the next call plans a fresh one —
+    so a mapping that outlived its turn would attach to a later question that
+    merely reads the same, and record that decision under a technical question
+    nobody was asked.
+    """
+    shown = "How fast must saved reports open?"
+    reframed_payload = _batch_payload(
+        next_question="Which index strategy should the store use?",
+        category="development",
+        reframed_question=shown,
+        reasoning="Technical question needing a PM reframe.",
+    )
+    plain_payload = _batch_payload(next_question=shown, reframed_question=shown)
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        side_effect=[
+            Result.ok(_mock_completion(json.dumps(reframed_payload))),
+            Result.ok(_mock_completion(json.dumps(plain_payload))),
+        ]
+    )
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+    state = _batch_state("pm_abandoned_reframe")
+
+    first = await engine.plan_next_turns(state)
+    assert first.is_ok
+    assert engine._reframe_map[shown] == "Which index strategy should the store use?"
+
+    # The turn is abandoned: no answer is recorded, and a fresh turn is planned.
+    second = await engine.plan_next_turns(state)
+    assert second.is_ok
+    assert [plan.question for plan in second.value] == [shown]
+    assert engine._reframe_map == {}
+
+    # The answer to the freshly planned question carries only itself.
+    recorded = await engine.record_response(state, "Three seconds.", shown)
+    assert recorded.is_ok
+    round_written = recorded.value.rounds[-1]
+    assert round_written.question == shown
+    assert "Original technical question" not in round_written.question
