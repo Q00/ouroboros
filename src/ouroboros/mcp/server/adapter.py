@@ -1569,12 +1569,7 @@ def create_ouroboros_server(
         load_config,
     )
     from ouroboros.core.errors import ConfigError
-    from ouroboros.evaluation import (
-        EvaluationContext,
-        EvaluationPipeline,
-        PipelineConfig,
-        SemanticConfig,
-    )
+    from ouroboros.evaluation import EvaluationPipeline, PipelineConfig, SemanticConfig
     from ouroboros.mcp.job_manager import JobManager
     from ouroboros.mcp.resources.handlers import (
         EventsResourceHandler,
@@ -1805,6 +1800,10 @@ def create_ouroboros_server(
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
+    from ouroboros.mcp.server.evolve_evaluation import (
+        evaluate_seed_criteria,
+        warn_if_seed_has_no_success_contract,
+    )
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
@@ -2015,6 +2014,7 @@ def create_ouroboros_server(
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
+        warn_if_seed_has_no_success_contract(seed)
 
         artifact = execution_output or ""
         if not artifact.strip():
@@ -2040,10 +2040,9 @@ def create_ouroboros_server(
         acs = getattr(seed, "acceptance_criteria", None)
 
         # The mechanical path needs ``### Task N: [COMPLETED]`` markers in the
-        # worker's report.  When they are absent this silently degrades to a
-        # single model verdict covering every AC at once, and on this path
-        # Stage 1 is off by default and Stage 3 is disabled, so nothing else
-        # intervenes.  Say so rather than letting every generation look the
+        # worker's report.  When they are absent this degrades to semantic
+        # evaluation, and on this path Stage 1 is off by default and Stage 3
+        # is disabled. Say so rather than letting every generation look the
         # same from the outside.
         log.warning(
             "evolution.evaluation.mechanical_skipped",
@@ -2051,48 +2050,17 @@ def create_ouroboros_server(
             seed_id=getattr(seed.metadata, "seed_id", None),
             acceptance_criteria=len(acs) if acs else 0,
             artifact_chars=len(artifact),
-            consequence=("falling back to one LLM verdict over all acceptance criteria combined"),
+            consequence="falling back to independent semantic verdicts for each criterion",
         )
-
-        if acs:
-            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(ac_texts(acs)))
-        else:
-            current_ac = "Verify execution output meets requirements"
 
         # Collect file-based artifacts for richer evaluation
         project_dir = _extract_project_dir(artifact, seed=seed)
         artifact_bundle = ArtifactCollector().collect(artifact, project_dir)
-
-        eval_context = EvaluationContext(
-            execution_id=f"eval_{seed.metadata.seed_id}",
-            seed_id=seed.metadata.seed_id,
-            current_ac=current_ac,
+        return await evaluate_seed_criteria(
+            seed=seed,
             artifact=artifact,
-            artifact_type="code",
-            goal=seed.goal,
-            constraints=tuple(seed.constraints),
             artifact_bundle=artifact_bundle,
-        )
-
-        eval_result = await evolution_eval_pipeline.evaluate(eval_context)
-        if eval_result.is_err:
-            return EvaluationSummary(
-                final_approved=False,
-                highest_stage_passed=1,
-                score=0.0,
-                drift_score=1.0,
-                failure_reason=str(eval_result.error),
-            )
-
-        result = eval_result.value
-        stage2 = result.stage2_result
-        return EvaluationSummary(
-            final_approved=result.final_approved,
-            highest_stage_passed=max(1, result.highest_stage_completed),
-            score=stage2.score if stage2 else None,
-            drift_score=stage2.drift_score if stage2 else None,
-            reward_hacking_risk=stage2.reward_hacking_risk if stage2 else None,
-            failure_reason=result.failure_reason,
+            pipeline=evolution_eval_pipeline,
         )
 
     async def _evolution_validator(seed: Any, execution_output: str | None) -> str:
