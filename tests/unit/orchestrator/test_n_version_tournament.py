@@ -101,6 +101,7 @@ class TestWorktreeIsolation:
             winner = manager.create("codex")
             (winner / "file.txt").write_text("winning change\n")
             diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
             assert "winning change" in diff
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
@@ -108,3 +109,150 @@ class TestWorktreeIsolation:
 
     def test_empty_diff_is_noop_success(self, git_workspace: Path) -> None:
         assert nvt.apply_diff_to_workspace(git_workspace, "") is True
+
+    def test_unchanged_winner_exports_empty_not_none(self, git_workspace: Path) -> None:
+        """A contestant that genuinely changed nothing exports ``""``, not ``None``."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            assert nvt.export_worktree_diff(winner) == ""
+
+
+class TestExportFailureIsNotSilentDataLoss:
+    """Regression: a failed ``git diff`` must not look like "winner changed nothing".
+
+    Previously ``export_worktree_diff`` returned ``""`` on any git error and
+    ``apply_diff_to_workspace("")`` returned ``True``, so a git failure while
+    exporting the tournament winner's work was reported as a *successful* merge
+    and the winning contestant's code was silently discarded.
+    """
+
+    def test_export_returns_none_when_not_a_repo(self, tmp_path: Path) -> None:
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        assert nvt.export_worktree_diff(not_a_repo) is None
+
+    def test_export_returns_none_when_git_missing(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError("git not found")
+
+        monkeypatch.setattr(nvt.subprocess, "run", _boom)
+        assert nvt.export_worktree_diff(git_workspace) is None
+
+    def test_export_returns_none_on_timeout(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _timeout(*_args: object, **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd="git diff HEAD", timeout=1)
+
+        monkeypatch.setattr(nvt.subprocess, "run", _timeout)
+        assert nvt.export_worktree_diff(git_workspace) is None
+
+    def test_apply_rejects_failed_export(self, git_workspace: Path) -> None:
+        assert nvt.apply_diff_to_workspace(git_workspace, None) is False
+
+    def test_failed_export_does_not_report_successful_merge(self, tmp_path: Path) -> None:
+        """End-to-end shape of the data-loss bug: export fails -> merge fails."""
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        diff = nvt.export_worktree_diff(not_a_repo)
+        # The failure is distinguishable from "no changes"...
+        assert diff is None
+        assert diff != ""
+        # ...and is never laundered into a successful no-op merge.
+        assert nvt.apply_diff_to_workspace(tmp_path, diff) is False
+
+
+class TestGitCommandTimeouts:
+    """Regression: unbounded git calls could hang the tournament, including teardown."""
+
+    def test_timeout_constant_is_bounded_and_larger_than_probe_timeout(self) -> None:
+        assert isinstance(nvt.GIT_COMMAND_TIMEOUT_SECONDS, int)
+        # Worktree add/remove is slower than a ``rev-parse`` probe (5s elsewhere).
+        assert 5 < nvt.GIT_COMMAND_TIMEOUT_SECONDS <= 300
+
+    def test_git_helper_passes_timeout(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        real_run = nvt.subprocess.run
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+            return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+        manager = nvt.RunWorktreeManager(git_workspace)
+        try:
+            monkeypatch.setattr(nvt.subprocess, "run", _spy)
+            manager._git("rev-parse", "HEAD")
+        finally:
+            monkeypatch.undo()
+            manager.cleanup_all()
+        assert seen.get("timeout") == nvt.GIT_COMMAND_TIMEOUT_SECONDS
+
+    def test_apply_diff_passes_timeout(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def _spy(*_args: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+            raise subprocess.TimeoutExpired(cmd="git apply", timeout=1)
+
+        monkeypatch.setattr(nvt.subprocess, "run", _spy)
+        assert nvt.apply_diff_to_workspace(git_workspace, "some diff\n") is False
+        assert seen.get("timeout") == nvt.GIT_COMMAND_TIMEOUT_SECONDS
+
+    def test_cleanup_survives_timeout_and_still_prunes_temp_root(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedged git during teardown must not leak the temp root."""
+        manager = nvt.RunWorktreeManager(git_workspace)
+        manager.create("codex")
+        manager.create("gemini")
+        root = manager._root
+        assert root.exists()
+
+        def _timeout(*_args: str, **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd="git worktree remove", timeout=1)
+
+        monkeypatch.setattr(manager, "_git", _timeout)
+        # Does not raise, and every remaining cleanup step still runs.
+        manager.cleanup_all()
+        assert not root.exists()
+        assert manager._created == []
+
+    def test_context_manager_exit_survives_timeout(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            manager.create("codex")
+            root = manager._root
+            monkeypatch.setattr(
+                manager,
+                "_git",
+                lambda *_a, **_k: (_ for _ in ()).throw(
+                    subprocess.TimeoutExpired(cmd="git", timeout=1)
+                ),
+            )
+        # __exit__ completed instead of propagating / hanging.
+        assert not root.exists()
+
+    def test_failed_create_is_tracked_for_cleanup(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timed-out ``worktree add`` may leave a partial worktree; track it."""
+        manager = nvt.RunWorktreeManager(git_workspace)
+        try:
+
+            def _timeout(*_args: str, **_kwargs: object) -> object:
+                raise subprocess.TimeoutExpired(cmd="git worktree add", timeout=1)
+
+            monkeypatch.setattr(manager, "_git", _timeout)
+            with pytest.raises(subprocess.TimeoutExpired):
+                manager.create("codex")
+            assert len(manager._created) == 1
+        finally:
+            monkeypatch.undo()
+            manager.cleanup_all()
