@@ -461,3 +461,191 @@ async def test_two_members_answered_concurrently_both_survive(tmp_path: Path) ->
     saved = _load_meta(state.interview_id, tmp_path)
     assert [entry["question"] for entry in saved["pending_batch"]] == [Q_THIRD]
     engine.plan_next_turns.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_answerless_resume_is_serialized_because_it_also_writes(
+    tmp_path: Path,
+) -> None:
+    """A resume without an answer is not a read, so it is not exempt.
+
+    It looks like one — it re-displays what is pending — but with no pending
+    batch and no unanswered round it plans the next turn and persists it. Two
+    of them concurrently are two answers concurrently under another name, so
+    the round one of them appends must survive the other.
+    """
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_answerless")
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
+
+    planned = ["First planned question?", "Second planned question?"]
+
+    async def _plan_in_turn(_state: InterviewState) -> object:
+        await asyncio.sleep(0)
+        return Result.ok([_plan(planned.pop(0))])
+
+    engine.plan_next_turns = _plan_in_turn  # type: ignore[method-assign]
+    inner_save = engine.save_state
+
+    async def _yielding_save(saved_state: InterviewState) -> object:
+        await asyncio.sleep(0)
+        return await inner_save(saved_state)
+
+    engine.save_state = _yielding_save  # type: ignore[method-assign]
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    first, second = await asyncio.gather(
+        handler.handle({"session_id": state.interview_id, "cwd": str(tmp_path)}),
+        handler.handle({"session_id": state.interview_id, "cwd": str(tmp_path)}),
+    )
+
+    assert first.is_ok and second.is_ok
+    # Serialized, the second call finds the first one's question already
+    # pending and re-displays it. Concurrent, both would plan and the later
+    # save would drop the earlier round.
+    assert first.value.meta["question"] == "First planned question?"
+    assert second.value.meta["question"] == "First planned question?"
+    assert planned == ["Second planned question?"], "the retry planned a second turn"
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert [r.question for r in reloaded.rounds][-1] == "First planned question?"
+    assert len(reloaded.rounds) == 4
+
+
+@pytest.mark.asyncio
+async def test_plugin_mode_never_enters_the_batch_contract(tmp_path: Path) -> None:
+    """The plugin runtime has no batch to persist, so it persists none.
+
+    Batching rides the in-process planner (RFC #2222, "Deliberately not decided
+    here"). This pins the property that keeps that true: the runtime that
+    dispatches to a child session neither plans a batch nor writes pending
+    members, so there is no batch state for its answer path to bypass.
+    """
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_plugin", pending=Q_PRIMARY)
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
+    engine.plan_next_turns = AsyncMock()
+    handler = PMInterviewHandler(
+        pm_engine=engine,
+        data_dir=tmp_path,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answer": "The review workflow.",
+            "last_question": Q_PRIMARY,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    engine.plan_next_turns.assert_not_called()
+    assert "pending_batch" not in _load_meta(state.interview_id, tmp_path)
+    assert "question_batch" not in (result.value.meta or {})
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_an_interrupted_meta_write_repairs_it(tmp_path: Path) -> None:
+    """The decision is recorded once, and the retry heals the pending list.
+
+    Two files carry one turn and the state is written first, so a meta write
+    that fails leaves a member marked pending whose answer is already durable.
+    The host sees the error and retries the same answer. Recording it again
+    would put two rounds under one question — the transcript would say the PM
+    answered twice, and the seed would read both.
+    """
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_replay")
+    # What the interrupted call left behind: the answer committed to state...
+    state.rounds.append(
+        InterviewRound(
+            round_number=4,
+            question=Q_PRIMARY,
+            user_response="The review workflow.",
+        )
+    )
+    assert (await engine.save_state(state)).is_ok
+    # ...while the metadata still marks that member pending.
+    _save_pm_meta(
+        state.interview_id,
+        engine,
+        cwd=str(tmp_path),
+        data_dir=tmp_path,
+        extra={
+            "pending_batch": [
+                {"question": Q_PRIMARY, "classification": "passthrough", "skip_eligible": False},
+                {"question": Q_SECOND, "classification": "passthrough", "skip_eligible": False},
+            ]
+        },
+    )
+    engine.plan_next_turns = AsyncMock()
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answer": "The review workflow.",
+            "last_question": Q_PRIMARY,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert [r.question for r in reloaded.rounds].count(Q_PRIMARY) == 1
+    assert len(reloaded.rounds) == 4
+    # The metadata is repaired: only the genuinely unanswered member is left.
+    saved = _load_meta(state.interview_id, tmp_path)
+    assert [entry["question"] for entry in saved["pending_batch"]] == [Q_SECOND]
+    engine.plan_next_turns.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_different_answer_to_a_repeated_question_is_still_recorded(
+    tmp_path: Path,
+) -> None:
+    """The replay guard must not swallow a decision the user has not made yet.
+
+    It fires on the same answer or on a sentinel, which carries no words of
+    the user's. A question whose text repeats but whose answer differs is a new
+    decision and is recorded as one.
+    """
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_repeat")
+    state.rounds.append(
+        InterviewRound(round_number=4, question=Q_PRIMARY, user_response="An older decision.")
+    )
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(
+        state.interview_id,
+        engine,
+        cwd=str(tmp_path),
+        data_dir=tmp_path,
+        extra={
+            "pending_batch": [
+                {"question": Q_PRIMARY, "classification": "passthrough", "skip_eligible": False},
+                {"question": Q_SECOND, "classification": "passthrough", "skip_eligible": False},
+            ]
+        },
+    )
+    engine.plan_next_turns = AsyncMock()
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answer": "The review workflow, actually.",
+            "last_question": Q_PRIMARY,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.rounds[-1].question == Q_PRIMARY
+    assert reloaded.rounds[-1].user_response == "The review workflow, actually."
+    assert len(reloaded.rounds) == 5
