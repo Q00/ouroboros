@@ -2341,3 +2341,45 @@ async def test_plan_next_turns_rejects_wrong_typed_companion_routing(
     assert result.value[1].classification.output_type == ClassifierOutputType.DECIDE_LATER
     # The rejected companion left no routing state behind.
     assert len(engine.classifications) == len(questions)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_companion_does_not_take_the_primary_reframe_with_it(
+    tmp_path: Path,
+) -> None:
+    """Undoing a companion restores the reframe map, never pops its key.
+
+    A companion whose own text differs passes the identity gate, then reframes
+    onto the primary's shown question and is dropped for it. Its
+    ``_apply_classification`` has already overwritten the primary's map entry
+    by then, so popping the key would delete the primary's original question —
+    and the PM's answer to a reframed question would have nothing to bundle.
+    """
+    reframed = "How fast must saved reports open?"
+    payload = _batch_payload(
+        next_question="Which index strategy should the store use?",
+        category="development",
+        reframed_question=reframed,
+        reasoning="Technical question needing a PM reframe.",
+        companion_questions=[
+            {
+                "question": "Which storage engine should back the report cache?",
+                "category": "development",
+                "reframed_question": reframed,
+                "reasoning": "Reframes onto the primary's shown question.",
+                "defer_to_dev": False,
+                "decide_later": False,
+            },
+        ],
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_reframe_undo"))
+
+    assert result.is_ok
+    assert [plan.question for plan in result.value] == [reframed]
+    # The primary's reframe survived the companion's undo.
+    assert engine._reframe_map[reframed] == "Which index strategy should the store use?"
+    assert len(engine.classifications) == 1

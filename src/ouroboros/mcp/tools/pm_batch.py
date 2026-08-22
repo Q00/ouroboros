@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 log = structlog.get_logger()
@@ -51,14 +52,25 @@ async def interview_answer_lock(
 
     A batched turn is the first shape where this is reachable in ordinary use —
     a host holding three answerable questions can send two answers as parallel
-    tool calls — but the read-modify-write is shared by every answer path, so
-    the lock is taken around the whole call rather than around the batch
-    branch. Locks are keyed by interview and live on the handler, which the
-    server builds once at startup; the same idiom as the execution handler's
-    ``_idempotency_locks``.
+    tool calls — but the read-modify-write is shared by the in-process batch
+    and single-question paths alike, so the lock is taken once around the call
+    rather than around the batch branch. Locks are keyed by interview and live
+    on the handler, which the server builds once at startup; the same idiom as
+    the execution handler's ``_idempotency_locks``.
 
-    The scope is one server process, which is the scope of the state directory
-    it owns.
+    The call without an answer is deliberately not exempted, though it looks
+    read-only and holding the lock through the next turn's generation — a real
+    LLM call — makes a timed-out host's retry queue behind it. It only reads
+    while something is pending: with no pending batch and no unanswered round
+    it plans the next turn and persists it, which is the same read-modify-write
+    under another name. Queuing that retry is the point; letting it plan
+    concurrently is the defect this closes.
+
+    What this does not cover, so it is not mistaken for more: the plugin
+    dispatch branch records answers on its own path, and a data directory is a
+    user-global location that several server processes can open at once. An
+    ``asyncio.Lock`` orders coroutines in one process; it does not order
+    processes.
     """
     async with locks.setdefault(session_id, asyncio.Lock()):
         yield
@@ -153,10 +165,35 @@ async def record_member_answer(
     ``[decide_later]`` sent for a passthrough member records as a plain answer
     rather than silently discarding data, exactly as the single-question guard
     does with the last classification.
+
+    A member whose decision is already in the interview state is not recorded
+    again. Two files carry one turn — the state holds the decisions, the PM
+    meta holds who is still pending — and the state is written first, so a
+    failed or interrupted meta write leaves a member marked pending whose
+    answer is already durable. The host sees an error and retries, and without
+    this the retry would put a second round under the same question. Reading
+    the decision back from the state is what makes the retry idempotent: the
+    caller goes on to persist the pending list without this member, so the
+    retry repairs the metadata instead of duplicating the decision.
+
+    The comparison is deliberately narrow — the same answer, or a sentinel,
+    which carries no words of the user's to lose. A question repeated verbatim
+    later in the interview and answered differently is a new decision and is
+    recorded as one.
     """
     question = str(member.get("question"))
     classification = member.get("classification")
     stripped = answer.strip()
+    sentinel = (stripped == "[decide_later]" and classification == "decide_later") or (
+        stripped == "[deferred]" and classification == "deferred"
+    )
+    recorded = next(
+        (r for r in state.rounds if r.question == question and r.user_response is not None),
+        None,
+    )
+    if recorded is not None and (sentinel or recorded.user_response == answer):
+        log.info("pm.batch_member_already_recorded", question=question[:100])
+        return Result.ok(state)
     skipped = False
     if stripped == "[decide_later]" and classification == "decide_later":
         result = await engine.skip_as_decide_later(state, question)

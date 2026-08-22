@@ -706,8 +706,10 @@ Apply this canonical PM routing policy:
         turn, and companions are an optimization the turn must not fail on.
         What counts as malformed is not decided here — the companion's routing
         fields go through the primary's own classification parser, so a
-        wrong-typed ``decide_later`` is rejected in a batch exactly as it is in
-        a single-question turn.
+        wrong-typed ``decide_later`` is refused by the same rule in both. What
+        follows the refusal differs, because the two questions do: the primary
+        falls back to a plain planning question, since the turn must have one,
+        while a companion is dropped, since the turn is whole without it.
         """
         turn_result = await self.plan_next_turn(state)
         if turn_result.is_err:
@@ -747,13 +749,19 @@ Apply this canonical PM routing policy:
                 # answer. Dropping loses one companion; coercing loses an answer.
                 log.warning("pm.companion_classification_rejected", error=str(exc))
                 continue
+            reframes_before = dict(self._reframe_map)
             shown_question = self._apply_classification(classification)
             shown_identity = normalize_question_text(shown_question)
             if shown_identity in seen_identities:
                 # _apply_classification already recorded routing state for a
-                # question this batch will not carry — undo both traces.
+                # question this batch will not carry — undo both traces. The
+                # map is restored, not popped: a companion whose own text
+                # differs but which reframes onto the primary's shown question
+                # overwrites the primary's entry, and popping that key would
+                # take the primary's original question with it — leaving the
+                # PM's answer to a reframed question with nothing to bundle.
                 self.classifications.pop()
-                self._reframe_map.pop(shown_question, None)
+                self._reframe_map = reframes_before
                 continue
             seen_identities.add(normalize_question_text(question_text))
             seen_identities.add(shown_identity)
