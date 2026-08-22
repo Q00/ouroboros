@@ -1,33 +1,36 @@
 """Schemas for the PM interview's advisory lanes (RFC Q00/ouroboros#1937).
 
 The PM interview fans out the same way the regular interview does, with two
-deliberate differences that both fall out of one sentence: *a confirmed fact may
-occupy a round of its own; an unconfirmed one may not become anything.*
+deliberate differences that both fall out of one sentence: *a finding is
+evidence the PM reads before answering; it is never an answer.*
 
 **Two lanes, not six.** Only the lanes that fetch evidence carry over — what the
 code does today, and what the data says. A lane that critiques the question or
 narrows it into options produces a draft judgment, not evidence, and a draft
 wears the face of material while standing in for the decision.
 
-**One answer path, and no exception to its confirmation.** The regular
-interview's code-fact contract carries an ``answer_prefix``, and a chain follows
-it: a confirmation flag, an exception to that flag
-(``[from-code][auto-confirmed]``), and a confidence grade deciding which answers
-earn the exception. That exception is justified there — the person being asked
-usually wrote the code — and PM has no such premise, so PM does not inherit it.
+**Findings are shown, not recorded** (RFC #2222 decision 4). An earlier design
+let a confirmed finding occupy a round of its own, carried into the transcript
+by an ``answer_prefix`` the lane declared and gated by a confirmation the PM had
+to give. Both are retired: the round duplicated the published fan-out, which is
+already addressable and re-offered, and the gate spent a turn to record what the
+store already held. The v2 code-lane contract has no ``answer_prefix``, no
+``requires_user_confirmation`` and no ``user_confirmation_prompt`` — with
+nothing recorded there is nothing to gate, and the closed shape rejects an
+answer that still carries them. Interview rounds carry the PM's own words.
 
-What PM inherits is the rest: the same ``answer_prefix`` field, under an enum
-holding exactly one element. ``[from-code][auto-confirmed]`` is therefore not
-forbidden here; it is unspellable. The prohibition is retired by removing the
-place rather than by growing the list of things forbidden — the same move the
-data lane made when a typed read request replaced its free-text query field
-(#1754/#1825).
+What each claim gains instead is a lane-authored ``plain_statement``: the
+product-language sentence the screen renders, in the question's own language,
+with no paths or identifiers. Citations stay in the published fan-out, which is
+where the record belongs. The prohibition is enforced by removing the place
+rather than by growing a list of forbidden values — the same move the data lane
+made when a typed read request replaced its free-text query field (#1754/#1825).
 
 Two doors were the alternative, and the cost was measured. PM originally kept
 no answer path at all and grew a second entrance for findings — an ``evidence``
 parameter no sibling tool has. Two entrances meant two sets of rules for the
 same payload, and seven review rounds found the same class of silent loss at a
-new address each time. One door with a one-element enum is what closed it.
+new address each time. Removing the entrance is what closed it.
 
 **What holds when a host skips the confirmation anyway.** The prompt is shown by
 the host, so the contract can ask for it but not perform it. The guarantee that

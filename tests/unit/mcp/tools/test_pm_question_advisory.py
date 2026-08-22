@@ -991,24 +991,30 @@ async def test_a_confirmed_finding_takes_its_own_round_and_the_decision_takes_th
     """
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
     state = InterviewState(interview_id="pm-shape", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
     engine = _stub_engine(state, ("Q2", "Q3"))
 
     first = await handler._handle_answer(
-        engine, "pm-shape", "[from-code] api: counted by service date", str(tmp_path)
+        engine,
+        "pm-shape",
+        "[from-code] api: counted by service date",
+        str(tmp_path),
+        last_question="Q1",
     )
     assert first.is_ok
-    assert [r.question for r in state.rounds] == ["Q1", "Q2"]
+    # A turn persists nothing when it asks (RFC #2222 r4), so the transcript
+    # holds finished rounds only — Q2 is on the wire, not on disk.
+    assert [r.question for r in state.rounds] == ["Q1"]
     assert state.rounds[0].user_response == "[from-code] api: counted by service date"
     assert state.rounds[0].provenance == "observation"
 
     second = await handler._handle_answer(
-        engine, "pm-shape", "cancellations free the slot", str(tmp_path)
+        engine, "pm-shape", "cancellations free the slot", str(tmp_path), last_question="Q2"
     )
     assert second.is_ok
+    assert state.rounds[1].question == "Q2"
     assert state.rounds[1].user_response == "cancellations free the slot"
     assert state.rounds[1].provenance == "user"
-    assert [r.question for r in state.rounds if r.user_response is None] == ["Q3"]
+    assert [r for r in state.rounds if r.user_response is None] == []
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1081,6 @@ async def test_no_second_field_can_carry_a_finding_past_the_answer(tmp_path: Pat
     """
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
     state = InterviewState(interview_id="pm-caseB", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
     engine = _stub_engine(state, ("Q2",))
     handler.pm_engine = engine  # type: ignore[assignment]
 
@@ -1083,6 +1088,7 @@ async def test_no_second_field_can_carry_a_finding_past_the_answer(tmp_path: Pat
         {
             "session_id": "pm-caseB",
             "answer": "[from-code] api: counted by service date",
+            "last_question": "Q1",
             "evidence": "SECOND-PAYLOAD",
         }
     )
@@ -1172,21 +1178,27 @@ async def test_the_plugin_runtime_records_a_finding_the_same_way(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_a_bare_reconnect_is_still_allowed(tmp_path: Path) -> None:
-    """``answer`` stays optional: a reconnect re-shows the pending question.
+async def test_a_bare_reconnect_asks_a_fresh_question(tmp_path: Path) -> None:
+    """``answer`` stays optional, and a reconnect plans rather than restores.
 
-    Kept from the refused-combination era, because the guard above is about a
-    missing *question* and this is the call with a missing *answer*. Blocking it
-    would close a normal path.
+    The guard above is about a missing *question*; this is the call with a
+    missing *answer*, and blocking it would close a normal path. What it
+    returns changed with RFC #2222 revision 4: a turn persists nothing when it
+    asks, so there is no in-flight question to re-show — the host that lost its
+    turn gets a new one planned from the finished transcript.
     """
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
     state = InterviewState(interview_id="pm-rc2", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
 
-    result = await handler._handle_answer(_stub_engine(state), "pm-rc2", None, str(tmp_path))
+    result = await handler._handle_answer(
+        _stub_engine(state, ("Q2",)), "pm-rc2", None, str(tmp_path)
+    )
 
     assert result.is_ok
-    assert result.value.meta["question"] == "Q1"
+    assert result.value.meta["question"] == "Q2"
+    # Nothing half-written was left behind by asking.
+    assert [r.user_response for r in state.rounds] == ["A1"]
 
 
 def test_a_citation_path_that_is_not_repository_relative_is_rejected() -> None:
@@ -1233,19 +1245,6 @@ def test_a_citation_path_that_is_not_repository_relative_is_rejected() -> None:
     assert not accepted("./x")
     # A newline would smuggle a second line into a rendered citation.
     assert not accepted("src/x.py\nrm -rf /")
-
-
-def test_reconnect_returns_the_unanswered_question_not_a_new_one() -> None:
-    """Pending is found by being unanswered, wherever it sits in the stream."""
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.mcp.tools.pm_handler import _pending_round
-
-    state = InterviewState(interview_id="pm-rc", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
-    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response="A2"))
-
-    pending = _pending_round(state)
-    assert pending is not None and pending.question == "Q1"
 
 
 def test_readiness_counts_decisions_not_records() -> None:
