@@ -330,11 +330,29 @@ def is_credential_shaped(value: str) -> bool:
     This is deliberately shape-based rather than a validity check. It protects
     canonical metadata boundaries from copying opaque credentials while still
     allowing ordinary route and authority identifiers through.
+
+    ``str`` subclasses (notably :class:`enum.StrEnum` members, used widely in
+    this codebase) are inspected on their string content rather than waved
+    through: because a ``False`` result here means "safe to copy/log", a strict
+    ``type(...) is str`` test would let a subclass carrying a live credential
+    bypass this guard entirely. Subclass method overrides are never trusted --
+    the value is renormalized through the built-in ``str`` implementations, and
+    a value that cannot be normalized is treated as credential-shaped.
     """
 
-    if type(value) is not str:
+    if not isinstance(value, str):
         return False
-    normalized = value.strip()
+    try:
+        # Never call a caller-controlled override (``strip``, ``__str__``, ...).
+        # Renormalizing through the built-ins yields a genuine ``str`` whose
+        # content is what the shape matchers below actually inspect.
+        normalized = str.strip(str.__str__(value))
+    except Exception:
+        # A subclass that cannot be normalized is not provably safe, so fail
+        # closed and treat it as a credential.
+        return True
+    if type(normalized) is not str:
+        return True
     if not normalized:
         return False
     if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
@@ -371,11 +389,25 @@ def is_stable_authority_identity(value: str) -> bool:
     free-form opaque token is not accepted merely because it is not yet known
     to the credential denylist; it must first match this descriptor grammar and
     then pass the shared credential-shape guard.
+
+    ``str`` subclasses are evaluated on their string content so that a
+    :class:`enum.StrEnum` member cannot skip the credential-shape guard below.
+    Retaining plain built-in ``str`` values at live effect boundaries remains
+    the caller's responsibility.
     """
 
+    # Unlike ``is_credential_shaped``, a ``False`` result here *rejects* the
+    # value, so declining a caller-controlled ``str`` subclass is fail-closed
+    # rather than a bypass. Subclasses are refused outright because an accepted
+    # descriptor may be retained by a caller, and a subclass can override
+    # ``__eq__``/``__hash__`` to behave differently after this check. Callers
+    # that hold a ``StrEnum`` normalize to a built-in ``str`` before asking.
     if type(value) is not str:
         return False
-    normalized = value.strip()
+    try:
+        normalized = str.strip(str.__str__(value))
+    except Exception:
+        return False
     return (
         _has_stable_authority_grammar(normalized)
         and not is_credential_shaped(normalized)
@@ -518,10 +550,39 @@ def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:
     return str(value)
 
 
+def _sanitize_logging_value(value: Any) -> Any:
+    """Mask sensitive data inside an arbitrary nested logging value.
+
+    Dictionaries recurse through :func:`sanitize_for_logging`. Lists and tuples
+    recurse element-wise and preserve their sequence type so that a secret
+    nested inside a sequence cannot reach a log sink verbatim. Scalar strings
+    reuse the same :func:`is_sensitive_value` check applied to mapping values.
+    """
+
+    if isinstance(value, dict):
+        return sanitize_for_logging(value)
+    if isinstance(value, (list, tuple)):
+        sanitized = [_sanitize_logging_value(item) for item in value]
+        # Preserve the original sequence type (including named tuples, which
+        # build from positional arguments rather than a single iterable).
+        if isinstance(value, tuple):
+            factory = getattr(type(value), "_make", None)
+            if callable(factory):
+                return factory(sanitized)
+            return tuple(sanitized)
+        return sanitized
+    if isinstance(value, str) and is_sensitive_value(value):
+        return mask_api_key(value)
+    return value
+
+
 def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
     """Create a copy of data with sensitive values masked.
 
     Use this before logging dictionaries that might contain sensitive data.
+    Nested mappings and nested sequences (lists/tuples) are both traversed, so
+    a credential buried inside a list of provider configs is masked rather than
+    passed through verbatim.
 
     Args:
         data: Dictionary that might contain sensitive data.
@@ -537,12 +598,8 @@ def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
     for key, value in data.items():
         if is_sensitive_field(key):
             result[key] = "<REDACTED>"
-        elif isinstance(value, str) and is_sensitive_value(value):
-            result[key] = mask_api_key(value)
-        elif isinstance(value, dict):
-            result[key] = sanitize_for_logging(value)
         else:
-            result[key] = value
+            result[key] = _sanitize_logging_value(value)
     return result
 
 

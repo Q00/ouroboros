@@ -8,6 +8,7 @@ Tests cover:
 - Sanitization for logging
 """
 
+from enum import StrEnum
 from time import perf_counter
 
 from ouroboros.core.security import (
@@ -171,7 +172,12 @@ class TestSensitiveDetection:
             def strip(self) -> str:
                 raise RuntimeError("hostile normalization")
 
-        assert is_credential_shaped(HostileString("runtime:apikey123")) is False
+        # A hostile subclass must not raise, and must fail *closed*: because a
+        # False verdict means "safe to copy/log", a credential-shaped payload
+        # wrapped in a subclass is reported as credential-shaped.
+        assert is_credential_shaped(HostileString("runtime:apikey123")) is True
+        # Authority identity fails closed in the opposite direction: a
+        # caller-controlled subclass is rejected outright.
         assert is_stable_authority_identity(HostileString("runtime:claude")) is False
 
     def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
@@ -297,6 +303,91 @@ class TestSanitizeForLogging:
         result = sanitize_for_logging(data)
         assert "sk-" in result["some_field"]
         assert "abcdef" not in result["some_field"]  # Fully masked
+
+    def test_sanitize_dict_inside_list(self) -> None:
+        """Secrets nested inside a list are not leaked verbatim."""
+        data = {"providers": [{"api_key": "sk-live-abc123"}]}
+        result = sanitize_for_logging(data)
+        assert result["providers"][0]["api_key"] == "<REDACTED>"
+        assert "sk-live-abc123" not in repr(result)
+
+    def test_sanitize_dict_inside_tuple_preserves_type(self) -> None:
+        """Tuples recurse and stay tuples; lists stay lists."""
+        data = {"providers": ({"api_key": "sk-live-abc123"},), "names": [{"name": "ok"}]}
+        result = sanitize_for_logging(data)
+        assert isinstance(result["providers"], tuple)
+        assert isinstance(result["names"], list)
+        assert result["providers"][0]["api_key"] == "<REDACTED>"
+        assert result["names"][0]["name"] == "ok"
+
+    def test_sanitize_nested_lists_of_lists(self) -> None:
+        """Lists of lists recurse to arbitrary depth."""
+        data = {"batches": [[{"token": "sk-live-abc123"}], [[{"api_key": "sk-live-xyz789"}]]]}
+        result = sanitize_for_logging(data)
+        assert result["batches"][0][0]["token"] == "<REDACTED>"
+        assert result["batches"][1][0][0]["api_key"] == "<REDACTED>"
+        assert "sk-live-abc123" not in repr(result)
+        assert "sk-live-xyz789" not in repr(result)
+
+    def test_sanitize_raw_secret_string_inside_list(self) -> None:
+        """A bare credential string inside a list is masked like a scalar."""
+        secret = "sk-1234567890abcdef"
+        data = {"values": [secret, "harmless"]}
+        result = sanitize_for_logging(data)
+        assert result["values"][0] != secret
+        assert "abcdef" not in repr(result)
+        assert result["values"][1] == "harmless"
+
+    def test_sanitize_returns_dict_for_dict_input(self) -> None:
+        """Dict input still yields a dict, and non-sequence values pass through."""
+        data = {"count": 3, "enabled": True, "ratio": 1.5, "nothing": None}
+        result = sanitize_for_logging(data)
+        assert isinstance(result, dict)
+        assert result == data
+
+
+class TestStrSubclassGuardBypass:
+    """Guards must inspect ``str`` subclasses such as ``enum.StrEnum`` members."""
+
+    def test_credential_shaped_detects_str_enum_member(self) -> None:
+        """A StrEnum member carrying a credential is not waved through."""
+
+        class Mode(StrEnum):
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        assert is_credential_shaped("sk-live-abc123def456ghi789") is True
+        assert is_credential_shaped(Mode.LEAKY) is True
+
+    def test_credential_shaped_still_rejects_non_strings(self) -> None:
+        """Non-string inputs remain non-credential-shaped."""
+        assert is_credential_shaped(None) is False  # type: ignore[arg-type]
+        assert is_credential_shaped(123) is False  # type: ignore[arg-type]
+        assert is_credential_shaped(b"sk-live-abc123def456") is False  # type: ignore[arg-type]
+
+    def test_stable_authority_identity_rejects_str_subclasses_fail_closed(self) -> None:
+        """Authority identity fails closed: subclasses are rejected, not accepted."""
+
+        class Authority(StrEnum):
+            SAFE = "runtime:claude"
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        # A False verdict here means rejection, so declining a subclass is the
+        # safe direction. Callers normalize to a built-in ``str`` first.
+        assert is_stable_authority_identity(Authority.SAFE) is False
+        assert is_stable_authority_identity(str(Authority.SAFE)) is True
+        assert is_stable_authority_identity(Authority.LEAKY) is False
+        assert is_stable_authority_identity(str(Authority.LEAKY)) is False
+        assert is_stable_authority_identity(None) is False  # type: ignore[arg-type]
+
+    def test_sensitive_value_detects_str_enum_member(self) -> None:
+        """The log-sanitization path also sees through StrEnum members."""
+
+        class Mode(StrEnum):
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        assert is_sensitive_value(Mode.LEAKY) is True
+        result = sanitize_for_logging({"mode": Mode.LEAKY})
+        assert "abc123def456ghi789" not in repr(result)
 
 
 class TestTruncateInput:
