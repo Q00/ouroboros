@@ -582,3 +582,34 @@ def test_the_request_schema_makes_a_mismatched_lane_pairing_unrepresentable(
     assert list(validator.iter_errors(request)) == []
     request["recent_findings"]["code_context"][0]["lane_id"] = "data_context"
     assert list(validator.iter_errors(request)) != []
+
+
+def test_a_lane_alone_lists_that_lane_own_recent_findings(store: ArtifactStore) -> None:
+    """A lane may ask which of its findings exist instead of being handed the ids.
+
+    Sending the list in every prompt spent a fifth of it on identifiers a child
+    has no way to choose between, and a lane wanting none of them paid for it
+    anyway. Asking is the same answer, pulled: the window, the eligible kind
+    and the cap stay the query's, so a lane cannot ask for a wider read than it
+    was ever offered — only for its own, and only from the last day.
+    """
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    result = asyncio.run(handler.handle({"lane_id": "code_context"}))
+
+    assert result.is_ok
+    listing = result.value.meta
+    assert listing["lane_id"] == "code_context"
+    assert [entry["contract_id"] for entry in listing["recent"]] == [contract_id]
+    assert {"contract_id", "lane_id", "published_at"} == set(listing["recent"][0])
+    # Bodies stay in the store: what is listed is what to read, never the read.
+    assert "output" not in json.dumps(listing)
+
+
+def test_neither_a_contract_nor_a_lane_is_refused(store: ArtifactStore) -> None:
+    """An empty request names both ways to ask rather than guessing one."""
+    result = asyncio.run(_fetch_handler(store).handle({}))
+
+    assert result.is_err
+    assert "contract_id" in str(result.error) and "lane_id" in str(result.error)
