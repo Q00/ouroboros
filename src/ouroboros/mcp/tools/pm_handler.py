@@ -805,22 +805,29 @@ class PMInterviewHandler:
                 if pair_error:
                     return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
                 if pairs:
-                    # The same normalization the in-process branch uses, so the
-                    # public answer shape means one thing on every runtime. It
-                    # was not shared once, and `answers` sent here was accepted
-                    # and dropped: the call reported success and the decisions
-                    # were never written.
+                    # The same recorder the in-process branch uses, not a
+                    # second one that agrees with it today. A pair became a
+                    # round here once by a loop of its own, and that loop
+                    # spelled `[decide_later]` as a sentence the user typed:
+                    # a control token committed as a decision, and an open
+                    # question the generated seed never heard was open.
+                    #
+                    # No engine is passed, and none is built: this runtime
+                    # dispatches generation to a child precisely so the server
+                    # need not hold an LLM adapter, and an answer being written
+                    # down must not be what finally requires one.
                     #
                     # Every answer names its question, on every runtime: a turn
                     # persists nothing when it asks (RFC #2222 revision 4), so
                     # there is no stored question to prefer over the echo.
-                    # ``record_answer`` appends the pair and settles provenance
-                    # where the answer arrives rather than at construction — one
-                    # call for every answer, whatever its provenance, so the two
-                    # runtimes agree by default rather than by a second rule
-                    # someone has to keep in step.
-                    for question_text, answer_text in pairs:
-                        state.record_answer(question_text, answer_text)
+                    record_result = await record_turn_answers(None, state, pairs)
+                    if record_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                str(record_result.error), tool_name="ouroboros_pm_interview"
+                            )
+                        )
+                    state = record_result.value
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
@@ -852,9 +859,12 @@ class PMInterviewHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "next_turn_hint": (
-                        "When the user answers, pass the child session's "
-                        "question text as 'last_question' alongside 'answer' "
-                        "to preserve PM interview transcript fidelity."
+                        "When the user answers, send the turn's answers as "
+                        "'answers': [{question, answer}] — each answer names "
+                        "its own question. A single answer may instead pass "
+                        "the child session's question text as 'last_question' "
+                        "alongside 'answer'. Either way the question travels "
+                        "with the answer, which is what the transcript keeps."
                     ),
                 },
             )
