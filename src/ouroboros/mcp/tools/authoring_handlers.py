@@ -1308,8 +1308,12 @@ class GenerateSeedHandler:
             from ouroboros.core.requirement_candidate import evaluate_promotion
 
             promotion = evaluate_promotion(distillation)
-            if promotion.blockers:
-                details = seed_readiness_details(promotion)
+            reference_aware = is_reference_aware_distillation(distillation)
+            details = seed_readiness_details(
+                promotion,
+                require_promoted_acceptance_criteria=reference_aware,
+            )
+            if details["blockers"]:
                 return Result.err(
                     MCPToolError(
                         f"Interview must be reopened before Seed generation: {details}",
@@ -1325,7 +1329,7 @@ class GenerateSeedHandler:
                     error=str(cache_save_result.error),
                 )
 
-            if is_reference_aware_distillation(distillation):
+            if reference_aware:
                 reference_seed = build_promoted_reference_seed(
                     interview_state,
                     distillation,
