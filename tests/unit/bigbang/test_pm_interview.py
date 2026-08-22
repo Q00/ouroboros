@@ -2294,3 +2294,50 @@ async def test_plan_next_turns_drops_duplicates_and_malformed_companions(
     ]
     # One classification per shipped question — dropped companions leave no trace.
     assert len(engine.classifications) == len(questions)
+
+
+@pytest.mark.asyncio
+async def test_plan_next_turns_rejects_wrong_typed_companion_routing(
+    tmp_path: Path,
+) -> None:
+    """A companion's routing fields are validated, never coerced (RFC #2222).
+
+    ``bool("false")`` is True: a string where a boolean belongs would make a
+    question the PM must answer skip-eligible, and ``[decide_later]`` would
+    then discard it. The companion goes through the primary's own parser, so
+    the wrong-typed one is dropped while a properly typed decide-later
+    companion keeps its skip route.
+    """
+    payload = _batch_payload(
+        companion_questions=[
+            {
+                "question": "What data retention constraint applies?",
+                "category": "planning",
+                "decide_later": "false",  # a string, not a boolean
+            },
+            {
+                "question": "Which decisions can wait until launch scope is known?",
+                "category": "decide_later",
+                "reframed_question": "Which decisions can wait until launch scope is known?",
+                "reasoning": "Deferrable dimension.",
+                "defer_to_dev": False,
+                "decide_later": True,
+                "placeholder_response": "To be decided at launch.",
+            },
+        ]
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(json.dumps(payload))))
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+
+    result = await engine.plan_next_turns(_batch_state("pm_batch_typed_flags"))
+
+    assert result.is_ok
+    questions = [plan.question for plan in result.value]
+    assert questions == [
+        "Which user workflow matters most?",
+        "Which decisions can wait until launch scope is known?",
+    ]
+    assert result.value[1].classification.output_type == ClassifierOutputType.DECIDE_LATER
+    # The rejected companion left no routing state behind.
+    assert len(engine.classifications) == len(questions)

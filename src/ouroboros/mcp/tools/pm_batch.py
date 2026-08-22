@@ -3,7 +3,8 @@
 A batched turn puts one to three questions on the table at once. What this
 module owns is everything that is *about the batch* rather than about one
 question: where pending members live, how an incoming answer is matched to its
-member, and how a batched turn renders to the host.
+member, how a batched turn renders to the host, and the answer lock a turn with
+several answerable questions is the first shape to need.
 
 Batch pending state lives in PM meta, never as core question-only rounds. The
 engine's ``record_answer`` fills the *trailing* unanswered round and overwrites
@@ -15,6 +16,9 @@ every member is recorded question-and-answer together at answer time.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
@@ -31,6 +35,33 @@ ADVISORY_PROMPT_BUNDLE_KIND = "advisory_prompt_bundle"
 #: host submits that lane as ``undispatched`` — a lane without its brief has
 #: no contract to answer under, and guessing one is worse than absence.
 UNDISPATCHED_SENTINEL = "UNDISPATCHED"
+
+
+@asynccontextmanager
+async def interview_answer_lock(
+    locks: dict[str, asyncio.Lock],
+    session_id: str,
+) -> AsyncIterator[None]:
+    """Hold one interview's answer lock for a whole record call.
+
+    Recording an answer reads the interview state and PM meta, then writes
+    both. Two answers that interleave therefore both report success while the
+    second write carries a state that never saw the first: the user's words are
+    gone and their question comes back as still pending.
+
+    A batched turn is the first shape where this is reachable in ordinary use —
+    a host holding three answerable questions can send two answers as parallel
+    tool calls — but the read-modify-write is shared by every answer path, so
+    the lock is taken around the whole call rather than around the batch
+    branch. Locks are keyed by interview and live on the handler, which the
+    server builds once at startup; the same idiom as the execution handler's
+    ``_idempotency_locks``.
+
+    The scope is one server process, which is the scope of the state directory
+    it owns.
+    """
+    async with locks.setdefault(session_id, asyncio.Lock()):
+        yield
 
 
 def pending_batch_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:

@@ -18,6 +18,7 @@ The decisions these hold:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -390,3 +391,73 @@ async def test_without_a_store_the_full_briefs_stay_inline(tmp_path: Path) -> No
     for envelope in result.value.meta["question_advisories"]:
         for payload in envelope["question_advisory_subagents"]:
             assert "Answer Contract" in payload["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_two_members_answered_concurrently_both_survive(tmp_path: Path) -> None:
+    """Answers to one turn's members do not overwrite each other.
+
+    Recording an answer reads interview state and PM meta, then writes both.
+    A batched turn is the first shape where a host holds two answerable
+    questions at once, so two answers can be in flight together; unserialized,
+    the later write carries a state that never saw the earlier answer and the
+    user's words are gone while their question comes back as still pending.
+
+    ``save_state`` is made to yield here so the interleave is scheduled rather
+    than hoped for — without the per-interview lock this test loses a round.
+    """
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_concurrent")
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(
+        state.interview_id,
+        engine,
+        cwd=str(tmp_path),
+        data_dir=tmp_path,
+        extra={
+            "pending_batch": [
+                {"question": Q_PRIMARY, "classification": "passthrough", "skip_eligible": False},
+                {"question": Q_SECOND, "classification": "passthrough", "skip_eligible": False},
+                {"question": Q_THIRD, "classification": "passthrough", "skip_eligible": False},
+            ]
+        },
+    )
+    engine.plan_next_turns = AsyncMock()
+
+    inner_save = engine.save_state
+
+    async def _yielding_save(saved_state: InterviewState) -> object:
+        await asyncio.sleep(0)
+        return await inner_save(saved_state)
+
+    engine.save_state = _yielding_save  # type: ignore[method-assign]
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    first, second = await asyncio.gather(
+        handler.handle(
+            {
+                "session_id": state.interview_id,
+                "answer": "The review workflow.",
+                "last_question": Q_PRIMARY,
+                "cwd": str(tmp_path),
+            }
+        ),
+        handler.handle(
+            {
+                "session_id": state.interview_id,
+                "answer": "Retention is 90 days.",
+                "last_question": Q_SECOND,
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert first.is_ok and second.is_ok
+    reloaded = (await engine.load_state(state.interview_id)).value
+    answered = {r.question: r.user_response for r in reloaded.rounds}
+    assert answered[Q_PRIMARY] == "The review workflow."
+    assert answered[Q_SECOND] == "Retention is 90 days."
+    # Only the untouched member is still pending.
+    saved = _load_meta(state.interview_id, tmp_path)
+    assert [entry["question"] for entry in saved["pending_batch"]] == [Q_THIRD]
+    engine.plan_next_turns.assert_not_called()
