@@ -279,138 +279,51 @@ def _lean_schema(contract: Any) -> str | None:
     return json.dumps(_without_prose(schema), ensure_ascii=False, separators=(",", ":"))
 
 
-#: A worked answer per contract, in place of the contract's own schema.
+#: What each contract asks for, said in words instead of as its schema.
 #:
 #: The schema is exact and nearly unreadable — a child reads ``oneOf`` branches
-#: and regex patterns to work out that ``path`` is repository-relative. One
-#: filled-in answer says the same thing in a quarter of the characters, and
-#: says the part regexes say worst: what a value looks like.
+#: and regex patterns to work out that ``path`` is repository-relative. Naming
+#: the fields and their bounds says the same in a fraction of the characters.
+#:
+#: Deliberately not a filled-in example. An example is a claim already written
+#: in the answer's shape, and a child short on evidence has one in front of it
+#: that only needs its identifiers changed — the fabricated-but-well-formed
+#: finding is the one outcome this mechanism exists to prevent.
 #:
 #: Keyed by ``contract_id``, so a contract that changes version falls back to
-#: its schema rather than being described by an example written for the old
-#: one. What an example cannot show — bounds, enums, the rules about what may
-#: not appear — is stated beside it, and only what a wrong answer would be
-#: rejected for.
-#:
-#: **Every value in them is deliberately fictional**, and the identifiers are
-#: chosen so that copying one wholesale fails: ``example-repo-a1b2c3d4`` is in
-#: no roster, so an answer carrying it is rejected at submission. An example
-#: whose values looked real would be the one thing this mechanism exists to
-#: prevent — a fabricated claim, correctly shaped, reaching the PM as evidence.
-#: Wrong-and-refused and invented-and-accepted are not the same failure, and
-#: the example is written to fail the first way.
-#:
-#: ``tests/unit/mcp/tools/test_pm_handler_batch.py`` validates every example
-#: against the contract it is keyed to, so an example cannot drift from it, and
-#: checks that its identifiers are none of the ones a lane is actually given.
-_ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
-    "pm_code_context_answer.v2": (
-        {
-            "question_identity": "pm-question:0000000000000000",
-            "lane_id": "code_context",
-            "examined": [
-                {
-                    "repo_id": "example-repo-a1b2c3d4",
-                    "policy_claims": [
-                        {
-                            "path": "src/main/java/com/example/booking/ReminderScheduler.java",
-                            "policy_claim": (
-                                "Three reminders fire at +6h, +3h and day+6 09:21 after a trial "
-                                "booking, keyed {userId}-{templateCode}, and are cancelled once "
-                                "the user books a class."
-                            ),
-                            "plain_statement": (
-                                "신청 직후 개입은 전부 시점 기반 리마인드이고, 예약하면 취소됩니다."
-                            ),
-                        }
-                    ],
-                },
-                {"repo_id": "example-app-e5f6a7b8", "policy_claims": []},
-            ],
-        },
-        {
-            "question_identity": "pm-question:0000000000000000",
-            "lane_id": "code_context",
-            "examined": [],
-            "nothing_examined_reason": "not_a_policy_question",
-        },
-        """- `path` is relative to the repository, never absolute and never through `..`.
-- `plain_statement` is the claim beside it said once, in the question's own
-  language, with no paths or identifiers in it — it is what the PM reads.
-- One entry per repository. A repository you read and found nothing in is an
-  entry with empty `policy_claims` — that is how "I looked and it is clean" is
-  said, and a repository you never opened has no entry at all.
+#: rendering its schema rather than being described by text written for the
+#: shape before it. ``tests/unit/mcp/tools/test_pm_handler_batch.py`` checks
+#: that every field a contract requires is named here.
+_ANSWER_SPECS: dict[str, str] = {
+    "pm_code_context_answer.v2": """- `question_identity` and `lane_id` exactly as this task gives them.
+- `examined`: one entry per repository you opened — `repo_id` from 3 above and
+  `policy_claims`, each of them `{path, policy_claim, plain_statement}`. A
+  repository you read and found nothing in is an entry with no claims; one you
+  never opened has no entry at all.
+- Nothing examined: `examined: []` with `nothing_examined_reason` —
+  not_a_policy_question, no_repository_in_roster, roster_repository_not_readable.
+- `path` is relative to the repository, never absolute, never through `..`.
+- `plain_statement` says that claim once in the question's own language, with
+  no paths or identifiers in it — it is the part the PM reads.
 - At most 20 claims per repository; `policy_claim` ≤ 600 characters,
-  `plain_statement` ≤ 300.
-- No other fields. Anything the shape does not name is rejected with the answer.""",
-    ),
-    "data_evidence_answer.v1": (
-        {
-            "question_identity": "pm-question:0000000000000000",
-            "lane_id": "data_context",
-            "data_needed": True,
-            "read_requests": [
-                {
-                    "operation": "read",
-                    "tool_name": "example_metrics_tool",
-                    "metric": "trial bookings that reached the lesson",
-                    "aggregation": "count",
-                    "filters": [{"field": "status", "comparator": "eq", "value": "COMPLETED"}],
-                    "time_window": "last 30 days",
-                    "informs_decision": "which of the two drop-offs is the larger one today",
-                    "values": [{"value": 1832}],
-                }
-            ],
-        },
-        {
-            "question_identity": "pm-question:0000000000000000",
-            "lane_id": "data_context",
-            "data_needed": False,
-            "no_evidence_reason": "not_a_measurement",
-        },
-        """- At most 5 read requests, each carrying the value it actually read back.
-- `aggregation` is one of count, distinct_count, sum, average, median, p90,
-  p95, p99, min, max, rate; `comparator` one of eq, neq, gt, gte, lt, lte.
-- A count or distinct_count value is a non-negative integer.
-- Without `group_by` there is exactly one value; with it, up to 20 entries of
-  `{group, value}`.
-- No rows, names or identifiers — an aggregate is what this lane may carry.
-- No other fields. Anything the shape does not name is rejected with the answer.""",
-    ),
+  `plain_statement` ≤ 300. Any field not named here is rejected with the answer.""",
+    "data_evidence_answer.v1": """- `question_identity` and `lane_id` exactly as this task gives them.
+- Measured something: `data_needed: true` and `read_requests` (at most 5), each
+  with `operation: "read"`, `tool_name`, `metric`, `aggregation`,
+  `informs_decision`, and `values` carrying the number you actually read back.
+  Optional per request: `filters` of `{field, comparator, value}`, `time_window`,
+  `group_by`.
+- Nothing to measure: `data_needed: false` with `no_evidence_reason` —
+  not_a_measurement, answer_would_not_be_an_aggregate,
+  question_too_ambiguous_to_measure, no_data_store_described,
+  store_described_but_not_callable.
+- `aggregation` is one of count, distinct_count, sum, average, median, p90, p95,
+  p99, min, max, rate; `comparator` one of eq, neq, gt, gte, lt, lte.
+- Without `group_by` there is exactly one value; with it, up to 20 `{group,
+  value}` entries. A count or distinct_count value is a non-negative integer.
+- No rows, names or identifiers — an aggregate is what this lane may carry. Any
+  field not named here is rejected with the answer.""",
 }
-
-
-def _answer_section(contract: Any, schema_json: str | None) -> str:
-    """Return the ``## Answer`` block: a worked example, or the schema itself."""
-    contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
-    example = _ANSWER_EXAMPLES.get(str(contract_id))
-    if example is None:
-        if not schema_json:
-            return ""
-        return f"""## Answer
-Your final message is this JSON and nothing else — no prose around it:
-```json
-{schema_json}
-```
-"""
-    answer, empty, notes = example
-    return f"""## Answer
-Your final message is one JSON object and nothing else — no prose around it,
-shaped like this:
-```json
-{json.dumps(answer, ensure_ascii=False, indent=2)}
-```
-Nothing to report is its own answer, not an empty version of the one above:
-```json
-{json.dumps(empty, ensure_ascii=False, indent=2)}
-```
-**Every value above is invented.** Take the identity from the Session block,
-the identifiers from 3, and every claim from what you actually read — an
-answer shaped like this one but not read from anywhere is the one thing that
-must never reach the PM.
-{notes}
-
-"""
 
 
 def _no_op_literals(schema_json: str) -> str:
@@ -442,6 +355,27 @@ def _no_op_literals(schema_json: str) -> str:
 
     walk(schema)
     return found[0] if found else ""
+
+
+def _answer_section(contract: Any, schema_json: str | None) -> str:
+    """Return the ``## Answer`` block: the contract said in words, or its schema."""
+    contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
+    spec = _ANSWER_SPECS.get(str(contract_id))
+    if spec is None:
+        if not schema_json:
+            return ""
+        return f"""## Answer
+Your final message is this JSON and nothing else — no prose around it:
+```json
+{schema_json}
+```
+"""
+    return f"""## Answer
+Your final message is one JSON object and nothing else — no prose around it.
+
+{spec}
+
+"""
 
 
 def _investigation_step(roster: Any, schema_json: str | None) -> str:
@@ -537,7 +471,7 @@ evidence the PM reads before answering; you never answer for them.
 the decision. If two sources disagree, carry both — the disagreement is what the
 PM most needs.
 
-Full brief (rules, worked examples, field descriptions): `ouroboros_fetch_artifact`
+Full brief (rules and field descriptions): `ouroboros_fetch_artifact`
 with contract_id `{bundle_id}`, lane_id `{lane_id}`."""
 
 

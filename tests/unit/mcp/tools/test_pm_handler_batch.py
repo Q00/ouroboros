@@ -195,8 +195,7 @@ async def test_briefs_travel_as_references_when_a_store_is_wired(tmp_path: Path)
             assert "UNDISPATCHED" not in stub
             # What it cannot work without rides the stub: the answer shape, the
             # lane's own empty state, and where it may look.
-            assert f'"lane_id": "{lane_id}"' in stub
-            assert "Nothing to report is its own answer" in stub
+            assert "`question_identity` and `lane_id`" in stub
             assert "answer the empty" in stub
             # Step 3 follows the lane's own answer shape, not its name.
             assert ("data tools" in stub) == (lane_id == "data_context")
@@ -561,13 +560,12 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # 3 — where each may look.
     assert roster[0]["repo_id"] in code and str(tmp_path / "podo-backend") in code
     assert "data tools" in data and roster[0]["repo_id"] not in data
-    # The answer shape, shown as a worked answer rather than as its schema.
-    assert '"lane_id": "code_context"' in code and '"lane_id": "data_context"' in data
-    assert "Anything the shape does not name is rejected" in code
-    # The example is not copyable into a valid answer: its identifiers are none
-    # of the ones this lane was actually given, and it says so.
-    assert "Every value above is invented" in code and "Every value above is invented" in data
-    assert roster[0]["repo_id"] not in code.split("## Answer")[1]
+    # The answer shape, named in words — no filled-in claim for a child short on
+    # evidence to adopt, and nothing in the block a copy could be made from.
+    assert "`examined`: one entry per repository" in code
+    assert "`data_needed: true`" in data
+    assert "rejected with the answer" in code and "rejected with the answer" in data
+    assert "```json" not in code.split("## Answer")[1]
     assert "plain_statement" in code and "plain_statement" not in data
     # Compact: the full brief is several times this, and stays fetchable.
     assert len(code) < 6000
@@ -575,21 +573,18 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     assert stored == "FULL BRIEF"
 
 
-def test_every_worked_example_satisfies_the_contract_it_stands_for() -> None:
-    """An example shown to a child must be an answer that would be accepted.
+def test_every_answer_spec_names_what_its_contract_requires() -> None:
+    """The prompt describes the contract in words, so the words must be complete.
 
-    The stub shows a filled-in answer instead of the contract's schema, which
-    is a quarter of the characters and says the part a regex says worst: what
-    a value looks like. The trade is that an example can be wrong in a way a
-    schema cannot, and a child copying a wrong one is rejected at submission
-    for doing exactly as it was told. So each example is validated against the
-    contract it is keyed to — and the key is the ``contract_id``, so a version
-    bump falls back to the schema rather than to an example written for the
-    shape before it.
+    No worked example: an example is a claim already written in the answer's
+    shape, and a child short on evidence would have one in front of it needing
+    only its identifiers changed. What replaces it is the field list, which can
+    go stale in the one way that matters — a contract gaining a required field
+    nothing tells the child to send. Every required name is checked against the
+    text, and the text is keyed by ``contract_id`` so a version bump falls back
+    to the schema rather than to a description of the shape before it.
     """
-    from jsonschema import Draft202012Validator
-
-    from ouroboros.mcp.tools.pm_batch import _ANSWER_EXAMPLES
+    from ouroboros.mcp.tools.pm_batch import _ANSWER_SPECS
     from ouroboros.orchestrator.capabilities.pm_schemas import (
         _interview_data_evidence_answer_contract,
         pm_code_context_answer_contract,
@@ -599,22 +594,21 @@ def test_every_worked_example_satisfies_the_contract_it_stands_for() -> None:
         c["contract_id"]: c
         for c in (pm_code_context_answer_contract(), _interview_data_evidence_answer_contract())
     }
-    # Every example stands for a contract this build declares — an example for
-    # a contract_id nothing produces is one nobody would notice going stale.
-    assert set(_ANSWER_EXAMPLES) == set(contracts)
-    for contract_id, (answer, empty, notes) in _ANSWER_EXAMPLES.items():
-        validator = Draft202012Validator(contracts[contract_id]["response_model_schema"])
-        for name, candidate in (("answer", answer), ("empty", empty)):
-            errors = sorted(validator.iter_errors(candidate), key=str)
-            assert not errors, f"{contract_id} {name}: {[e.message for e in errors]}"
-        assert notes.strip()
-        # Fictional by construction. A child that copies the example instead of
-        # reading anything must be refused, not believed: an invented claim
-        # wearing a real repo_id validates, and validating is what puts it in
-        # front of the PM. `example-repo-*` is in no roster, so the copy is
-        # rejected at submission — wrong-and-refused rather than
-        # invented-and-accepted.
-        for entry in answer.get("examined", []):
-            assert entry["repo_id"].startswith("example-")
-        assert answer["question_identity"] == "pm-question:0000000000000000"
-        assert empty["question_identity"] == "pm-question:0000000000000000"
+    assert set(_ANSWER_SPECS) == set(contracts)
+
+    def required_names(node: object) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, dict):
+            if isinstance(node.get("required"), list):
+                found |= {str(name) for name in node["required"]}
+            for value in node.values():
+                found |= required_names(value)
+        elif isinstance(node, list):
+            for item in node:
+                found |= required_names(item)
+        return found
+
+    for contract_id, spec in _ANSWER_SPECS.items():
+        schema = contracts[contract_id]["response_model_schema"]
+        missing = sorted(name for name in required_names(schema) if name not in spec)
+        assert not missing, f"{contract_id} does not tell the child about: {missing}"
