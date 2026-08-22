@@ -205,6 +205,21 @@ class PMInterviewTurnPlan:
     raw_payload: dict[str, Any]
 
 
+#: What a round holds when the user asked to leave the decision open.
+#:
+#: A skip is recorded, not skipped: the round exists so the question is not
+#: asked again, and it says the decision is open rather than answered. These
+#: are named because two runtimes write them — the engine below, and the
+#: plugin path that has no engine to reach — and a second spelling of one
+#: sentence is a transcript whose meaning depends on which runtime took the
+#: call.
+DECIDE_LATER_PLACEHOLDER = "[Decide later] To be determined — user chose to decide later."
+DEFERRED_PLACEHOLDER = (
+    "[Deferred to development phase] This technical decision will be addressed "
+    "during the development interview."
+)
+
+
 @dataclass
 class PMInterviewEngine:
     """PM interview engine — wraps InterviewEngine via composition.
@@ -906,7 +921,7 @@ Apply this canonical PM routing policy:
 
         return await self.record_response(
             state,
-            user_response="[Decide later] To be determined — user chose to decide later.",
+            user_response=DECIDE_LATER_PLACEHOLDER,
             question=question,
         )
 
@@ -938,9 +953,7 @@ Apply this canonical PM routing policy:
 
         return await self.record_response(
             state,
-            user_response="[Deferred to development phase] "
-            "This technical decision will be addressed during the "
-            "development interview.",
+            user_response=DEFERRED_PLACEHOLDER,
             question=question,
         )
 

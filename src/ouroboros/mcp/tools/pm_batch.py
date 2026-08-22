@@ -26,6 +26,12 @@ from typing import Any
 
 import structlog
 
+from ouroboros.bigbang.pm_interview import (
+    DECIDE_LATER_PLACEHOLDER,
+    DEFERRED_PLACEHOLDER,
+)
+from ouroboros.core.errors import ValidationError
+from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
 
 log = structlog.get_logger()
@@ -123,7 +129,7 @@ def turn_answers(
     return [], None
 
 
-async def record_turn_answers(engine: Any, state: Any, pairs: list[tuple[str, str]]) -> Any:
+async def record_turn_answers(engine: Any | None, state: Any, pairs: list[tuple[str, str]]) -> Any:
     """Record a turn's answers, each as a whole question-and-answer round.
 
     A skip sentinel is honoured wherever it arrives. The server no longer
@@ -133,21 +139,54 @@ async def record_turn_answers(engine: Any, state: Any, pairs: list[tuple[str, st
     question that may not have been offered as deferrable; refusing it would
     write a control token into the transcript as though the PM had typed it.
     The first loses no words of the user's, the second invents some.
+
+    ``engine`` is None on the runtime that dispatches to a child session.
+    That runtime has no engine to reach — building one there would put an LLM
+    adapter behind an answer being written down, on the very path that exists
+    so the server need not hold one. What it must not have is a second reading
+    of the same answer: whether a token is a skip, and what a skipped round
+    then says, is decided here, above the fork. Below it lies only what an
+    engine uniquely owns — the reframe map, and the open items it accumulates
+    for the summary — and a runtime that plans no questions has neither.
     """
     for question, answer in pairs:
         stripped = answer.strip()
-        skipped = stripped in ("[decide_later]", "[deferred]")
-        if stripped == "[decide_later]":
-            result = await engine.skip_as_decide_later(state, question)
-        elif stripped == "[deferred]":
-            result = await engine.skip_as_deferred(state, question)
+        placeholder = _SKIP_PLACEHOLDERS.get(stripped)
+        if engine is not None:
+            if stripped == "[decide_later]":
+                result = await engine.skip_as_decide_later(state, question)
+            elif stripped == "[deferred]":
+                result = await engine.skip_as_deferred(state, question)
+            else:
+                result = await engine.record_response(state, answer, question)
         else:
-            result = await engine.record_response(state, answer, question)
+            result = _record_without_engine(state, question, placeholder or answer)
         if result.is_err:
             return result
         state = result.value
-        if skipped:
+        if placeholder is not None:
             state.clear_stored_ambiguity()
+    return Result.ok(state)
+
+
+#: The control tokens a turn's answer may be, and the round each one leaves.
+_SKIP_PLACEHOLDERS = {
+    "[decide_later]": DECIDE_LATER_PLACEHOLDER,
+    "[deferred]": DEFERRED_PLACEHOLDER,
+}
+
+
+def _record_without_engine(state: Any, question: str, user_response: str) -> Any:
+    """Write one round the way ``InterviewEngine.record_response`` writes it.
+
+    The same validation guards the same field: a runtime does not get to
+    accept a response the other refuses, any more than it gets to read a
+    skip differently.
+    """
+    is_valid, error_msg = InputValidator.validate_user_response(user_response)
+    if not is_valid:
+        return Result.err(ValidationError(error_msg, field="user_response"))
+    state.record_answer(question, user_response)
     return Result.ok(state)
 
 

@@ -31,6 +31,7 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
 )
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.pm_batch import record_turn_answers
 from ouroboros.mcp.tools.pm_handler import (
     PMInterviewHandler,
     _meta_path,
@@ -493,6 +494,70 @@ async def test_the_batch_transport_means_the_same_thing_in_plugin_mode(
         (Q_PRIMARY, "The review workflow."),
         (Q_SECOND, "Retention is 90 days."),
     ]
+
+    # Writing them down is half the turn; the child has to be handed them.
+    # A turn's answers arrive under `answers`, which leaves the singular
+    # `answer` empty — and the prompt used to decide whether there was
+    # anything to resume with by reading exactly that field. The turns
+    # carrying the most history took the branch that names none of it.
+    prompt = result.value.meta["_subagent"]["prompt"]
+    assert "## Conversation History" in prompt
+    assert "The review workflow." in prompt
+    assert "Retention is 90 days." in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sentinel", ["[decide_later]", "[deferred]"])
+async def test_a_skip_control_is_a_skip_on_every_runtime(tmp_path: Path, sentinel: str) -> None:
+    """A control token is not something the user said.
+
+    ``[decide_later]`` and ``[deferred]`` ask the server to leave a decision
+    open. Recorded literally they become the opposite: a transcript in which
+    the PM answered the question with the token's own text, and an open item
+    the generated seed never hears about. Whether that happens turned on which
+    runtime took the call.
+
+    The postcondition is equality, not a spelling: the same call recorded on
+    either runtime leaves the same round. Pinning the placeholder text instead
+    would pass a plugin path that had merely copied today's wording.
+    """
+    from ouroboros.mcp.tools.authoring_handlers import _plugin_load_state, _plugin_save_state
+
+    in_process_engine = _engine(tmp_path)
+    in_process_state = _answered_state("pm_skip_in_process")
+    assert (await in_process_engine.save_state(in_process_state)).is_ok
+    settled = await record_turn_answers(
+        in_process_engine, in_process_state, [(Q_PRIMARY, sentinel)]
+    )
+    assert settled.is_ok
+    expected = settled.value.rounds[-1].user_response
+
+    plugin_state = _answered_state("pm_skip_plugin")
+    assert (await _plugin_save_state(tmp_path, plugin_state)).is_ok
+    handler = PMInterviewHandler(
+        data_dir=tmp_path,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "session_id": plugin_state.interview_id,
+            "answers": [{"question": Q_PRIMARY, "answer": sentinel}],
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await _plugin_load_state(tmp_path, plugin_state.interview_id)).value
+    recorded = reloaded.rounds[-1]
+    assert recorded.question == Q_PRIMARY
+    assert recorded.user_response == expected
+    assert recorded.user_response != sentinel
+    # And the child reads the decision as open, not as an answer it may build on.
+    prompt = result.value.meta["_subagent"]["prompt"]
+    assert expected in prompt
+    assert sentinel not in prompt
 
 
 @pytest.mark.asyncio
