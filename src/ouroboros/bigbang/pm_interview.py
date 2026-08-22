@@ -64,6 +64,7 @@ from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -135,6 +136,15 @@ Respond ONLY with valid JSON in this exact format:
 # enforce. It is shed last so tight budgets drop the supporting paragraphs
 # before the policy itself.
 _PM_CONTRACT_MARKER = "contract between the PM and the developers"
+
+#: Ceiling on questions per PM turn (RFC #2222 decision 1) — a target the
+#: generator may stay under, never a quota to pad toward.
+MAX_QUESTIONS_PER_TURN = 3
+
+#: Mirrors the planner's closure-mode activation ("Overall ambiguity <= 0.25
+#: activates closure mode ... do not open a new topic"). A companion is by
+#: definition a second topic, so at or below this score the batch is one.
+_CLOSURE_MODE_AMBIGUITY = 0.25
 
 
 def _decision_only_view(state: InterviewState) -> InterviewState:
@@ -626,6 +636,13 @@ Also include these PM routing fields in the same JSON object:
 "defer_to_dev": false|true, "decide_later": false|true,
 "placeholder_response": "string".
 
+Optionally add "companion_questions": up to {MAX_QUESTIONS_PER_TURN - 1} extra
+questions asked in the same turn, each an object with the same routing fields
+plus "question". Include one only when it targets a different unresolved
+clarity dimension and no answer to another question in this turn could change
+how it should be asked. In closure mode, or when unsure, include none. Never
+rephrase the primary question as a companion.
+
 Apply this canonical PM routing policy:
 {classification_policy_prompt()}
 """
@@ -661,6 +678,98 @@ Apply this canonical PM routing policy:
                 raw_payload=turn.raw_payload,
             )
         )
+
+    async def plan_next_turns(
+        self,
+        state: InterviewState,
+    ) -> Result[list[PMInterviewTurnPlan], ProviderError | ValidationError]:
+        """Plan one PM turn of one to three questions (RFC #2222 decision 1).
+
+        One planner call: the primary question travels exactly as
+        :meth:`plan_next_turn` produces it, and companions ride the same JSON
+        payload under ``companion_questions``. Each companion is classified and
+        applied through the same ``_apply_classification`` path as the primary,
+        so reframe tracking and skip routing do not know batch members apart.
+
+        What is enforced here rather than trusted to the generator:
+
+        * **Closure mode is single-question.** At or below the planner's
+          closure threshold the batch is the primary alone — a companion is a
+          second topic, and closure mode forbids opening one.
+        * **No duplicate question identities in one batch.** Fan-out isolation
+          keys on the normalized question text, so a companion that normalizes
+          to an already-included question is dropped, not dispatched.
+        * **The ceiling.** At most ``MAX_QUESTIONS_PER_TURN`` questions leave,
+          however many the payload carried.
+
+        A malformed companion entry is dropped silently: the primary is the
+        turn, and companions are an optimization the turn must not fail on.
+        """
+        turn_result = await self.plan_next_turn(state)
+        if turn_result.is_err:
+            return Result.err(turn_result.error)
+        primary = turn_result.value
+        plans = [primary]
+
+        ambiguity = primary.ambiguity
+        if ambiguity is not None and ambiguity.overall_score <= _CLOSURE_MODE_AMBIGUITY:
+            return Result.ok(plans)
+
+        seen_identities = {
+            normalize_question_text(primary.question),
+            normalize_question_text(primary.classification.original_question),
+        }
+        raw_companions = primary.raw_payload.get("companion_questions")
+        if not isinstance(raw_companions, list):
+            return Result.ok(plans)
+
+        for raw in raw_companions:
+            if len(plans) >= MAX_QUESTIONS_PER_TURN:
+                break
+            if not isinstance(raw, dict):
+                continue
+            question_text = str(raw.get("question") or "").strip()
+            if not question_text:
+                continue
+            if normalize_question_text(question_text) in seen_identities:
+                continue
+            try:
+                category = QuestionCategory(str(raw.get("category") or "planning"))
+            except ValueError:
+                category = QuestionCategory.PLANNING
+            classification = ClassificationResult(
+                original_question=question_text,
+                category=category,
+                reframed_question=str(raw.get("reframed_question") or "").strip() or question_text,
+                reasoning=str(raw.get("reasoning") or "Companion question."),
+                defer_to_dev=bool(raw.get("defer_to_dev")),
+                decide_later=bool(raw.get("decide_later")),
+            )
+            shown_question = self._apply_classification(classification)
+            shown_identity = normalize_question_text(shown_question)
+            if shown_identity in seen_identities:
+                # _apply_classification already recorded routing state for a
+                # question this batch will not carry — undo both traces.
+                self.classifications.pop()
+                self._reframe_map.pop(shown_question, None)
+                continue
+            seen_identities.add(normalize_question_text(question_text))
+            seen_identities.add(shown_identity)
+            plans.append(
+                PMInterviewTurnPlan(
+                    question=shown_question,
+                    ambiguity=None,
+                    classification=classification,
+                    raw_payload=dict(raw),
+                )
+            )
+
+        log.info(
+            "pm.turn_batch_planned",
+            interview_id=state.interview_id,
+            batch_size=len(plans),
+        )
+        return Result.ok(plans)
 
     async def ask_next_question(
         self,
@@ -953,6 +1062,13 @@ Apply this canonical PM routing policy:
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):
             self._reframe_map[pending["reframed"]] = pending["original"]
+        # A batched turn can hold several pending reframes at once (RFC #2222);
+        # the full map is persisted beside the legacy single entry.
+        pending_map = meta.get("pending_reframes")
+        if isinstance(pending_map, dict):
+            for reframed, original in pending_map.items():
+                if isinstance(reframed, str) and isinstance(original, str):
+                    self._reframe_map[reframed] = original
 
         # Reinstall PM steering wrapper for resumed sessions
         self._install_pm_steering()

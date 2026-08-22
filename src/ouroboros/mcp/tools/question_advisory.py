@@ -170,12 +170,6 @@ contradiction is the most useful thing you can hand a PRD author.
 this list, that is not evidence and it will be rejected: report it in your
 finding as a repository worth adding, and give it no entry.
 
-**Fill what a carried finding requires.** If any entry carries a claim, set
-`answer_prefix` to `[from-code]`, `requires_user_confirmation` to true, and write
-`user_confirmation_prompt` as the question the user should be asked before your
-finding is recorded on their behalf. There is no prefix that skips that step.
-If no entry carries one, those three fields do not exist in your answer.
-
 **Stop while the answer is still useful.** Read the roster in order and stop
 once you can answer, giving entries only to what you actually opened. A partial
 scope named honestly is a complete answer; an exhaustive search that has not
