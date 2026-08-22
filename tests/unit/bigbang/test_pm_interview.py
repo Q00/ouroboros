@@ -2383,3 +2383,52 @@ async def test_a_dropped_companion_does_not_take_the_primary_reframe_with_it(
     # The primary's reframe survived the companion's undo.
     assert engine._reframe_map[reframed] == "Which index strategy should the store use?"
     assert len(engine.classifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_turns_reframe_does_not_attach_to_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """Planning a turn replaces the reframe routing, never adds to it.
+
+    A reframe maps a shown question back to the technical one behind it, and
+    that mapping is meaningful only while its turn is on the wire. A host
+    abandons a turn by not answering it, and the next call plans a fresh one —
+    so a mapping that outlived its turn would attach to a later question that
+    merely reads the same, and record that decision under a technical question
+    nobody was asked.
+    """
+    shown = "How fast must saved reports open?"
+    reframed_payload = _batch_payload(
+        next_question="Which index strategy should the store use?",
+        category="development",
+        reframed_question=shown,
+        reasoning="Technical question needing a PM reframe.",
+    )
+    plain_payload = _batch_payload(next_question=shown, reframed_question=shown)
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        side_effect=[
+            Result.ok(_mock_completion(json.dumps(reframed_payload))),
+            Result.ok(_mock_completion(json.dumps(plain_payload))),
+        ]
+    )
+    engine = _make_engine(adapter=adapter, tmp_path=tmp_path)
+    state = _batch_state("pm_abandoned_reframe")
+
+    first = await engine.plan_next_turns(state)
+    assert first.is_ok
+    assert engine._reframe_map[shown] == "Which index strategy should the store use?"
+
+    # The turn is abandoned: no answer is recorded, and a fresh turn is planned.
+    second = await engine.plan_next_turns(state)
+    assert second.is_ok
+    assert [plan.question for plan in second.value] == [shown]
+    assert engine._reframe_map == {}
+
+    # The answer to the freshly planned question carries only itself.
+    recorded = await engine.record_response(state, "Three seconds.", shown)
+    assert recorded.is_ok
+    round_written = recorded.value.rounds[-1]
+    assert round_written.question == shown
+    assert "Original technical question" not in round_written.question

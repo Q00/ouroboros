@@ -711,6 +711,7 @@ Apply this canonical PM routing policy:
         falls back to a plain planning question, since the turn must have one,
         while a companion is dropped, since the turn is whole without it.
         """
+        self._begin_turn()
         turn_result = await self.plan_next_turn(state)
         if turn_result.is_err:
             return Result.err(turn_result.error)
@@ -781,11 +782,30 @@ Apply this canonical PM routing policy:
         )
         return Result.ok(plans)
 
+    def _begin_turn(self) -> None:
+        """Drop the previous turn's reframe routing before a new one is planned.
+
+        A reframe maps a *shown* question back to the technical one it came
+        from, and that mapping means something only while the turn that
+        produced it is the turn on the wire. A host abandons a turn simply by
+        not answering it (RFC #2222 revision 4) and the next call plans a fresh
+        one — so a mapping that outlived its turn would attach itself to
+        whatever later question happens to be displayed with the same text, and
+        that decision would be recorded under a technical question nobody was
+        asked.
+
+        This is the same removal the pending list got, at the one address it
+        had left: what is persisted describes the turn being planned now, and
+        planning replaces it rather than adding to it.
+        """
+        self._reframe_map = {}
+
     async def ask_next_question(
         self,
         state: InterviewState,
     ) -> Result[str, ProviderError | ValidationError]:
         """Generate and classify the next question using the legacy two-call path."""
+        self._begin_turn()
         question_result = await self.inner.ask_next_question(state)
         if question_result.is_err:
             return question_result
