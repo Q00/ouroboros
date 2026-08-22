@@ -358,23 +358,24 @@ def _payload_stub(
     schema_json = _lean_schema(contract)
     offered = [e for e in findings if isinstance(e, dict)] if findings else []
     if offered:
+        # To the minute. Sub-second precision and a UTC offset decide nothing
+        # here and are twenty lines of it.
         listing = "\n".join(
-            f"   - `{e.get('contract_id')}` — published {e.get('published_at')}" for e in offered
+            f"   - `{e.get('contract_id')}` — {str(e.get('published_at') or '')[:16]}"
+            for e in offered
         )
-        # Newest first, and named as a shelf to choose from. Told to fetch each
-        # in turn, a child would spend its whole budget before it started —
-        # these are a head start, not a checklist.
-        reuse = (
-            f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
+        # Recency is the only thing separating these entries, so it is the only
+        # thing the instruction may lean on. Telling a child to pick the ones
+        # whose subject fits would name a signal the offer does not carry, and
+        # telling it to fetch each in turn would spend the budget before the
+        # work started. These are a head start, not a checklist.
+        reuse = f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
    takes a `contract_id` below plus `lane_id: {lane_id}` (load the tool via
-   your runtime's tool discovery if deferred). Newest first — open the ones
-   whose subject looks like this question, not all of them. Use what helps and
-   investigate the rest yourself; if what you read answers the question, stop
-   there.
+   your runtime's tool discovery if deferred). They are newest first and that
+   is all you can tell them apart by, so start at the top and open a few
+   rather than all of them. Use what helps, investigate the rest yourself, and
+   if what you read answers the question, stop there.
 {listing}"""
-            if offered
-            else ""
-        )
     else:
         reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
    reuse. Go to 3."""
