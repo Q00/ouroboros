@@ -96,14 +96,14 @@ from memory, so it is the last one to skip evidence on.
 ### Step 3: Loop
 
 Apply this to **every** MCP response that carries a question, including the one
-Step 2 returned and any question re-shown on resume.
+Step 2 returned and any question a resume plans anew.
 
 **Batched turns (RFC #2222).** A response may carry one to three questions at
 once: `meta.question_batch` lists them and `meta.question_advisories` carries
 one advisory envelope per question, each with its own
 `question_advisory_subagents` and `question_advisory_fanout_id`. Treat every
-batch member exactly as a single question is treated below, with these batch
-mechanics:
+question of the turn exactly as a single question is treated below, with these
+batch mechanics:
 
 - **Dispatch all envelopes' payloads in one wave** — one subagent per payload
   across all questions, in a single parallel batch. Never leave a question's
@@ -112,16 +112,16 @@ mechanics:
   envelope's `question_advisory_fanout_id` and
   `question_advisory_result_correlation_key`; one
   `ouroboros_submit_fanout_results` call per envelope.
-- **Relay answers one at a time**, each with `last_question` set to that
-  member's exact question text. Members may be answered in any order; the
-  server re-lists what is still pending after each. An unanswered member stays
-  pending — never auto-answer, auto-defer, or decide-later it on the user's
-  behalf.
-- A response that lists pending members without `question_advisories` is a
-  re-display: its lanes already ran, do not dispatch them again.
-- Skip sentinels are per member: `answer="[decide_later]"` /
-  `answer="[deferred]"` are honoured only for the member whose classification
-  allows it, always with that member's `last_question`.
+- **Relay the turn's answers together** in one call:
+  `answers: [{question, answer}, ...]`, one entry per question the turn asked,
+  each naming its own exact question text. A turn is recorded whole — collect
+  every answer first, and never auto-answer, auto-defer, or decide-later one on
+  the user's behalf to complete the set.
+- The server keeps nothing between calls. A call that arrives without the
+  turn's answers plans a **new** turn from the transcript rather than restoring
+  the old one, so a turn you abandon is a turn the user will be asked again.
+- Skip sentinels are per question: give that question the answer
+  `"[decide_later]"` or `"[deferred]"` in its own entry.
 
 **A. Show alerts** (if present in `meta`):
 - `meta.deferred_this_round` → print `[DEV → deferred] "question"`
@@ -306,11 +306,11 @@ Then check: does `meta.ask_user_question` exist?
   Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
 
 - **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question`.
-  - **Batched turn**: put every pending member into ONE `AskUserQuestion` call —
-    one entry per member (the tool takes up to 4). Each member keeps its own
+  - **Batched turn**: put every question of the turn into ONE `AskUserQuestion`
+    call — one entry per question (the tool takes up to 4). Each keeps its own
     options, built by the same rules below from its own entry in
-    `meta.question_batch`; a skip option follows that member's own
-    `classification`, never another member's.
+    `meta.question_batch`; a skip option follows that question's own
+    `classification`, never another's.
   - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
     - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
     - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
@@ -324,10 +324,10 @@ If the user chose "Decide later" → send `answer="[decide_later]"`.
 If the user chose "Defer to dev" → send `answer="[deferred]"`.
 Otherwise → send the user's answer through the Refine gate below.
 
-On a batched turn: one call per answered member, each with that member's exact
-question text as `last_question`, each through its own Refine gate. The server
-answers each call with what is still pending; only the call that resolves the
-last member returns the next turn's question(s).
+On a batched turn: run each answer through its own Refine gate, then send them
+in one call as `answers: [{question, answer}, ...]` — the question text exactly
+as the turn asked it. The call that carries the turn returns the next turn's
+question(s).
 
 **Refine gate — structure it, mark whose it is, then have the user confirm.**
 

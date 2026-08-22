@@ -32,7 +32,6 @@ from ouroboros.bigbang.ambiguity import qualifies_for_seed_completion
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
-    InterviewRound,
     InterviewState,
 )
 from ouroboros.bigbang.pm_completion import (
@@ -57,14 +56,12 @@ from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispa
 from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.pm_batch import (
     batch_entries_for_turns,
-    batch_pending_result,
     batch_turn_meta_and_text,
     externalize_advisory_payloads,
     interview_answer_lock,
-    pending_batch_entries,
-    record_member_answer,
-    resolve_batch_member,
+    record_turn_answers,
     skip_hint_suffix,
+    turn_answers,
 )
 from ouroboros.mcp.tools.question_advisory import attach_question_advisory
 from ouroboros.mcp.tools.subagent import (
@@ -135,21 +132,6 @@ def _plugin_repo_paths(repos: list[Any], *, durable: bool = False) -> list[Any]:
 def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
     """Backward-compatible scan-path projection for plugin repo refresh."""
     return _plugin_repo_paths(_refresh_plugin_repo_records(paths))
-
-
-def _pending_round(state: InterviewState) -> InterviewRound | None:
-    """Return the round still waiting for an answer, or ``None``.
-
-    Pending means *unanswered*, not *last*. Those two agreed until a round could
-    be answered without being a question, and every consumer that assumed the
-    trailing round was the pending one then filed the next decision against
-    whatever sat behind it.
-
-    ``None`` is now load-bearing rather than a fallback: it means there is no
-    question for an incoming answer to belong to, and the caller is asked to
-    name one instead of the trailing round being borrowed.
-    """
-    return next((r for r in reversed(state.rounds) if r.user_response is None), None)
 
 
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
@@ -461,8 +443,31 @@ class PMInterviewHandler:
                 MCPToolParameter(
                     name="answer",
                     type=ToolInputType.STRING,
-                    description="PM's response to the current interview question",
+                    description=(
+                        "PM's response to a single-question turn. Pass the question it "
+                        "answers as 'last_question'. For a turn that asked more than one "
+                        "question, use 'answers' instead."
+                    ),
                     required=False,
+                ),
+                MCPToolParameter(
+                    name="answers",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "A turn's answers, sent together: [{question, answer}, ...], one "
+                        "entry per question the turn asked. A turn is recorded whole, so "
+                        "collect every answer before calling. Each entry names its own "
+                        "question; nothing is matched against server-side state."
+                    ),
+                    required=False,
+                    items={
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "answer": {"type": "string"},
+                        },
+                        "required": ["question", "answer"],
+                    },
                 ),
                 MCPToolParameter(
                     name="action",
@@ -501,14 +506,11 @@ class PMInterviewHandler:
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
-                        "The question this answer is answering, when the server is "
-                        "not already holding it unanswered. In plugin mode each "
-                        "dispatch creates a new child session whose questions are "
-                        "not persisted server-side, so pass the child's last "
-                        "question here. On any runtime, an answer sent when no "
-                        "question is pending is refused without it — there is no "
-                        "question to file it under, and the round behind it is one "
-                        "somebody already answered."
+                        "The question this answer is answering. A turn persists "
+                        "nothing when it asks, on any runtime, so an answer without "
+                        "its question is refused — there is no remembered question "
+                        "to file it under, and the round behind it is one somebody "
+                        "already answered."
                     ),
                     required=False,
                 ),
@@ -796,13 +798,12 @@ class PMInterviewHandler:
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
                 if answer:
-                    # ``record_answer`` fills a round persisted question-only or
-                    # appends a new one, and settles provenance where the answer
-                    # arrives rather than at construction.
-                    plugin_pending = _pending_round(state)
-                    if plugin_pending is not None:
-                        question_text = last_question or plugin_pending.question
-                    elif last_question:
+                    # Every answer names its question, on every runtime: a turn
+                    # persists nothing when it asks (RFC #2222 revision 4), so
+                    # there is no stored question to prefer over the echo.
+                    # ``record_answer`` appends the pair and settles provenance
+                    # where the answer arrives rather than at construction.
+                    if last_question:
                         question_text = last_question
                     else:
                         # The same refusal the in-process path gives, because a
@@ -904,7 +905,12 @@ class PMInterviewHandler:
             if action == "resume" and session_id:
                 async with interview_answer_lock(self._answer_locks, session_id):
                     return await self._handle_answer(
-                        engine, session_id, answer, cwd, last_question=last_question
+                        engine,
+                        session_id,
+                        answer,
+                        cwd,
+                        last_question=last_question,
+                        answers=arguments.get("answers"),
                     )
 
             return Result.err(
@@ -1010,14 +1016,8 @@ class PMInterviewHandler:
         # Compute diff
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
-        # Record unanswered round
-        state.rounds.append(
-            InterviewRound(
-                round_number=state.current_round_number,
-                question=question,
-                user_response=None,
-            )
-        )
+        # RFC #2222 revision 4: a turn persists nothing when it asks. The
+        # question travels in the response and comes back with its answer.
         state.mark_updated()
 
         # Persist — check save result to avoid handing back a session that wasn't written
@@ -1245,9 +1245,15 @@ class PMInterviewHandler:
         """Return the first question when select_repos is called on an already-started session.
 
         This handles the case where the caller sends ``select_repos`` more
-        than once for the same session.  Instead of re-starting the
-        interview (which would create duplicate state), we load the existing
-        ``InterviewState`` and replay the first question from its rounds.
+        than once for the same session. Instead of re-starting the interview
+        (which would create duplicate state), the existing ``InterviewState``
+        is loaded and a question is planned from it.
+
+        It plans rather than replays because a turn persists nothing when it
+        asks (RFC #2222 revision 4): the question the first call returned was
+        never written down, so there is none to hand back. This is the same
+        trade a reconnect makes — one regenerated question, and no half-written
+        state to keep consistent.
         """
         log.info(
             "pm_handler.select_repos.idempotent",
@@ -1265,19 +1271,18 @@ class PMInterviewHandler:
             )
 
         state = load_result.value
-        # Return the last unanswered round's question (the pending PM-facing prompt),
-        # not rounds[0] which may be a hidden auto-deferred/auto-decided question.
-        pending = next(
-            (r for r in reversed(state.rounds) if r.user_response is None),
-            None,
-        )
-        first_question = (
-            pending.question
-            if pending
-            else (state.rounds[-1].question if state.rounds else "No question available.")
-        )
-
         engine.restore_meta(meta)
+        question_result = await engine.ask_next_question(state)
+        if question_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Session {session_id} is already started but a question could "
+                    f"not be planned: {question_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+        first_question = question_result.value
+
         classification = _last_classification(engine)
         skip_eligible = classification in ("decide_later", "deferred")
 
@@ -1323,8 +1328,15 @@ class PMInterviewHandler:
         answer: str | None,
         cwd: str,
         last_question: str | None = None,
+        answers: Any = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Resume session, record an answer, check completion, then ask next question.
+        """Record a turn's answers, check completion, then ask the next turn.
+
+        A turn is atomic (RFC #2222 revision 4): its answers arrive together,
+        each holding the question it belongs to, and the rounds they become are
+        the only durable state. A call with no answers is a host that lost its
+        turn — the next turn is planned from the transcript rather than
+        restored, so there is no pending question to reconcile against.
 
         Completion is determined by the engine's ambiguity score dropping
         below the threshold (requirements are clear).  User controls when
@@ -1343,62 +1355,10 @@ class PMInterviewHandler:
         if meta:
             engine.restore_meta(meta)
 
-        # ── Batched turn (RFC #2222): pending members live in PM meta ──
-        pending_batch = pending_batch_entries(meta)
-
-        if not answer and pending_batch:
-            return Result.ok(
-                batch_pending_result(
-                    session_id,
-                    pending_batch,
-                    decide_later_count=len(engine.deferred_items) + len(engine.decide_later_items),
-                )
-            )
-
-        # If no answer provided, re-display the pending question (retry/reconnect)
-        reconnect_pending = _pending_round(state)
-        if not answer and reconnect_pending is not None:
-            pending_question = reconnect_pending.question
-            classification = _last_classification(engine)
-            skip_eligible = classification in ("decide_later", "deferred")
-
-            pending_reframe = engine.get_pending_reframe()
-
-            # Include skip hint in re-displayed question
-            pending_text = f"Session {session_id}\n\n{pending_question}"
-            pending_text += skip_hint_suffix(classification, session_id)
-
-            pending_meta: dict[str, Any] = {
-                "session_id": session_id,
-                "input_type": "freeText",
-                "response_param": "answer",
-                "question": pending_question,
-                "is_complete": False,
-                "classification": classification,
-                "skip_eligible": skip_eligible,
-                "deferred_this_round": [],
-                "decide_later_this_round": [],
-                "interview_complete": False,
-                "pending_reframe": pending_reframe,
-                "new_deferred": [],
-                "new_decide_later": [],
-                "deferred_count": 0,
-                "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
-            }
-            await self._attach_advisory(pending_meta, session_id, pending_question)
-
-            return Result.ok(
-                MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text=append_question_advisory_dispatch(pending_text, pending_meta),
-                        ),
-                    ),
-                    is_error=False,
-                    meta=pending_meta,
-                )
-            )
+        # ── This turn's answers, each holding its question (RFC #2222 r4) ──
+        pairs, pair_error = turn_answers(answers, answer, last_question)
+        if pair_error:
+            return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
 
         # ── Per-round diff snapshot — must be BEFORE any skip/record call ──
         # Snapshot list lengths here so that items appended inside
@@ -1407,155 +1367,13 @@ class PMInterviewHandler:
         deferred_before = len(engine.deferred_items)
         decide_later_before = len(engine.decide_later_items)
 
-        # Record answer if provided
-        if answer and not state.rounds:
-            return Result.err(
-                MCPToolError(
-                    "Cannot record answer: no questions have been asked yet.",
-                    tool_name="ouroboros_pm_interview",
-                )
-            )
-
-        # ── Batch member answer (RFC #2222) — see pm_batch for the rules ──
-        batch_answer_recorded = False
-        if answer and pending_batch:
-            target, member_error = resolve_batch_member(pending_batch, last_question)
-            if target is None:
+        if pairs:
+            record_result = await record_turn_answers(engine, state, pairs)
+            if record_result.is_err:
                 return Result.err(
-                    MCPToolError(
-                        member_error or "No pending batch member matched.",
-                        tool_name="ouroboros_pm_interview",
-                    )
+                    MCPToolError(str(record_result.error), tool_name="ouroboros_pm_interview")
                 )
-
-            member_result = await record_member_answer(engine, state, target, answer)
-            if member_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        str(member_result.error),
-                        tool_name="ouroboros_pm_interview",
-                    )
-                )
-            state = member_result.value
-
-            remaining = [e for e in pending_batch if e is not target]
-            save_result = await engine.save_state(state)
-            if isinstance(save_result, Result) and save_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to persist PM answer: {save_result.error}",
-                        tool_name="ouroboros_pm_interview",
-                    )
-                )
-            if remaining:
-                _save_pm_meta(
-                    session_id,
-                    engine,
-                    cwd=cwd,
-                    data_dir=self.data_dir,
-                    extra={"pending_batch": remaining},
-                )
-                diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
-                return Result.ok(
-                    batch_pending_result(
-                        session_id,
-                        remaining,
-                        decide_later_count=diff["decide_later_count"],
-                        diff=diff,
-                    )
-                )
-            # Batch resolved — persist without the key, then fall through to
-            # completion checking and next-turn generation.
-            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
-            batch_answer_recorded = True
-
-        if answer and state.rounds and not batch_answer_recorded:
-            # Pending means unanswered, not last. Those two agree now that
-            # nothing but a question occupies a round, and the search is written
-            # this way rather than as ``rounds[-1]`` so that it keeps agreeing:
-            # the assumption cost three stored sessions their real questions
-            # when it last stopped holding.
-            #
-            # What follows is ``ouroboros_interview``'s guard, copied rather
-            # than adapted (``authoring_handlers._handle_interview_answer``).
-            # An answer needs a question to be filed under, and when none is
-            # pending the trailing round is one somebody already answered —
-            # binding a second answer to it overwrites a decision that was
-            # made. The caller has the question on screen, so it is asked for.
-            #
-            # Deliberately provenance-blind. The previous shape branched here
-            # on ``classify_answer_provenance`` and routed observations to a
-            # side path that reported success while persisting nothing when no
-            # round was pending. A second door for one class of answer is what
-            # produced that; the rule is the same for every answer now, and an
-            # adopted fact is protected downstream by its provenance rather
-            # than by a branch here.
-            pending = _pending_round(state)
-            if pending is not None:
-                # The stored question of an unanswered round is what we asked,
-                # and it is preferred over the echo: what the host has on screen
-                # carries the advisory dispatch directive appended to it, so an
-                # echo would write our own instructions into the transcript.
-                question_for_answer = pending.question
-                state.rounds.remove(pending)
-            elif last_question:
-                question_for_answer = last_question
-            else:
-                return Result.err(
-                    MCPToolError(
-                        "Cannot record answer - the previous round is already "
-                        "answered and no follow-up question was provided. Pass "
-                        "the question this answer belongs to as 'last_question' "
-                        "alongside 'answer'.",
-                        tool_name="ouroboros_pm_interview",
-                    )
-                )
-
-            # ── User chose to skip (decide later / defer to dev) ───
-            # The main session detects classification via response_meta
-            # and offers skip options.  The user's choice arrives as:
-            #   answer="[decide_later]" → skip_as_decide_later()
-            #   answer="[deferred]"     → skip_as_deferred()
-            # Guard: only honour the sentinel when the last question was
-            # actually classified as that type.  If a client sends
-            # "[decide_later]" for a passthrough/reframed question, treat
-            # it as a normal answer so no data is silently discarded.
-            stripped = answer.strip()
-            last_classification = _last_classification(engine)
-            if stripped == "[decide_later]" and last_classification == "decide_later":
-                skip_result = await engine.skip_as_decide_later(state, question_for_answer)
-                if skip_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(skip_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
-                    )
-                state = skip_result.value
-                state.clear_stored_ambiguity()
-            elif stripped == "[deferred]" and last_classification == "deferred":
-                skip_result = await engine.skip_as_deferred(state, question_for_answer)
-                if skip_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(skip_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
-                    )
-                state = skip_result.value
-                state.clear_stored_ambiguity()
-            else:
-                record_result = await engine.record_response(state, answer, question_for_answer)
-                if record_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(record_result.error),
-                            tool_name="ouroboros_pm_interview",
-                        )
-                    )
-                state = record_result.value
-
-        if answer and not batch_answer_recorded:
+            state = record_result.value
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
                 return Result.err(
@@ -1759,7 +1577,7 @@ class PMInterviewHandler:
         # slice from the pre-snapshot length to current length
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
-        # ── Batched turn (RFC #2222) — see pm_batch for the invariant ──
+        # ── Batched turn (RFC #2222) — asked whole, answered whole ──
         if len(batch_turns) > 1:
             state.mark_updated()
             save_result = await engine.save_state(state)
@@ -1770,14 +1588,12 @@ class PMInterviewHandler:
                         tool_name="ouroboros_pm_interview",
                     )
                 )
+            # The questions go out in the response and nowhere else. Persisting
+            # them would recreate the pending list revision 4 removed — the
+            # second place a turn was remembered, and the seam every replay and
+            # ordering defect lived in.
             batch_entries = batch_entries_for_turns(batch_turns)
-            _save_pm_meta(
-                session_id,
-                engine,
-                cwd=cwd,
-                data_dir=self.data_dir,
-                extra={"pending_batch": batch_entries},
-            )
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
             # One fan-out per question in its own envelope, so fanout ids and
             # payloads never overwrite each other (one wave, submit per envelope).
@@ -1811,14 +1627,7 @@ class PMInterviewHandler:
                 )
             )
 
-        # Save unanswered round
-        state.rounds.append(
-            InterviewRound(
-                round_number=state.current_round_number,
-                question=question,
-                user_response=None,
-            )
-        )
+        # RFC #2222 revision 4: nothing is persisted until it is whole.
         state.mark_updated()
 
         save_result = await engine.save_state(state)

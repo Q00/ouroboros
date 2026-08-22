@@ -1,17 +1,19 @@
-"""Batched PM turns (RFC #2222): pending state, member routing, responses.
+"""Batched PM turns (RFC #2222): a turn is asked whole and answered whole.
 
 A batched turn puts one to three questions on the table at once. What this
-module owns is everything that is *about the batch* rather than about one
-question: where pending members live, how an incoming answer is matched to its
-member, how a batched turn renders to the host, and the answer lock a turn with
-several answerable questions is the first shape to need.
+module owns is everything that is *about the turn* rather than about one
+question: how a turn renders to the host, how its answers come back, and how
+they are recorded.
 
-Batch pending state lives in PM meta, never as core question-only rounds. The
-engine's ``record_answer`` fills the *trailing* unanswered round and overwrites
-its question text, so two pending rounds in core state would let an
-out-of-order answer destroy a question silently. One entry per pending
-question, each carrying the classification its skip sentinel is guarded by;
-every member is recorded question-and-answer together at answer time.
+**A turn is atomic** (RFC #2222 revision 4). Nothing is persisted when a turn
+is asked — no question-only round, no pending-member list — and a turn's
+answers arrive together, so a round is written only when it is whole. That is
+what removes the seam three review rounds kept finding: a pending list beside
+the transcript is one fact in two places, and an interleaved write, an
+interrupted one, or a question whose text recurs each turned that gap into a
+lost or duplicated decision. There is no gap to guard now. A call that carries
+no answers is a host that lost its turn; the next turn is planned from the
+transcript rather than restored.
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ from typing import Any
 import structlog
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 log = structlog.get_logger()
 
@@ -45,26 +46,22 @@ async def interview_answer_lock(
 ) -> AsyncIterator[None]:
     """Hold one interview's answer lock for a whole record call.
 
-    Recording an answer reads the interview state and PM meta, then writes
-    both. Two answers that interleave therefore both report success while the
-    second write carries a state that never saw the first: the user's words are
-    gone and their question comes back as still pending.
+    A turn is one write now, but two calls for one interview can still be in
+    flight — a host that retried, two sessions on one id. Each reads the
+    interview state and writes it back, so interleaved they both report success
+    while the later write carries a state that never saw the earlier one, and
+    those decisions are gone.
 
-    A batched turn is the first shape where this is reachable in ordinary use —
-    a host holding three answerable questions can send two answers as parallel
-    tool calls — but the read-modify-write is shared by the in-process batch
-    and single-question paths alike, so the lock is taken once around the call
-    rather than around the batch branch. Locks are keyed by interview and live
-    on the handler, which the server builds once at startup; the same idiom as
-    the execution handler's ``_idempotency_locks``.
+    The call carrying no answers is not exempted. It looks read-only and it
+    holds the lock through the next turn's generation, a real LLM call, so a
+    timed-out host's retry queues behind it — but it plans a turn and persists
+    what that costs, which is the same read-modify-write under another name.
+    Queuing the retry is the point; letting it plan concurrently is the defect
+    this closes.
 
-    The call without an answer is deliberately not exempted, though it looks
-    read-only and holding the lock through the next turn's generation — a real
-    LLM call — makes a timed-out host's retry queue behind it. It only reads
-    while something is pending: with no pending batch and no unanswered round
-    it plans the next turn and persists it, which is the same read-modify-write
-    under another name. Queuing that retry is the point; letting it plan
-    concurrently is the defect this closes.
+    Locks are keyed by interview and live on the handler, which the server
+    builds once at startup; the same idiom as the execution handler's
+    ``_idempotency_locks``.
 
     What this does not cover, so it is not mistaken for more: the plugin
     dispatch branch records answers on its own path, and a data directory is a
@@ -76,18 +73,81 @@ async def interview_answer_lock(
         yield
 
 
-def pending_batch_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Return the still-unanswered members of a batched turn."""
-    entries = (meta or {}).get("pending_batch")
-    if not isinstance(entries, list):
-        return []
-    return [
-        entry for entry in entries if isinstance(entry, dict) and str(entry.get("question") or "")
-    ]
+def turn_answers(
+    answers: Any,
+    answer: str | None,
+    last_question: str | None,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """Normalize one call's answers into ``(question, answer)`` pairs.
+
+    A turn's answers arrive together (RFC #2222 decision 2), so this is the
+    only shape the recorder ever sees: each pair carries its own question and
+    nothing is matched against anything the server remembered. ``answers`` is
+    the batch spelling — a list of ``{question, answer}`` — and
+    ``answer``/``last_question`` is the single-question one.
+
+    An answer without its question is refused rather than filed against
+    whatever round happens to be last. Nothing is persisted when a turn is
+    asked, so there is no remembered question to fall back on, and guessing
+    would write a decision under a question nobody was looking at.
+
+    Returns ``(pairs, error)``; an empty pair list with no error means this
+    call carries no answers, which is a reconnect and plans a fresh turn.
+    """
+    if isinstance(answers, list) and answers:
+        pairs: list[tuple[str, str]] = []
+        for entry in answers:
+            if not isinstance(entry, dict):
+                return [], "Each item of 'answers' must be an object with 'question' and 'answer'."
+            question = str(entry.get("question") or "").strip()
+            text = entry.get("answer")
+            if not question or not isinstance(text, str) or not text.strip():
+                return [], (
+                    "Each item of 'answers' needs a non-empty 'question' and 'answer'. "
+                    "Every answer names the question it belongs to."
+                )
+            pairs.append((question, text))
+        return pairs, None
+    if answer:
+        if not last_question:
+            return [], (
+                "Pass the question this answer belongs to as 'last_question', or send the "
+                "turn's answers together as 'answers': [{question, answer}]."
+            )
+        return [(last_question, answer)], None
+    return [], None
+
+
+async def record_turn_answers(engine: Any, state: Any, pairs: list[tuple[str, str]]) -> Any:
+    """Record a turn's answers, each as a whole question-and-answer round.
+
+    A skip sentinel is honoured wherever it arrives. The server no longer
+    keeps a record of which questions it offered as skippable — that record
+    was the pending state this design removed — so there is nothing to check
+    the sentinel against. Honouring it costs a deferral recorded for a
+    question that may not have been offered as deferrable; refusing it would
+    write a control token into the transcript as though the PM had typed it.
+    The first loses no words of the user's, the second invents some.
+    """
+    for question, answer in pairs:
+        stripped = answer.strip()
+        skipped = stripped in ("[decide_later]", "[deferred]")
+        if stripped == "[decide_later]":
+            result = await engine.skip_as_decide_later(state, question)
+        elif stripped == "[deferred]":
+            result = await engine.skip_as_deferred(state, question)
+        else:
+            result = await engine.record_response(state, answer, question)
+        if result.is_err:
+            return result
+        state = result.value
+        if skipped:
+            state.clear_stored_ambiguity()
+    return Result.ok(state)
 
 
 def batch_entries_for_turns(turns: list[Any]) -> list[dict[str, Any]]:
-    """Project planned turns into persistable pending-batch entries."""
+    """Project planned turns into the entries a turn's response shows."""
     return [
         {
             "question": turn.question,
@@ -96,37 +156,6 @@ def batch_entries_for_turns(turns: list[Any]) -> list[dict[str, Any]]:
         }
         for turn in turns
     ]
-
-
-def resolve_batch_member(
-    pending_batch: list[dict[str, Any]],
-    last_question: str | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Match an incoming answer to its pending member.
-
-    Returns ``(member, None)`` on a match and ``(None, error_message)`` when
-    the answer cannot be filed — several members pending and none named, or a
-    named question that is not one of them. Refusing is what keeps an answer
-    from being recorded under a question the user was not looking at.
-    """
-    pending_list = "\n".join(f"- {e.get('question')}" for e in pending_batch)
-    if last_question:
-        target = next(
-            (e for e in pending_batch if e.get("question") == last_question),
-            None,
-        )
-        if target is None:
-            return None, (
-                "last_question does not match any pending question of this "
-                f"turn. Pending:\n{pending_list}"
-            )
-        return target, None
-    if len(pending_batch) == 1:
-        return pending_batch[0], None
-    return None, (
-        "Several questions from this turn are pending. Pass the question this "
-        f"answer belongs to as 'last_question'. Pending:\n{pending_list}"
-    )
 
 
 def skip_hint_suffix(classification: str | None, session_id: str) -> str:
@@ -153,148 +182,24 @@ def skip_hint_suffix(classification: str | None, session_id: str) -> str:
     return ""
 
 
-async def record_member_answer(
-    engine: Any,
-    state: Any,
-    member: dict[str, Any],
-    answer: str,
-) -> Any:
-    """Record one batch member's answer, honouring its own skip sentinel.
-
-    The sentinel is guarded by the *member's* classification — a
-    ``[decide_later]`` sent for a passthrough member records as a plain answer
-    rather than silently discarding data, exactly as the single-question guard
-    does with the last classification.
-
-    A member whose decision is already in the interview state is not recorded
-    again. Two files carry one turn — the state holds the decisions, the PM
-    meta holds who is still pending — and the state is written first, so a
-    failed or interrupted meta write leaves a member marked pending whose
-    answer is already durable. The host sees an error and retries, and without
-    this the retry would put a second round under the same question. Reading
-    the decision back from the state is what makes the retry idempotent: the
-    caller goes on to persist the pending list without this member, so the
-    retry repairs the metadata instead of duplicating the decision.
-
-    The comparison is deliberately narrow — the same answer, or a sentinel,
-    which carries no words of the user's to lose. A question repeated verbatim
-    later in the interview and answered differently is a new decision and is
-    recorded as one.
-    """
-    question = str(member.get("question"))
-    classification = member.get("classification")
-    stripped = answer.strip()
-    sentinel = (stripped == "[decide_later]" and classification == "decide_later") or (
-        stripped == "[deferred]" and classification == "deferred"
-    )
-    recorded = next(
-        (r for r in state.rounds if r.question == question and r.user_response is not None),
-        None,
-    )
-    if recorded is not None and (sentinel or recorded.user_response == answer):
-        log.info("pm.batch_member_already_recorded", question=question[:100])
-        return Result.ok(state)
-    skipped = False
-    if stripped == "[decide_later]" and classification == "decide_later":
-        result = await engine.skip_as_decide_later(state, question)
-        skipped = True
-    elif stripped == "[deferred]" and classification == "deferred":
-        result = await engine.skip_as_deferred(state, question)
-        skipped = True
-    else:
-        result = await engine.record_response(state, answer, question)
-    if skipped and result.is_ok:
-        result.value.clear_stored_ambiguity()
-    return result
-
-
-def _batch_skip_hint(entry: dict[str, Any], session_id: str) -> str:
-    """Return the skip hint for one batch member, or an empty string."""
+def _batch_skip_hint(entry: dict[str, Any]) -> str:
+    """Return the skip hint for one question of a turn, or an empty string."""
     classification = entry.get("classification")
-    question = str(entry.get("question") or "")
     if classification == "decide_later":
-        return (
-            '  💡 May be skipped: pass answer="[decide_later]" with '
-            f'last_question="{question}" and session_id="{session_id}".'
-        )
+        return '  💡 May be skipped: give this question the answer "[decide_later]".'
     if classification == "deferred":
-        return (
-            '  💡 May be deferred to the dev phase: pass answer="[deferred]" '
-            f'with last_question="{question}" and session_id="{session_id}".'
-        )
+        return '  💡 May be deferred to the dev phase: answer it "[deferred]".'
     return ""
 
 
-def _numbered_questions(session_id: str, entries: list[dict[str, Any]]) -> list[str]:
+def _numbered_questions(entries: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, entry in enumerate(entries, 1):
         lines.append(f"{index}. {entry.get('question')}")
-        hint = _batch_skip_hint(entry, session_id)
+        hint = _batch_skip_hint(entry)
         if hint:
             lines.append(hint)
     return lines
-
-
-def batch_pending_meta(
-    session_id: str,
-    remaining: list[dict[str, Any]],
-    *,
-    decide_later_count: int,
-) -> dict[str, Any]:
-    """Build the response meta for a turn whose batch is partially answered."""
-    first = remaining[0]
-    return {
-        "session_id": session_id,
-        "input_type": "freeText",
-        "response_param": "answer",
-        "question": first.get("question"),
-        "question_batch": [dict(entry) for entry in remaining],
-        "is_complete": False,
-        "interview_complete": False,
-        "classification": first.get("classification"),
-        "skip_eligible": bool(first.get("skip_eligible")),
-        "deferred_this_round": [],
-        "decide_later_this_round": [],
-        "new_deferred": [],
-        "new_decide_later": [],
-        "deferred_count": 0,
-        "decide_later_count": decide_later_count,
-    }
-
-
-def batch_pending_result(
-    session_id: str,
-    remaining: list[dict[str, Any]],
-    *,
-    decide_later_count: int,
-    diff: dict[str, Any] | None = None,
-) -> MCPToolResult:
-    """Render the still-pending members of a batch for the host.
-
-    Advisory lanes were dispatched when the batch was issued, so a re-display
-    carries none — dispatching again would multiply fan-outs for questions
-    whose lanes already ran.
-    """
-    meta = batch_pending_meta(session_id, remaining, decide_later_count=decide_later_count)
-    if diff:
-        meta["deferred_this_round"] = diff["new_deferred"]
-        meta["decide_later_this_round"] = diff["new_decide_later"]
-        meta.update(diff)
-    lines = [
-        f"Session {session_id}",
-        "",
-        f"{len(remaining)} question(s) from this turn still await an answer. "
-        "Answer each with its own call, passing the question text as "
-        "'last_question'. Evidence lanes for these questions were already "
-        "dispatched with the turn — do not dispatch them again.",
-        "",
-        *_numbered_questions(session_id, remaining),
-    ]
-    return MCPToolResult(
-        content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(lines)),),
-        is_error=False,
-        meta=meta,
-    )
 
 
 def batch_turn_meta_and_text(
@@ -331,11 +236,13 @@ def batch_turn_meta_and_text(
     lines = [
         f"Session {session_id}",
         "",
-        f"This turn asks {len(batch_entries)} independent questions. Answer "
-        "each with its own call, passing the question text as "
-        "'last_question'. Answer in any order; unanswered ones stay pending.",
+        f"This turn asks {len(batch_entries)} independent questions. Put every "
+        "answer to the user, then send them back together in one call: "
+        f"'answers': [{{question, answer}}, ...] with session_id=\"{session_id}\". "
+        "The turn is recorded as a whole; a call that arrives without them "
+        "plans a new turn instead.",
         "",
-        *_numbered_questions(session_id, batch_entries),
+        *_numbered_questions(batch_entries),
     ]
     return response_meta, "\n".join(lines)
 
@@ -445,10 +352,8 @@ __all__ = [
     "ADVISORY_PROMPT_BUNDLE_KIND",
     "UNDISPATCHED_SENTINEL",
     "batch_entries_for_turns",
-    "batch_pending_meta",
-    "batch_pending_result",
+    "record_turn_answers",
+    "turn_answers",
     "batch_turn_meta_and_text",
     "externalize_advisory_payloads",
-    "pending_batch_entries",
-    "resolve_batch_member",
 ]
