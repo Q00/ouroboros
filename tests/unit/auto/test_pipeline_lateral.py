@@ -113,6 +113,956 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
+def test_seed_qa_feedback_repairs_explicit_document_task_type() -> None:
+    seed = _build_seed(seed_id="seed_wrong_task_type").model_copy(
+        update={
+            "goal": (
+                "Inherit from seed_6619d294d5c7. "
+                "Implement the requested document with task_type: document."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=(
+            "task_type is code but the goal explicitly requires document and its exit condition.",
+            "Provenance inconsistency: the goal cites parent seed_6619d294d5c7 "
+            "while metadata.parent_seed_id is seed_generated.",
+            "The external lecture assumption needs a stream-specific uncertainty note.",
+        ),
+        suggestions=(
+            "Set task_type to document before execution.",
+            "Reconcile the parent lineage.",
+            "Add an uncertainty and fallback rule for the high-risk assumption.",
+        ),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+    assert repaired.metadata.parent_seed_id == "seed_6619d294d5c7"
+    assert any("uncertainty and fallback rule" in item for item in repaired.constraints)
+
+
+def test_seed_qa_repairs_preserve_same_clause_task_and_parent_contracts() -> None:
+    seed = _build_seed(seed_id="seed_wrong_contracts").model_copy(
+        update={
+            "goal": (
+                "Use task_type: document to explain why the old proposal was rejected. "
+                "Inherit seed_good for either a PDF or DOCX migration note. "
+                "For reference, task_type: code is an example. "
+                "The docs show inherit seed_bad as an example."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("The explicit task and parent contracts are not reflected.",),
+        suggestions=("Preserve the explicit contracts.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep the explicit contracts authoritative.",
+        text="Apply the requested document task and inherited parent.",
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+    for candidate in (repaired, lateral):
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repairs_ignore_comma_prefixed_reference_contracts() -> None:
+    seed = _build_seed(seed_id="seed_comma_governors").model_copy(
+        update={
+            "goal": (
+                "The task type must be document. Inherit seed_good. "
+                "For example, task_type: code. For reference, inherit seed_bad."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("The explicit task and parent contracts are not reflected.",),
+        suggestions=("Preserve the explicit contracts.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep only binding contracts authoritative.",
+        text="Apply the requested document task and inherited parent.",
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+
+    for candidate in (repaired, lateral):
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repairs_preserve_descriptive_and_reference_contracts() -> None:
+    for goal in (
+        "Create a guide explaining setup with task_type: document. Inherit seed_good.",
+        "Summarize the rejected proposal with task_type: document. Inherit seed_good.",
+        "Use task_type: document. Mention task_type: code in the appendix. "
+        "Inherit seed_good. Mention parent_seed_id: seed_bad in the appendix.",
+        "Use task_type: document. Compare it with task_type: code. "
+        "Inherit seed_good. Compare with parent_seed_id: seed_bad.",
+        "Use task_type: document. This document mentions task_type: code in prose. "
+        "Inherit seed_good. This document mentions parent_seed_id: seed_bad in prose.",
+        "Use task_type: document. As a reference, task_type: code appears in old docs. "
+        "Inherit seed_good. As a reference, inherit seed_bad appears in old docs.",
+    ):
+        seed = _build_seed(seed_id="seed_descriptive_contract").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        qa_result = EvaluateResult(
+            passed=False,
+            score=0.61,
+            verdict="revise",
+            differences=("The explicit task and parent contracts are not reflected.",),
+            suggestions=("Preserve the explicit contracts.",),
+        )
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.task_type == "document"
+        assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repairs_ignore_api_schema_and_parser_control_field_content() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep descriptive payload fields non-authoritative.",
+        text="Preserve the code execution route and genuine repair lineage.",
+    )
+    for goal in (
+        "The API returns a Seed where task_type: document and parent_seed_id: seed_fake.",
+        "The schema property task_type is document and parent_seed_id is seed_fake.",
+        "Ensure the parser preserves strings where task_type: document and parent_seed_id: seed_fake.",
+        "Persist task_type: document and parent_seed_id: seed_fake in the database.",
+        "Store task_type: document and parent_seed_id: seed_fake in the session state.",
+        "Expose task_type: document and parent_seed_id: seed_fake in the CLI output.",
+        "The config field task_type: document and parent_seed_id: seed_fake controls resume.",
+        "Route task_type: document requests to artifact workers. "
+        "Route records with parent_seed_id: seed_demo to replay.",
+        "Map PDFs to task_type: document in the routing table. "
+        "Treat parent_seed_id: seed_demo as an opaque string.",
+        "Read task_type: document and parent_seed_id: seed_demo from the config.",
+        "When the user asks for a document, set task_type: document in the generated Seed. "
+        "When parent_seed_id is provided, set parent_seed_id: seed_fake in the result.",
+        "When task_type: document, render Markdown. Handle parent_seed_id: seed_historical during migration.",
+        "Handle task_type: document by rendering Markdown. Handle parent_seed_id: seed_historical during migration.",
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        repaired = (
+            _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+            _seed_with_seed_qa_lateral_feedback(
+                seed, lateral_result, qa_result=qa_result, attempt=1
+            ),
+        )
+        for candidate in repaired:
+            assert candidate.task_type == "code"
+            assert candidate.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repair_persists_only_binding_mixed_clause_contracts() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    rejected = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type: document, but that requirement was rejected. "
+                "Inherit seed_bad, but that requirement was rejected."
+            ),
+            "task_type": "code",
+        }
+    )
+    binding = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Whether to include charts is undecided, but task_type: document. "
+                "Whether to copy settings is undecided, but inherit seed_good."
+            ),
+            "task_type": "code",
+        }
+    )
+
+    rejected_repair = _seed_with_seed_qa_feedback(rejected, qa_result, attempt=1)
+    binding_repair = _seed_with_seed_qa_feedback(binding, qa_result, attempt=1)
+
+    assert rejected_repair.task_type == "code"
+    assert rejected_repair.metadata.parent_seed_id == "seed_current"
+    assert binding_repair.task_type == "document"
+    assert binding_repair.metadata.parent_seed_id == "seed_good"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "It does not inherit from seed_bad.",
+        "No, inherit seed_bad.",
+        "Inherit seed_bad, but not anymore.",
+        "Inherit seed_bad, but we decided against it.",
+        "Inherit seed_bad, but scratch that.",
+        "Inherit seed_one and inherit seed_two.",
+        "Inherit seed_one; inherit seed_two.",
+    ),
+)
+def test_seed_qa_repair_never_persists_negative_or_conflicting_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repair_preserves_parent_with_optional_output_modifier() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Inherit from seed_good for an optional migration note."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repair_preserves_final_actual_task_type_and_parent() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type must be code. Actually, task_type must be document. "
+                "Confirmed: task_type must be document. "
+                "Inherit seed_old. Actually, inherit seed_new. "
+                "Confirmed: inherit seed_new."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+    assert repaired.metadata.parent_seed_id == "seed_new"
+
+
+def test_seed_qa_repair_preserves_clause_local_document_contract() -> None:
+    goal = "Without changing the existing task type, task_type must remain document."
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The task type must be document.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.task_type == "document"
+
+
+@pytest.mark.parametrize(
+    "retraction",
+    (
+        "No, task_type: document. No, inherit seed_bad.",
+        "task_type: document, but not anymore. Inherit seed_bad, but not anymore.",
+        (
+            "task_type: document, but we decided against it. "
+            "Inherit seed_bad, but we decided against it."
+        ),
+        "task_type: document, but scratch that. Inherit seed_bad, but scratch that.",
+        "task_type: document. Actually, scratch that. Inherit seed_bad. Actually, scratch that.",
+        "task_type: document. That requirement was rejected. Inherit seed_bad. "
+        "That requirement was rejected.",
+        "task_type: document. Never mind. Inherit seed_bad. Never mind.",
+        "task_type: document. Forget that. Inherit seed_bad. Forget that.",
+        "task_type: document. Forget it. Inherit seed_bad. Forget it.",
+        "task_type: document. I take it back. Inherit seed_bad. I take it back.",
+        "task_type: document. Cancel it. Inherit seed_bad. Cancel it.",
+        "task_type: document. Cancel that requirement. Inherit seed_bad. Cancel that requirement.",
+        "task_type: document. I take that back. Inherit seed_bad. I take that back.",
+        "task_type: document. However, cancel that requirement. Inherit seed_bad. "
+        "But cancel that requirement.",
+        "task_type: document. That was only an example. Inherit seed_bad. "
+        "That was only an example.",
+        "task_type: document. I was only giving an example. Inherit seed_bad. "
+        "I was only giving an example.",
+        "task_type: document. Please disregard that requirement. Inherit seed_bad. "
+        "Please disregard that requirement.",
+    ),
+)
+def test_seed_qa_repair_never_persists_retracted_task_type_or_parent(
+    retraction: str,
+) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": retraction, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Do not restore retracted contracts.",
+    )
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repairs_scope_mixed_contract_retractions() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": "task_type: document. Inherit seed_bad. Cancel that requirement.",
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The task type must be document.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Keep the active document route.",
+    )
+
+    deterministic = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    lateral = _seed_with_seed_qa_lateral_feedback(
+        seed, lateral_result, qa_result=qa_result, attempt=1
+    )
+
+    for repaired in (deterministic, lateral):
+        assert repaired.task_type == "document"
+        assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repairs_accept_replacements_after_cancellation() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "task_type: code. Cancel that requirement. task_type: document. "
+                "Inherit seed_old. Cancel that requirement. Inherit seed_new."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("The final explicit contracts must be preserved.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve final active contracts.",
+        text="Use the replacement route and lineage.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_new"
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected_task_type", "expected_parent"),
+    (
+        ("Use task_type: document. Cancel lunch. Inherit seed_parent.", "document", "seed_parent"),
+        (
+            "Write a validator that emits the line task_type: document. Inherit seed_parent.",
+            "code",
+            "seed_parent",
+        ),
+    ),
+)
+def test_seed_qa_repairs_ignore_unrelated_cancellation_and_output_prose(
+    goal: str, expected_task_type: str, expected_parent: str
+) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only active contracts.",
+        text="Ignore prose that does not select routing.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == expected_task_type
+        assert candidate.metadata.parent_seed_id == expected_parent
+
+
+def test_seed_qa_repairs_fail_closed_on_validation_content_and_field_retractions() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Build a linter that rejects task_type: document in configuration. "
+                "Write docs recommending inherit seed_old to users. "
+                "Inherit seed_parent. Cancel the task type requirement."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep routing and lineage authoritative.",
+        text="Ignore data-format examples.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_parent"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Generate a YAML example containing task_type: document and parent_seed_id: seed_old.",
+        "Return JSON with task_type: document and parent_seed_id: seed_old.",
+        "The generated manifest must set task_type: document and parent_seed_id: seed_old.",
+        "Add a CLI flag whose help text says task_type: document and inherit seed_old.",
+        "Implement a validator whose error message says task_type: document and inherit seed_old.",
+        "Create docs with the sentence task_type: document and inherit seed_old.",
+        "Build a CLI whose README says task_type: document.",
+        "Implement a validator whose error says task_type: document.",
+        "Generate a TOML file with task_type: document.",
+        "Write tests where the expected string is task_type: document.",
+        "The YAML file must set task_type: document.",
+        "Write a README saying task_type: document and inherit seed_external.",
+        "Add support for task_type: document in the Seed API.",
+        "Update the parser to accept task_type: document.",
+        "Add a test for task_type: document.",
+        "Add support for parent_seed_id: seed_demo in the API.",
+        "The schema must accept parent_seed_id: seed_demo.",
+        "Add a test for parent_seed_id: seed_demo.",
+        "Fix handling when users inherit seed_demo.",
+        "Analyze why the API accepts task_type: document.",
+        "Analyze why the API accepts parent_seed_id: seed_old.",
+        "Rename task_type: document to artifact in the API.",
+        "Refactor task_type: document handling.",
+        "Deprecate task_type: document.",
+        "Rename parent_seed_id: seed_old to predecessor_id.",
+        "Remove parent_seed_id: seed_old from the API.",
+        "Implement support for inheriting from seed_demo.",
+        "Add support for inheriting from seed_demo.",
+        "Test inheriting from seed_demo.",
+    ),
+)
+def test_seed_qa_repairs_ignore_artifact_payload_contract_fields(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep payload fields out of Seed control metadata.",
+        text="Preserve the existing routing and repair lineage.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+        assert candidate.metadata.parent_seed_id == "seed_current"
+
+
+@pytest.mark.parametrize(
+    "parent",
+    (
+        "seed_parent_001",
+        "seed_mechanical_eval_minimal",
+        "seed_4749408237de-auto_35d",
+        "release-parent-v2",
+        "another-id",
+        "seed-parent-v2",
+        "release.2026",
+        "seed.parent",
+        "foo=bar",
+        "seed#42",
+        "부모#42",
+    ),
+)
+def test_seed_qa_repairs_preserve_schema_valid_parent_identifiers(parent: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": f"Inherit {parent}.", "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve explicit lineage.",
+        text="Keep the complete parent identifier.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.metadata.parent_seed_id == parent
+
+
+def test_seed_qa_repairs_ignore_unrelated_bare_retraction_details() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "Use task_type: document. Never mind the earlier color choice. "
+                "Inherit seed_good. Scratch that old heading."
+            ),
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Keep only contract-scoped retractions.",
+        text="Ignore unrelated corrections.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "document"
+        assert candidate.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repairs_preserve_parent_before_content_example() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": "Inherit seed_old. The report should say parent_seed_id: seed_fake.",
+            "task_type": "code",
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve explicit lineage.",
+        text="Ignore content examples.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.metadata.parent_seed_id == "seed_old"
+
+
+def test_seed_qa_repairs_scope_modal_clause_and_semicolon_retraction() -> None:
+    for goal, task_type, parent in (
+        ("We may revise the title, and task_type: document.", "document", "seed_current"),
+        ("task_type: document; cancel that requirement.", "code", "seed_current"),
+        ("Inherit seed_old; cancel that requirement.", "code", "seed_current"),
+        (
+            "Inherit seed_good. Use SVG. Cancel the parent requirement.",
+            "code",
+            "seed_current",
+        ),
+        (
+            "Inherit seed_good. Use SVG. Retract the parent contract.",
+            "code",
+            "seed_current",
+        ),
+    ):
+        seed = _build_seed(seed_id="seed_current").model_copy(
+            update={"goal": goal, "task_type": "code"}
+        )
+        qa_result = EvaluateResult(
+            passed=False,
+            score=0.5,
+            verdict="revise",
+            differences=("metadata.ambiguity_score must be <= 0.20.",),
+        )
+        repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+        assert repaired.task_type == task_type
+        assert repaired.metadata.parent_seed_id == parent
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Do not ever inherit seed_bad.",
+        "Never directly inherit seed_bad.",
+        "The Seed must not inherit seed_bad.",
+        "Cannot inherit seed_bad.",
+        "Continue without inheriting seed_bad.",
+        'The phrase "inherit seed_bad" is an example, not a requirement.',
+        "We discussed inherit seed_bad in the rejected proposal.",
+        "It is false that we inherit seed_bad.",
+        "Start fresh instead of inheriting seed_bad.",
+        "Rather than inherit seed_bad, start fresh.",
+        "We no longer inherit seed_bad.",
+        "In the previous proposal, inherit seed_bad.",
+        "It is not true that we inherit seed_bad.",
+        "Inherit seed_bad will not be used.",
+        "Inheriting from seed_bad is not required.",
+        "Inheriting from seed_bad isn't required for this Seed.",
+        "Inheriting seed_bad is unnecessary for this Seed.",
+        "Inherit seed_bad, but not required.",
+        "Inherit seed_bad, but no longer needed.",
+        "Inherit seed_bad, but unnecessary.",
+        "Inherit seed_bad, pending approval.",
+        "Inherit seed_bad, unless the user confirms migration.",
+        "Inherit seed_bad, but maybe seed_good.",
+        "Inherit seed_bad need not be used.",
+        "Inherit seed_bad only if requested.",
+        "Use seed_bad as the parent seed only when resuming an interrupted run.",
+        "Inherit seed_bad pending approval.",
+        "Inherit seed_bad after approval.",
+        "Inherit seed_bad once approved.",
+        "Inherit seed_bad upon approval.",
+        "Inherit seed_bad assuming approval.",
+        "Inherit seed_bad contingent on approval.",
+        "Inherit seed_bad subject to approval.",
+        "Inherit seed_bad is no longer required.",
+        "We won't inherit seed_bad.",
+        "There is no requirement to inherit seed_bad.",
+        "The team declined to inherit seed_bad.",
+        "We refused to inherit seed_bad.",
+        "We chose not to inherit seed_bad.",
+        "We didn't inherit seed_bad.",
+        "We decided not to inherit seed_bad.",
+        "The requirement to inherit seed_bad was declined.",
+        "We rejected inherit seed_bad.",
+        "We abandoned the plan to inherit seed_bad.",
+        "Inherit seed_bad, which was rejected.",
+        "We ruled out inheriting seed_bad.",
+        "We opted not to inherit seed_bad.",
+    ),
+)
+def test_seed_qa_repair_never_persists_negated_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only authoritative lineage.",
+        text="Keep unresolved lineage conditions out of durable metadata.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.metadata.parent_seed_id == "seed_current"
+        assert candidate.metadata.parent_seed_id != "seed_bad"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "The task_type: document requirement was rejected.",
+        "Use the default code task instead of task_type: document.",
+        "Rather than use task_type: document, keep the code task.",
+        "We no longer use task_type: document.",
+        "In the previous proposal, task_type: document.",
+        "It is not true that task_type: document.",
+        "We are not using task_type: document.",
+        "task_type: document will not be used.",
+        "task_type: document is not required for this Seed.",
+        "task_type: document isn't required for this Seed.",
+        "task_type: document is unnecessary for this Seed.",
+        "task_type: document, but not required.",
+        "task_type: document, but no longer needed.",
+        "task_type: document, but unnecessary.",
+        "Use task_type: document, pending approval.",
+        "Use task_type: document, unless the user asks for code.",
+        "Use task_type: document, but maybe code.",
+        "task_type: document need not be used.",
+        "The task type is document only if requested.",
+        "The task type is document only when explicitly requested.",
+        "Use task_type: document pending approval.",
+        "Use task_type: document after approval.",
+        "Use task_type: document once approved.",
+        "Use task_type: document upon approval.",
+        "Use task_type: document assuming approval.",
+        "Use task_type: document contingent on approval.",
+        "Use task_type: document subject to approval.",
+        "task_type: document is no longer required.",
+        "We won't use task_type: document.",
+        "We did not select task_type: document.",
+        "We have not selected task_type: document.",
+        "There is no requirement that task_type: document.",
+        "The team declined to use task_type: document.",
+        "We didn't select task_type: document.",
+        "We decided not to use task_type: document.",
+        "The requirement to use task_type: document was declined.",
+        "We rejected task_type: document.",
+        "We abandoned task_type: document.",
+        "task_type: document, which was rejected.",
+        "We ruled out task_type: document.",
+        "We opted not to use task_type: document.",
+    ),
+)
+def test_seed_qa_repair_does_not_apply_rejected_task_type(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": goal, "task_type": "code"}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    lateral_result = LateralResult(
+        persona="simplifier",
+        approach_summary="Preserve only authoritative task routing.",
+        text="Keep unresolved routing conditions out of the repaired Seed.",
+    )
+
+    repaired = (
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1),
+        _seed_with_seed_qa_lateral_feedback(seed, lateral_result, qa_result=qa_result, attempt=1),
+    )
+
+    for candidate in repaired:
+        assert candidate.task_type == "code"
+
+
+def test_seed_qa_repair_persists_positive_parent_after_negated_candidate() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Do not inherit seed_bad, instead inherit seed_good."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+def test_seed_qa_repair_resets_prefix_governor_at_punctuation_boundary() -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Rather than copy old constraints, start the repair; inherit seed_good."}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Inherit seed_good and do not copy its obsolete constraints.",
+        "Do not inherit seed_bad and instead inherit seed_good.",
+        "Inherit seed_good without copying obsolete constraints.",
+        "Derive from seed_good although we must not reuse its runtime settings.",
+        "Do not copy obsolete constraints because this Seed should inherit seed_good.",
+        "Inherit from seed_good.",
+        "Set parent_seed_id to seed_good.",
+        "Use seed_good as the parent seed.",
+    ),
+)
+def test_seed_qa_repair_persists_conjunction_scoped_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_good"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "We won’t inherit seed_bad.",
+        "Inherit seed_bad should be avoided.",
+        'The old docs say "Inherit seed_bad for migrations." Replace that guidance.',
+        "If we inherit seed_bad, copy settings; otherwise start fresh.",
+        "Inherit seed_one or seed_two after review.",
+    ),
+)
+def test_seed_qa_repair_never_persists_non_binding_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Add migration notes explaining how to inherit seed_old.",
+        "The docs say 'inherit seed_old' for migrations.",
+        "Only if approved, inherit seed_old.",
+    ),
+)
+def test_seed_qa_repair_rejects_explanatory_optional_parent(goal: str) -> None:
+    seed = _build_seed(seed_id="seed_current").model_copy(update={"goal": goal})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+    assert repaired.metadata.parent_seed_id == "seed_current"
+
+
+def test_seed_qa_repair_scopes_historical_lineage_and_possessives() -> None:
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.5,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be <= 0.20.",),
+    )
+    historical = _build_seed(seed_id="seed_current").model_copy(
+        update={
+            "goal": (
+                "The previous proposal was rejected, but it said inherit seed_bad for reference."
+            )
+        }
+    )
+    positive = _build_seed(seed_id="seed_current").model_copy(
+        update={"goal": "Inherit seed_good for John's project."}
+    )
+
+    assert (
+        _seed_with_seed_qa_feedback(historical, qa_result, attempt=1).metadata.parent_seed_id
+        == "seed_current"
+    )
+    assert (
+        _seed_with_seed_qa_feedback(positive, qa_result, attempt=1).metadata.parent_seed_id
+        == "seed_good"
+    )
+
+
 def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}

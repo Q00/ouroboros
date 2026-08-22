@@ -98,6 +98,7 @@ def create_mock_completion_response(
 
 def create_valid_extraction_response(
     goal: str = "Build a CLI task manager with project grouping",
+    task_type: str = "code",
     constraints: str = '["Python 3.14+", "No external database", "Single-file storage"]',
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
@@ -154,6 +155,7 @@ def create_valid_extraction_response(
             # text so the production retry boundary can reject it.
             pass
     return f"""GOAL: {goal}
+TASK_TYPE: {task_type}
 CONSTRAINTS: {constraints}
 ACCEPTANCE_CRITERIA: {acceptance_criteria}
 ONTOLOGY_NAME: {ontology_name}
@@ -352,6 +354,195 @@ class TestSeedGeneratorAmbiguityGating:
 
             assert result.is_ok
             assert isinstance(result.value, Seed)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Rather than change source code, write the requested plan; set the task type to document. For reference, task_type: code is an example.",
+            "Implement this as task_type: document.",
+        ),
+    )
+    async def test_generate_preserves_explicit_document_task_type(
+        self, initial_context: str
+    ) -> None:
+        """A document contract must not silently fall back to code execution."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context=initial_context)
+        low_ambiguity = create_low_ambiguity_score(0.15)
+        extraction_response = create_valid_extraction_response(
+            goal="Create the requested plan as a document.",
+            task_type="code",
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.task_type == "document"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Create a guide explaining setup with task_type: document.",
+            "Summarize the rejected proposal with task_type: document.",
+            "Use task_type: document. As a reference, task_type: code appears in old docs.",
+            "Use task_type: document. The report should say task_type: code.",
+            "Use task_type: document. A test fixture contains task_type: code.",
+        ),
+    )
+    async def test_generate_preserves_descriptive_document_task_type(
+        self, initial_context: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context=initial_context)
+        extraction_response = create_valid_extraction_response(
+            goal="Create the requested plan as a document.", task_type="code"
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "document"
+
+    @pytest.mark.parametrize(
+        "initial_context",
+        (
+            "Should task_type: document?",
+            "Document the literal example `task_type: code` for users.",
+            "Do not use task_type: document.",
+            "The task_type: document requirement was rejected.",
+            "Use the default code task instead of task_type: document.",
+            "Rather than use task_type: document, keep the code task.",
+            "We no longer use task_type: document.",
+            "task_type: document will not be used.",
+            "task_type: document is no longer required.",
+            "task_type: document isn't required for this Seed.",
+            "task_type: document is unnecessary for this Seed.",
+            "task_type: document, but not required.",
+            "task_type: document, but no longer needed.",
+            "task_type: document, but unnecessary.",
+            "Use task_type: document, pending approval.",
+            "Use task_type: document, unless the user asks for code.",
+            "Use task_type: document, but maybe code.",
+            "Use task_type: document. Forget it.",
+            "Use task_type: document. I take it back.",
+            "Use task_type: document. Cancel it.",
+            "task_type: document need not be used.",
+            "The task type is document only if requested.",
+            "The task type is document only when explicitly requested.",
+            "We won't use task_type: document.",
+            "We did not select task_type: document.",
+            "We have not selected task_type: document.",
+            "There is no requirement that task_type: document.",
+            "The team declined to use task_type: document.",
+            "We didn't select task_type: document.",
+            "We decided not to use task_type: document.",
+            "The requirement to use task_type: document was declined.",
+            "We rejected task_type: document.",
+            "We abandoned task_type: document.",
+            "task_type: document, which was rejected.",
+            "We ruled out task_type: document.",
+            "We opted not to use task_type: document.",
+            "Generate a YAML example containing task_type: document.",
+            "Return JSON with task_type: document.",
+            "The generated manifest must set task_type: document.",
+            "Add a CLI flag whose help text says task_type: document.",
+            "Implement a validator whose error message says task_type: document.",
+            "Create docs with the sentence task_type: document.",
+            "Build a CLI whose README says task_type: document.",
+            "Implement a validator whose error says task_type: document.",
+            "Generate a TOML file with task_type: document.",
+            "Write tests where the expected string is task_type: document.",
+            "The YAML file must set task_type: document.",
+            "Write a README saying task_type: document.",
+            "Add support for task_type: document in the Seed API.",
+            "Update the parser to accept task_type: document.",
+            "Add a test for task_type: document.",
+            "Add support for parent_seed_id: seed_demo in the API.",
+            "The schema must accept parent_seed_id: seed_demo.",
+            "Add a test for parent_seed_id: seed_demo.",
+            "Fix handling when users inherit seed_demo.",
+            "Analyze why the API accepts task_type: document.",
+            "Analyze why the API accepts parent_seed_id: seed_old.",
+            "Rename task_type: document to artifact in the API.",
+            "Refactor task_type: document handling.",
+            "Deprecate task_type: document.",
+            "Rename parent_seed_id: seed_old to predecessor_id.",
+            "Remove parent_seed_id: seed_old from the API.",
+            "The API returns a Seed where task_type: document.",
+            "The schema property task_type is document.",
+            "Ensure the parser preserves strings where task_type: document.",
+            "Persist task_type: document in the database.",
+            "Store task_type: document in the session state.",
+            "Expose task_type: document in the CLI output.",
+            "The config field task_type: document controls rendering.",
+            "Route task_type: document requests to artifact workers.",
+            "Map PDFs to task_type: document in the routing table.",
+            "Read task_type: document from the config.",
+            "When the user asks for a document, set task_type: document in the generated Seed.",
+            "When task_type: document, render Markdown output in the existing Python service.",
+            "Handle task_type: document by rendering Markdown while keeping this Python CLI implementation.",
+        ),
+    )
+    @pytest.mark.asyncio
+    async def test_generate_preserves_extracted_type_for_non_binding_mentions(
+        self, initial_context: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context=initial_context)
+        extraction_response = create_valid_extraction_response(task_type="code")
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "code"
+
+    @pytest.mark.asyncio
+    async def test_brownfield_reference_text_cannot_override_task_type(self) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(initial_context="Extend the CLI implementation")
+        state.is_brownfield = True
+        state.codebase_context = "Legacy example: TASK_TYPE: document"
+        extraction_response = create_valid_extraction_response(task_type="code")
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, create_low_ambiguity_score(0.15))
+
+        assert result.is_ok
+        assert result.value.task_type == "code"
 
     @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:

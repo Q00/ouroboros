@@ -28,7 +28,7 @@ metadata:
   ambiguity_score: <0.0-1.0>
 
 # Optional fields
-task_type: "code"           # "code" (default), "research", or "analysis"
+task_type: "code"           # See the supported values table below; default: "code"
 constraints:
   - "<constraint>"
 evaluation_principles:
@@ -64,6 +64,10 @@ Controls execution strategy (tools, prompts) and evaluation behavior.
 | `code` | Read, Write, Edit, Bash, Glob, Grep | Lint, build, test, semantic | Source code files |
 | `research` | Read, Write, Bash, Glob, Grep | Structure, references, completeness | Markdown documents |
 | `analysis` | Read, Write, Bash, Glob, Grep | Structure, reasoning quality | Markdown documents |
+| `artifact` | Read, Write, Edit, Bash, Glob, Grep | Artifact validity and completeness | Declared artifact files |
+| `document` | Read, Write, Edit, Bash, Glob, Grep | Accuracy, structure, readability | Document files |
+| `documentation` | Read, Write, Edit, Bash, Glob, Grep | Accuracy, coverage, usability | Documentation files |
+| `presentation` | Read, Write, Edit, Bash, Glob, Grep | Narrative, clarity, visual structure | Presentation files |
 
 ```yaml
 task_type: research

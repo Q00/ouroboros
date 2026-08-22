@@ -15,6 +15,7 @@ _VALID_ACCEPTANCE_CRITERIA = (
     'ACCEPTANCE_CRITERIA: [{"description":"Service extension is verified",'
     '"verify":"printf ok",'
     '"artifacts":"NONE","expect":"ok"}]\n'
+    "TASK_TYPE: code\n"
 )
 
 

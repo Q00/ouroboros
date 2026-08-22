@@ -77,6 +77,35 @@ class TestSynthesizeSeedFromLedgerUnchanged:
         assert seed.metadata.recovery_reason is None
         assert seed.metadata.interview_id == "iv-1"
 
+    def test_complete_ledger_preserves_explicit_document_task_type(self) -> None:
+        for goal in (
+            "Create a plan document; task_type must be document.",
+            "task_type must be document without changing repository files.",
+            "Use task_type: document although we must not produce code.",
+            "Use task_type: document because source code must not change.",
+            "Do not modify source code because task_type must be document.",
+            "Rather than change source code, write a plan; task_type: document.",
+            "The task type is document.",
+            "Set the task type to document.",
+            "The task type must remain document.",
+            "Keep the task type as document.",
+            "Use document as the task type.",
+            "The task type must be a document.",
+            "The task type should be a document.",
+            "Whether to include charts or tables is undecided, but task_type: document.",
+            "Use task_type: document for an optional appendix.",
+            "task_type must be code. Actually, task_type must be document.",
+            "Use task_type: document. Mention task_type: code in the appendix.",
+            "Use task_type: document. Compare it with task_type: code.",
+            "Use task_type: document. This document mentions task_type: code in prose.",
+            "task_type: document should be used.",
+        ):
+            ledger = _populate_complete_ledger(goal)
+
+            seed = synthesize_seed_from_ledger(ledger)
+
+            assert seed.task_type == "document"
+
     def test_incomplete_ledger_still_raises_on_strict_path(self) -> None:
         # Goal-only ledger is intentionally not Seed-ready; legacy contract is
         # to refuse rather than fabricate.
@@ -104,6 +133,404 @@ class TestPartialSeedFromEvidence:
         assert seed.metadata.degraded is True
         assert seed.metadata.recovery_reason == "interview_phase_deadline"
         assert seed.metadata.interview_id == "iv-partial"
+
+    def test_partial_seed_preserves_explicit_document_task_type(self) -> None:
+        for goal in (
+            "문서형 계획을 만든다. task_type은 document여야 한다.",
+            "task_type must be document without changing repository files.",
+            "Use task_type: document although we must not produce code.",
+            "Use task_type: document because source code must not change.",
+            "Do not modify source code because task_type must be document.",
+            "The task type must remain document.",
+            "Keep the task type as document.",
+            "Use document as the task type.",
+            "The task type must be a document.",
+            "The task type should be a document.",
+            "task_type must be code. Actually, task_type must be document.",
+            "Use task_type: document. Mention task_type: code in the appendix.",
+            "Use task_type: document. Compare it with task_type: code.",
+            "Use task_type: document. This document mentions task_type: code in prose.",
+            "task_type: document should be used.",
+        ):
+            ledger = SeedDraftLedger.from_goal(goal)
+
+            seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+
+            assert seed.task_type == "document"
+
+    def test_complete_and_partial_ledgers_respect_retraction_and_reconfirmation(self) -> None:
+        rejected_goals = (
+            "No, task_type: document.",
+            "task_type: document, but not anymore.",
+            "task_type: document, but we decided against it.",
+            "task_type: document, but scratch that.",
+            "task_type: document. Actually, scratch that.",
+            "task_type: document. We decided against it.",
+            "task_type: document. That requirement was rejected.",
+            "task_type: document. Never mind.",
+            "task_type: document. Forget that.",
+            "task_type: document. Cancel that requirement.",
+            "task_type: document. I take that back.",
+            "task_type: document. However, cancel that requirement.",
+            "task_type: document. But cancel that requirement.",
+            "task_type: document. That was only an example.",
+            "task_type: document. I was only giving an example.",
+            "task_type: document. Please disregard that requirement.",
+            "task_type: document. Withdraw that requirement.",
+            "task_type: document. Retract that requirement.",
+            "task_type: document. Cancel this requirement.",
+        )
+        corrected = (
+            "task_type: code. Actually, task_type: document. Confirmed: task_type: document."
+        )
+
+        for goal in rejected_goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "code"
+            assert partial.task_type == "code"
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(corrected))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(corrected), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_scope_mixed_contract_retractions(self) -> None:
+        goal = "task_type: document. Inherit seed_old. Cancel that requirement."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_scope_unrelated_modal_clause(self) -> None:
+        goal = "We may revise the title, and task_type: document."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_honor_semicolon_retraction(self) -> None:
+        for goal in (
+            "task_type: document; cancel that requirement.",
+            "Inherit seed_old; cancel that requirement.",
+            "Inherit seed_good. Use SVG. Cancel the parent requirement.",
+            "Inherit seed_good. Use SVG. Retract the parent contract.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            if goal.startswith("task_type"):
+                assert complete.task_type == "code"
+                assert partial.task_type == "code"
+            else:
+                assert complete.metadata.parent_seed_id is None
+                assert partial.metadata.parent_seed_id is None
+
+    def test_complete_and_partial_ledgers_accept_replacement_after_cancellation(self) -> None:
+        goal = "task_type: code. Cancel that requirement. task_type: document."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_ignore_unrelated_cancellation_and_output_prose(
+        self,
+    ) -> None:
+        goals = (
+            "Use task_type: document. Cancel lunch.",
+            "Write a validator that emits the line task_type: document.",
+        )
+
+        for goal in goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            expected = "document" if "Use task_type" in goal else "code"
+            assert complete.task_type == expected
+            assert partial.task_type == expected
+
+    def test_complete_and_partial_ledgers_fail_closed_on_validation_content(self) -> None:
+        goals = (
+            "Build a parser that validates task_type: document.",
+            "Write a validator that parses parent_seed_id: seed_bad.",
+            "Write unit tests asserting task_type: document.",
+            "Create documentation showing how to set task_type: document.",
+            "Generate a YAML example containing task_type: document.",
+            "Return JSON with task_type: document.",
+            "The generated manifest must set task_type: document.",
+            "Add a CLI flag whose help text says task_type: document.",
+            "Implement a validator whose error message says task_type: document.",
+            "Create docs with the sentence task_type: document.",
+            "Add support for task_type: document in the Seed API.",
+            "Update the parser to accept task_type: document.",
+            "Add a test for task_type: document.",
+            "Add support for parent_seed_id: seed_demo in the API.",
+            "The schema must accept parent_seed_id: seed_demo.",
+            "Add a test for parent_seed_id: seed_demo.",
+            "Fix handling when users inherit seed_demo.",
+            "Analyze why the API accepts task_type: document.",
+            "Analyze why the API accepts parent_seed_id: seed_old.",
+            "Rename task_type: document to artifact in the API.",
+            "Refactor task_type: document handling.",
+            "Deprecate task_type: document.",
+            "Rename parent_seed_id: seed_old to predecessor_id.",
+            "Remove parent_seed_id: seed_old from the API.",
+        )
+
+        positive = "Implement this as task_type: document."
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(positive))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(positive), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+        for goal in goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "code"
+            assert partial.task_type == "code"
+
+    def test_complete_and_partial_ledgers_ignore_unrelated_bare_retractions(self) -> None:
+        goal = "Use task_type: document. Never mind the earlier color choice."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+    def test_complete_and_partial_ledgers_preserve_binding_before_content_example(self) -> None:
+        for goal in (
+            "Use task_type: document. The report should say task_type: code.",
+            "Use task_type: document. A test fixture contains task_type: code.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "document"
+            assert partial.task_type == "document"
+
+    def test_ledgers_ignore_comma_prefixed_reference_task_types(self) -> None:
+        goal = "The task type must be document. For example, task_type: code."
+
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+
+        assert complete.task_type == "document"
+        assert partial.task_type == "document"
+
+        rejected = "Do not, under any circumstances, use task_type: document."
+        assert synthesize_seed_from_ledger(_populate_complete_ledger(rejected)).task_type == "code"
+        assert (
+            partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(rejected), reason="interview_phase_deadline"
+            ).task_type
+            == "code"
+        )
+
+    def test_ledgers_preserve_descriptive_task_type_contracts(self) -> None:
+        for goal in (
+            "Create a guide explaining setup with task_type: document.",
+            "Summarize the rejected proposal with task_type: document.",
+            "Use task_type: document. As a reference, task_type: code appears in old docs.",
+        ):
+            assert (
+                synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"
+            )
+            assert (
+                partial_seed_from_evidence(
+                    SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+                ).task_type
+                == "document"
+            )
+
+    def test_ledgers_ignore_api_schema_and_parser_task_type_content(self) -> None:
+        for goal in (
+            "The API returns a Seed where task_type: document.",
+            "The schema property task_type is document.",
+            "Ensure the parser preserves strings where task_type: document.",
+            "Persist task_type: document in the database.",
+            "Store task_type: document in the session state.",
+            "Expose task_type: document in the CLI output.",
+            "The config field task_type: document controls rendering.",
+            "Route task_type: document requests to artifact workers.",
+            "Map PDFs to task_type: document in the routing table.",
+            "Read task_type: document from the config.",
+            "When the user asks for a document, set task_type: document in the generated Seed.",
+            "When task_type: document, render Markdown output in the existing Python service.",
+            "Handle task_type: document by rendering Markdown while keeping this Python CLI implementation.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == partial.task_type == "code"
+
+    def test_ledgers_preserve_clause_local_document_contract(self) -> None:
+        goal = "Without changing the existing task type, task_type must remain document."
+        assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "document"
+        assert (
+            partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            ).task_type
+            == "document"
+        )
+
+    def test_ledgers_preserve_contracts_with_unrelated_same_clause_details(self) -> None:
+        goal = (
+            "Use task_type: document to explain why the old proposal was rejected. "
+            "Inherit seed_good for either a PDF or DOCX migration note."
+        )
+        complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+        partial = partial_seed_from_evidence(
+            SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+        )
+        assert complete.task_type == partial.task_type == "document"
+
+    def test_historical_task_type_does_not_override_ledger_default(self) -> None:
+        for goal in (
+            "We discussed task_type: document in the rejected proposal. Build a CLI.",
+            "The task_type: document requirement was rejected.",
+            "Use the default code task instead of task_type: document.",
+            "Rather than use task_type: document, keep the code task.",
+            "We no longer use task_type: document.",
+            "In the previous proposal, task_type: document.",
+            "It is not true that task_type: document.",
+            "We are not using task_type: document.",
+            "task_type: document will not be used.",
+            "Build a Python CLI; task_type: document is not required for this Seed.",
+            "task_type: document isn't required for this Seed.",
+            "task_type: document is unnecessary for this Seed.",
+            "task_type: document, but not required.",
+            "task_type: document, but no longer needed.",
+            "task_type: document, but unnecessary.",
+            "Use task_type: document, pending approval.",
+            "Use task_type: document, unless the user asks for code.",
+            "Use task_type: document, but maybe code.",
+            "Use task_type: document. Forget it.",
+            "Use task_type: document. I take it back.",
+            "Use task_type: document. Cancel it.",
+            "task_type: document need not be used.",
+            "The task type is document only if requested.",
+            "The task type is document only when explicitly requested.",
+            "task_type: document is no longer required.",
+            "We won't use task_type: document.",
+            "We won’t use task_type: document.",
+            "task_type: document should be avoided.",
+            "Choose between task_type: document or code later.",
+            "We did not select task_type: document.",
+            "We have not selected task_type: document.",
+            "There is no requirement that task_type: document.",
+            "The team declined to use task_type: document.",
+            "We didn't select task_type: document.",
+            "We decided not to use task_type: document.",
+            "The requirement to use task_type: document was declined.",
+            "We rejected task_type: document.",
+            "We abandoned task_type: document.",
+            "task_type: document, which was rejected.",
+            "We ruled out task_type: document.",
+            "We opted not to use task_type: document.",
+            "Build a CLI whose README says task_type: document.",
+            "Implement a validator whose error says task_type: document.",
+            "Generate a TOML file with task_type: document.",
+            "Write tests where the expected string is task_type: document.",
+            "The YAML file must set task_type: document.",
+            "Write a README saying task_type: document.",
+        ):
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+
+            assert complete.task_type == "code"
+            assert partial.task_type == "code"
+
+    def test_contract_scope_is_preserved_through_complete_and_partial_ledgers(self) -> None:
+        positive_goals = (
+            "We'll use task_type: document for the final plan.",
+            "Use task_type: document for the historical archive.",
+            "Rather than change source code, write a plan; task_type: document.",
+            "The task type is document.",
+            "Set the task type to document.",
+            "The task type must remain document.",
+            "Keep the task type as document.",
+            "Use document as the task type.",
+            "Use task_type: document for the final proposal.",
+            "task_type: document. For reference, task_type: code is an example.",
+            "Implement the requested document with task_type: document.",
+        )
+        for goal in positive_goals:
+            complete = synthesize_seed_from_ledger(_populate_complete_ledger(goal))
+            partial = partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+            )
+            assert complete.task_type == "document"
+            assert partial.task_type == "document"
+
+        historical = (
+            "The previous proposal was rejected, but its task_type: document "
+            "should be recorded for audit."
+        )
+        assert (
+            synthesize_seed_from_ledger(_populate_complete_ledger(historical)).task_type == "code"
+        )
+        assert (
+            partial_seed_from_evidence(
+                SeedDraftLedger.from_goal(historical),
+                reason="interview_phase_deadline",
+            ).task_type
+            == "code"
+        )
+
+        rejected = (
+            "task_type: document will not be used.",
+            "Build a Python CLI; task_type: document is not required for this Seed.",
+            "task_type: document isn't required for this Seed.",
+            "task_type: document is unnecessary for this Seed.",
+            "task_type: document need not be used.",
+            "Use task_type: document pending approval.",
+            "Use task_type: document after approval.",
+            "Use task_type: document once approved.",
+            "Use task_type: document upon approval.",
+            "Use task_type: document assuming approval.",
+            "Use task_type: document contingent on approval.",
+            "Use task_type: document subject to approval.",
+            "The task type is document only if requested.",
+            "The task type is document only when explicitly requested.",
+            "task_type: document is no longer required.",
+            "We won't use task_type: document.",
+            "We won’t use task_type: document.",
+        )
+        for goal in rejected:
+            assert synthesize_seed_from_ledger(_populate_complete_ledger(goal)).task_type == "code"
+            assert (
+                partial_seed_from_evidence(
+                    SeedDraftLedger.from_goal(goal), reason="interview_phase_deadline"
+                ).task_type
+                == "code"
+            )
 
     def test_unresolved_slots_match_open_gaps(self) -> None:
         ledger = SeedDraftLedger.from_goal("A bare goal.")

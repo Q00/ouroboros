@@ -335,6 +335,27 @@ async def test_seed_generator_keeps_explicitly_confirmed_reference_ac(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_reference_aware_generation_preserves_explicit_document_task_type(tmp_path) -> None:
+    adapter = AsyncMock()
+    generator = SeedGenerator(
+        llm_adapter=adapter,
+        model="test-model",
+        output_dir=tmp_path,
+    )
+    state = _reference_state()
+    state.initial_context = (
+        "Set the task type to document. For reference, task_type: code is an example. "
+        "Build a Linear-like issue tool."
+    )
+
+    result = await generator.generate(state, _low_ambiguity())
+
+    assert result.is_ok
+    assert result.value.task_type == "document"
+    adapter.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_seed_generator_returns_typed_reopen_error_for_conflict(tmp_path) -> None:
     adapter = AsyncMock()
     generator = SeedGenerator(

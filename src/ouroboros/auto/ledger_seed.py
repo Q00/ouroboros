@@ -19,6 +19,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.core.task_type import explicit_task_type_from_goal
 
 _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
     {
@@ -139,6 +140,7 @@ def synthesize_seed_from_ledger(
 
     return Seed(
         goal=goal,
+        task_type=explicit_task_type_from_goal(goal) or "code",
         brownfield_context=brownfield_context or BrownfieldContext(),
         constraints=constraints,
         acceptance_criteria=acceptance_criteria,
@@ -361,6 +363,7 @@ def partial_seed_from_evidence(
 
     return Seed(
         goal=goal,
+        task_type=explicit_task_type_from_goal(goal) or "code",
         constraints=tuple(dict.fromkeys(constraints)),
         acceptance_criteria=acceptance,
         ontology_schema=ontology_schema,
