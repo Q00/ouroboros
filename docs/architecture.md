@@ -27,12 +27,12 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 │  │     REGISTRY        │     │                     │     │      LAYER           │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Skills      │──┼─────┼─▶│   Seed Spec    │──┼─────┼─▶│   TUI Dashboard │  │                 │
-│  │  │   (9)         │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
+│  │  │   (22)        │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  │                     │     │                     │     │                     │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Agents      │──┼─────┼─▶│  Acceptance    │──┼─────┼─▶│   CLI Interface│  │                 │
-│  │  │   (9)         │  │     │  │  Criteria Tree │  │     │  │   (Typer)    │  │                 │
+│  │  │   (21)        │  │     │  │  Criteria Tree │  │     │  │   (Typer)    │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  └─────────────────────┘     └─────────────────────┘     └─────────────────────┘                 │
 │           │                         │                         │                                 │
@@ -44,8 +44,8 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 │  │    EXECUTION LAYER   │     │    STATE LAYER     │     │    ORCHESTRATION    │                 │
 │  │                     │     │                     │     │      LAYER         │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
-│  │  │ 7 Execution  │  │     │  │ Event Store  │  │     │  │ 6-Phase       │  │                 │
-│  │  │   Modes      │  │     │  │  (SQLite)    │  │     │  │ Pipeline      │  │                 │
+│  │  │ Execution    │  │     │  │ Event Store  │  │     │  │ 6-Phase       │  │                 │
+│  │  │   Engine     │  │     │  │  (SQLite)    │  │     │  │ Pipeline      │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  │                     │     │                     │     │                     │                 │
 │  │  ┌───────────────┐  │     │  │ Checkpoint   │  │     │  │ PAL Router    │  │                 │
@@ -60,8 +60,8 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ### 1. Skills & Agents Registry
 **Auto-discovery of bundled skills and agents that ship with Ouroboros core**
-- Skills: 14 core workflow skills (interview, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, status)
-- Agents: 9 specialized agents for different thinking modes
+- Skills: 22 core workflow skills (auto, brownfield, cancel, config, evaluate, evolve, help, interview, ooo, pm, publish, qa, ralph, resume-session, run, seed, setup, status, tutorial, unstuck, update, welcome)
+- Agents: 21 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)
 
