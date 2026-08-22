@@ -552,9 +552,11 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # 1 — the empty state, named from each lane's own contract.
     assert "not_a_policy_question" in code
     assert "not_a_measurement" in data
-    # 2 — the findings this lane may reuse, ids only.
+    # 2 — the findings this lane may reuse, ids only, offered as a shelf to
+    # choose from rather than a list to work through.
     assert "fanout_earlier" in code
-    assert "none published yet" in data
+    assert "not all of them" in code
+    assert "nothing to" in data and "reuse" in data
     # 3 — where each may look.
     assert roster[0]["repo_id"] in code and str(tmp_path / "podo-backend") in code
     assert "data tools" in data and roster[0]["repo_id"] not in data

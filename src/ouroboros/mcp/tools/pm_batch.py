@@ -358,12 +358,26 @@ def _payload_stub(
     schema_json = _lean_schema(contract)
     offered = [e for e in findings if isinstance(e, dict)] if findings else []
     if offered:
-        reuse = "\n".join(
-            f"   - contract_id: `{e.get('contract_id')}`, lane_id: `{e.get('lane_id', lane_id)}`"
-            for e in offered
+        listing = "\n".join(
+            f"   - `{e.get('contract_id')}` — published {e.get('published_at')}" for e in offered
+        )
+        # Newest first, and named as a shelf to choose from. Told to fetch each
+        # in turn, a child would spend its whole budget before it started —
+        # these are a head start, not a checklist.
+        reuse = (
+            f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
+   takes a `contract_id` below plus `lane_id: {lane_id}` (load the tool via
+   your runtime's tool discovery if deferred). Newest first — open the ones
+   whose subject looks like this question, not all of them. Use what helps and
+   investigate the rest yourself; if what you read answers the question, stop
+   there.
+{listing}"""
+            if offered
+            else ""
         )
     else:
-        reuse = "   - none published yet — go to 3."
+        reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
+   reuse. Go to 3."""
     no_op = _no_op_literals(schema_json) if schema_json else ""
     no_op_hint = f" ({no_op})" if no_op else ""
     # Named only where the shape has the field: the data lane reports
@@ -398,9 +412,6 @@ evidence the PM reads before answering; you never answer for them.
 ## Order of work
 1. **Does this question need this lane at all?** If not, answer the empty
    state{no_op_hint} and stop. Do not investigate to prove it.
-2. **Read what this lane already found here** — `ouroboros_fetch_artifact` with
-   each pair below (load the tool via your runtime's tool discovery if
-   deferred). If that answers the question, stop there.
 {reuse}
 {_investigation_step(roster, schema_json)}
 
