@@ -299,7 +299,7 @@ _ANSWER_SPECS: dict[str, str] = {
 - `examined`: one entry per repository you opened — its `repo_id` from 3 and
   `policy_claims` of `{path, policy_claim, plain_statement}`. Read and found
   nothing: an entry with no claims. Never opened: no entry.
-- Opened nothing at all: `examined: []` with `nothing_examined_reason`.
+- Opened nothing at all: `examined: []` with {no_op}.
 - `path` is relative to the repository.
 - `plain_statement`: that claim once, in the question's language, no paths or
   identifiers.""",
@@ -308,7 +308,7 @@ _ANSWER_SPECS: dict[str, str] = {
   `operation: "read"`, `tool_name`, `metric`, `aggregation`,
   `informs_decision`, and `values` — the numbers you read back. Optional:
   `filters` of `{field, comparator, value}`, `time_window`, `group_by`.
-- Nothing to measure: `data_needed: false` with `no_evidence_reason`.
+- Nothing to measure: `data_needed: false` with {no_op}.
 - `aggregation`: count, distinct_count, sum, average, median, p90, p95, p99,
   min, max, rate. `comparator`: eq, neq, gt, gte, lt, lte.
 - `values` is one entry, or one per group when you grouped.
@@ -363,7 +363,7 @@ Your final message is this JSON and nothing else — no prose around it:
     return f"""## Answer
 Your final message is one JSON object and nothing else — no prose around it.
 
-{spec}
+{spec.replace("{no_op}", _no_op_literals(schema_json) if schema_json else "its reason")}
 
 """
 
@@ -380,7 +380,7 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
     cites_repos = bool(schema_json) and '"repo_id"' in (schema_json or "")
     entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
     if not cites_repos:
-        return """3. **Still not enough?** Find and call the data tools this host exposes. An
+        return """3. **Not covered there?** Find and call the data tools this host exposes. An
    empty tool search is where you start, not where you stop; a store counts as
    unreachable only after a call to it failed."""
     if not entries:
@@ -388,9 +388,10 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
    empty state and say so. Reading whatever is at hand would produce evidence
    nothing can check."""
     listing = "\n".join(f"   - `{e['repo_id']}` — {e.get('path')}" for e in entries)
-    return f"""3. **Still not enough?** Read these repositories:
+    return f"""3. **Not covered there?** Read these repositories:
 {listing}
-   Look wherever you need to; cite only these."""
+   Look wherever you need to; cite only these. Follow what the question
+   plainly touches — report what bears on it, not everything near it."""
 
 
 def _payload_stub(
@@ -421,12 +422,10 @@ def _payload_stub(
         reuse = f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
    with `lane_id: {lane_id}` and no `contract_id` lists them, newest first
    (load the tool via tool discovery if deferred); pass back a `contract_id`
-   from that list to read one. Stop there if it answers the question."""
+   from that list to read one. Stop there if it already covers this question."""
     else:
         reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
    reuse. Go to 3."""
-    no_op = _no_op_literals(schema_json) if schema_json else ""
-    no_op_hint = f" ({no_op})" if no_op else ""
     answer_section = _answer_section(contract, schema_json)
     return f"""## Task
 You are an Ouroboros PM interview advisory subagent — lane {lane_id}. You
@@ -440,8 +439,8 @@ gather evidence the PM reads before deciding; you never decide for them.
 - question_identity: {context.get("question_identity")}
 
 ## Order of work
-1. **Does this question need this lane?** If not, answer the empty
-   state{no_op_hint} and stop — do not investigate to prove it.
+1. **Does this question need this lane?** If not, answer the empty state
+   below and stop — do not investigate to prove it.
 {reuse}
 {_investigation_step(roster, schema_json)}
 

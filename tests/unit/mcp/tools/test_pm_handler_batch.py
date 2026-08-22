@@ -585,7 +585,7 @@ def test_every_answer_spec_names_what_its_contract_requires() -> None:
     text, and the text is keyed by ``contract_id`` so a version bump falls back
     to the schema rather than to a description of the shape before it.
     """
-    from ouroboros.mcp.tools.pm_batch import _ANSWER_SPECS
+    from ouroboros.mcp.tools.pm_batch import _ANSWER_SPECS, _answer_section, _lean_schema
     from ouroboros.orchestrator.capabilities.pm_schemas import (
         _interview_data_evidence_answer_contract,
         pm_code_context_answer_contract,
@@ -609,7 +609,14 @@ def test_every_answer_spec_names_what_its_contract_requires() -> None:
                 found |= required_names(item)
         return found
 
-    for contract_id, spec in _ANSWER_SPECS.items():
-        schema = contracts[contract_id]["response_model_schema"]
-        missing = sorted(name for name in required_names(schema) if name not in spec)
+    for contract_id in _ANSWER_SPECS:
+        contract = contracts[contract_id]
+        # What the child is shown, not the template it is built from: the
+        # empty state's reasons are filled in from the schema at render time.
+        rendered = _answer_section(contract, _lean_schema(contract))
+        missing = sorted(
+            name
+            for name in required_names(contract["response_model_schema"])
+            if name not in rendered
+        )
         assert not missing, f"{contract_id} does not tell the child about: {missing}"
