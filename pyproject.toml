@@ -226,6 +226,7 @@ python_functions = ["test_*"]
 markers = [
     "integration: integration tests that exercise cross-component behavior",
     "slow: integration tests that build artifacts or call subprocesses",
+    "performance: isolated performance budgets; exclude from parallel correctness suites",
 ]
 
 [tool.ruff]
