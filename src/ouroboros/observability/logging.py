@@ -227,6 +227,11 @@ def _mask_sensitive_data(
         # Recursively handle nested dicts
         if isinstance(value, dict):
             event_dict[key] = _mask_dict_sensitive_data(value)
+            continue
+
+        # Recursively handle lists and tuples
+        if isinstance(value, (list, tuple)):
+            event_dict[key] = _mask_sequence_sensitive_data(value)
 
     return event_dict
 
@@ -248,9 +253,43 @@ def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
             result[key] = mask_api_key(value)
         elif isinstance(value, dict):
             result[key] = _mask_dict_sensitive_data(value)
+        elif isinstance(value, (list, tuple)):
+            result[key] = _mask_sequence_sensitive_data(value)
         else:
             result[key] = value
     return result
+
+
+def _mask_sequence_sensitive_data(
+    data: list[Any] | tuple[Any, ...],
+) -> list[Any] | tuple[Any, ...]:
+    """Recursively mask sensitive data in a list or tuple.
+
+    Preserves the sequence type (list vs tuple, including named tuples).
+
+    Args:
+        data: List or tuple to process.
+
+    Returns:
+        Sequence of the same type with sensitive values masked.
+    """
+    sanitized = []
+    for item in data:
+        if isinstance(item, dict):
+            sanitized.append(_mask_dict_sensitive_data(item))
+        elif isinstance(item, (list, tuple)):
+            sanitized.append(_mask_sequence_sensitive_data(item))
+        elif isinstance(item, str) and is_sensitive_value(item):
+            sanitized.append(mask_api_key(item))
+        else:
+            sanitized.append(item)
+
+    if isinstance(data, tuple):
+        factory = getattr(type(data), "_make", None)
+        if callable(factory):
+            return factory(sanitized)
+        return tuple(sanitized)
+    return sanitized
 
 
 @dataclass(frozen=True, slots=True)
