@@ -15,6 +15,7 @@ detect_keywords = _mod.detect_keywords
 SETUP_BYPASS_SKILLS = _mod.SETUP_BYPASS_SKILLS
 main = _mod.main
 is_first_time = _mod.is_first_time
+is_pr_creation_request = _mod.is_pr_creation_request
 
 
 class TestFirstTimePrefs:
@@ -147,6 +148,13 @@ class TestDetectKeywords:
     def test_no_match(self):
         result = detect_keywords("hello world")
         assert result["detected"] is False
+
+    def test_pr_creation_request_detection(self):
+        for prompt in ("PR 올려줘", "create a PR", "open pull request", "gh pr create"):
+            assert is_pr_creation_request(prompt) is True
+
+    def test_pr_status_question_does_not_request_creation(self):
+        assert is_pr_creation_request("PR도 쐈어?") is False
 
     def test_ooo_auto_with_goal(self):
         result = detect_keywords('ooo auto "Add /healthz endpoint"')
@@ -347,6 +355,40 @@ class TestHookProtocol:
             "session_id": "ooo status",
             "turn_id": "turn-1",
             "prompt": "hello world",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        assert capsys.readouterr().out == ""
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    @patch.object(_mod, "is_ouroboros_project", return_value=True)
+    def test_pr_creation_request_injects_fixed_project_template(self, _project, _first, capsys):
+        payload = {
+            "session_id": "test-session",
+            "turn_id": "test-turn",
+            "prompt": "PR 올려줘",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "## Summary" in context
+        assert "## Verification" in context
+        assert "## Related issues" in context
+        assert "src/ouroboros/auto/" in context
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    @patch.object(_mod, "is_ouroboros_project", return_value=False)
+    def test_pr_template_does_not_leak_into_other_projects(self, _project, _first, capsys):
+        payload = {
+            "session_id": "test-session",
+            "turn_id": "test-turn",
+            "prompt": "create a PR",
             "hook_event_name": "UserPromptSubmit",
         }
         with patch("sys.stdin") as mock_stdin:

@@ -160,6 +160,34 @@ KEYWORD_MAP = [
     },
 ]
 
+_PR_CREATION_RE = re.compile(
+    r"(?:"
+    r"\bgh\s+pr\s+create\b"
+    r"|\b(?:create|open|submit|raise)\s+(?:a\s+)?(?:pr|pull request)\b"
+    r"|\b(?:pr|pull request)\s+(?:create|open|submit)\b"
+    r"|(?:pr|풀\s*리퀘스트)(?:도|를|을)?\s*(?:올려|열어|만들어|생성|쏴|제출)"
+    r")",
+    re.IGNORECASE,
+)
+
+PROJECT_PR_TEMPLATE_CONTEXT = """<project-pr-template>
+When creating a pull request for this repository, use this body structure:
+
+## Summary
+- State what changed and why in 1-3 bullets.
+
+## Verification
+- List the exact commands run and their exact results.
+- Report failed checks and why they are unrelated. Never claim an unrun check passed.
+
+## Related issues
+- Use `Closes #<issue-number>` when the PR fully resolves an issue.
+- Use `Refs #<issue-number>` when it is related without closing it.
+- Use `N/A` when there is no related issue.
+
+Add the repository's R-run comparison section before Related issues only when files under src/ouroboros/auto/ changed.
+</project-pr-template>"""
+
 
 def is_mcp_configured() -> bool:
     """Check if MCP server is registered in ~/.claude/mcp.json."""
@@ -281,6 +309,22 @@ def detect_keywords(text: str) -> dict:
     return {"detected": False, "keyword": None, "suggested_skill": None}
 
 
+def is_pr_creation_request(text: str) -> bool:
+    """Return whether the prompt asks the agent to create a pull request."""
+    return bool(_PR_CREATION_RE.search(text))
+
+
+def is_ouroboros_project() -> bool:
+    """Return whether the current directory belongs to this repository."""
+    cwd = Path.cwd()
+    return any(
+        (directory / "pyproject.toml").is_file()
+        and (directory / "src" / "ouroboros").is_dir()
+        and (directory / ".github" / "PULL_REQUEST_TEMPLATE.md").is_file()
+        for directory in (cwd, *cwd.parents)
+    )
+
+
 def _extract_prompt_and_host(hook_input: str) -> tuple[str, str]:
     """Extract a prompt and identify the hook host from its wire envelope."""
 
@@ -326,15 +370,21 @@ def main() -> None:
     user_input, host = _extract_prompt_and_host(hook_input)
 
     result = detect_keywords(user_input)
+    project_context = (
+        PROJECT_PR_TEMPLATE_CONTEXT
+        if is_pr_creation_request(user_input) and is_ouroboros_project()
+        else ""
+    )
 
     # First-time user: add welcome context to their first message.
     if not result["detected"] and is_first_time():
         skill_name = "welcome"
-        _emit_context(f"""<skill-suggestion>
+        welcome_context = f"""<skill-suggestion>
 🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
 IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
-</skill-suggestion>""")
+</skill-suggestion>"""
+        _emit_context("\n\n".join(item for item in (project_context, welcome_context) if item))
         return
 
     if result["detected"]:
@@ -345,16 +395,19 @@ IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confir
         # layers, so a child hook process cannot reconstruct its effective MCP state.
         needs_setup = host != "codex" and not is_mcp_configured()
         if skill not in SETUP_BYPASS_SKILLS and needs_setup:
-            _emit_context("""<skill-suggestion>
+            skill_context = """<skill-suggestion>
 🎯 REQUIRED SKILL:
 - /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
-</skill-suggestion>""")
+</skill-suggestion>"""
         else:
             skill_name = skill.replace("/ouroboros:", "")
-            _emit_context(f"""<skill-suggestion>
+            skill_context = f"""<skill-suggestion>
 🎯 MATCHED SKILLS:
 - /ouroboros:{skill_name} - Detected "{keyword}"
-</skill-suggestion>""")
+</skill-suggestion>"""
+        _emit_context("\n\n".join(item for item in (project_context, skill_context) if item))
+    elif project_context:
+        _emit_context(project_context)
 
 
 if __name__ == "__main__":
