@@ -180,11 +180,13 @@ this mechanism exists to prevent: the PM decides without the two things they
 could not have looked up themselves. Waiting is for lanes still in flight: one
 that came back empty, broke its contract, or could not be spawned has returned.
 
-**Stub payloads.** A payload's `prompt` may be a short stub telling its child
-to fetch the full brief from the store (`ouroboros_fetch_artifact`) — pass it
-unchanged exactly like any payload. A child that replies exactly
-`UNDISPATCHED` could not receive its brief: submit that lane as
-`{ "key": <lane id>, "undispatched": true }`.
+**Stub payloads.** A payload's `prompt` may be a compact stub: it carries the
+lane's answer schema, where it may look, and the findings it may reuse, and
+points at `ouroboros_fetch_artifact` for the prose that explains them. Pass it
+unchanged exactly like any payload — the child fetches for itself, and a fetch
+it cannot make does not stop it. A child that replies exactly `UNDISPATCHED`
+could not work at all: submit that lane as
+`{ "key": <lane id>, "undispatched": true }` rather than as an empty finding.
 
 **Submitting results back.** Correlate by
 `meta.question_advisory_result_correlation_key` (`context.lane_id`) and call

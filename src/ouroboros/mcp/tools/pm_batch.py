@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import json
 from typing import Any
 
 import structlog
@@ -33,9 +34,13 @@ log = structlog.get_logger()
 #: recent-findings reuse query never offers a brief as a finding.
 ADVISORY_PROMPT_BUNDLE_KIND = "advisory_prompt_bundle"
 
-#: What a lane child replies when it cannot fetch its externalized brief. The
-#: host submits that lane as ``undispatched`` — a lane without its brief has
-#: no contract to answer under, and guessing one is worse than absence.
+#: What a lane child replies when it cannot do its work at all. The host
+#: submits that lane as ``undispatched``, which is the honest record: a lane
+#: that reports nothing found would be read as having found nothing.
+#:
+#: A failed brief fetch is no longer one of those cases. The stub carries the
+#: schema, the roster and the offered findings, so a child that cannot reach
+#: the store still knows what to look at and what shape to answer in.
 UNDISPATCHED_SENTINEL = "UNDISPATCHED"
 
 
@@ -251,12 +256,137 @@ def batch_turn_meta_and_text(
     return response_meta, "\n".join(lines)
 
 
-def _payload_stub(payload: dict[str, Any], bundle_id: str) -> str:
-    """Render the compact prompt a child receives when its brief is stored."""
+def _without_prose(node: Any) -> Any:
+    """Return a JSON Schema with its human-facing text removed.
+
+    What the child needs from the schema is the shape it must produce — field
+    names, required lists, enum literals, ``additionalProperties``. The
+    descriptions explain that shape to a reader who has the brief; they are two
+    thirds of its bytes and none of its meaning here.
+    """
+    if isinstance(node, dict):
+        return {k: _without_prose(v) for k, v in node.items() if k not in ("description", "title")}
+    if isinstance(node, list):
+        return [_without_prose(item) for item in node]
+    return node
+
+
+def _lean_schema(contract: Any) -> str | None:
+    """Return the child-facing schema of one lane's contract, or ``None``."""
+    schema = contract.get("response_model_schema") if isinstance(contract, dict) else None
+    if not isinstance(schema, dict):
+        return None
+    return json.dumps(_without_prose(schema), ensure_ascii=False, separators=(",", ":"))
+
+
+def _no_op_literals(schema_json: str) -> str:
+    """Return the empty-state reason literals this lane's schema admits.
+
+    Read out of the schema rather than listed here: a lane's reasons are its
+    contract's to name, and a copy in this module would be a second list to
+    keep in step.
+    """
+    try:
+        schema = json.loads(schema_json)
+    except ValueError:
+        return ""
+    found: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if (
+                    key.endswith("_reason")
+                    and isinstance(value, dict)
+                    and isinstance(value.get("enum"), list)
+                ):
+                    found.append(f"`{key}`: {', '.join(str(v) for v in value['enum'])}")
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(schema)
+    return found[0] if found else ""
+
+
+def _investigation_step(roster: Any, schema_json: str | None) -> str:
+    """Return step 3 — where this lane may look when reuse was not enough.
+
+    Which of the two it is comes from the lane's own answer shape rather than
+    its name: a lane whose answer carries ``repo_id`` is bounded by the roster,
+    and one that carries none measures what the host exposes. The roster
+    travels with the request, so a lane that cannot cite a repository must not
+    be handed one — it would be told to read what it has no way to report.
+    """
+    cites_repos = bool(schema_json) and '"repo_id"' in (schema_json or "")
+    entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
+    if not cites_repos:
+        return """3. **Still not enough?** Find the data tools this host exposes and call them —
+   registering one is the willingness to have it called. An empty tool search
+   is where you start looking, never where you stop, and a store is only
+   unreachable once a call to it has actually failed."""
+    if not entries:
+        return """3. **No repository was given to you.** That is the whole answer — report the
+   empty state and say so. Reading whatever is at hand would produce evidence
+   nothing can check."""
+    listing = "\n".join(f"   - `{e['repo_id']}` — {e.get('path')}" for e in entries)
+    return f"""3. **Still not enough?** Read these repositories:
+{listing}
+   Where you look is open; what you cite is not. Every `repo_id` you report must
+   be one of the above — anything else is rejected at submission."""
+
+
+def _payload_stub(
+    payload: dict[str, Any],
+    bundle_id: str,
+    *,
+    contract: Any = None,
+    roster: Any = None,
+    findings: Any = None,
+) -> str:
+    """Render the compact prompt a child receives when its brief is stored.
+
+    Compact, not partial. What the child cannot do without travels here — the
+    answer schema, where it may look, what it has already found — and only what
+    explains those to a reader stays behind the fetch. A stub that carried none
+    of it made one fetch the single point of failure for the whole lane: no
+    schema, no roster, no rules, and nothing to do but say so.
+    """
     context = payload.get("context") or {}
     lane_id = context.get("lane_id")
+    schema_json = _lean_schema(contract)
+    offered = [e for e in findings if isinstance(e, dict)] if findings else []
+    if offered:
+        reuse = "\n".join(
+            f"   - contract_id: `{e.get('contract_id')}`, lane_id: `{e.get('lane_id', lane_id)}`"
+            for e in offered
+        )
+    else:
+        reuse = "   - none published yet — go to 3."
+    no_op = _no_op_literals(schema_json) if schema_json else ""
+    no_op_hint = f" ({no_op})" if no_op else ""
+    # Named only where the shape has the field: the data lane reports
+    # measurements, which are already in the PM's language.
+    plain_rule = (
+        " Each claim also carries a `plain_statement`: one sentence in the"
+        " question's own language, no paths or identifiers."
+        if schema_json and '"plain_statement"' in schema_json
+        else ""
+    )
+    answer_section = (
+        f"""## Answer
+Your final message is this JSON and nothing else — no prose around it:
+```json
+{schema_json}
+```
+"""
+        if schema_json
+        else ""
+    )
     return f"""## Task
-You are an Ouroboros PM interview advisory subagent — lane {lane_id}.
+You are an Ouroboros PM interview advisory subagent — lane {lane_id}. You gather
+evidence the PM reads before answering; you never answer for them.
 
 ## PM Question
 {context.get("question")}
@@ -265,15 +395,21 @@ You are an Ouroboros PM interview advisory subagent — lane {lane_id}.
 - session_id: {context.get("session_id")}
 - question_identity: {context.get("question_identity")}
 
-## Your Brief
-The full brief (rules, repository roster, answer contract) is stored, not
-inlined. Fetch it with the MCP tool `ouroboros_fetch_artifact` (load it via
-your runtime's tool discovery if deferred):
-- contract_id: `{bundle_id}`
-- lane_id: `{lane_id}`
-Follow the fetched brief exactly — it defines your answer contract, and your
-final message is only what its Output section specifies.
-If the fetch fails, reply with exactly `{UNDISPATCHED_SENTINEL}` and nothing else."""
+## Order of work
+1. **Does this question need this lane at all?** If not, answer the empty
+   state{no_op_hint} and stop. Do not investigate to prove it.
+2. **Read what this lane already found here** — `ouroboros_fetch_artifact` with
+   each pair below (load the tool via your runtime's tool discovery if
+   deferred). If that answers the question, stop there.
+{reuse}
+{_investigation_step(roster, schema_json)}
+
+{answer_section}Describe, never prescribe: what you find is an input to the PM's decision, not
+the decision. If two sources disagree, carry both — the disagreement is what the
+PM most needs.{plain_rule}
+
+Full brief (rules, worked examples, field descriptions): `ouroboros_fetch_artifact`
+with contract_id `{bundle_id}`, lane_id `{lane_id}`."""
 
 
 async def externalize_advisory_payloads(meta: dict[str, Any], findings_store: Any) -> None:
@@ -287,6 +423,13 @@ async def externalize_advisory_payloads(meta: dict[str, Any], findings_store: An
     surgery. After this, the response carries the questions and fetchable
     references; the briefs sit in the same store the children already fetch
     findings from.
+
+    What travels is decided by what a child cannot work without: the answer
+    schema (stripped of its descriptions), the roster it may cite, and the
+    findings it may reuse all ride the stub, and the fetch carries only what
+    explains them. The first shape of this put everything behind the fetch, and
+    a lane that could not reach the store had no schema, no roster and no rules
+    — one call away from having nothing to do.
 
     Fail-open on every edge: no store, no fanout id, or a publish that fails
     leaves the full prompts inline — today's behavior, oversized but whole.
@@ -330,11 +473,26 @@ async def externalize_advisory_payloads(meta: dict[str, Any], findings_store: An
             error=str(exc),
         )
         return
+    request = meta.get("question_advisory_request")
+    request = request if isinstance(request, dict) else {}
+    contracts = {
+        str(lane.get("lane_id")): lane.get("answer_contract")
+        for lane in (request.get("lanes") or [])
+        if isinstance(lane, dict) and lane.get("lane_id")
+    }
+    by_lane = request.get("recent_findings")
+    by_lane = by_lane if isinstance(by_lane, dict) else {}
     for payload in payloads:
         if isinstance(payload, dict) and payload.get("prompt"):
-            payload["prompt"] = _payload_stub(payload, bundle_id)
-    request = meta.get("question_advisory_request")
-    if isinstance(request, dict):
+            lane_id = str((payload.get("context") or {}).get("lane_id") or "")
+            payload["prompt"] = _payload_stub(
+                payload,
+                bundle_id,
+                contract=contracts.get(lane_id),
+                roster=request.get("repository_roster"),
+                findings=by_lane.get(lane_id),
+            )
+    if request:
         capability = request.get("mcp_tool_capability")
         if isinstance(capability, dict) and capability.get("tool_name"):
             # The only field any wire consumer reads; the rest is fetchable
