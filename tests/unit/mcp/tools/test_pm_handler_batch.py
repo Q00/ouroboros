@@ -143,13 +143,13 @@ async def test_a_batched_turn_issues_every_question_with_its_own_evidence(
 
 @pytest.mark.asyncio
 async def test_briefs_travel_as_references_when_a_store_is_wired(tmp_path: Path) -> None:
-    """RFC #2222: the wire carries questions and references; briefs are fetched.
+    """RFC #2222: the explanation is fetched; what the child works from is not.
 
     A turn's response used to carry every lane's full brief twice plus a copy
     of the capability metadata per envelope, and a batch outgrew what a host
-    accepts inline. With a store wired, each payload prompt becomes a compact
-    stub naming the bundle to fetch; the bundle returns the full brief, lane-
-    scoped, through the same fetch path findings use.
+    accepts inline. The stub keeps what a child cannot work without — its
+    answer schema, where it may look, what it has already found — and leaves
+    behind only the prose that explains them, one lane-scoped fetch away.
     """
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.persistence.artifact_store import ArtifactStore
@@ -186,13 +186,21 @@ async def test_briefs_travel_as_references_when_a_store_is_wired(tmp_path: Path)
         bundle_id = f"advisory-prompts:{envelope['question_advisory_fanout_id']}"
         for payload in envelope["question_advisory_subagents"]:
             stub = payload["prompt"]
-            # The stub names the fetch, and carries no brief body.
+            lane_id = payload["context"]["lane_id"]
+            # The stub names the fetch, and carries no brief prose.
             assert "ouroboros_fetch_artifact" in stub
             assert bundle_id in stub
             assert "Answer Contract" not in stub
-            assert "UNDISPATCHED" in stub
+            # A failed fetch no longer ends the lane, so nothing tells it to say so.
+            assert "UNDISPATCHED" not in stub
+            # What it cannot work without rides the stub: the answer shape, the
+            # lane's own empty state, and where it may look.
+            assert f'"lane_id":{{"const":"{lane_id}"}}' in stub
+            assert "answer the empty" in stub
+            # Step 3 follows the lane's own answer shape, not its name.
+            assert ("data tools" in stub) == (lane_id == "data_context")
             # The full brief is one scoped fetch away.
-            fetched = store.fetch_lane(bundle_id, payload["context"]["lane_id"]).body
+            fetched = store.fetch_lane(bundle_id, lane_id).body
             assert "Answer Contract" in fetched
             assert envelope["question"] in fetched
         # The request no longer ships the capability metadata or lane catalog.
@@ -441,3 +449,119 @@ async def test_plugin_mode_never_enters_the_batch_contract(tmp_path: Path) -> No
     engine.plan_next_turns.assert_not_called()
     assert "pending_batch" not in _load_meta(state.interview_id, tmp_path)
     assert "question_batch" not in (result.value.meta or {})
+
+
+@pytest.mark.asyncio
+async def test_the_batch_transport_means_the_same_thing_in_plugin_mode(
+    tmp_path: Path,
+) -> None:
+    """One public answer shape, one meaning, on every runtime.
+
+    The plugin branch records answers on its own path. When `answers` was added
+    to the in-process branch alone, a host that sent it here was answered with
+    success while its decisions were never written — the shape changed meaning
+    with the runtime, which is worse than not accepting it at all.
+
+    Plugin mode still never *plans* a batch (RFC #2222 keeps the producer
+    in-process); this is about what it does with the answers it is handed.
+    """
+    from ouroboros.mcp.tools.authoring_handlers import _plugin_load_state, _plugin_save_state
+
+    state = _answered_state("pm_plugin_answers")
+    assert (await _plugin_save_state(tmp_path, state)).is_ok
+    handler = PMInterviewHandler(
+        data_dir=tmp_path,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answers": [
+                {"question": Q_PRIMARY, "answer": "The review workflow."},
+                {"question": Q_SECOND, "answer": "Retention is 90 days."},
+            ],
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await _plugin_load_state(tmp_path, state.interview_id)).value
+    recorded = [(r.question, r.user_response) for r in reloaded.rounds[3:]]
+    assert recorded == [
+        (Q_PRIMARY, "The review workflow."),
+        (Q_SECOND, "Retention is 90 days."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) -> None:
+    """The stub is compact, not partial (RFC #2222 decision 6).
+
+    Three things decide whether a lane can do its job at all: what shape its
+    answer must take, what it has already found here, and where it may look.
+    All three ride the stub, so a child that cannot reach the store still
+    works. Only the prose explaining them stays behind the fetch.
+
+    The two lanes are told different things about step 3, and the difference is
+    read from each lane's own answer shape: the lane that cites ``repo_id`` is
+    bounded by the roster, the one that does not measures what the host
+    exposes.
+    """
+    from ouroboros.mcp.tools.pm_batch import externalize_advisory_payloads
+    from ouroboros.orchestrator.capabilities.pm_schemas import (
+        _interview_data_evidence_answer_contract,
+        pm_code_context_answer_contract,
+        pm_repository_roster,
+    )
+    from ouroboros.persistence.artifact_store import ArtifactStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ArtifactStore.for_project(workspace)
+    store.initialize()
+    roster = pm_repository_roster([str(tmp_path / "podo-backend")])
+    meta = {
+        "question_advisory_fanout_id": "fanout_stub",
+        "question_advisory_subagents": [
+            {
+                "prompt": "FULL BRIEF",
+                "context": {"lane_id": lane, "question": Q_PRIMARY, "session_id": "s"},
+            }
+            for lane in ("code_context", "data_context")
+        ],
+        "question_advisory_request": {
+            "lanes": [
+                {"lane_id": "code_context", "answer_contract": pm_code_context_answer_contract()},
+                {
+                    "lane_id": "data_context",
+                    "answer_contract": _interview_data_evidence_answer_contract(),
+                },
+            ],
+            "repository_roster": roster,
+            "recent_findings": {
+                "code_context": [{"contract_id": "fanout_earlier", "lane_id": "code_context"}]
+            },
+        },
+    }
+
+    await externalize_advisory_payloads(meta, store)
+
+    code, data = (p["prompt"] for p in meta["question_advisory_subagents"])
+    # 1 — the empty state, named from each lane's own contract.
+    assert "not_a_policy_question" in code
+    assert "not_a_measurement" in data
+    # 2 — the findings this lane may reuse, ids only.
+    assert "fanout_earlier" in code
+    assert "none published yet" in data
+    # 3 — where each may look.
+    assert roster[0]["repo_id"] in code and str(tmp_path / "podo-backend") in code
+    assert "data tools" in data and roster[0]["repo_id"] not in data
+    # The answer shape, and the plain statement only where the shape has one.
+    assert '"additionalProperties":false' in code and '"additionalProperties":false' in data
+    assert "plain_statement" in code and "plain_statement" not in data
+    # Compact: the full brief is several times this, and stays fetchable.
+    assert len(code) < 6000
+    stored = store.fetch_lane("advisory-prompts:fanout_stub", "code_context").body
+    assert stored == "FULL BRIEF"

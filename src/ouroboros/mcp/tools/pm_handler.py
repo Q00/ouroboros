@@ -562,6 +562,7 @@ class PMInterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+        answers = arguments.get("answers")
         cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
         last_question = arguments.get("last_question")
@@ -800,34 +801,26 @@ class PMInterviewHandler:
                 # the parent LLM sees the child's response (which contains the
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
-                if answer:
+                pairs, pair_error = turn_answers(answers, answer, last_question)
+                if pair_error:
+                    return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
+                if pairs:
+                    # The same normalization the in-process branch uses, so the
+                    # public answer shape means one thing on every runtime. It
+                    # was not shared once, and `answers` sent here was accepted
+                    # and dropped: the call reported success and the decisions
+                    # were never written.
+                    #
                     # Every answer names its question, on every runtime: a turn
                     # persists nothing when it asks (RFC #2222 revision 4), so
                     # there is no stored question to prefer over the echo.
                     # ``record_answer`` appends the pair and settles provenance
-                    # where the answer arrives rather than at construction.
-                    if last_question:
-                        question_text = last_question
-                    else:
-                        # The same refusal the in-process path gives, because a
-                        # question this server never asked is worse here: the
-                        # placeholder that stood here was written into the
-                        # durable transcript, and later questions and extraction
-                        # read it back as something the user was asked.
-                        return Result.err(
-                            MCPToolError(
-                                "Cannot record answer - the previous round is already "
-                                "answered and no follow-up question was provided. Pass "
-                                "the question this answer belongs to as 'last_question' "
-                                "alongside 'answer'.",
-                                tool_name="ouroboros_pm_interview",
-                            )
-                        )
-                    # One call for every answer, whatever its provenance:
-                    # ``record_answer`` classifies any leading marker itself,
-                    # so the two runtimes agree by default rather than by a
-                    # second rule someone has to keep in step.
-                    state.record_answer(question_text, answer)
+                    # where the answer arrives rather than at construction — one
+                    # call for every answer, whatever its provenance, so the two
+                    # runtimes agree by default rather than by a second rule
+                    # someone has to keep in step.
+                    for question_text, answer_text in pairs:
+                        state.record_answer(question_text, answer_text)
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
@@ -913,7 +906,7 @@ class PMInterviewHandler:
                         answer,
                         cwd,
                         last_question=last_question,
-                        answers=arguments.get("answers"),
+                        answers=answers,
                     )
 
             return Result.err(
