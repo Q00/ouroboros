@@ -380,15 +380,16 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
     cites_repos = bool(schema_json) and '"repo_id"' in (schema_json or "")
     entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
     if not cites_repos:
-        return """3. **Not covered there?** Find and call the data tools this host exposes. An
-   empty tool search is where you start, not where you stop; a store counts as
-   unreachable only after a call to it failed."""
+        return """3. **Only if 2 turned up nothing that bears on this question**, find and call
+   the data tools this host exposes. An empty tool search is where you start,
+   not where you stop; a store counts as unreachable only after a call failed."""
     if not entries:
         return """3. **No repository was given to you.** That is the whole answer — report the
    empty state and say so. Reading whatever is at hand would produce evidence
    nothing can check."""
     listing = "\n".join(f"   - `{e['repo_id']}` — {e.get('path')}" for e in entries)
-    return f"""3. **Not covered there?** Read these repositories:
+    return f"""3. **Only if 2 turned up nothing that bears on this question**, read these
+   repositories:
 {listing}
    Look wherever you need to; cite only these. Follow what the question
    plainly touches — report what bears on it, not everything near it."""
@@ -422,7 +423,8 @@ def _payload_stub(
         reuse = f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
    with `lane_id: {lane_id}` and no `contract_id` lists them, newest first
    (load the tool via tool discovery if deferred); pass back a `contract_id`
-   from that list to read one. Stop there if it already covers this question."""
+   from that list to read one. This lane found it — carry it as it stands
+   rather than establishing it again."""
     else:
         reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
    reuse. Go to 3."""
