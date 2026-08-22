@@ -10,9 +10,9 @@ parallel_executor. The H1 verifier loop (next PR in the stack) consumes
 the ValidationResult to decide between accept / retry / escalate.
 
 The evaluator for `rejected_if` is intentionally narrow. It supports only
-`<field> == <literal>` where literal is parsed first as JSON (so YAML/JSON
-authors can write `null`, `true`, `false`, numbers, strings, lists) and
-then as a Python literal as a fallback (so legacy `None`/`True`/`False`
+``<field> == <literal>`` where literal is parsed first as JSON (so YAML/JSON
+authors can write ``null``, ``true``, ``false``, numbers, strings, lists) and
+then as a Python literal as a fallback (so legacy ``None``/``True``/``False``
 keep working). Any other expression shape raises ProfileEvidenceConfigError
 so that profile authors get an immediate, loud failure instead of silent
 acceptance.
@@ -188,6 +188,47 @@ def _find_body_start(text: str) -> int:
     return 0
 
 
+def _iter_json_object_starts(text: str) -> Iterator[int]:
+    """Yield the offset of every ``{`` in *text*, in order of appearance."""
+    pos = text.find("{")
+    while pos != -1:
+        yield pos
+        pos = text.find("{", pos + 1)
+
+
+def _recover_json_object(text: str, primary: int, primary_exc: json.JSONDecodeError) -> Any:
+    """Fallback for outputs whose strict parse failed: scan every ``{``.
+
+    Tries each ``{`` in *text* (skipping the already-failed *primary*
+    offset) and returns the first position that decodes as a JSON value.
+    A decode that starts at ``{`` always yields an object, so the caller's
+    dict check cannot reject a recovered value.
+
+    Raises EvidenceError when no candidate decodes, distinguishing
+    "no JSON object present at all" from "JSON present but malformed".
+    """
+    last_exc = primary_exc
+    for start in _iter_json_object_starts(text):
+        if start == primary:
+            continue
+        try:
+            parsed, _ = _DECODER.raw_decode(text[start:])
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            continue
+        return parsed
+
+    if text.find("{") == -1:
+        msg = "Leaf output contains no JSON object and no fenced evidence block."
+        raise EvidenceError(msg)
+    msg = (
+        f"Evidence is not valid JSON: {last_exc.msg} (line {last_exc.lineno}, "
+        f"col {last_exc.colno}). Tried the fence-guided parse from offset "
+        f"{primary} and every '{{' candidate in the output."
+    )
+    raise EvidenceError(msg) from last_exc
+
+
 def extract_evidence(text: str) -> EvidenceRecord:
     """Pull a JSON evidence record out of a leaf executor's raw output.
 
@@ -197,6 +238,15 @@ def extract_evidence(text: str) -> EvidenceRecord:
     ends. That keeps `}` and ``` inside string values from truncating
     valid payloads.
 
+    **Resilience**: If the strict fence-based or bare-JSON-from-start
+    parse fails, ``_recover_json_object`` scans every ``{`` in the output
+    and adopts the first one that decodes. This handles cases where
+    smaller models (e.g. adaptive tier) emit prose markers like
+    ``[AC_COMPLETE: 6]`` before the evidence JSON. When the strict parse
+    *succeeds*, its result is authoritative: a non-object there is an
+    error, never a cue to keep scanning (so ``[{...}]`` cannot leak its
+    inner object out as evidence).
+
     Raises EvidenceError on missing / malformed payloads so the harness
     can surface a clear failure instead of silently accepting empty
     results.
@@ -205,14 +255,11 @@ def extract_evidence(text: str) -> EvidenceRecord:
         msg = "Leaf output is empty; no evidence record to validate."
         raise EvidenceError(msg)
 
-    start = _find_body_start(text)
-    body = text[start:]
-
+    primary = _find_body_start(text)
     try:
-        parsed, _ = _DECODER.raw_decode(body)
+        parsed, _ = _DECODER.raw_decode(text[primary:])
     except json.JSONDecodeError as exc:
-        msg = f"Evidence is not valid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})"
-        raise EvidenceError(msg) from exc
+        parsed = _recover_json_object(text, primary, exc)
 
     if not isinstance(parsed, dict):
         msg = f"Evidence must be a JSON object, got {type(parsed).__name__}"
@@ -225,10 +272,10 @@ def _parse_literal(raw: str) -> Any:
     """Safely parse the right-hand side of a `field == literal` expression.
 
     Profiles are YAML-authored and the evidence is JSON, so the natural
-    literal spellings authors will reach for are `null`, `true`, `false`,
+    literal spellings authors will reach for are ``null``, ``true``, ``false``,
     plus numbers / strings / lists. We try JSON first so those work
     out-of-the-box. We fall back to ast.literal_eval so legacy Python
-    spellings (`None`, `True`, `False`) keep working too.
+    spellings (``None``, ``True``, ``False``) keep working too.
     """
     raw = raw.strip()
     try:
@@ -291,7 +338,7 @@ def _parse_blocker(data: dict[str, Any]) -> EvidenceBlocker | None:
 def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
     """Evaluate a single rejected_if expression.
 
-    Grammar: `<field> == <literal>` only. Anything else raises
+    Grammar: ``<field> == <literal>`` only. Anything else raises
     ProfileEvidenceConfigError so profile authors notice immediately instead
     of silently passing.
     """
