@@ -40,6 +40,7 @@ def _extract_python_resolver(contents: str) -> str:
     return fenced.removeprefix("```bash\n").removesuffix("\n```")
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     shutil.which("uv") is None,
     reason="uv not on PATH — wheel build cannot run in this environment.",
@@ -305,6 +306,7 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     shutil.which("uv") is None,
     reason="uv not on PATH — wheel build cannot run in this environment.",

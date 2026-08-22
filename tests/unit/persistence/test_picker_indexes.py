@@ -1358,6 +1358,7 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
         conn.close()
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize(
     ("event_type", "max_time_ratio", "max_size_ratio"),
     [
