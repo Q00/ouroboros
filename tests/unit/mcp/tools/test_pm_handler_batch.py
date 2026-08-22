@@ -564,7 +564,8 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # evidence to adopt, and nothing in the block a copy could be made from.
     assert "`examined`: one entry per repository" in code
     assert "`data_needed: true`" in data
-    assert "rejected with the answer" in code and "rejected with the answer" in data
+    assert "`path` is relative to the repository" in code
+    assert "never a row, a name, or an identifier" in data
     assert "```json" not in code.split("## Answer")[1]
     assert "plain_statement" in code and "plain_statement" not in data
     # Compact: the full brief is several times this, and stays fetchable.
