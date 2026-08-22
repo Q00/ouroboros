@@ -1304,3 +1304,61 @@ class TestSensitiveDataMasking:
         data = json.loads(captured.err.strip())
         assert data["config"]["provider"]["api_key"] == "<REDACTED>"
         assert data["config"]["name"] == "test"
+
+    def test_secrets_in_list_masked_live(self, capsys: Any) -> None:
+        """Secrets nested inside lists are masked in live PROD JSON logging."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info(
+            "config.loaded",
+            providers=[{"api_key": "sk-live-abc123"}, {"api_key": "sk-live-def456"}],
+        )
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        # The full keys should not appear verbatim
+        assert "sk-live-abc123" not in output
+        assert "sk-live-def456" not in output
+        data = json.loads(output)
+        # The list structure should be preserved with keys masked
+        assert isinstance(data["providers"], list)
+        assert len(data["providers"]) == 2
+        assert data["providers"][0]["api_key"] == "<REDACTED>"
+        assert data["providers"][1]["api_key"] == "<REDACTED>"
+
+    def test_secrets_in_tuple_masked_live(self, capsys: Any) -> None:
+        """Secrets nested inside tuples are masked in live PROD JSON logging."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info(
+            "auth.config",
+            credentials=("sk-live-secret1", "sk-live-secret2"),
+        )
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        assert "sk-live-secret1" not in output
+        assert "sk-live-secret2" not in output
+
+    def test_deeply_nested_list_secrets_masked_live(self, capsys: Any) -> None:
+        """Deeply nested secrets in list-of-list structures are masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info(
+            "multi.provider",
+            groups=[
+                [{"token": "ghp_secrettoken123"}],
+                {"nested_list": ["sk-live-deeply-nested"]},
+            ],
+        )
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        assert "ghp_secrettoken123" not in output
+        assert "sk-live-deeply-nested" not in output
