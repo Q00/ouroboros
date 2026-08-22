@@ -295,34 +295,24 @@ def _lean_schema(contract: Any) -> str | None:
 #: shape before it. ``tests/unit/mcp/tools/test_pm_handler_batch.py`` checks
 #: that every field a contract requires is named here.
 _ANSWER_SPECS: dict[str, str] = {
-    "pm_code_context_answer.v2": """- `question_identity` and `lane_id` exactly as this task gives them.
-- `examined`: one entry per repository you opened — `repo_id` from 3 above and
-  `policy_claims`, each of them `{path, policy_claim, plain_statement}`. A
-  repository you read and found nothing in is an entry with no claims; one you
-  never opened has no entry at all.
-- Nothing examined: `examined: []` with `nothing_examined_reason` —
-  not_a_policy_question, no_repository_in_roster, roster_repository_not_readable.
-- `path` is relative to the repository, never absolute, never through `..`.
-- `plain_statement` says that claim once in the question's own language, with
-  no paths or identifiers in it — it is the part the PM reads.
-- At most 20 claims per repository; `policy_claim` ≤ 600 characters,
-  `plain_statement` ≤ 300. Any field not named here is rejected with the answer.""",
-    "data_evidence_answer.v1": """- `question_identity` and `lane_id` exactly as this task gives them.
-- Measured something: `data_needed: true` and `read_requests` (at most 5), each
-  with `operation: "read"`, `tool_name`, `metric`, `aggregation`,
-  `informs_decision`, and `values` carrying the number you actually read back.
-  Optional per request: `filters` of `{field, comparator, value}`, `time_window`,
-  `group_by`.
-- Nothing to measure: `data_needed: false` with `no_evidence_reason` —
-  not_a_measurement, answer_would_not_be_an_aggregate,
-  question_too_ambiguous_to_measure, no_data_store_described,
-  store_described_but_not_callable.
-- `aggregation` is one of count, distinct_count, sum, average, median, p90, p95,
-  p99, min, max, rate; `comparator` one of eq, neq, gt, gte, lt, lte.
-- Without `group_by` there is exactly one value; with it, up to 20 `{group,
-  value}` entries. A count or distinct_count value is a non-negative integer.
-- No rows, names or identifiers — an aggregate is what this lane may carry. Any
-  field not named here is rejected with the answer.""",
+    "pm_code_context_answer.v2": """- `question_identity` and `lane_id` exactly as given above.
+- `examined`: one entry per repository you opened — its `repo_id` from 3 and
+  `policy_claims` of `{path, policy_claim, plain_statement}`. Read and found
+  nothing: an entry with no claims. Never opened: no entry.
+- Opened nothing at all: `examined: []` with `nothing_examined_reason`.
+- `path` is relative to the repository.
+- `plain_statement`: that claim once, in the question's language, no paths or
+  identifiers.""",
+    "data_evidence_answer.v1": """- `question_identity` and `lane_id` exactly as given above.
+- Measured: `data_needed: true` and `read_requests`, each with
+  `operation: "read"`, `tool_name`, `metric`, `aggregation`,
+  `informs_decision`, and `values` — the numbers you read back. Optional:
+  `filters` of `{field, comparator, value}`, `time_window`, `group_by`.
+- Nothing to measure: `data_needed: false` with `no_evidence_reason`.
+- `aggregation`: count, distinct_count, sum, average, median, p90, p95, p99,
+  min, max, rate. `comparator`: eq, neq, gt, gte, lt, lte.
+- `values` is one entry, or one per group when you grouped.
+- You carry aggregates — never a row, a name, or an identifier.""",
 }
 
 
@@ -390,10 +380,9 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
     cites_repos = bool(schema_json) and '"repo_id"' in (schema_json or "")
     entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
     if not cites_repos:
-        return """3. **Still not enough?** Find the data tools this host exposes and call them —
-   registering one is the willingness to have it called. An empty tool search
-   is where you start looking, never where you stop, and a store is only
-   unreachable once a call to it has actually failed."""
+        return """3. **Still not enough?** Find and call the data tools this host exposes. An
+   empty tool search is where you start, not where you stop; a store counts as
+   unreachable only after a call to it failed."""
     if not entries:
         return """3. **No repository was given to you.** That is the whole answer — report the
    empty state and say so. Reading whatever is at hand would produce evidence
@@ -401,8 +390,7 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
     listing = "\n".join(f"   - `{e['repo_id']}` — {e.get('path')}" for e in entries)
     return f"""3. **Still not enough?** Read these repositories:
 {listing}
-   Where you look is open; what you cite is not. Every `repo_id` you report must
-   be one of the above — anything else is rejected at submission."""
+   Look wherever you need to; cite only these."""
 
 
 def _payload_stub(
@@ -430,12 +418,10 @@ def _payload_stub(
     # paid for it anyway. The tool answers the same question on request, and
     # the window and the cap stay its own.
     if offered:
-        reuse = f"""2. **Read what this lane already found here.** Call
-   `ouroboros_fetch_artifact` with `lane_id: {lane_id}` and no `contract_id`
-   (load the tool via your runtime's tool discovery if deferred): it lists
-   what this lane published here in the last day, newest first. Read the ones
-   you want back with the same tool, passing a `contract_id` from that list
-   and the same `lane_id`. If what you read answers the question, stop there."""
+        reuse = f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
+   with `lane_id: {lane_id}` and no `contract_id` lists them, newest first
+   (load the tool via tool discovery if deferred); pass back a `contract_id`
+   from that list to read one. Stop there if it answers the question."""
     else:
         reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
    reuse. Go to 3."""
@@ -443,8 +429,8 @@ def _payload_stub(
     no_op_hint = f" ({no_op})" if no_op else ""
     answer_section = _answer_section(contract, schema_json)
     return f"""## Task
-You are an Ouroboros PM interview advisory subagent — lane {lane_id}. You gather
-evidence the PM reads before answering; you never answer for them.
+You are an Ouroboros PM interview advisory subagent — lane {lane_id}. You
+gather evidence the PM reads before deciding; you never decide for them.
 
 ## PM Question
 {context.get("question")}
@@ -454,14 +440,13 @@ evidence the PM reads before answering; you never answer for them.
 - question_identity: {context.get("question_identity")}
 
 ## Order of work
-1. **Does this question need this lane at all?** If not, answer the empty
-   state{no_op_hint} and stop. Do not investigate to prove it.
+1. **Does this question need this lane?** If not, answer the empty
+   state{no_op_hint} and stop — do not investigate to prove it.
 {reuse}
 {_investigation_step(roster, schema_json)}
 
-{answer_section}Describe, never prescribe: what you find is an input to the PM's decision, not
-the decision. If two sources disagree, carry both — the disagreement is what the
-PM most needs.
+{answer_section}Describe, never prescribe. If two sources disagree, carry both — that
+disagreement is the finding.
 
 Full brief (rules and field descriptions): `ouroboros_fetch_artifact`
 with contract_id `{bundle_id}`, lane_id `{lane_id}`."""
