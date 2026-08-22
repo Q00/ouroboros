@@ -175,8 +175,11 @@ def _save_pm_meta(
             "decide_later_items": combined_decide_later,
             "codebase_context": engine.codebase_context,
             "pending_reframe": pending_reframe,
-            # A batched turn holds several reframes; the single entry above
-            # stays for older readers (RFC #2222).
+            # The reframe routing of the turn on the wire, whole — a batch
+            # holds several, and the single entry above stays for older
+            # readers. Planning replaces this map rather than adding to it, so
+            # an abandoned turn's routing cannot reach a later question that
+            # merely reads the same (RFC #2222 revision 4).
             "pending_reframes": dict(getattr(engine, "_reframe_map", {})),
             "cwd": cwd,
             "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),

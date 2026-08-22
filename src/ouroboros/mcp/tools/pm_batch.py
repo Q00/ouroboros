@@ -220,7 +220,10 @@ def batch_turn_meta_and_text(
     response_meta = {
         "session_id": session_id,
         "input_type": "freeText",
-        "response_param": "answer",
+        # The batch relay parameter, named as itself: a generic host reading
+        # this to build its reply would otherwise be told to send one answer to
+        # a turn that asked several.
+        "response_param": "answers",
         "question": batch_entries[0]["question"],
         "question_batch": [dict(e) for e in batch_entries],
         "question_advisories": advisories,
@@ -239,8 +242,9 @@ def batch_turn_meta_and_text(
         f"This turn asks {len(batch_entries)} independent questions. Put every "
         "answer to the user, then send them back together in one call: "
         f"'answers': [{{question, answer}}, ...] with session_id=\"{session_id}\". "
-        "The turn is recorded as a whole; a call that arrives without them "
-        "plans a new turn instead.",
+        "One call records the turn. The server does not hold the questions "
+        "between calls, so whatever you leave out is abandoned — the next call "
+        "plans a new turn, and a question that still matters is asked again.",
         "",
         *_numbered_questions(batch_entries),
     ]

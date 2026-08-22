@@ -114,9 +114,11 @@ batch mechanics:
   `ouroboros_submit_fanout_results` call per envelope.
 - **Relay the turn's answers together** in one call:
   `answers: [{question, answer}, ...]`, one entry per question the turn asked,
-  each naming its own exact question text. A turn is recorded whole — collect
-  every answer first, and never auto-answer, auto-defer, or decide-later one on
-  the user's behalf to complete the set.
+  each naming its own exact question text. One call records the turn, so
+  collect every answer first — and never auto-answer, auto-defer, or
+  decide-later one on the user's behalf to complete the set. The server does
+  not check that you sent them all: whatever you leave out is **abandoned**,
+  not remembered.
 - The server keeps nothing between calls. A call that arrives without the
   turn's answers plans a **new** turn from the transcript rather than restoring
   the old one, so a turn you abandon is a turn the user will be asked again.
