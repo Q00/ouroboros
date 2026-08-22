@@ -122,12 +122,18 @@ def _has_visible_text(value: str) -> bool:
     )
 
 
-def _bounded_text(name: str, value: str, *, max_bytes: int) -> str:
+def _visible_text(name: str, value: str) -> str:
+    """Return stripped text that is guaranteed to carry visible characters."""
     if not isinstance(value, str):
         raise TypeError(f"SessionSignal {name} must be a string")
     normalized = value.strip()
     if not normalized or not _has_visible_text(normalized):
         raise ValueError(f"SessionSignal {name} must contain visible text")
+    return normalized
+
+
+def _bounded_text(name: str, value: str, *, max_bytes: int) -> str:
+    normalized = _visible_text(name, value)
     if len(normalized.encode("utf-8")) > max_bytes:
         raise ValueError(f"SessionSignal {name} exceeds {max_bytes} UTF-8 bytes")
     return normalized
@@ -146,8 +152,16 @@ def session_signal_text_contains_secret(value: str) -> bool:
 
 
 def bounded_session_signal_reply(value: str) -> str:
-    """Return one safe, bounded AC-to-main reply without persisting transcripts."""
-    normalized = _bounded_text("reply", value, max_bytes=max(MAX_REPLY_BYTES, len(value.encode())))
+    """Return one safe, bounded AC-to-main reply without persisting transcripts.
+
+    This is a truncator, not a length validator.  The input is provider
+    transcript text whose size the caller does not control, so anything longer
+    than ``MAX_REPLY_BYTES`` is truncated on a UTF-8 boundary and suffixed with
+    an ellipsis instead of being rejected.  Only two inputs are refused:
+    non-string values and text without visible characters.  Secret-shaped text
+    is replaced with a fixed notice rather than truncated.
+    """
+    normalized = _visible_text("reply", value)
     if session_signal_text_contains_secret(normalized):
         return "[Reply omitted because it contained secret-shaped content.]"
     encoded = normalized.encode("utf-8")
@@ -267,8 +281,20 @@ class SessionSignal:
             raise ValueError("SessionSignal expiry reference must be timezone-aware")
         return reference.astimezone(UTC) >= self.expires_at
 
-    def to_event_data(self, *, include_message: bool = False) -> dict[str, object]:
-        """Serialize the bounded transport-neutral signal metadata."""
+    def to_event_data(self, *, include_message: bool = True) -> dict[str, object]:
+        """Serialize the bounded transport-neutral signal metadata.
+
+        The default payload is reconstructible: it contains ``message``, so
+        ``SessionSignal.from_event_data(signal.to_event_data())`` returns an
+        equal signal.  The ``requested`` lifecycle event uses this payload
+        because replay after a process restart re-renders the intent body into
+        the delivery prompt.
+
+        Pass ``include_message=False`` for the digest-only telemetry payload
+        used by every later lifecycle event, where ``message_digest`` alone
+        identifies the intent and the body must not be repeated.  That payload
+        is deliberately not reconstructible.
+        """
         data: dict[str, object] = {
             "schema_version": self.schema_version,
             "signal_id": self.signal_id,
@@ -299,7 +325,13 @@ class SessionSignal:
 
     @classmethod
     def from_event_data(cls, data: dict[str, object]) -> SessionSignal:
-        """Reconstruct one validated signal from its durable requested event."""
+        """Reconstruct one validated signal from its durable requested event.
+
+        Only the message-bearing payload produced by ``to_event_data()`` (as
+        persisted by the ``requested`` event) can be reconstructed.  A
+        digest-only lifecycle payload is rejected, because the intent body
+        cannot be recovered from ``message_digest``.
+        """
 
         def required_text(name: str) -> str:
             value = data.get(name)
