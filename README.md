@@ -427,7 +427,7 @@ See the [CLI reference](./docs/cli-reference.md) for full details.
 
 ## The Nine Minds
 
-Nine agents, each a different mode of thinking. Loaded on-demand, never preloaded:
+Nine highlighted agents below, with 12 more specialized agents available (21 total). All loaded on-demand, never preloaded:
 
 | Agent                    | Role                               | Core Question                                       |
 | :----------------------- | :--------------------------------- | :-------------------------------------------------- |
@@ -452,13 +452,13 @@ Nine agents, each a different mode of thinking. Loaded on-demand, never preloade
 src/ouroboros/
 +-- bigbang/        Interview, ambiguity scoring, brownfield explorer
 +-- routing/        PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
-+-- execution/      Double Diamond, hierarchical AC decomposition
++-- execution/      (deprecated — logic moved to orchestrator/ and mcp/tools/)
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect cycle, convergence detection
 +-- resilience/     4-pattern stagnation detection, 5 lateral personas
 +-- observability/  3-component drift measurement, auto-retrospective
 +-- persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
-+-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi)
++-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, GJC, Goose, Antigravity, Grok, Zcode)
 +-- core/           Types, errors, seed, ontology, security
 +-- providers/      LiteLLM adapter (100+ models)
 +-- mcp/            MCP client/server integration

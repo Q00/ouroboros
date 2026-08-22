@@ -53,6 +53,20 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop and other MCP clients |
+| `plugin` | Manage UserLevel plugins (install, list, remove) |
+| `pm` | Product Management interview for requirements gathering |
+| `doctor` | Diagnose configuration and runtime health |
+| `detect` | Detect available runtime backends |
+| `artifacts` | Manage and inspect execution artifacts |
+| `harness` | Manage runtime harness configurations |
+| `codex` | Codex-specific setup and configuration |
+| `seed` | Generate or inspect seed specifications |
+| `workflow-ir` | Inspect workflow intermediate representation |
+| `zcode` | Convenience wrapper for Zcode (bundles `start`, `qa`, `run` with Zcode pre-selected; for global config use `setup --runtime zcode`) |
+
+> **Shorthand entry points:** `ooo` and `ouroboros` both launch the main CLI.
+> `ozo` is a standalone shorthand that launches only the Zcode convenience commands
+> (equivalent to `ouroboros zcode ...`).
 
 ---
 
