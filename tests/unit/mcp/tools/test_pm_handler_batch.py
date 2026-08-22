@@ -564,6 +564,10 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # The answer shape, shown as a worked answer rather than as its schema.
     assert '"lane_id": "code_context"' in code and '"lane_id": "data_context"' in data
     assert "Anything the shape does not name is rejected" in code
+    # The example is not copyable into a valid answer: its identifiers are none
+    # of the ones this lane was actually given, and it says so.
+    assert "Every value above is invented" in code and "Every value above is invented" in data
+    assert roster[0]["repo_id"] not in code.split("## Answer")[1]
     assert "plain_statement" in code and "plain_statement" not in data
     # Compact: the full brief is several times this, and stays fetchable.
     assert len(code) < 6000
@@ -604,3 +608,13 @@ def test_every_worked_example_satisfies_the_contract_it_stands_for() -> None:
             errors = sorted(validator.iter_errors(candidate), key=str)
             assert not errors, f"{contract_id} {name}: {[e.message for e in errors]}"
         assert notes.strip()
+        # Fictional by construction. A child that copies the example instead of
+        # reading anything must be refused, not believed: an invented claim
+        # wearing a real repo_id validates, and validating is what puts it in
+        # front of the PM. `example-repo-*` is in no roster, so the copy is
+        # rejected at submission — wrong-and-refused rather than
+        # invented-and-accepted.
+        for entry in answer.get("examined", []):
+            assert entry["repo_id"].startswith("example-")
+        assert answer["question_identity"] == "pm-question:0000000000000000"
+        assert empty["question_identity"] == "pm-question:0000000000000000"

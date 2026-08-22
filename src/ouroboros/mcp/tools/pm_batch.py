@@ -292,16 +292,25 @@ def _lean_schema(contract: Any) -> str | None:
 #: not appear — is stated beside it, and only what a wrong answer would be
 #: rejected for.
 #:
+#: **Every value in them is deliberately fictional**, and the identifiers are
+#: chosen so that copying one wholesale fails: ``example-repo-a1b2c3d4`` is in
+#: no roster, so an answer carrying it is rejected at submission. An example
+#: whose values looked real would be the one thing this mechanism exists to
+#: prevent — a fabricated claim, correctly shaped, reaching the PM as evidence.
+#: Wrong-and-refused and invented-and-accepted are not the same failure, and
+#: the example is written to fail the first way.
+#:
 #: ``tests/unit/mcp/tools/test_pm_handler_batch.py`` validates every example
-#: against the contract it is keyed to, so an example cannot drift from it.
+#: against the contract it is keyed to, so an example cannot drift from it, and
+#: checks that its identifiers are none of the ones a lane is actually given.
 _ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
     "pm_code_context_answer.v2": (
         {
-            "question_identity": "pm-question:a48ab92c1bae912e",
+            "question_identity": "pm-question:0000000000000000",
             "lane_id": "code_context",
             "examined": [
                 {
-                    "repo_id": "podo-backend-2f0e5f7e",
+                    "repo_id": "example-repo-a1b2c3d4",
                     "policy_claims": [
                         {
                             "path": "src/main/java/com/example/booking/ReminderScheduler.java",
@@ -316,11 +325,11 @@ _ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
                         }
                     ],
                 },
-                {"repo_id": "podo-app-cf98ca21", "policy_claims": []},
+                {"repo_id": "example-app-e5f6a7b8", "policy_claims": []},
             ],
         },
         {
-            "question_identity": "pm-question:a48ab92c1bae912e",
+            "question_identity": "pm-question:0000000000000000",
             "lane_id": "code_context",
             "examined": [],
             "nothing_examined_reason": "not_a_policy_question",
@@ -337,13 +346,13 @@ _ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
     ),
     "data_evidence_answer.v1": (
         {
-            "question_identity": "pm-question:a48ab92c1bae912e",
+            "question_identity": "pm-question:0000000000000000",
             "lane_id": "data_context",
             "data_needed": True,
             "read_requests": [
                 {
                     "operation": "read",
-                    "tool_name": "podo_mysql_query",
+                    "tool_name": "example_metrics_tool",
                     "metric": "trial bookings that reached the lesson",
                     "aggregation": "count",
                     "filters": [{"field": "status", "comparator": "eq", "value": "COMPLETED"}],
@@ -354,7 +363,7 @@ _ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
             ],
         },
         {
-            "question_identity": "pm-question:a48ab92c1bae912e",
+            "question_identity": "pm-question:0000000000000000",
             "lane_id": "data_context",
             "data_needed": False,
             "no_evidence_reason": "not_a_measurement",
@@ -395,6 +404,10 @@ Nothing to report is its own answer, not an empty version of the one above:
 ```json
 {json.dumps(empty, ensure_ascii=False, indent=2)}
 ```
+**Every value above is invented.** Take the identity from the Session block,
+the identifiers from 3, and every claim from what you actually read — an
+answer shaped like this one but not read from anywhere is the one thing that
+must never reach the PM.
 {notes}
 
 """
