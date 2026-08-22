@@ -1705,16 +1705,21 @@ class SeedGenerator:
 
         distillation = build_requirement_distillation(state)
         preflight = apply_requirement_distillation({}, distillation)
-        if preflight.promotion.blockers:
+        reference_aware = is_reference_aware_distillation(distillation)
+        readiness = seed_readiness_details(
+            preflight.promotion,
+            require_promoted_acceptance_criteria=reference_aware,
+        )
+        if readiness["blockers"]:
             return Result.err(
                 ValidationError(
                     "Interview must be reopened before Seed generation",
                     field="requirement_distillation",
-                    details=seed_readiness_details(preflight.promotion),
+                    details=readiness,
                 )
             )
         state.requirement_distillation = distillation
-        if is_reference_aware_distillation(distillation):
+        if reference_aware:
             return Result.ok(
                 build_promoted_reference_seed(
                     state,

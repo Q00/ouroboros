@@ -142,7 +142,7 @@ def test_seed_subagent_payload_separates_promoted_and_omitted_candidates() -> No
 
 
 @pytest.mark.asyncio
-async def test_plugin_reference_seed_is_built_server_side_without_child_leakage() -> None:
+async def test_plugin_reference_seed_reopens_when_no_acs_are_promoted() -> None:
     cue = ReferenceCue(
         reference_id="linear",
         label="Linear-like",
@@ -186,7 +186,7 @@ async def test_plugin_reference_seed_is_built_server_side_without_child_leakage(
         patch(
             "ouroboros.mcp.tools.authoring_handlers._plugin_save_state",
             AsyncMock(return_value=Result.ok(MagicMock())),
-        ),
+        ) as save_state,
         patch(
             "ouroboros.mcp.tools.authoring_handlers.dispatch_plugin_terminal",
             AsyncMock(),
@@ -194,10 +194,10 @@ async def test_plugin_reference_seed_is_built_server_side_without_child_leakage(
     ):
         result = await handler.handle({"session_id": state.interview_id})
 
-    assert result.is_ok
-    assert "Seed Generated Successfully" in result.value.text_content
-    assert "Keyboard-first command menu" not in result.value.text_content
-    assert result.value.meta["requirement_distillation"]
+    assert result.is_err
+    assert "interview_reopen_required" in str(result.error)
+    assert "no_promoted_acceptance_criteria" in str(result.error)
+    save_state.assert_not_awaited()
     dispatch.assert_not_awaited()
 
 
