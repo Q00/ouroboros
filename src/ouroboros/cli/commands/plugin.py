@@ -1278,6 +1278,33 @@ def _looks_like_url(target: str) -> bool:
     )
 
 
+# `git clone` reaches the network, so it gets a generous ceiling; `git rev-parse`
+# is a local object-store read that either answers immediately or is wedged.
+# Both are bounded because `capture_output=True` hides a credential prompt: an
+# untimed call turns an unreachable host into a silent, permanent hang of
+# `ooo plugin add`.
+_GIT_CLONE_TIMEOUT_SECONDS = 300
+_GIT_REV_PARSE_TIMEOUT_SECONDS = 30
+
+
+def _git_noninteractive_env() -> dict[str, str]:
+    """Environment that makes Git fail instead of prompting for credentials.
+
+    `GIT_TERMINAL_PROMPT=0` is Git's own kill switch for terminal prompts.
+    Pointing `GIT_ASKPASS`/`SSH_ASKPASS` at `true` stops a GUI helper from
+    waiting on input off-screen, and `ssh -oBatchMode=yes` does the same for
+    the SSH transport.  Combined with a `DEVNULL` stdin, a private or moved
+    repository fails fast with a real stderr message instead of blocking on a
+    prompt nobody can see.
+    """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "true"
+    env["SSH_ASKPASS"] = "true"
+    env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
+    return env
+
+
 def _normalize_clone_url(target: str) -> str:
     """Strip the Python-style `git+` prefix that pip/uv accept but Git itself
     does not understand.
@@ -1301,6 +1328,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=_GIT_CLONE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=_git_noninteractive_env(),
     )
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1308,6 +1338,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=_GIT_REV_PARSE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=_git_noninteractive_env(),
     ).stdout.strip()
     return sha
 
@@ -1872,7 +1905,7 @@ def add_command(
             git_sha = plugin_cache.stage_url_cache_refresh(
                 lambda staging: _shallow_clone(target, staging), clone_dest
             )
-        except (subprocess.CalledProcessError, OSError) as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
             print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
             raise typer.Exit(code=1) from exc
         repo_root = clone_dest
@@ -2463,7 +2496,7 @@ def _install_named_from_url(
         git_sha = plugin_cache.stage_url_cache_refresh(
             lambda staging: _shallow_clone(repo_url, staging), clone_dest
         )
-    except (subprocess.CalledProcessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError) as exc:
         print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
         raise typer.Exit(code=1) from exc
 

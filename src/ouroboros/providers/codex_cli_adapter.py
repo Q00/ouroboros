@@ -947,10 +947,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         process: Any,
     ) -> tuple[list[str], list[str], str | None, str]:
         """Fallback for tests or wrappers that only expose communicate()."""
-        if self._timeout is not None:
-            async with asyncio.timeout(self._timeout):
-                stdout_bytes, stderr_bytes = await process.communicate()
-        else:
+        async with asyncio.timeout(self._effective_timeout_seconds()):
             stdout_bytes, stderr_bytes = await process.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -1183,13 +1180,11 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                 last_content = self._update_last_content(last_content, event_content)
 
         stdout_task = asyncio.create_task(_read_stdout())
+        timeout_seconds = self._effective_timeout_seconds()
 
         try:
-            if self._timeout is None:
+            async with asyncio.timeout(timeout_seconds):
                 await process.wait()
-            else:
-                async with asyncio.timeout(self._timeout):
-                    await process.wait()
             await stdout_task
             stderr_lines = await stderr_task
         except ProviderError as exc:
@@ -1244,11 +1239,12 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
 
             return Result.err(
                 ProviderError(
-                    message=f"{self._display_name} request timed out after {self._timeout:.1f}s",
+                    message=f"{self._display_name} request timed out after {timeout_seconds:.1f}s",
                     provider=self._provider_name,
                     details={
                         "timed_out": True,
-                        "timeout_seconds": self._timeout,
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_was_default": self._timeout_is_default_ceiling(),
                         "session_id": session_id,
                         "partial_content": content,
                         "returncode": getattr(process, "returncode", None),
