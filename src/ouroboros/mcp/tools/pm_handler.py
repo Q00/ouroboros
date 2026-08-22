@@ -60,6 +60,7 @@ from ouroboros.mcp.tools.pm_batch import (
     batch_pending_result,
     batch_turn_meta_and_text,
     externalize_advisory_payloads,
+    interview_answer_lock,
     pending_batch_entries,
     record_member_answer,
     resolve_batch_member,
@@ -192,8 +193,8 @@ def _save_pm_meta(
             "decide_later_items": combined_decide_later,
             "codebase_context": engine.codebase_context,
             "pending_reframe": pending_reframe,
-            # A batched turn can hold several pending reframes (RFC #2222);
-            # the single entry above stays for older readers.
+            # A batched turn holds several reframes; the single entry above
+            # stays for older readers (RFC #2222).
             "pending_reframes": dict(getattr(engine, "_reframe_map", {})),
             "cwd": cwd,
             "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),
@@ -390,6 +391,7 @@ class PMInterviewHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     findings_store: Any | None = field(default=None, repr=False)
+    _answer_locks: dict[str, asyncio.Lock] = field(default_factory=dict, repr=False)
 
     async def _attach_advisory(self, meta: dict[str, Any], session_id: str, question: str) -> None:
         """Attach the evidence lanes to one PM turn that shows ``question``.
@@ -817,10 +819,9 @@ class PMInterviewHandler:
                                 tool_name="ouroboros_pm_interview",
                             )
                         )
-                    # One call for every answer, whatever its provenance —
+                    # One call for every answer, whatever its provenance:
                     # ``record_answer`` classifies any leading marker itself,
-                    # so this branch needs no case of its own, which is what
-                    # makes the two runtimes agree by default instead of by a
+                    # so the two runtimes agree by default rather than by a
                     # second rule someone has to keep in step.
                     state.record_answer(question_text, answer)
                     state.mark_updated()
@@ -901,9 +902,10 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                return await self._handle_answer(
-                    engine, session_id, answer, cwd, last_question=last_question
-                )
+                async with interview_answer_lock(self._answer_locks, session_id):
+                    return await self._handle_answer(
+                        engine, session_id, answer, cwd, last_question=last_question
+                    )
 
             return Result.err(
                 MCPToolError(
@@ -1462,8 +1464,8 @@ class PMInterviewHandler:
                         diff=diff,
                     )
                 )
-            # Batch resolved — persist without the key and continue to the
-            # completion check and next-turn generation below.
+            # Batch resolved — persist without the key, then fall through to
+            # completion checking and next-turn generation.
             _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
             batch_answer_recorded = True
 
@@ -1778,8 +1780,7 @@ class PMInterviewHandler:
             )
 
             # One fan-out per question in its own envelope, so fanout ids and
-            # payloads never overwrite each other (dispatch: one wave, submit
-            # per envelope).
+            # payloads never overwrite each other (one wave, submit per envelope).
             advisories: list[dict[str, Any]] = []
             for t in batch_turns:
                 envelope: dict[str, Any] = {"question": t.question}

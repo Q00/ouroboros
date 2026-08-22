@@ -704,6 +704,10 @@ Apply this canonical PM routing policy:
 
         A malformed companion entry is dropped silently: the primary is the
         turn, and companions are an optimization the turn must not fail on.
+        What counts as malformed is not decided here — the companion's routing
+        fields go through the primary's own classification parser, so a
+        wrong-typed ``decide_later`` is rejected in a batch exactly as it is in
+        a single-question turn.
         """
         turn_result = await self.plan_next_turn(state)
         if turn_result.is_err:
@@ -734,17 +738,15 @@ Apply this canonical PM routing policy:
             if normalize_question_text(question_text) in seen_identities:
                 continue
             try:
-                category = QuestionCategory(str(raw.get("category") or "planning"))
-            except ValueError:
-                category = QuestionCategory.PLANNING
-            classification = ClassificationResult(
-                original_question=question_text,
-                category=category,
-                reframed_question=str(raw.get("reframed_question") or "").strip() or question_text,
-                reasoning=str(raw.get("reasoning") or "Companion question."),
-                defer_to_dev=bool(raw.get("defer_to_dev")),
-                decide_later=bool(raw.get("decide_later")),
-            )
+                classification = self.classifier._parse_response(json.dumps(raw), question_text)
+            except (KeyError, TypeError, ValueError) as exc:
+                # Same parser, same strictness as the primary: a routing field
+                # of the wrong type is malformed, not a value to coerce.
+                # ``bool("false")`` is True, and a companion routed that way
+                # would offer a skip that discards a question the PM must
+                # answer. Dropping loses one companion; coercing loses an answer.
+                log.warning("pm.companion_classification_rejected", error=str(exc))
+                continue
             shown_question = self._apply_classification(classification)
             shown_identity = normalize_question_text(shown_question)
             if shown_identity in seen_identities:
