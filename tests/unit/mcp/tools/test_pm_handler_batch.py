@@ -331,9 +331,7 @@ async def test_briefs_travel_as_references_when_a_store_is_wired(tmp_path: Path)
     state = _answered_state("pm_batch_reference", pending="Q4")
     assert (await engine.save_state(state)).is_ok
     _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
-    engine.plan_next_turns = AsyncMock(
-        return_value=Result.ok([_plan(Q_PRIMARY), _plan(Q_SECOND)])
-    )
+    engine.plan_next_turns = AsyncMock(return_value=Result.ok([_plan(Q_PRIMARY), _plan(Q_SECOND)]))
     handler = PMInterviewHandler(
         pm_engine=engine,
         data_dir=tmp_path,
