@@ -389,6 +389,7 @@ class TestPrdMetaFileLocation:
             "decide_later_items",
             "codebase_context",
             "pending_reframe",
+            "pending_reframes",
             "cwd",
             "brownfield_repos",
             "classifications",

@@ -41,10 +41,10 @@ QUESTION = "What happens today when a subscription lapses mid-period?"
 def _found_policy(roster: list[dict[str, str]], **overrides: Any) -> dict[str, Any]:
     """Return a well-formed ``PolicyCarried`` answer for the code lane.
 
-    Built in one place because the carried state is the one that holds the
-    forwarding fields: a test that spells them out by hand records today's
-    contract in a dozen places, and the last round's lesson is that a payload
-    with more than one spelling is a payload whose rules stop agreeing.
+    Built in one place: a test that spells the carried state out by hand
+    records today's contract in a dozen places, and the last round's lesson is
+    that a payload with more than one spelling is a payload whose rules stop
+    agreeing.
     """
     payload: dict[str, Any] = {
         "question_identity": stable_pm_question_identity(QUESTION),
@@ -53,13 +53,14 @@ def _found_policy(roster: list[dict[str, str]], **overrides: Any) -> dict[str, A
             {
                 "repo_id": roster[0]["repo_id"] if roster else "api-12345678",
                 "policy_claims": [
-                    {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                    {
+                        "path": "src/billing.py",
+                        "policy_claim": "grace period applies",
+                        "plain_statement": "a grace period applies after lapse",
+                    }
                 ],
             }
         ],
-        "answer_prefix": "[from-code]",
-        "requires_user_confirmation": True,
-        "user_confirmation_prompt": "Record this finding as what the code does today?",
     }
     payload.update(overrides)
     return payload
@@ -242,34 +243,33 @@ def test_the_emitted_prompt_renders_the_catalog_answer_rule(
     assert rule and rule in _code_lane_prompt(roster)
 
 
-def test_the_emitted_prompt_does_not_retract_the_confirmation_it_asks_for(
+def test_the_emitted_prompt_speaks_evidence_only(
     roster: list[dict[str, str]],
 ) -> None:
-    """One prompt told the child both to produce and not to produce a finding.
+    """One rule with one spelling: the finding is evidence beside the question.
 
-    The task preamble said the finding is shown for confirmation and recorded;
-    the lane brief, still carrying the retired design, said there was nothing to
-    confirm. A child following the second omits the fields the contract requires
-    and the required lane is rejected.
+    The prompt once told the child its finding would be shown for confirmation
+    and recorded; that flow is retired (RFC #2222), and a prompt still saying
+    so would instruct the child toward a recording that no longer exists.
     """
     prompt = _code_lane_prompt(roster)
-    assert "shown to the user for confirmation" in prompt
-    assert "nothing to confirm" not in prompt
-    assert "no answer to send" not in prompt
+    assert "shown to the user for confirmation" not in prompt
+    assert "adopted fact" not in prompt
+    assert "evidence beside the question" in prompt
 
 
-def test_the_emitted_prompt_names_the_fields_a_carried_finding_requires(
+def test_the_emitted_prompt_carries_no_forwarding_instruction(
     roster: list[dict[str, str]],
 ) -> None:
-    """A schema the child is never shown is one it satisfies by luck.
+    """Findings are evidence, never answers (RFC #2222).
 
-    The three forwarding fields are required by the contract and were named
-    nowhere in the emitted prompt, so removing the contradiction alone would
-    have left the child with no instruction at all about them.
+    The v1 forwarding fields gated a recorded adopted fact; with nothing
+    recorded, a prompt still naming them would instruct the child toward a
+    shape the contract now rejects.
     """
     prompt = _code_lane_prompt(roster)
     for field in ("answer_prefix", "requires_user_confirmation", "user_confirmation_prompt"):
-        assert field in prompt
+        assert field not in prompt
 
 
 def _prompt_json_block(prompt: str, heading: str) -> Any:
@@ -416,64 +416,57 @@ def test_no_tool_parameter_holds_a_finding_beside_the_answer() -> None:
     assert {"answer", "last_question"} <= pm_params
 
 
-def test_the_only_answer_prefix_is_the_one_that_has_to_be_confirmed() -> None:
-    """Auto-confirm is unspellable rather than forbidden.
+def test_no_state_carries_a_forwarding_field() -> None:
+    """Findings are evidence, never answers (RFC #2222).
 
-    The interview's exception, ``[from-code][auto-confirmed]``, rests on the
-    premise that the person being asked wrote the code. A PRD has no such
-    premise, so PM keeps the field and drops the exception by giving the enum
-    one element — there is no rule to find, and nothing to reword past.
-
-    The confidence grade goes with it: a grade exists to decide which answers
-    earn the exception, and there is no exception to earn.
+    The v1 confirmation machinery — ``answer_prefix``,
+    ``requires_user_confirmation``, ``user_confirmation_prompt`` — gated a
+    recorded adopted fact. With nothing recorded there is nothing to gate, and
+    the closed shapes make an answer that still carries those fields rejected
+    rather than quietly honoured.
     """
     schema = pm_code_context_answer_contract()["response_model_schema"]
-    found = _state(schema, "PolicyCarried")
 
-    assert found["properties"]["answer_prefix"]["enum"] == ["[from-code]"]
-    assert found["properties"]["requires_user_confirmation"]["const"] is True
-    assert "confidence" not in found["properties"]
-    assert {"answer_prefix", "requires_user_confirmation", "user_confirmation_prompt"} <= set(
-        found["required"]
-    )
-    # Nothing to forward, so no way to say how to forward it.
-    for title in ("NothingExamined", "NoPolicyInExaminedRepositories"):
-        assert "answer_prefix" not in _state(schema, title)["properties"]
-    # And no free-text answer field: what the host forwards is composed from the
-    # ``examined`` entries, so every claim keeps the repository it was read in.
     for state in schema["oneOf"]:
         assert state["additionalProperties"] is False
-        assert "answer_text" not in state["properties"]
+        for field in (
+            "answer_prefix",
+            "requires_user_confirmation",
+            "user_confirmation_prompt",
+            "confidence",
+            "answer_text",
+        ):
+            assert field not in state["properties"], (state["title"], field)
 
 
-def test_the_confirmed_prefix_is_accepted_and_the_auto_confirmed_one_is_not(
+def test_a_carried_policy_is_accepted_and_a_forwarding_field_is_not(
     registry: FanoutRegistry, roster: list[dict[str, str]]
 ) -> None:
-    """Both directions, because the enum has to admit as well as refuse."""
+    """Both directions: the plain carried state admits; a v1 relic refuses."""
     accepted = _submit(registry, _attach(registry, roster), _found_policy(roster))
     assert accepted["status"] == "complete"
 
     refused = _submit(
         registry,
         _attach(registry, roster, session_id="pm-2"),
-        _found_policy(roster, answer_prefix="[from-code][auto-confirmed]"),
+        _found_policy(roster, answer_prefix="[from-code]"),
         session_id="pm-2",
     )
     assert refused["status"] == "partial"
-    assert "answer_prefix" in str(refused["contract_violations"]["code_context"])
+    assert "code_context" in refused["contract_violations"]
 
 
-def test_a_finding_that_declares_itself_pre_confirmed_is_rejected(
+def test_a_finding_carrying_the_retired_confirmation_flag_is_rejected(
     registry: FanoutRegistry, roster: list[dict[str, str]]
 ) -> None:
-    """The flag is constant, so the lane cannot lower it either."""
+    """The field is gone, so any value of it — True or False — is unspellable."""
     result = _submit(
         registry,
         _attach(registry, roster),
         _found_policy(roster, requires_user_confirmation=False),
     )
     assert result["status"] == "partial"
-    assert "requires_user_confirmation" in str(result["contract_violations"]["code_context"])
+    assert "code_context" in result["contract_violations"]
 
 
 # ── Decision 3: the lane speaks about itself ─────────────────────────────
@@ -575,7 +568,13 @@ def test_evidence_from_outside_the_roster_is_rejected(
             examined=[
                 {
                     "repo_id": "elsewhere-deadbeef",
-                    "policy_claims": [{"path": "src/x.py", "policy_claim": "something"}],
+                    "policy_claims": [
+                        {
+                            "path": "src/x.py",
+                            "policy_claim": "something",
+                            "plain_statement": "something, plainly",
+                        }
+                    ],
                 }
             ],
         ),
@@ -622,7 +621,11 @@ def test_one_repository_cannot_hold_two_entries(
                 {
                     "repo_id": roster[0]["repo_id"],
                     "policy_claims": [
-                        {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                        {
+                            "path": "src/billing.py",
+                            "policy_claim": "grace period applies",
+                            "plain_statement": "a grace period applies after lapse",
+                        }
                     ],
                 },
                 {"repo_id": roster[0]["repo_id"], "policy_claims": []},
@@ -658,6 +661,7 @@ def test_a_claim_cannot_name_a_repository_the_answer_did_not_examine(
                             "repo_id": roster[1]["repo_id"],
                             "path": "src/checkout.ts",
                             "policy_claim": "revoked immediately",
+                            "plain_statement": "access ends immediately",
                         }
                     ],
                 }
@@ -711,7 +715,11 @@ def test_a_repository_read_and_clean_is_not_a_repository_unread(
         ]
     )
     carried = [
-        {"path": "src/billing.py", "policy_claim": "grace period applies"},
+        {
+            "path": "src/billing.py",
+            "policy_claim": "grace period applies",
+            "plain_statement": "a grace period applies after lapse",
+        },
     ]
 
     def scan(session_id: str, read: list[dict[str, str]]) -> dict[str, Any]:
@@ -772,7 +780,11 @@ def test_a_cited_repository_need_not_be_the_only_one_examined(
                 {
                     "repo_id": roster[0]["repo_id"],
                     "policy_claims": [
-                        {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                        {
+                            "path": "src/billing.py",
+                            "policy_claim": "grace period applies",
+                            "plain_statement": "a grace period applies after lapse",
+                        }
                     ],
                 },
                 {"repo_id": roster[1]["repo_id"], "policy_claims": []},
@@ -804,6 +816,7 @@ def test_cross_repo_disagreement_survives_as_structure(
                         {
                             "path": "src/billing.py",
                             "policy_claim": "access continues until period end",
+                            "plain_statement": "access continues to the end of the paid period",
                         }
                     ],
                 },
@@ -813,6 +826,7 @@ def test_cross_repo_disagreement_survives_as_structure(
                         {
                             "path": "src/checkout.ts",
                             "policy_claim": "access is revoked immediately",
+                            "plain_statement": "access ends immediately",
                         }
                     ],
                 },
@@ -1193,7 +1207,11 @@ def test_a_citation_path_that_is_not_repository_relative_is_rejected() -> None:
     validator = Draft202012Validator(schema)
 
     def accepted(path: str) -> bool:
-        item = {"path": path, "policy_claim": "access ends"}
+        item = {
+            "path": path,
+            "policy_claim": "access ends",
+            "plain_statement": "access ends",
+        }
         return not list(validator.iter_errors(item))
 
     # What a lane is supposed to cite, including dotfiles and a literal '..'
