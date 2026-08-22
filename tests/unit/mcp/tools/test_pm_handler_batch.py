@@ -195,7 +195,8 @@ async def test_briefs_travel_as_references_when_a_store_is_wired(tmp_path: Path)
             assert "UNDISPATCHED" not in stub
             # What it cannot work without rides the stub: the answer shape, the
             # lane's own empty state, and where it may look.
-            assert f'"lane_id":{{"const":"{lane_id}"}}' in stub
+            assert f'"lane_id": "{lane_id}"' in stub
+            assert "Nothing to report is its own answer" in stub
             assert "answer the empty" in stub
             # Step 3 follows the lane's own answer shape, not its name.
             assert ("data tools" in stub) == (lane_id == "data_context")
@@ -560,10 +561,46 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # 3 — where each may look.
     assert roster[0]["repo_id"] in code and str(tmp_path / "podo-backend") in code
     assert "data tools" in data and roster[0]["repo_id"] not in data
-    # The answer shape, and the plain statement only where the shape has one.
-    assert '"additionalProperties":false' in code and '"additionalProperties":false' in data
+    # The answer shape, shown as a worked answer rather than as its schema.
+    assert '"lane_id": "code_context"' in code and '"lane_id": "data_context"' in data
+    assert "Anything the shape does not name is rejected" in code
     assert "plain_statement" in code and "plain_statement" not in data
     # Compact: the full brief is several times this, and stays fetchable.
     assert len(code) < 6000
     stored = store.fetch_lane("advisory-prompts:fanout_stub", "code_context").body
     assert stored == "FULL BRIEF"
+
+
+def test_every_worked_example_satisfies_the_contract_it_stands_for() -> None:
+    """An example shown to a child must be an answer that would be accepted.
+
+    The stub shows a filled-in answer instead of the contract's schema, which
+    is a quarter of the characters and says the part a regex says worst: what
+    a value looks like. The trade is that an example can be wrong in a way a
+    schema cannot, and a child copying a wrong one is rejected at submission
+    for doing exactly as it was told. So each example is validated against the
+    contract it is keyed to — and the key is the ``contract_id``, so a version
+    bump falls back to the schema rather than to an example written for the
+    shape before it.
+    """
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.mcp.tools.pm_batch import _ANSWER_EXAMPLES
+    from ouroboros.orchestrator.capabilities.pm_schemas import (
+        _interview_data_evidence_answer_contract,
+        pm_code_context_answer_contract,
+    )
+
+    contracts = {
+        c["contract_id"]: c
+        for c in (pm_code_context_answer_contract(), _interview_data_evidence_answer_contract())
+    }
+    # Every example stands for a contract this build declares — an example for
+    # a contract_id nothing produces is one nobody would notice going stale.
+    assert set(_ANSWER_EXAMPLES) == set(contracts)
+    for contract_id, (answer, empty, notes) in _ANSWER_EXAMPLES.items():
+        validator = Draft202012Validator(contracts[contract_id]["response_model_schema"])
+        for name, candidate in (("answer", answer), ("empty", empty)):
+            errors = sorted(validator.iter_errors(candidate), key=str)
+            assert not errors, f"{contract_id} {name}: {[e.message for e in errors]}"
+        assert notes.strip()

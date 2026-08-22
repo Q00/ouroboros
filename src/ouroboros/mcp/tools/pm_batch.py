@@ -279,6 +279,127 @@ def _lean_schema(contract: Any) -> str | None:
     return json.dumps(_without_prose(schema), ensure_ascii=False, separators=(",", ":"))
 
 
+#: A worked answer per contract, in place of the contract's own schema.
+#:
+#: The schema is exact and nearly unreadable — a child reads ``oneOf`` branches
+#: and regex patterns to work out that ``path`` is repository-relative. One
+#: filled-in answer says the same thing in a quarter of the characters, and
+#: says the part regexes say worst: what a value looks like.
+#:
+#: Keyed by ``contract_id``, so a contract that changes version falls back to
+#: its schema rather than being described by an example written for the old
+#: one. What an example cannot show — bounds, enums, the rules about what may
+#: not appear — is stated beside it, and only what a wrong answer would be
+#: rejected for.
+#:
+#: ``tests/unit/mcp/tools/test_pm_handler_batch.py`` validates every example
+#: against the contract it is keyed to, so an example cannot drift from it.
+_ANSWER_EXAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
+    "pm_code_context_answer.v2": (
+        {
+            "question_identity": "pm-question:a48ab92c1bae912e",
+            "lane_id": "code_context",
+            "examined": [
+                {
+                    "repo_id": "podo-backend-2f0e5f7e",
+                    "policy_claims": [
+                        {
+                            "path": "src/main/java/com/example/booking/ReminderScheduler.java",
+                            "policy_claim": (
+                                "Three reminders fire at +6h, +3h and day+6 09:21 after a trial "
+                                "booking, keyed {userId}-{templateCode}, and are cancelled once "
+                                "the user books a class."
+                            ),
+                            "plain_statement": (
+                                "신청 직후 개입은 전부 시점 기반 리마인드이고, 예약하면 취소됩니다."
+                            ),
+                        }
+                    ],
+                },
+                {"repo_id": "podo-app-cf98ca21", "policy_claims": []},
+            ],
+        },
+        {
+            "question_identity": "pm-question:a48ab92c1bae912e",
+            "lane_id": "code_context",
+            "examined": [],
+            "nothing_examined_reason": "not_a_policy_question",
+        },
+        """- `path` is relative to the repository, never absolute and never through `..`.
+- `plain_statement` is the claim beside it said once, in the question's own
+  language, with no paths or identifiers in it — it is what the PM reads.
+- One entry per repository. A repository you read and found nothing in is an
+  entry with empty `policy_claims` — that is how "I looked and it is clean" is
+  said, and a repository you never opened has no entry at all.
+- At most 20 claims per repository; `policy_claim` ≤ 600 characters,
+  `plain_statement` ≤ 300.
+- No other fields. Anything the shape does not name is rejected with the answer.""",
+    ),
+    "data_evidence_answer.v1": (
+        {
+            "question_identity": "pm-question:a48ab92c1bae912e",
+            "lane_id": "data_context",
+            "data_needed": True,
+            "read_requests": [
+                {
+                    "operation": "read",
+                    "tool_name": "podo_mysql_query",
+                    "metric": "trial bookings that reached the lesson",
+                    "aggregation": "count",
+                    "filters": [{"field": "status", "comparator": "eq", "value": "COMPLETED"}],
+                    "time_window": "last 30 days",
+                    "informs_decision": "which of the two drop-offs is the larger one today",
+                    "values": [{"value": 1832}],
+                }
+            ],
+        },
+        {
+            "question_identity": "pm-question:a48ab92c1bae912e",
+            "lane_id": "data_context",
+            "data_needed": False,
+            "no_evidence_reason": "not_a_measurement",
+        },
+        """- At most 5 read requests, each carrying the value it actually read back.
+- `aggregation` is one of count, distinct_count, sum, average, median, p90,
+  p95, p99, min, max, rate; `comparator` one of eq, neq, gt, gte, lt, lte.
+- A count or distinct_count value is a non-negative integer.
+- Without `group_by` there is exactly one value; with it, up to 20 entries of
+  `{group, value}`.
+- No rows, names or identifiers — an aggregate is what this lane may carry.
+- No other fields. Anything the shape does not name is rejected with the answer.""",
+    ),
+}
+
+
+def _answer_section(contract: Any, schema_json: str | None) -> str:
+    """Return the ``## Answer`` block: a worked example, or the schema itself."""
+    contract_id = contract.get("contract_id") if isinstance(contract, dict) else None
+    example = _ANSWER_EXAMPLES.get(str(contract_id))
+    if example is None:
+        if not schema_json:
+            return ""
+        return f"""## Answer
+Your final message is this JSON and nothing else — no prose around it:
+```json
+{schema_json}
+```
+"""
+    answer, empty, notes = example
+    return f"""## Answer
+Your final message is one JSON object and nothing else — no prose around it,
+shaped like this:
+```json
+{json.dumps(answer, ensure_ascii=False, indent=2)}
+```
+Nothing to report is its own answer, not an empty version of the one above:
+```json
+{json.dumps(empty, ensure_ascii=False, indent=2)}
+```
+{notes}
+
+"""
+
+
 def _no_op_literals(schema_json: str) -> str:
     """Return the empty-state reason literals this lane's schema admits.
 
@@ -381,24 +502,7 @@ def _payload_stub(
    reuse. Go to 3."""
     no_op = _no_op_literals(schema_json) if schema_json else ""
     no_op_hint = f" ({no_op})" if no_op else ""
-    # Named only where the shape has the field: the data lane reports
-    # measurements, which are already in the PM's language.
-    plain_rule = (
-        " Each claim also carries a `plain_statement`: one sentence in the"
-        " question's own language, no paths or identifiers."
-        if schema_json and '"plain_statement"' in schema_json
-        else ""
-    )
-    answer_section = (
-        f"""## Answer
-Your final message is this JSON and nothing else — no prose around it:
-```json
-{schema_json}
-```
-"""
-        if schema_json
-        else ""
-    )
+    answer_section = _answer_section(contract, schema_json)
     return f"""## Task
 You are an Ouroboros PM interview advisory subagent — lane {lane_id}. You gather
 evidence the PM reads before answering; you never answer for them.
@@ -418,7 +522,7 @@ evidence the PM reads before answering; you never answer for them.
 
 {answer_section}Describe, never prescribe: what you find is an input to the PM's decision, not
 the decision. If two sources disagree, carry both — the disagreement is what the
-PM most needs.{plain_rule}
+PM most needs.
 
 Full brief (rules, worked examples, field descriptions): `ouroboros_fetch_artifact`
 with contract_id `{bundle_id}`, lane_id `{lane_id}`."""
