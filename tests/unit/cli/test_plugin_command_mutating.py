@@ -20,8 +20,11 @@ import typer
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.plugin import (
+    _GIT_CLONE_TIMEOUT_SECONDS,
+    _GIT_REV_PARSE_TIMEOUT_SECONDS,
     _enumerate_catalog,
     _select_plugins,
+    _shallow_clone,
 )
 from ouroboros.cli.commands.plugin import (
     app as plugin_app,
@@ -5151,3 +5154,84 @@ def test_catalog_register_does_not_lose_concurrent_updates(tmp_path: Path) -> No
         f"concurrent register lost updates: missing "
         f"{expected - plugins_recorded}, got {plugins_recorded}"
     )
+
+
+def test_shallow_clone_bounds_git_and_refuses_credential_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both git calls must be timed and non-interactive.
+
+    `capture_output=True` hides a credential prompt, so an untimed
+    `git clone` against an unreachable host or a private repository hangs
+    `ooo plugin add` silently and forever. Every invocation therefore carries
+    a timeout, a `DEVNULL` stdin, and an environment that makes git fail
+    instead of prompting.
+    """
+    calls: list[tuple[list[str], dict]] = []
+
+    def _spy(argv, *_args, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[:2] == ["git", "clone"]:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="cafef00d\n", stderr="")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
+
+    sha = _shallow_clone("https://github.com/Q00/ouroboros-plugins.git", tmp_path / "clone")
+
+    assert sha == "cafef00d"
+    assert [argv[:2] for argv, _ in calls] == [["git", "clone"], ["git", "rev-parse"]]
+    for argv, kwargs in calls:
+        assert kwargs["stdin"] is subprocess.DEVNULL, argv
+        assert kwargs["timeout"] > 0, argv
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0", argv
+        assert kwargs["env"]["GIT_ASKPASS"] == "true", argv
+    clone_kwargs = calls[0][1]
+    rev_parse_kwargs = calls[1][1]
+    # Network reach gets a generous ceiling; a local object-store read does not.
+    assert clone_kwargs["timeout"] == _GIT_CLONE_TIMEOUT_SECONDS
+    assert rev_parse_kwargs["timeout"] == _GIT_REV_PARSE_TIMEOUT_SECONDS
+    assert clone_kwargs["timeout"] > rev_parse_kwargs["timeout"]
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_clone_timeout_is_reported_without_traceback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A timed-out clone follows the CLI error contract instead of crashing.
+
+    `subprocess.TimeoutExpired` is a `SubprocessError`, not an `OSError`, so
+    the call sites must widen their `except` clause or the new timeout turns a
+    hang into an unhandled traceback.
+    """
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _clone_timed_out(repo_url: str, dest: Path) -> str:
+        raise subprocess.TimeoutExpired(["git", "clone", "--depth", "1", repo_url], 300)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _clone_timed_out)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "timed out" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception

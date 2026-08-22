@@ -15,6 +15,7 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.copilot.model_discovery import CopilotModel
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+from ouroboros.providers.codex_cli_stream import DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
 from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 
 
@@ -1101,6 +1102,41 @@ class TestComplete:
         assert result.is_err
         assert result.error.details["timed_out"] is True
         assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_bounds_wait_when_no_timeout_configured(self) -> None:
+        """A wedged CLI must not hang forever on the constructor default.
+
+        ``timeout`` defaults to ``None`` and no production call site sets it, so
+        the ceiling from :data:`DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS` is the
+        only thing standing between a stuck ``copilot`` process and a generation
+        that never returns.
+        """
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        assert adapter._timeout is None
+        assert adapter._effective_timeout_seconds() == DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(wait_forever=True)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=10,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is True
 
     @pytest.mark.asyncio
     async def test_depth_guard_returns_provider_error_without_spawning(self) -> None:

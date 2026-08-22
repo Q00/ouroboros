@@ -16,7 +16,11 @@ from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
-from ouroboros.providers.codex_cli_stream import collect_stream_lines, terminate_runtime_process
+from ouroboros.providers.codex_cli_stream import (
+    DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS,
+    collect_stream_lines,
+    terminate_runtime_process,
+)
 
 
 class _FakeStream:
@@ -1374,6 +1378,45 @@ class TestCodexCliLLMAdapter:
         assert result.error.details["timed_out"] is True
         assert create_calls == 1
         assert callback_events == [("thinking", "Still working...")]
+        assert process_holder["process"].terminated or process_holder["process"].killed
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_bounds_wait_when_no_timeout_configured(self) -> None:
+        """A wedged `codex` child must not block the generation forever.
+
+        ``timeout`` defaults to ``None`` and no production call site passes one,
+        so without the module-level ceiling ``await process.wait()`` is an
+        unbounded wait on the default path.
+        """
+        process_holder: dict[str, _FakeProcess] = {}
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        assert adapter._timeout is None
+        assert adapter._effective_timeout_seconds() == DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
+        adapter._default_completion_timeout_seconds = 0.01
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            process = _FakeProcess(returncode=124, wait_forever=True)
+            process_holder["process"] = process
+            return process
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=10,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.01)
+        assert result.error.details["timeout_was_default"] is True
         assert process_holder["process"].terminated or process_holder["process"].killed
 
     def test_build_command_does_not_include_prompt_as_positional_arg(self) -> None:

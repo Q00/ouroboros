@@ -29,8 +29,15 @@ class CacheRefreshRecoveryError(OSError):
         self.backup_path = backup_path
 
 
-def url_cache_refresh_error(exc: subprocess.CalledProcessError | OSError, dest: Path) -> str:
+def url_cache_refresh_error(exc: subprocess.SubprocessError | OSError, dest: Path) -> str:
     """Render clone and filesystem failures through one public CLI contract."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        cmd = exc.cmd if isinstance(exc.cmd, str) else " ".join(str(part) for part in exc.cmd)
+        return (
+            f"git command timed out after {exc.timeout}s: {cmd}. "
+            "The remote may be unreachable or the repository may require "
+            "credentials that cannot be prompted for non-interactively."
+        )
     if isinstance(exc, subprocess.CalledProcessError):
         detail = exc.stderr.strip() if exc.stderr else exc
         return f"git clone failed: {detail}"

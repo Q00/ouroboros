@@ -280,6 +280,7 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         content = ""
         final_content = ""
         prompt_id = f"prompt-{uuid4().hex}"
+        timeout_seconds = self._effective_timeout_seconds()
 
         async def fail(
             message: str, details: dict[str, object] | None = None
@@ -397,11 +398,8 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                         final_content = self._extract_agent_end_text(event)
                         return
 
-            if self._timeout is None:
+            async with asyncio.timeout(timeout_seconds):
                 await run_protocol()
-            else:
-                async with asyncio.timeout(self._timeout):
-                    await run_protocol()
         except ProviderError as exc:
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
@@ -421,8 +419,13 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
             return await fail(
-                f"{self._display_name} request timed out after {self._timeout:.1f}s",
-                {"timed_out": True, "timeout_seconds": self._timeout, "partial_content": content},
+                f"{self._display_name} request timed out after {timeout_seconds:.1f}s",
+                {
+                    "timed_out": True,
+                    "timeout_seconds": timeout_seconds,
+                    "timeout_was_default": self._timeout_is_default_ceiling(),
+                    "partial_content": content,
+                },
             )
         except asyncio.CancelledError:
             await self._terminate_process(process)
@@ -432,10 +435,23 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                 if process.stdin is not None:
                     process.stdin.close()
 
-        if stderr_task is not None:
-            stderr_lines = await stderr_task
-        returncode = await process.wait()
-        if returncode != 0:
+        # ``agent_end`` already arrived, so the CLI should be exiting on its own.
+        # Bound both the stderr drain and the reap with the shutdown budget: a
+        # lingering child must not hang a completion that already has its answer.
+        returncode: int | None
+        try:
+            async with asyncio.timeout(self._process_shutdown_timeout_seconds):
+                if stderr_task is not None:
+                    stderr_lines = await stderr_task
+                returncode = await process.wait()
+        except TimeoutError:
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
+            await self._terminate_process(process)
+            returncode = None
+        if returncode is not None and returncode != 0:
             return Result.err(
                 ProviderError(
                     message=f"{self._display_name} exited with code {returncode}",
