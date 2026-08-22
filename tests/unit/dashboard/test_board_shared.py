@@ -359,3 +359,93 @@ class TestProviderIdentityReachesTui:
         assert app._provider_ledger.run_provider is None
         # The ledger still wraps the SAME state dict after reset.
         assert app.state.provider_by_node is app._provider_ledger.provider_by_node
+
+
+class TestTerminalAcceptanceFlips:
+    """Final-acceptance events must overturn cards already marked DONE.
+
+    Incident exec_15998686d51a: every AC reached DONE via progress snapshots,
+    then the final workspace revalidation failed 3 of 4 — but the board never
+    consumed the flip events, so the kanban showed 4×Done while the CLI
+    reported Success: 1/4.
+    """
+
+    @staticmethod
+    def _snapshot() -> dict[str, Any]:
+        return {
+            "acceptance_criteria": [
+                {
+                    "node_id": f"node_{i}",
+                    "content": f"AC {i + 1}",
+                    "status": "completed",
+                    "root_ac_number": i + 1,
+                }
+                for i in range(4)
+            ]
+        }
+
+    @staticmethod
+    def _statuses(board: dict[str, Any]) -> dict[str, str]:
+        return {card["id"]: column for column, cards in board["columns"].items() for card in cards}
+
+    def test_final_revalidation_moves_done_cards_to_failed(self) -> None:
+        events: list[dict[str, Any]] = [
+            {"event_type": "workflow.progress.updated", "payload": self._snapshot()}
+        ]
+        for i in range(3):
+            events.append(
+                {
+                    "event_type": "execution.verify.failed",
+                    "payload": {"ac_index": i, "final_workspace_revalidation": True},
+                }
+            )
+        for i in range(4):
+            events.append(
+                {
+                    "event_type": "execution.ac.acceptance_finalized",
+                    "payload": {"root_ac_index": i, "accepted": i == 3},
+                }
+            )
+
+        statuses = self._statuses(reduce_board(events))
+
+        assert statuses == {
+            "node_0": "failed",
+            "node_1": "failed",
+            "node_2": "failed",
+            "node_3": "completed",
+        }
+
+    def test_midrun_verify_failure_without_final_flag_does_not_flip(self) -> None:
+        """Per-attempt gate failures are followed by a retry; only the terminal
+        revalidation flip is folded into the board."""
+        events: list[dict[str, Any]] = [
+            {"event_type": "workflow.progress.updated", "payload": self._snapshot()},
+            {"event_type": "execution.verify.failed", "payload": {"ac_index": 0}},
+        ]
+
+        statuses = self._statuses(reduce_board(events))
+
+        assert statuses["node_0"] == "completed"
+
+    def test_acceptance_finalized_ignores_malformed_payloads(self) -> None:
+        events: list[dict[str, Any]] = [
+            {"event_type": "workflow.progress.updated", "payload": self._snapshot()},
+            # Unknown index, non-bool accepted, non-int index: all ignored.
+            {
+                "event_type": "execution.ac.acceptance_finalized",
+                "payload": {"root_ac_index": 99, "accepted": False},
+            },
+            {
+                "event_type": "execution.ac.acceptance_finalized",
+                "payload": {"root_ac_index": 0, "accepted": "no"},
+            },
+            {
+                "event_type": "execution.ac.acceptance_finalized",
+                "payload": {"root_ac_index": True, "accepted": False},
+            },
+        ]
+
+        statuses = self._statuses(reduce_board(events))
+
+        assert all(status == "completed" for status in statuses.values())

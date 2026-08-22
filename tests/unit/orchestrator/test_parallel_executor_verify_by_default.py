@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -40,6 +41,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _complete_sibling_acs_from_evidence,
     _deserialize_verify_gate_outcome,
     _missing_expected_artifacts,
+    _resolve_verify_command_cwd,
     _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
     render_parallel_completion_message,
@@ -2175,9 +2177,59 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
 
 
 @pytest.mark.asyncio
-async def test_final_settlement_rejects_stale_command_without_replay(
+async def test_final_settlement_replays_stale_command_and_accepts_final_pass(
     tmp_path: Any,
 ) -> None:
+    """A stale digest is the expected shape of every dependency-chained run:
+    downstream siblings legitimately mutate the workspace after an earlier
+    AC's verify passed. Settlement must replay the gate against the settled
+    workspace and accept when the replay passes, instead of failing closed."""
+    counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        'raise SystemExit(0)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    # A downstream sibling changes the workspace after the cached pass.
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"  # cached run + settlement replay
+    assert settled[0].success is True
+    assert settled[0].outcome is ACExecutionOutcome.SUCCEEDED
+    assert settled[0].verify_gate_outcome is not cached
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.passed is True
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_replay_failure_rejects_stale_command(
+    tmp_path: Any,
+) -> None:
+    """When the settled workspace no longer satisfies the contract (a later
+    sibling regressed it), the settlement replay must fail the AC with the
+    replay's own gate verdict."""
     counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
     target = tmp_path / "condition.txt"
     target.write_text("before", encoding="utf-8")
@@ -2208,10 +2260,49 @@ async def test_final_settlement_rejects_stale_command_without_replay(
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "1"
+    assert counter.read_text(encoding="utf-8") == "2"  # cached run + settlement replay
     assert settled[0].success is False
     assert settled[0].outcome is ACExecutionOutcome.FAILED
-    assert "replaying verify_command is not permitted" in (settled[0].error or "")
+    assert "failed on settlement replay" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_replay_mutation_invalidates_success_set(
+    tmp_path: Any,
+) -> None:
+    """A settlement replay that mutates the workspace is a mis-scoped verifier;
+    the observation-boundary invariant still fails the complete success set."""
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        "marker = Path('replay-side-effect.txt'); "
+        "marker.write_text('x') if Path('condition.txt').read_text() != 'before' else None\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.workspace_mutated is False
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert "mutated the workspace" in (settled[0].error or "")
 
 
 @pytest.mark.asyncio
@@ -2699,3 +2790,114 @@ async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
     assert outcome.passed is False
+
+
+# --- verify_cwd: where verify_command runs (explicit spec + sole-manifest) ---
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_runs_command_in_explicit_verify_cwd(tmp_path: Any) -> None:
+    (tmp_path / "app").mkdir()
+    command = (
+        "python3 -c \"import pathlib, sys; sys.exit(0 if pathlib.Path.cwd().name == 'app' else 3)\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command, verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_fails_loud_when_verify_cwd_missing(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="exit 0", verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert "verify_cwd does not exist" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_rejects_verify_cwd_symlink_escape(tmp_path: Any) -> None:
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app").symlink_to(outside, target_is_directory=True)
+    executor = _make_executor(working_directory=str(workspace))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="exit 0", verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(workspace))
+
+    assert outcome.passed is False
+    assert "escapes the workspace" in (outcome.reason or "")
+
+
+def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> None:
+    """Greenfield runs frequently scaffold the app in one subdirectory the
+    seed could not know in advance (incident exec_418f29f31e5c: root
+    ``npx playwright test`` while the config lived in ``app/``)."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npx playwright test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+def test_resolve_verify_cwd_never_guesses_between_manifests(tmp_path: Any) -> None:
+    for name in ("app", "site"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert resolved == str(tmp_path)
+
+
+def test_resolve_verify_cwd_prefers_root_manifest(tmp_path: Any) -> None:
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert resolved == str(tmp_path)
+
+
+def test_resolve_verify_cwd_ignores_non_node_commands_and_node_modules(tmp_path: Any) -> None:
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+
+    pytest_spec = AcceptanceCriterionSpec(description="ac", verify_command="pytest -q")
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), pytest_spec)
+    assert error is None
+    assert resolved == str(tmp_path)
+
+    node_spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), node_spec)
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+def test_explicit_verify_cwd_wins_over_manifest_detection(tmp_path: Any) -> None:
+    for name in ("app", "site"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test", verify_cwd="site")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "site").resolve()

@@ -460,6 +460,15 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     description: str
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
+    verify_cwd: str | None = Field(
+        default=None,
+        description=(
+            "Workspace-relative directory verify_command runs in (e.g. 'app' "
+            "for a project whose test config lives in a subdirectory). The "
+            "verify gate resolves it under the run workspace and rejects any "
+            "path that escapes it. Default: the workspace root."
+        ),
+    )
     expected_artifacts: tuple[str, ...] = Field(
         default_factory=tuple,
         description=(
@@ -522,7 +531,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             return stripped
         return value
 
-    @field_validator("verify_command", mode="before")
+    @field_validator("verify_command", "verify_cwd", mode="before")
     @classmethod
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
@@ -572,6 +581,14 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             raise ValueError("verify_exemption_reason is mutually exclusive with verify_command")
         if self.output_assertion and not self.verify_command:
             raise ValueError("output_assertion requires verify_command")
+        if self.verify_cwd:
+            if not self.verify_command:
+                raise ValueError("verify_cwd requires verify_command")
+            cwd_error = expected_artifact_path_error(self.verify_cwd)
+            if cwd_error is not None:
+                raise ValueError(
+                    f"verify_cwd must be a portable workspace-relative path: {cwd_error}"
+                )
         invalid_artifacts = tuple(
             (artifact, error)
             for artifact in self.expected_artifacts
@@ -618,6 +635,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["semantic_ac_key"] = self.semantic_ac_key
         if self.verify_command:
             data["verify_command"] = self.verify_command
+        if self.verify_cwd:
+            data["verify_cwd"] = self.verify_cwd
         if self.expected_artifacts:
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:

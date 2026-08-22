@@ -1166,3 +1166,55 @@ class TestSeedImmutabilityComprehensive:
         assert isinstance(seed.constraints, tuple)
         assert not hasattr(seed.constraints, "append")
         assert not hasattr(seed.constraints, "extend")
+
+
+class TestAcceptanceCriterionVerifyCwd:
+    """verify_cwd: the workspace-relative directory verify_command runs in."""
+
+    def test_verify_cwd_accepted_with_verify_command(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npx playwright test",
+            verify_cwd="app",
+        )
+        assert spec.verify_cwd == "app"
+        value = spec.to_seed_value()
+        assert isinstance(value, dict)
+        assert value["verify_cwd"] == "app"
+
+    def test_verify_cwd_requires_verify_command(self) -> None:
+        with pytest.raises(PydanticValidationError, match="verify_cwd requires verify_command"):
+            AcceptanceCriterionSpec(description="tests pass", verify_cwd="app")
+
+    def test_verify_cwd_rejects_workspace_escape(self) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
+            AcceptanceCriterionSpec(
+                description="tests pass",
+                verify_command="npm test",
+                verify_cwd="../outside",
+            )
+
+    def test_verify_cwd_rejects_absolute_path(self) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
+            AcceptanceCriterionSpec(
+                description="tests pass",
+                verify_command="npm test",
+                verify_cwd="/etc",
+            )
+
+    def test_blank_verify_cwd_normalizes_to_none(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="  ",
+        )
+        assert spec.verify_cwd is None
+
+    def test_verify_cwd_round_trips_through_seed_value(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="app",
+        )
+        rebuilt = AcceptanceCriterionSpec.model_validate(spec.to_seed_value())
+        assert rebuilt == spec

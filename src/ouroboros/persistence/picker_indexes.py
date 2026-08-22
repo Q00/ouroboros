@@ -44,6 +44,11 @@ PICKER_RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.ac.token_attribution.reported",
     "execution.frugality_proof.evaluated",
     "execution.frugality_retrospective.reported",
+    # Terminal-acceptance flips: without these the board reducer never sees a
+    # verdict that overturns an AC after its ac.completed event (cards stay
+    # DONE while the CLI reports the run failed).
+    "execution.verify.failed",
+    "execution.ac.acceptance_finalized",
 )
 PICKER_DIRECT_EVENT_TYPES: tuple[str, ...] = tuple(
     event_type

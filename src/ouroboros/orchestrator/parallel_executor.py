@@ -1782,6 +1782,68 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+# Package-runner commands whose config manifest anchors the directory they
+# must run from. Used only by the deterministic verify-cwd resolution below.
+_NODE_PACKAGE_RUNNERS = frozenset({"npm", "npx", "yarn", "pnpm"})
+
+
+def _sole_node_manifest_directory(root: Path) -> Path | None:
+    """Return the one directory holding the workspace's only package.json.
+
+    Returns None when the root itself has a manifest, when none exists, or
+    when more than one candidate exists — resolution never guesses between
+    candidates.
+    """
+    if (root / "package.json").is_file():
+        return None
+    candidates: list[Path] = []
+    for manifest in root.rglob("package.json"):
+        relative_parts = manifest.relative_to(root).parts
+        if any(part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES for part in relative_parts):
+            continue
+        if not manifest.is_file():
+            continue
+        candidates.append(manifest.parent)
+        if len(candidates) > 1:
+            return None
+    return candidates[0] if candidates else None
+
+
+def _resolve_verify_command_cwd(
+    root_cwd: str, spec: AcceptanceCriterionSpec
+) -> tuple[str, str | None]:
+    """Resolve the directory ``verify_command`` runs in.
+
+    Returns ``(cwd, error)``. Precedence: the spec's explicit ``verify_cwd``
+    (must resolve to an existing directory inside the workspace — anything
+    else is a loud contract failure), then, for node package-runner commands
+    issued from a workspace whose root has no ``package.json``, the directory
+    of the workspace's sole manifest (a greenfield run frequently scaffolds
+    the app in one subdirectory the seed could not know in advance), then the
+    workspace root itself. Only the command's working directory moves;
+    ``expected_artifacts`` and workspace digests stay rooted at ``root_cwd``.
+    """
+    root = Path(root_cwd).expanduser().resolve(strict=False)
+    if spec.verify_cwd:
+        target = (root / spec.verify_cwd).resolve(strict=False)
+        if not target.is_relative_to(root):
+            return root_cwd, f"verify_cwd escapes the workspace: {spec.verify_cwd!r}"
+        if not target.is_dir():
+            return root_cwd, f"verify_cwd does not exist in the workspace: {spec.verify_cwd!r}"
+        return str(target), None
+
+    command = spec.verify_command or ""
+    first_token = Path(command.split()[0]).name if command.split() else ""
+    if first_token in _NODE_PACKAGE_RUNNERS:
+        try:
+            manifest_dir = _sole_node_manifest_directory(root)
+        except OSError:
+            manifest_dir = None
+        if manifest_dir is not None:
+            return str(manifest_dir), None
+    return root_cwd, None
+
+
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -5257,15 +5319,19 @@ class ParallelACExecutor:
         execution_id: str,
         coordinator_revalidated: bool = False,
     ) -> list[ACExecutionResult]:
-        """Fail closed when final shared-workspace evidence is no longer valid.
+        """Bind terminal acceptance to the settled shared workspace.
 
         Verify gates run as each AC completes, while later ACs can still touch
         the same workspace.  Before terminal acceptance, re-check every
-        successful contract's artifact leg and cached workspace identity. A
-        stale command result is rejected rather than replayed because an
-        unrestricted shell command may have effects outside the workspace.
-        Invalidate the complete success set when any verify command was
-        observed mutating the workspace.
+        successful contract's artifact leg and cached workspace identity.  A
+        command result whose cached workspace digest no longer matches the
+        settled workspace is replayed once against that workspace — downstream
+        siblings legitimately build on an AC's work, so a stale digest is the
+        expected shape of every dependency-chained run, not evidence of
+        tampering.  The replayed gate result (pass or fail) becomes the
+        acceptance evidence.  Invalidate the complete success set when any
+        verify command — cached or replayed — was observed mutating the
+        workspace.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -5292,6 +5358,7 @@ class ParallelACExecutor:
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         settled: list[ACExecutionResult] = []
         individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
+        replay_mutated_workspace = False
 
         for result in results:
             if not result.success:
@@ -5374,22 +5441,53 @@ class ParallelACExecutor:
 
                 if cached_digest != final_digest:
                     # A later worker changed the workspace after this command
-                    # passed.  Do not replay an unrestricted shell contract:
-                    # effects outside the workspace (DB/API/deployment writes)
-                    # cannot be detected by the digest.  The stale evidence is
-                    # therefore rejected at the final boundary.
-                    individual_failures[result.ac_index] = (
-                        "Final acceptance rejected because the workspace changed "
-                        "after verify_command completed; replaying verify_command "
-                        "is not permitted.",
-                        outcome,
+                    # passed.  Rejecting the stale pass outright fails every
+                    # dependency-chained run — each downstream AC legitimately
+                    # builds on its predecessors' work — so re-run the gate once
+                    # against the settled workspace instead.  The per-attempt
+                    # retry path already re-executes the same command, so a
+                    # settlement replay introduces no effect the run could not
+                    # already have.  Acceptance then binds to the workspace as
+                    # it actually is, which also catches downstream regressions
+                    # the cached pass could never observe.
+                    replay_outcome = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                        spec=spec,
+                        cwd=cwd,
                     )
-                    settled.append(result)
+                    await self._safe_emit_event(
+                        BaseEvent(
+                            type="execution.verify.replayed",
+                            aggregate_type="execution",
+                            aggregate_id=execution_id or session_id,
+                            data={
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "ac_index": result.ac_index,
+                                "verify_command": spec.verify_command,
+                                "passed": bool(replay_outcome.passed),
+                                "reason": replay_outcome.reason,
+                                "final_workspace_revalidation": True,
+                            },
+                        )
+                    )
+                    if replay_outcome.workspace_mutated:
+                        replay_mutated_workspace = True
+                    if not replay_outcome.passed and not replay_outcome.environment_unverifiable:
+                        individual_failures[result.ac_index] = (
+                            "Final workspace verify gate failed on settlement "
+                            f"replay: {replay_outcome.reason}",
+                            replay_outcome,
+                        )
+                        settled.append(result)
+                        continue
+                    settled.append(replace(result, verify_gate_outcome=replay_outcome))
                     continue
 
             settled.append(result)
 
-        if verify_mutated_workspace:
+        if verify_mutated_workspace or replay_mutated_workspace:
             # A verifier is an observation boundary, not another writer.  If
             # any final verifier changed the shared workspace (or its digest
             # became unreadable), every success observed before or after that
@@ -9744,9 +9842,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 workspace_digest=workspace_before,
                 environment_unverifiable=True,
             )
+        # Where the command runs is a per-AC contract (explicit verify_cwd, or
+        # the workspace's sole node manifest directory for package-runner
+        # commands); artifact checks and digests above stay rooted at ``cwd``.
+        command_cwd, command_cwd_error = _resolve_verify_command_cwd(cwd, spec)
+        if command_cwd_error is not None:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=command_cwd_error,
+                output_tail="",
+                workspace_digest=workspace_before,
+            )
         run = await run_with_shell(
             (verify_shell_path, "-c", command),
-            cwd=cwd,
+            cwd=command_cwd,
             env=verify_env,
             timeout_seconds=self._verify_command_timeout_seconds,
         )
