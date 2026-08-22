@@ -555,7 +555,6 @@ async def test_a_stub_carries_what_the_lane_cannot_work_without(tmp_path: Path) 
     # 2 — the findings this lane may reuse, ids only, offered as a shelf to
     # choose from rather than a list to work through.
     assert "fanout_earlier" in code
-    assert "rather than all of them" in code
     assert "nothing to" in data and "reuse" in data
     # 3 — where each may look.
     assert roster[0]["repo_id"] in code and str(tmp_path / "podo-backend") in code
@@ -612,3 +611,47 @@ def test_every_answer_spec_names_what_its_contract_requires() -> None:
         schema = contracts[contract_id]["response_model_schema"]
         missing = sorted(name for name in required_names(schema) if name not in spec)
         assert not missing, f"{contract_id} does not tell the child about: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_a_stub_lists_a_few_findings_and_says_what_it_withheld(tmp_path: Path) -> None:
+    """The prompt is bounded separately from the offer, and says so.
+
+    An offered entry carries an id and a time. Past the first few, a child is
+    choosing between identifiers it has no way to tell apart, so listing all
+    twenty spends a fifth of the prompt on a choice it cannot make. The rest
+    are named as withheld rather than dropped — a truncation nobody mentions
+    reads as "this is all there was", which is the confusion the reuse
+    mechanism exists to prevent.
+    """
+    from ouroboros.mcp.tools.pm_batch import _STUB_FINDINGS_SHOWN, externalize_advisory_payloads
+    from ouroboros.orchestrator.capabilities.pm_schemas import pm_code_context_answer_contract
+    from ouroboros.persistence.artifact_store import ArtifactStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ArtifactStore.for_project(workspace)
+    store.initialize()
+
+    offered = [
+        {"contract_id": f"fanout:{index:04d}", "lane_id": "code_context"} for index in range(20)
+    ]
+    meta = {
+        "question_advisory_fanout_id": "fanout_many",
+        "question_advisory_subagents": [
+            {"prompt": "FULL", "context": {"lane_id": "code_context", "question": Q_PRIMARY}}
+        ],
+        "question_advisory_request": {
+            "lanes": [
+                {"lane_id": "code_context", "answer_contract": pm_code_context_answer_contract()}
+            ],
+            "recent_findings": {"code_context": offered},
+        },
+    }
+
+    await externalize_advisory_payloads(meta, store)
+
+    stub = meta["question_advisory_subagents"][0]["prompt"]
+    listed = [entry["contract_id"] for entry in offered if entry["contract_id"] in stub]
+    assert listed == [entry["contract_id"] for entry in offered[:_STUB_FINDINGS_SHOWN]]
+    assert f"{20 - _STUB_FINDINGS_SHOWN} older ones from today are not listed" in stub

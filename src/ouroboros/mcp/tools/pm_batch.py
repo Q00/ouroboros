@@ -43,6 +43,16 @@ ADVISORY_PROMPT_BUNDLE_KIND = "advisory_prompt_bundle"
 #: the store still knows what to look at and what shape to answer in.
 UNDISPATCHED_SENTINEL = "UNDISPATCHED"
 
+#: How many of the offered findings a stub lists.
+#:
+#: The offer set is bounded by attention (twenty, in ``recent_findings``); this
+#: bounds the *prompt*, which is a different question. An entry carries an id
+#: and a time and nothing else, so past the first few a child is choosing
+#: between identifiers it cannot tell apart — twenty of them was a fifth of the
+#: prompt spent on a choice it has no way to make. The rest are named as
+#: withheld rather than dropped, and it may ask for them.
+_STUB_FINDINGS_SHOWN = 5
+
 
 @asynccontextmanager
 async def interview_answer_lock(
@@ -426,24 +436,34 @@ def _payload_stub(
     schema_json = _lean_schema(contract)
     offered = [e for e in findings if isinstance(e, dict)] if findings else []
     if offered:
+        shown = offered[:_STUB_FINDINGS_SHOWN]
         # To the minute. Sub-second precision and a UTC offset decide nothing
-        # here and are twenty lines of it.
+        # here and were a line of noise per entry.
         listing = "\n".join(
             f"   - `{e.get('contract_id')}` — {str(e.get('published_at') or '')[:16]}"
-            for e in offered
+            for e in shown
+        )
+        withheld = len(offered) - len(shown)
+        # Said, not silently dropped: a truncation nobody mentions reads as
+        # "this is all there was", which is the confusion the whole mechanism
+        # exists to prevent.
+        rest = (
+            f"\n   {withheld} older one{'' if withheld == 1 else 's'} from today are not"
+            " listed; ask for them if these leave the question open."
+            if withheld > 0
+            else ""
         )
         # Recency is the only thing separating these entries, so it is the only
         # thing the instruction may lean on. Telling a child to pick the ones
         # whose subject fits would name a signal the offer does not carry, and
-        # telling it to fetch each in turn would spend the budget before the
-        # work started. These are a head start, not a checklist.
+        # listing all twenty would spend a fifth of the prompt on identifiers
+        # it cannot choose between. These are a head start, not a checklist.
         reuse = f"""2. **Read what this lane already found here.** `ouroboros_fetch_artifact`
    takes a `contract_id` below plus `lane_id: {lane_id}` (load the tool via
-   your runtime's tool discovery if deferred). They are newest first and that
-   is all you can tell them apart by, so start at the top and open a few
-   rather than all of them. Use what helps, investigate the rest yourself, and
-   if what you read answers the question, stop there.
-{listing}"""
+   your runtime's tool discovery if deferred). Newest first, and recency is
+   all you can tell them apart by. Use what helps, investigate the rest
+   yourself, and if what you read answers the question, stop there.
+{listing}{rest}"""
     else:
         reuse = """2. **Nothing has been found here yet** for this lane, so there is nothing to
    reuse. Go to 3."""
