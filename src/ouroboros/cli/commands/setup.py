@@ -469,6 +469,19 @@ _CODEX_MANAGED_MCP_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "codex",
     "OUROBOROS_LLM_BACKEND": "codex",
 }
+_CODEX_HOST_MCP_ENV = {
+    "OUROBOROS_AGENT_RUNTIME": "host",
+    "OUROBOROS_LLM_BACKEND": "codex",
+}
+_CODEX_HOST_DIRECT_MCP_ARGS = [
+    "mcp",
+    "serve",
+    "--runtime",
+    "host",
+    "--llm-backend",
+    "codex",
+]
+_CODEX_HOST_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_HOST_DIRECT_MCP_ARGS]
 _CODEX_DIRECT_MCP_ARGS = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]
 _CODEX_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_DIRECT_MCP_ARGS]
 _CODEX_PROFILE_COMMENT = (
@@ -717,7 +730,7 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     env = entry.get("env")
-    if env is not None and env != _CODEX_MANAGED_MCP_ENV:
+    if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
@@ -727,8 +740,8 @@ def _is_setup_managed_codex_mcp_entry(
     if not has_managed_comment:
         return False
     if Path(command).name == "ouroboros":
-        return args == _CODEX_DIRECT_MCP_ARGS
-    return args == _CODEX_MODULE_MCP_ARGS
+        return args == _CODEX_DIRECT_MCP_ARGS or args == _CODEX_HOST_DIRECT_MCP_ARGS
+    return args == _CODEX_MODULE_MCP_ARGS or args == _CODEX_HOST_MODULE_MCP_ARGS
 
 
 _CODEX_WORKER_PROFILE_SECTION = """# Ouroboros Agent OS runtime profile for Codex worker subprocesses.
@@ -3858,18 +3871,134 @@ def _setup_runtime_only_backend(
     print_info(f"Config saved to: {config_path}")
 
 
-def _setup_host() -> None:
-    """Configure Ouroboros for the ``host`` (CLI-less, host-driven) runtime.
+def _codex_mcp_entry_runtime_override(entry: dict[str, object]) -> str | None:
+    """Return an explicit non-host runtime selector from a Codex MCP entry."""
+    args = entry.get("args")
+    if isinstance(args, list):
+        for index, arg in enumerate(args):
+            if not isinstance(arg, str):
+                continue
+            if arg == "--runtime" and index + 1 < len(args):
+                value = args[index + 1]
+                if isinstance(value, str) and value != "host":
+                    return f"--runtime {value}"
+            elif arg.startswith("--runtime="):
+                value = arg.partition("=")[2]
+                if value != "host":
+                    return arg
 
-    Nothing to detect: ``host`` dispatches execution to the calling MCP host
-    model instead of spawning a process (``orchestrator/host_dispatch.py``).
-    A terminal ``ooo run`` still rejects it (``cli/commands/run.py``).
-    """
-    _setup_runtime_only_backend("host", None, None)
+    env = entry.get("env")
+    if isinstance(env, dict):
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME"):
+            value = env.get(key)
+            if isinstance(value, str) and value.strip() and value.strip().lower() != "host":
+                return f"{key}={value}"
+    return None
+
+
+def _render_codex_host_mcp_section(entry: dict[str, object]) -> str:
+    """Render a setup-managed Codex entry after selecting host dispatch."""
+    migrated = deepcopy(entry)
+    args = migrated.get("args")
+    assert isinstance(args, list)
+    migrated_args = [str(arg) for arg in args]
+    for index, arg in enumerate(migrated_args):
+        if arg == "--runtime" and index + 1 < len(migrated_args):
+            migrated_args[index + 1] = "host"
+        elif arg.startswith("--runtime="):
+            migrated_args[index] = "--runtime=host"
+    migrated["args"] = migrated_args
+
+    env = migrated.get("env")
+    migrated_env = dict(env) if isinstance(env, dict) else {}
+    migrated_env["OUROBOROS_AGENT_RUNTIME"] = "host"
+    migrated["env"] = migrated_env
+
+    lines = [*_CODEX_MCP_COMMENT_LINES, "", "[mcp_servers.ouroboros]"]
+    for key in ("command", "args"):
+        lines.append(f"{key} = {_render_toml_value(migrated[key])}")
+    lines.extend(("", "[mcp_servers.ouroboros.env]"))
+    lines.extend(
+        f"{_render_toml_key(str(key))} = {_render_toml_value(value)}"
+        for key, value in migrated_env.items()
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _migrate_codex_mcp_entry_to_host() -> bool:
+    """Migrate setup-owned Codex launch selectors, rejecting user-owned conflicts."""
+    codex_config = resolve_codex_home() / "config.toml"
+    if not codex_config.exists():
+        return True
+    try:
+        raw = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(raw)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        print_error(f"Could not inspect {codex_config} before host activation: {exc}")
+        return False
+
+    entry = _codex_mcp_entry_from_toml(parsed)
+    if entry is None:
+        return True
+    has_managed_comment = _has_managed_codex_mcp_comment(raw)
+    if not _is_setup_managed_codex_mcp_entry(entry, has_managed_comment=has_managed_comment):
+        override = _codex_mcp_entry_runtime_override(entry)
+        if override is not None:
+            print_error(
+                f"Host setup cannot replace user-managed {codex_config}: its Ouroboros "
+                f"MCP entry explicitly selects {override}. Remove that selector or change it "
+                "to host, then rerun setup."
+            )
+            return False
+        return True
+
+    migrated, _ = _upsert_codex_mcp_section(raw, _render_codex_host_mcp_section(entry))
+    if migrated != raw:
+        _atomic_write_text(codex_config, migrated)
+        print_success(f"Migrated setup-managed Ouroboros MCP runtime to host in {codex_config}")
+    return True
+
+
+def _setup_host() -> bool:
+    """Configure the CLI-less host runtime and its setup-owned MCP launcher."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
+    if config_was_missing:
+        config_dict = get_default_config().model_dump(mode="json")
+    else:
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(config_dict, dict):
+        print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting host setup.")
+        return False
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "host"
+
+    if not _commit_runtime_activation(
+        runtime_name="Host",
+        host_path=resolve_codex_home() / "config.toml",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(config_dict, default_flow_style=False, sort_keys=False),
+        register_host=_migrate_codex_mcp_entry_to_host,
+        create_defaults=create_default_config,
+    ):
+        return False
+
+    print_success("Configured host runtime (no CLI — host-driven dispatch)")
+    print_info(f"Config saved to: {config_path}")
     print_info(
         "'host' only works from an MCP host session pumping "
         "ouroboros_job_wait (e.g. dsh). A terminal `ooo run` rejects it."
     )
+    return True
 
 
 def _setup_antigravity(antigravity_path: str) -> None:
@@ -5038,7 +5167,8 @@ def setup(
             raise typer.Exit(1)
         _setup_zcode(zcode_path)
     elif selected in ("host", "host_dispatch"):
-        _setup_host()
+        if not _setup_host():
+            raise typer.Exit(1)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

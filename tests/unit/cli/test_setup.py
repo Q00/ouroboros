@@ -9689,6 +9689,80 @@ class TestHostRuntimeSetup:
         assert "In your MCP host chat, type: ooo run" in result.output
         assert "ouroboros run workflow seed.yaml" not in result.output
 
+    def test_setup_host_migrates_setup_managed_codex_launcher(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: codex\n", encoding="utf-8"
+        )
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        codex_config.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines=(
+                    'command = "ouroboros"\n'
+                    'args = ["mcp", "serve", "--runtime", "codex", '
+                    '"--llm-backend", "codex"]'
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_host() is True
+
+        entry = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"][
+            "ouroboros"
+        ]
+        assert entry["args"] == [
+            "mcp",
+            "serve",
+            "--runtime",
+            "host",
+            "--llm-backend",
+            "codex",
+        ]
+        assert entry["env"] == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "codex",
+        }
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+    def test_setup_host_rejects_user_managed_runtime_override(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        original_codex = (
+            '[mcp_servers.ouroboros]\ncommand = "/custom/mcp-wrapper"\n'
+            'args = ["serve", "--runtime", "codex"]\n'
+        )
+        codex_config.write_text(original_codex, encoding="utf-8")
+
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
+
+        assert result.exit_code == 1
+        assert "user-managed" in result.output
+        assert "Setup complete" not in result.output
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == original_codex
+
 
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
