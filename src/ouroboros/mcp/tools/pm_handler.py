@@ -460,17 +460,20 @@ class PMInterviewHandler:
                         "A turn's answers, sent together: [{question, answer}, ...], one "
                         "entry per question the turn asked. A turn is recorded whole, so "
                         "collect every answer before calling. Each entry names its own "
-                        "question; nothing is matched against server-side state."
+                        "question and the batch accepts one to three entries."
                     ),
                     required=False,
                     items={
                         "type": "object",
                         "properties": {
-                            "question": {"type": "string"},
-                            "answer": {"type": "string"},
+                            "question": {"type": "string", "minLength": 1},
+                            "answer": {"type": "string", "minLength": 1},
                         },
                         "required": ["question", "answer"],
+                        "additionalProperties": False,
                     },
+                    min_items=1,
+                    max_items=3,
                 ),
                 MCPToolParameter(
                     name="action",
@@ -801,7 +804,17 @@ class PMInterviewHandler:
                 # the parent LLM sees the child's response (which contains the
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
-                pairs, pair_error = turn_answers(answers, answer, last_question)
+                planned_questions = (
+                    [state.rounds[-1].question]
+                    if state.rounds and state.rounds[-1].user_response is None
+                    else None
+                )
+                pairs, pair_error = turn_answers(
+                    answers,
+                    answer,
+                    last_question,
+                    planned_questions=planned_questions,
+                )
                 if pair_error:
                     return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
                 if pairs:
@@ -1362,7 +1375,17 @@ class PMInterviewHandler:
             engine.restore_meta(meta)
 
         # ── This turn's answers, each holding its question (RFC #2222 r4) ──
-        pairs, pair_error = turn_answers(answers, answer, last_question)
+        planned_questions = (
+            [state.rounds[-1].question]
+            if state.rounds and state.rounds[-1].user_response is None
+            else None
+        )
+        pairs, pair_error = turn_answers(
+            answers,
+            answer,
+            last_question,
+            planned_questions=planned_questions,
+        )
         if pair_error:
             return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
 
