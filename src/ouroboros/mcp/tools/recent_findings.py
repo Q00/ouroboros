@@ -91,6 +91,66 @@ _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 #: An id costs the same whatever the finding says, so counting them is counting
 #: characters.
 _RECENT_FINDINGS_MAX_ENTRIES = 20
+_INTERVIEW_BASELINE_LANE_IDS = frozenset({"code_context", "web_context"})
+
+
+def interview_baseline_by_lane(
+    findings_store: ArtifactStore | None,
+    *,
+    session_id: str,
+    now: datetime | None = None,
+) -> dict[str, dict]:
+    """Return this interview's newest fresh start-turn factual snapshot.
+
+    The server-authored synthesis provenance supplies session and phase identity;
+    child prose never grants reuse authority. A missing, stale, malformed, or
+    incomplete artifact simply falls back to normal factual fan-out.
+    """
+    if findings_store is None or not session_id:
+        return {}
+    effective_now = now or datetime.now(UTC)
+    try:
+        published = findings_store.published_contracts(
+            since=effective_now - RECENT_FINDINGS_WINDOW,
+            until=effective_now,
+            kind=_ELIGIBLE_FANOUT_KIND,
+        )
+    except (ArtifactStoreError, OSError):
+        return {}
+    for candidate in published:
+        try:
+            fetched = findings_store.fetch(candidate.contract_id)
+        except Exception:
+            continue
+        body = fetched.body
+        if not isinstance(body, dict):
+            continue
+        provenance = body.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        if provenance.get("session_id") != session_id or provenance.get("phase") != "start":
+            continue
+        result = body.get("result")
+        outputs = result.get("aggregated_outputs") if isinstance(result, dict) else None
+        if not isinstance(outputs, list):
+            continue
+        carried = {
+            entry["lane_id"]
+            for entry in outputs
+            if isinstance(entry, dict) and entry.get("lane_id") in _INTERVIEW_BASELINE_LANE_IDS
+        }
+        lanes = carried & _INTERVIEW_BASELINE_LANE_IDS
+        if not lanes:
+            continue
+        return {
+            lane_id: {
+                "contract_id": candidate.contract_id,
+                "lane_id": lane_id,
+                "published_at": candidate.published_at.isoformat(),
+            }
+            for lane_id in sorted(lanes)
+        }
+    return {}
 
 
 def _eligible_lane_ids(body: Any) -> set[str]:
@@ -210,5 +270,6 @@ def recent_findings_by_lane(
 
 __all__ = [
     "RECENT_FINDINGS_WINDOW",
+    "interview_baseline_by_lane",
     "recent_findings_by_lane",
 ]
