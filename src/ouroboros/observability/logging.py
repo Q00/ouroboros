@@ -210,8 +210,26 @@ def _mask_sensitive_data(
         Event dictionary with sensitive values masked.
     """
     for key, value in list(event_dict.items()):
-        # Skip standard structlog keys
-        if key in ("event", "level", "timestamp", "filename", "lineno"):
+        # Skip standard structlog keys that are not user-controlled —
+        # except ``event``: if a caller passes a non-string positional arg
+        # it is stored under ``event`` and may contain structured secrets.
+        if key in ("level", "timestamp", "filename", "lineno"):
+            continue
+
+        if key == "event":
+            # String events are the common case and never contain embedded
+            # credentials worth recursing into; structured (non-string) events
+            # can carry nested secrets and must be sanitized or rejected.
+            if isinstance(value, str):
+                continue
+            if isinstance(value, dict):
+                event_dict[key] = _mask_dict_sensitive_data(value)
+            elif isinstance(value, (list, tuple)):
+                event_dict[key] = _mask_sequence_sensitive_data(value)
+            else:
+                # Non-string, non-container event: coerce to str to prevent
+                # arbitrary object serialization from leaking secrets.
+                event_dict[key] = str(value)
             continue
 
         # Check if field name indicates sensitivity
@@ -219,9 +237,11 @@ def _mask_sensitive_data(
             event_dict[key] = "<REDACTED>"
             continue
 
-        # Check if value looks sensitive
+        # Check if value looks sensitive — normalize to built-in str before
+        # masking so a hostile subclass cannot override indexing/slicing to
+        # emit the original secret through the masked output.
         if isinstance(value, str) and is_sensitive_value(value):
-            event_dict[key] = mask_api_key(value)
+            event_dict[key] = mask_api_key(str.__str__(value))
             continue
 
         # Recursively handle nested dicts
@@ -250,7 +270,7 @@ def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
         if is_sensitive_field(key):
             result[key] = "<REDACTED>"
         elif isinstance(value, str) and is_sensitive_value(value):
-            result[key] = mask_api_key(value)
+            result[key] = mask_api_key(str.__str__(value))
         elif isinstance(value, dict):
             result[key] = _mask_dict_sensitive_data(value)
         elif isinstance(value, (list, tuple)):
@@ -280,14 +300,20 @@ def _mask_sequence_sensitive_data(
         elif isinstance(item, (list, tuple)):
             sanitized.append(_mask_sequence_sensitive_data(item))
         elif isinstance(item, str) and is_sensitive_value(item):
-            sanitized.append(mask_api_key(item))
+            sanitized.append(mask_api_key(str.__str__(item)))
         else:
             sanitized.append(item)
 
     if isinstance(data, tuple):
         factory = getattr(type(data), "_make", None)
         if callable(factory):
-            return factory(sanitized)
+            try:
+                return factory(sanitized)
+            except Exception:
+                # Custom tuple subclass whose _make() is incompatible with
+                # sanitized values — fall back to a plain tuple rather than
+                # letting an availability failure suppress sanitization.
+                return tuple(sanitized)
         return tuple(sanitized)
     return sanitized
 

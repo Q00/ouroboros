@@ -1389,3 +1389,79 @@ class TestSensitiveDataMasking:
         output = captured.err.strip()
         assert "ghp_secrettoken123" not in output
         assert "sk-live-deeply-nested" not in output
+
+    def test_hostile_str_subclass_secret_not_leaked_live(self, capsys: Any) -> None:
+        """A hostile str subclass overriding __getitem__ cannot leak secrets through masking."""
+
+        class HostileKey(str):
+            """Subclass that tries to leak the full secret through indexing."""
+
+            def __getitem__(self, idx: Any) -> str:
+                # Return the full secret regardless of the index
+                return str.__str__(self)
+
+            def index(self, sub: str, *args: Any) -> int:
+                # Lie about dash position to disrupt prefix detection
+                return 0
+
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        hostile_secret = HostileKey("sk-live-abc123def456ghi789")
+        log.info("auth.check", token=hostile_secret)
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        # The full secret must NEVER appear in the output
+        assert "sk-live-abc123def456ghi789" not in output
+
+    def test_structured_event_payload_secrets_masked_live(self, capsys: Any) -> None:
+        """Non-string positional event payloads containing secrets are sanitized."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        # structlog stores a non-string first positional arg under "event"
+        log.info([{"api_key": "sk-live-eventsecret"}])
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        # The secret nested inside a structured event value must not leak
+        assert "sk-live-eventsecret" not in output
+
+    def test_structured_dict_event_secrets_masked_live(self, capsys: Any) -> None:
+        """Dict event payloads stored under 'event' key are sanitized."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info({"credentials": {"api_key": "sk-live-dictevent"}})
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        assert "sk-live-dictevent" not in output
+
+    def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
+        """A custom tuple subclass with a broken _make() degrades gracefully."""
+
+        class BadTuple(tuple):
+            @classmethod
+            def _make(cls, _iterable: Any) -> BadTuple:
+                raise TypeError("intentionally broken _make")
+
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        # The processor should not raise; it falls back to plain tuple
+        broken = BadTuple(("sk-live-tuplesecret", "safe_value"))
+        log.info("tuple.test", data=broken)
+
+        captured = capsys.readouterr()
+        output = captured.err.strip()
+        # Secret must still be masked even when _make fails
+        assert "sk-live-tuplesecret" not in output
+        # The log line should still be valid JSON
+        data = json.loads(output)
+        assert "data" in data

@@ -488,3 +488,44 @@ class TestInputValidator:
         long_response = "x" * (MAX_LLM_RESPONSE_LENGTH + 1)
         is_valid, error = InputValidator.validate_llm_response(long_response)
         assert is_valid is False
+
+
+class TestSanitizeForLoggingSecurityRegressions:
+    """Regression tests for security-boundary fixes in sanitize_for_logging."""
+
+    def test_hostile_str_subclass_normalized_before_masking(self) -> None:
+        """A hostile str subclass cannot leak the secret through mask_api_key."""
+
+        class HostileKey(str):
+            def __getitem__(self, idx):
+                return str.__str__(self)
+
+        secret = HostileKey("sk-live-abc123def456ghi789")
+        result = sanitize_for_logging({"token": secret})
+        # The full secret must not appear in the masked output
+        assert "sk-live-abc123def456ghi789" not in str(result["token"])
+
+    def test_custom_tuple_subclass_make_failure_is_failsafe(self) -> None:
+        """A tuple subclass with broken _make() falls back to plain tuple."""
+
+        class BadTuple(tuple):
+            @classmethod
+            def _make(cls, _iterable):
+                raise TypeError("broken _make")
+
+        data = {"items": BadTuple(("sk-live-secretinside", "safe"))}
+        result = sanitize_for_logging(data)
+        # Must not raise, must still mask the secret
+        assert isinstance(result["items"], tuple)
+        assert "sk-live-secretinside" not in str(result["items"])
+
+    def test_strenum_credential_masked_in_nested_list(self) -> None:
+        """StrEnum values that look like credentials are masked in sequences."""
+        from enum import StrEnum
+
+        class ConfigKey(StrEnum):
+            SECRET = "sk-live-enumsecret123456"
+
+        data = {"keys": [ConfigKey.SECRET]}
+        result = sanitize_for_logging(data)
+        assert "sk-live-enumsecret123456" not in str(result["keys"])

@@ -568,11 +568,17 @@ def _sanitize_logging_value(value: Any) -> Any:
         if isinstance(value, tuple):
             factory = getattr(type(value), "_make", None)
             if callable(factory):
-                return factory(sanitized)
+                try:
+                    return factory(sanitized)
+                except Exception:
+                    # Custom tuple subclass whose _make() is incompatible —
+                    # fall back to plain tuple rather than raising during
+                    # sanitization.
+                    return tuple(sanitized)
             return tuple(sanitized)
         return sanitized
     if isinstance(value, str) and is_sensitive_value(value):
-        return mask_api_key(value)
+        return mask_api_key(str.__str__(value))
     return value
 
 
