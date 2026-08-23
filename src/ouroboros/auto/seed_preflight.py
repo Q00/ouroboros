@@ -1608,7 +1608,13 @@ def _command_program_tokens(command: str) -> frozenset[str]:
             if command_name == "command":
                 remaining = remaining[1:]
                 while remaining and remaining[0] in {"--", "-p", "-v", "-V"}:
+                    option = remaining[0]
                     remaining = remaining[1:]
+                    if option in {"-v", "-V"}:
+                        # ``command -v``/``command -V`` query shell command
+                        # resolution; their operands are names to inspect, not
+                        # programs this verification command will execute.
+                        return []
                 continue
             if command_name == "exec":
                 remaining = remaining[1:]

@@ -1264,6 +1264,50 @@ def test_shell_subprocess_bindings_do_not_leak_or_precede_expansion(
 @pytest.mark.parametrize(
     "command",
     (
+        "command -v ./missing-verifier",
+        "command -V ./missing-verifier",
+        "! command -v ./missing-verifier",
+        "! command -V ./missing-verifier",
+        "command -p -v -- ./missing-verifier",
+    ),
+)
+def test_command_resolution_queries_do_not_execute_their_operands(
+    tmp_path: Path, command: str
+) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Command query", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert report.passed
+    assert all(finding.code != "verify_program_missing" for finding in report.findings)
+
+
+def test_command_execution_option_still_exposes_missing_program(tmp_path: Path) -> None:
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Wrapped verifier",
+                    verify_command="command -p -- ./missing-verifier",
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "verify_program_missing"
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "command -- ./missing-verify",
         "exec ./missing-verify",
         "command exec ./missing-verify",
