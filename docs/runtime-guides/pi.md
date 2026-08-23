@@ -97,11 +97,14 @@ pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
 | `--no-tools` | Explicit tool-free mode: emitted when Ouroboros requests `tools=[]` (no tools allowed). Distinguishes "use defaults" (`tools=None`, flag omitted) from "disable all tools" |
 | `<PROMPT>` | The composed task prompt from Ouroboros |
 
-The native parameter flags are probed once via `pi --help`. Pi binaries without
-`--append-system-prompt` / `--tools` keep the previous behavior: system
-instructions and tool guidance are composed into the user message as text, and
-the runtime declares `system_prompt_support` / `tool_restriction_support` as
-`translated` instead of `native`.
+The native parameter flags are probed once via `pi --help` and retained
+independently. Native system-prompt and non-empty allow-list delivery still
+requires the paired `--append-system-prompt` / `--tools` path; otherwise those
+parameters are composed into the user message and reported as `translated`.
+An explicit empty allow-list uses `--no-tools` whenever that flag is available,
+even if either paired flag is absent. If `--no-tools` is unavailable, Ouroboros
+returns `ToolRestrictionUnenforced` before spawning Pi rather than silently
+widening `tools=[]` to unrestricted defaults.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal

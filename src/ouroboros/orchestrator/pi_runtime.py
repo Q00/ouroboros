@@ -284,13 +284,14 @@ class PiRuntime:
         if self._supports_native_param_flags():
             if system_prompt:
                 command.extend(["--append-system-prompt", system_prompt])
-            if tools is not None:
-                if tools:
-                    pi_names = ",".join(_PI_TOOL_FLAG_NAMES.get(tool, tool) for tool in tools)
-                    command.extend(["--tools", pi_names])
-                elif self._supports_no_tools_flag():
-                    # Explicit empty list means "disable all tools"; use --no-tools.
-                    command.append("--no-tools")
+            if tools:
+                pi_names = ",".join(_PI_TOOL_FLAG_NAMES.get(tool, tool) for tool in tools)
+                command.extend(["--tools", pi_names])
+
+        if tools == [] and self._supports_no_tools_flag():
+            # Empty-list enforcement is independent of the paired native
+            # system-prompt/non-empty-tools path.
+            command.append("--no-tools")
 
         command.append(prompt)
         return command
@@ -531,16 +532,10 @@ class PiRuntime:
             tool_list = "\n".join(f"- {t}" for t in tools)
             composed_parts.append(f"## Tooling Guidance\nPrefer these tools:\n{tool_list}")
 
-        # Fail closed when the probe proves this Pi can restrict a non-empty
-        # allow-list but lacks the companion flag required to enforce tools=[].
-        # This remains true when the paired native parameter path is disabled
-        # because --append-system-prompt is missing.
-        if (
-            tools is not None
-            and not tools
-            and self._supports_tools_flag()
-            and not self._supports_no_tools_flag()
-        ):
+        # An explicit empty allow-list is a security boundary. Enforce it with
+        # the independently probed --no-tools flag or refuse execution; no
+        # prompt translation can make unrestricted Pi defaults equivalent.
+        if tools == [] and not self._supports_no_tools_flag():
             yield AgentMessage(
                 type="result",
                 content=(

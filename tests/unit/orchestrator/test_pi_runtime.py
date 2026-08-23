@@ -621,10 +621,22 @@ def test_runtime_handle_accepts_pi_backend() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_command_emits_no_tools_for_explicit_empty_list() -> None:
-    """Blocker 1: tools=[] must emit --no-tools, not be silently dropped."""
+@pytest.mark.parametrize(
+    "native_param_flags",
+    [
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+    ids=["no-tools-only", "append-and-no-tools", "tools-and-no-tools", "all"],
+)
+def test_build_command_emits_no_tools_for_explicit_empty_list(
+    native_param_flags: tuple[bool, bool, bool],
+) -> None:
+    """tools=[] uses independently available --no-tools in every probe state."""
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = (True, True, True)
+    runtime._native_param_flags = native_param_flags
 
     command = runtime._build_command(prompt="Do the task", tools=[])
 
@@ -704,9 +716,21 @@ def test_ls_maps_to_pi_ls_builtin() -> None:
     assert command_title[command_title.index("--tools") + 1] == "ls"
 
 
+@pytest.mark.parametrize(
+    "native_param_flags",
+    [
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+    ids=["no-tools-only", "append-and-no-tools", "tools-and-no-tools", "all"],
+)
 @pytest.mark.asyncio
-async def test_execute_task_emits_no_tools_for_empty_list() -> None:
-    """End-to-end: execute_task with tools=[] should emit --no-tools natively."""
+async def test_execute_task_emits_no_tools_for_empty_list(
+    native_param_flags: tuple[bool, bool, bool],
+) -> None:
+    """Execution honors independently probed --no-tools before spawning Pi."""
     process = _FakeProcess(
         stdout_lines=[
             _jsonl_event({"type": "session", "id": "session-1"}),
@@ -723,7 +747,7 @@ async def test_execute_task_emits_no_tools_for_empty_list() -> None:
         returncode=0,
     )
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = (True, True, True)
+    runtime._native_param_flags = native_param_flags
 
     with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
         _ = [msg async for msg in runtime.execute_task("Do it", tools=[])]
@@ -832,13 +856,23 @@ def test_negotiation_full_pi_tools_empty_no_degradation() -> None:
     assert len(degradations) == 0
 
 
+@pytest.mark.parametrize(
+    "native_param_flags",
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+    ],
+    ids=["none", "append-only", "tools-only", "paired-without-no-tools"],
+)
 @pytest.mark.asyncio
-async def test_execute_task_fails_closed_tools_empty_partial_support() -> None:
-    """PR #2203 critical regression: tools=[] on partial Pi (has --tools, lacks
-    --no-tools) must fail closed with ToolRestrictionUnenforced error, never
-    silently widen to unrestricted tool access."""
+async def test_execute_task_fails_closed_tools_empty_without_no_tools_support(
+    native_param_flags: tuple[bool, bool, bool],
+) -> None:
+    """Every probe state lacking --no-tools must reject tools=[] before spawn."""
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = (True, True, False)
+    runtime._native_param_flags = native_param_flags
 
     with patch("asyncio.create_subprocess_exec") as mock_exec:
         messages = [msg async for msg in runtime.execute_task("Do it", tools=[])]
