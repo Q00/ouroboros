@@ -443,9 +443,12 @@ def resolve_network_security(
     Raises:
         ValueError: If the bind would expose tool execution without
             credentials, if authentication is configured for a transport that
-            cannot carry it, if a wildcard bind has no Host allowlist, or if
+            cannot carry it, if a wildcard bind has no Host allowlist, if
             a scoped IPv6 address (zone ID) is used on a non-loopback network
-            bind where authentication metadata URLs cannot be constructed.
+            bind where authentication metadata URLs cannot be constructed, or
+            if a scoped IPv6 address is used with authentication enabled
+            (even on loopback) since the zone ID breaks AuthSettings URL
+            construction.
     """
     is_network = transport in NETWORK_TRANSPORTS
     auth_method = security.auth_config.method
@@ -488,6 +491,15 @@ def resolve_network_security(
     # cannot be represented in a URL that the MCP SDK's Pydantic URL parser
     # accepts. Reject early with a clear message rather than failing deep
     # inside AuthSettings construction.
+    #
+    # Two cases:
+    # 1. Non-loopback scoped address (e.g. fe80::1%eth0): always rejected for
+    #    network transports because auth is mandatory for non-loopback and zone
+    #    IDs break AuthSettings URL construction.
+    # 2. Scoped loopback with auth enabled (e.g. ::1%lo with --auth-token or
+    #    inherited token): rejected because the zone ID still cannot appear in
+    #    the AuthSettings issuer/resource URLs that the SDK constructs.
+    #    Unauthenticated scoped loopback remains usable — no AuthSettings needed.
     if is_network and _has_scope_id(host) and not is_loopback_host(host):
         msg = (
             f"Cannot serve on scoped IPv6 address {host!r}. "
@@ -498,6 +510,19 @@ def resolve_network_security(
             f"Use the address without a zone ID, bind to a non-link-local "
             f"address, or use --allowed-host to specify the authority "
             f"clients will connect to."
+        )
+        raise ValueError(msg)
+
+    if is_network and _has_scope_id(host) and auth_enabled:
+        msg = (
+            f"Cannot serve on scoped IPv6 address {host!r} with authentication "
+            f"enabled. The zone identifier (scope ID) cannot be represented in "
+            f"the issuer/resource URLs that the MCP SDK's AuthSettings requires "
+            f"— neither raw (e.g. [::1%lo]) nor percent-encoded "
+            f"(e.g. [::1%25lo]) forms pass Pydantic URL validation. "
+            f"Remove the --auth-token / auth configuration to use this address "
+            f"credential-free (safe for loopback), or bind to '::1' without a "
+            f"zone ID."
         )
         raise ValueError(msg)
 

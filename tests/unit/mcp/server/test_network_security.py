@@ -269,6 +269,82 @@ class TestServeRefusesUnauthenticatedExposure:
 
         cls.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_scoped_loopback_with_explicit_token_adapter_rejects(self) -> None:
+        """Adapter.serve() rejects scoped loopback when auth_config is explicit.
+
+        Regression test: previously this reached build_auth_settings and crashed
+        inside Pydantic URL validation with an opaque error.
+        """
+        adapter = MCPServerAdapter(auth_config=_auth_config())
+
+        cls, _ = _mock_sdk_server()
+        with (
+            patch("ouroboros.mcp.server.adapter._OuroborosSDKServer", cls),
+            pytest.raises(
+                ValueError,
+                match="Cannot serve on scoped IPv6 address.*with authentication enabled",
+            ),
+        ):
+            await adapter.serve(
+                transport="streamable-http",
+                host="::1%lo",
+                port=8080,
+            )
+
+        cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scoped_loopback_with_inherited_token_adapter_rejects(self) -> None:
+        """Adapter.serve() rejects scoped loopback with an inherited bearer token.
+
+        Regression test: tokens can be inherited from env/config rather than
+        passed explicitly via --auth-token. The adapter must still reject.
+        """
+        inherited_auth = AuthConfig(
+            method=AuthMethod.BEARER_TOKEN,
+            api_keys=frozenset({"env-inherited-secret"}),
+            required=True,
+        )
+        adapter = MCPServerAdapter(auth_config=inherited_auth)
+
+        cls, _ = _mock_sdk_server()
+        with (
+            patch("ouroboros.mcp.server.adapter._OuroborosSDKServer", cls),
+            pytest.raises(
+                ValueError,
+                match="Cannot serve on scoped IPv6 address.*with authentication enabled",
+            ),
+        ):
+            await adapter.serve(
+                transport="sse",
+                host="[::1%lo0]",
+                port=9000,
+            )
+
+        cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scoped_loopback_without_auth_adapter_serves(self) -> None:
+        """Adapter.serve() still allows scoped loopback when credential-free.
+
+        Unauthenticated scoped loopback should work fine because no
+        AuthSettings URL construction is needed.
+        """
+        adapter = MCPServerAdapter()
+
+        cls, instance = _mock_sdk_server()
+        with patch("ouroboros.mcp.server.adapter._OuroborosSDKServer", cls):
+            await adapter.serve(
+                transport="streamable-http",
+                host="::1%lo",
+                port=8080,
+            )
+
+        cls.assert_called_once()
+        assert cls.call_args.kwargs["token_verifier"] is None
+        assert cls.call_args.kwargs["auth"] is None
+
 
 class TestResolveNetworkSecurity:
     """The policy entry point, exercised without standing a server up."""
@@ -559,6 +635,76 @@ class TestIPv6Binds:
 
         with pytest.raises(ValidationError, match="invalid IPv6 address"):
             build_auth_settings(host="fe80::1%lo", port=8080)
+
+    def test_scoped_loopback_with_explicit_auth_token_is_rejected(self) -> None:
+        """A scoped loopback (::1%lo) with an explicit --auth-token must fail.
+
+        Even though ::1%lo is loopback (safe from a network exposure
+        standpoint), the zone ID cannot appear in AuthSettings issuer URLs.
+        The rejection must be early and actionable, not a Pydantic crash.
+        """
+        with pytest.raises(
+            ValueError,
+            match="Cannot serve on scoped IPv6 address.*with authentication enabled",
+        ):
+            resolve_network_security(
+                transport="streamable-http",
+                host="::1%lo",
+                port=8080,
+                security=SecurityLayer(auth_config=_auth_config()),
+            )
+
+    def test_scoped_loopback_with_inherited_bearer_token_is_rejected(self) -> None:
+        """A scoped loopback with an inherited bearer token must also fail.
+
+        Tokens can be inherited from environment config (e.g. OUROBOROS_AUTH_TOKEN)
+        rather than passed explicitly. The rejection must apply regardless of
+        how the auth config reached the security layer.
+        """
+        inherited_auth = AuthConfig(
+            method=AuthMethod.BEARER_TOKEN,
+            api_keys=frozenset({"inherited-secret"}),
+            required=True,
+        )
+        with pytest.raises(
+            ValueError,
+            match="Cannot serve on scoped IPv6 address.*with authentication enabled",
+        ):
+            resolve_network_security(
+                transport="sse",
+                host="[::1%lo0]",
+                port=9000,
+                security=SecurityLayer(auth_config=inherited_auth),
+            )
+
+    def test_scoped_loopback_without_auth_still_works(self) -> None:
+        """Unauthenticated scoped loopback must remain usable (no AuthSettings).
+
+        This confirms the fix does not regress the credential-free case.
+        """
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="::1%lo",
+            port=8080,
+            security=SecurityLayer(),
+        )
+        assert wiring.token_verifier is None
+        assert wiring.auth_settings is None
+        assert wiring.transport_security is not None
+
+    @pytest.mark.parametrize("host", ["::1%lo", "::1%lo0", "[::1%eth0]"])
+    def test_scoped_loopback_variants_all_rejected_with_auth(self, host: str) -> None:
+        """All scoped loopback spellings are rejected when auth is enabled."""
+        with pytest.raises(
+            ValueError,
+            match="Cannot serve on scoped IPv6 address.*with authentication enabled",
+        ):
+            resolve_network_security(
+                transport="streamable-http",
+                host=host,
+                port=8080,
+                security=SecurityLayer(auth_config=_auth_config()),
+            )
 
 
 class TestTransportSecurityBuilder:
