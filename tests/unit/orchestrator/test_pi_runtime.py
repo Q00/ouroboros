@@ -11,7 +11,9 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
+from ouroboros.orchestrator.execution_authority import runtime_effect_capabilities_contract
 from ouroboros.orchestrator.pi_runtime import PiRuntime
+from ouroboros.orchestrator.runner import OrchestratorRunner
 
 _EXPECTED_CWD = str(Path("/tmp/project").resolve())
 
@@ -155,27 +157,43 @@ def test_capabilities_follow_probed_native_param_support() -> None:
 
     assert native.capabilities.system_prompt_support == ParamSupport.NATIVE
     assert native.capabilities.tool_restriction_support == ParamSupport.NATIVE
+    assert native.capabilities.empty_tool_restriction_support == ParamSupport.NATIVE
     assert legacy.capabilities.system_prompt_support == ParamSupport.TRANSLATED
     assert legacy.capabilities.tool_restriction_support == ParamSupport.TRANSLATED
+    assert legacy.capabilities.empty_tool_restriction_support == ParamSupport.IGNORED
     # Pi has no approval gate: permission mode stays ignored either way.
     assert native.capabilities.permission_mode_support == ParamSupport.IGNORED
     assert legacy.capabilities.permission_mode_support == ParamSupport.IGNORED
 
 
-def test_capabilities_partial_support_has_tools_but_no_no_tools() -> None:
-    """PR #2203 blocker: partial Pi (has --tools, lacks --no-tools) must NOT
-    report NATIVE for tool_restriction_support. It can restrict to a set but
-    cannot disable all tools — reporting NATIVE would silently widen tools=[]
-    to unrestricted."""
+def test_capabilities_preserve_positive_and_empty_tool_authority_independently() -> None:
     partial = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    partial._native_param_flags = (True, True, False)  # has --tools but not --no-tools
+    partial._native_param_flags = (True, True, False)
 
     caps = partial.capabilities
-    # system_prompt is still native (only needs --append-system-prompt)
+
     assert caps.system_prompt_support == ParamSupport.NATIVE
-    # tool restriction is TRANSLATED because empty-list cannot be enforced
-    assert caps.tool_restriction_support == ParamSupport.TRANSLATED
-    assert caps.permission_mode_support == ParamSupport.IGNORED
+    assert caps.tool_restriction_support == ParamSupport.NATIVE
+    assert caps.empty_tool_restriction_support == ParamSupport.IGNORED
+
+
+def test_no_tools_only_capability_changes_durable_execution_fingerprint() -> None:
+    no_tools = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    no_tools._native_param_flags = (False, False, True)
+    incapable = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    incapable._native_param_flags = (False, False, False)
+
+    no_tools_contract = runtime_effect_capabilities_contract(no_tools)
+    incapable_contract = runtime_effect_capabilities_contract(incapable)
+
+    assert no_tools_contract["empty_tool_restriction_support"] == "native"
+    assert incapable_contract["empty_tool_restriction_support"] == "ignored"
+    assert no_tools_contract != incapable_contract
+    assert OrchestratorRunner._execution_semantics_fingerprint(
+        {"runtime_effect_capabilities": no_tools_contract}
+    ) != OrchestratorRunner._execution_semantics_fingerprint(
+        {"runtime_effect_capabilities": incapable_contract}
+    )
 
 
 def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None:
@@ -194,6 +212,10 @@ def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None
     assert requested_runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
     assert requested_runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
     assert requested_runtime.capabilities.session_signals.after_turn_delivery is True
+    assert (
+        requested_runtime.capabilities.empty_tool_restriction_support
+        is ParamSupport.IGNORED
+    )
 
 
 def test_build_command_rejects_unsafe_resume_session_id() -> None:
@@ -815,8 +837,8 @@ def test_negotiation_partial_pi_tools_empty_reports_ignored() -> None:
     assert "silently dropped" in d.detail
 
 
-def test_negotiation_partial_pi_tools_nonempty_reports_translated() -> None:
-    """Partial Pi with a non-empty tools list: TRANSLATED (can restrict, but lossily)."""
+def test_negotiation_partial_pi_tools_nonempty_is_native() -> None:
+    """A paired Pi path enforces non-empty tools despite lacking --no-tools."""
     from ouroboros.orchestrator.runtime_param_negotiation import (
         negotiate_execution_params,
     )
@@ -831,10 +853,7 @@ def test_negotiation_partial_pi_tools_nonempty_reports_translated() -> None:
         permission_mode=None,
     )
 
-    assert len(degradations) == 1
-    d = degradations[0]
-    assert d.parameter == "tools"
-    assert d.support == ParamSupport.TRANSLATED
+    assert degradations == ()
 
 
 def test_negotiation_full_pi_tools_empty_no_degradation() -> None:
@@ -854,6 +873,23 @@ def test_negotiation_full_pi_tools_empty_no_degradation() -> None:
     )
 
     assert len(degradations) == 0
+
+
+def test_negotiation_no_tools_only_pi_empty_has_no_degradation() -> None:
+    """Independent --no-tools authority makes tools=[] natively enforceable."""
+    from ouroboros.orchestrator.runtime_param_negotiation import (
+        negotiate_execution_params,
+    )
+
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (False, False, True)
+
+    assert negotiate_execution_params(
+        runtime.capabilities,
+        system_prompt=None,
+        tools=[],
+        permission_mode=None,
+    ) == ()
 
 
 @pytest.mark.parametrize(

@@ -189,6 +189,7 @@ class LeaderDrivenWorkerRuntime:
             targeted_resume=self._targeted_resume,
             system_prompt_support=ParamSupport.NATIVE,
             tool_restriction_support=ParamSupport.IGNORED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             reasoning_effort_support=self._reasoning_effort_support,
             enforceable_reasoning_efforts=self._enforceable_reasoning_efforts,
             model_override_support=self._model_override_support,

@@ -194,27 +194,27 @@ class PiRuntime:
     @property
     def capabilities(self) -> RuntimeCapabilities:
         native_params = self._supports_native_param_flags()
-        # Tool restriction is only truly NATIVE when *both* ``--tools`` (positive
-        # allow-list) and ``--no-tools`` (disable all) are available.  A Pi
-        # binary that ships ``--tools`` but not ``--no-tools`` cannot enforce
-        # ``tools=[]``; reporting NATIVE would silently widen to unrestricted.
-        # Mark that partial state as TRANSLATED so the negotiation layer can
-        # surface the gap (and ``_tool_restriction_support_for_request`` correctly
-        # downgrades empty-list requests to IGNORED).
-        full_tool_restriction = native_params and self._supports_no_tools_flag()
+        # Pi exposes positive allow-list and disable-all authority as independent
+        # flags. Preserve that distinction publicly: either flag can exist without
+        # the other and changes which concrete tools request is enforceable.
         return RuntimeCapabilities(
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
             # ``--append-system-prompt`` and ``--tools`` deliver the system
-            # prompt and the tool allow-list natively when the installed Pi
-            # supports them; older binaries fall back to user-message
-            # composition. Pi has no permission-mode flag (no approval gate).
+            # prompt and a non-empty tool allow-list natively only when the
+            # installed Pi supports the paired parameter path; older binaries
+            # fall back to user-message composition.
             system_prompt_support=(
                 ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
             ),
             tool_restriction_support=(
-                ParamSupport.NATIVE if full_tool_restriction else ParamSupport.TRANSLATED
+                ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
+            ),
+            empty_tool_restriction_support=(
+                ParamSupport.NATIVE
+                if self._supports_no_tools_flag()
+                else ParamSupport.IGNORED
             ),
             permission_mode_support=ParamSupport.IGNORED,
             session_signals=SessionSignalCapabilities(

@@ -114,11 +114,13 @@ class TestRuntimeCapabilitiesParamSupport:
 
         assert caps.system_prompt_support is ParamSupport.NATIVE
         assert caps.tool_restriction_support is ParamSupport.NATIVE
+        assert caps.empty_tool_restriction_support is ParamSupport.NATIVE
         assert caps.permission_mode_support is ParamSupport.NATIVE
 
     def test_full_capabilities_is_all_native(self) -> None:
         assert FULL_CAPABILITIES.system_prompt_support is ParamSupport.NATIVE
         assert FULL_CAPABILITIES.tool_restriction_support is ParamSupport.NATIVE
+        assert FULL_CAPABILITIES.empty_tool_restriction_support is ParamSupport.NATIVE
         assert FULL_CAPABILITIES.permission_mode_support is ParamSupport.NATIVE
 
     def test_claude_adapter_honors_system_prompt_natively(self) -> None:

@@ -101,10 +101,13 @@ The native parameter flags are probed once via `pi --help` and retained
 independently. Native system-prompt and non-empty allow-list delivery still
 requires the paired `--append-system-prompt` / `--tools` path; otherwise those
 parameters are composed into the user message and reported as `translated`.
-An explicit empty allow-list uses `--no-tools` whenever that flag is available,
-even if either paired flag is absent. If `--no-tools` is unavailable, Ouroboros
-returns `ToolRestrictionUnenforced` before spawning Pi rather than silently
-widening `tools=[]` to unrestricted defaults.
+Empty-list enforcement is exposed separately as
+`empty_tool_restriction_support` and included in the durable runtime capability
+contract, so a Pi binary with only `--no-tools` has different negotiation and
+execution-semantics fingerprints from one that cannot disable tools. If
+`--no-tools` is unavailable, Ouroboros returns `ToolRestrictionUnenforced`
+before spawning Pi rather than silently widening `tools=[]` to unrestricted
+defaults.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal

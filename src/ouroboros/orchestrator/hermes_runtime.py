@@ -250,6 +250,7 @@ class HermesCliRuntime(AgentRuntime):
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             permission_mode_support=ParamSupport.TRANSLATED,
             reasoning_effort_support=ParamSupport.IGNORED,
         )

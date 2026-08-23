@@ -545,7 +545,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 6
+    assert semantics["version"] == 7
     assert semantics["verify_shell_identity"] is None or isinstance(
         semantics["verify_shell_identity"], dict
     )
@@ -559,7 +559,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
         "max_retry_after_seconds": 86400,
     }
     assert semantics["usage_limit_pause_seconds"] == 18000
-    assert semantics["runtime_effect_capabilities"]["version"] == 1
+    assert semantics["runtime_effect_capabilities"]["version"] == 2
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
@@ -1054,6 +1054,7 @@ def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
     "field",
     [
         "targeted_resume",
+        "empty_tool_restriction_support",
         "reasoning_effort_support",
         "enforceable_reasoning_efforts",
         "model_override_support",

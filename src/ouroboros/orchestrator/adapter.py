@@ -913,15 +913,20 @@ class RuntimeCapabilities:
             plain-text stdout lines only.
         system_prompt_support: How the runtime honors the ``system_prompt``
             execution parameter (see :class:`ParamSupport`).
-        tool_restriction_support: How the runtime honors the ``tools``
+        tool_restriction_support: How the runtime honors a non-empty ``tools``
             allow-list passed to ``execute_task``.
+        empty_tool_restriction_support: How the runtime honors an explicit empty
+            ``tools=[]`` allow-list. This is independent because a runtime may
+            expose disable-all authority without a positive allow-list, or vice
+            versa.
         permission_mode_support: How the runtime honors ``permission_mode``.
         session_signals: Ouroboros Synapse capabilities. Every field defaults to
             unsupported; resumability never implies live signal delivery.
 
-    The three ``*_support`` fields default to :attr:`ParamSupport.NATIVE` so
-    existing runtimes and ``FULL_CAPABILITIES`` are unchanged; a runtime opts in
-    to a non-native value only when its handling is demonstrably lossy.
+    The four execution-parameter ``*_support`` fields default to
+    :attr:`ParamSupport.NATIVE` so existing first-class runtimes and
+    ``FULL_CAPABILITIES`` are unchanged; a runtime opts in to a non-native value
+    only when its handling is demonstrably lossy.
     """
 
     skill_dispatch: bool
@@ -929,9 +934,10 @@ class RuntimeCapabilities:
     structured_output: bool
     system_prompt_support: ParamSupport = ParamSupport.NATIVE
     tool_restriction_support: ParamSupport = ParamSupport.NATIVE
+    empty_tool_restriction_support: ParamSupport = ParamSupport.NATIVE
     permission_mode_support: ParamSupport = ParamSupport.NATIVE
     # The effort-first investment lever (RFC #1405): how the runtime honors the
-    # ``reasoning_effort`` execution parameter. Unlike the three fields above it
+    # ``reasoning_effort`` execution parameter. Unlike the four fields above it
     # defaults to IGNORED, because most agent runtimes have no per-call effort
     # knob — a runtime must opt in to NATIVE (or TRANSLATED) only when it can
     # actually route the level to its backend (e.g. Claude Agent SDK ``effort``,

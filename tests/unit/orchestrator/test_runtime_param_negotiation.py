@@ -26,6 +26,7 @@ def _caps(
     *,
     system_prompt_support: ParamSupport = ParamSupport.NATIVE,
     tool_restriction_support: ParamSupport = ParamSupport.NATIVE,
+    empty_tool_restriction_support: ParamSupport = ParamSupport.NATIVE,
     permission_mode_support: ParamSupport = ParamSupport.NATIVE,
 ) -> RuntimeCapabilities:
     return RuntimeCapabilities(
@@ -34,6 +35,7 @@ def _caps(
         structured_output=True,
         system_prompt_support=system_prompt_support,
         tool_restriction_support=tool_restriction_support,
+        empty_tool_restriction_support=empty_tool_restriction_support,
         permission_mode_support=permission_mode_support,
     )
 
@@ -91,9 +93,12 @@ def test_translated_non_empty_tools_is_reported_when_requested() -> None:
     assert "translation" in result[0].detail
 
 
-def test_translated_empty_tools_allowlist_is_reported_as_ignored() -> None:
+def test_ignored_empty_tools_allowlist_is_reported_as_ignored() -> None:
     result = negotiate_execution_params(
-        _caps(tool_restriction_support=ParamSupport.TRANSLATED),
+        _caps(
+            tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
+        ),
         system_prompt=None,
         tools=[],
         permission_mode=None,
