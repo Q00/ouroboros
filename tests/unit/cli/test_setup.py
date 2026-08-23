@@ -608,6 +608,78 @@ class TestCodexSetup:
         assert "/home/operator/.local/bin/ouroboros" not in contents
         assert "ouroboros-ai[mcp]" in contents
 
+    def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical argv does not make a launcher with foreign env setup-owned."""
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(selected))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "claude"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_direct_not_selected_by_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical base argv stays user-managed when PATH selects another executable."""
+        configured = tmp_path / "custom" / "ouroboros"
+        selected = tmp_path / "path" / "ouroboros"
+        configured.parent.mkdir()
+        selected.parent.mkdir()
+        configured.touch()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(configured))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            if command == "ouroboros":
+                return str(selected)
+            return str(configured) if command == str(configured) else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
     def test_register_codex_mcp_server_preserves_path_direct_with_process_controls(
         self, tmp_path: Path
     ) -> None:
