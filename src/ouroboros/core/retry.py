@@ -9,12 +9,12 @@ Matching is therefore *per pattern*, not uniformly substring-based:
 * Patterns with no realistic false positive ("timeout", "overloaded", ...) stay
   plain substrings — narrowing them would drop genuine variants such as
   ``ReadTimeout`` or ``TimeoutException``.
-* ``"rate"`` is matched on alphabetic boundaries, so ``rate limit`` /
-  ``rate_limit`` / ``RateLimitError`` still match while ``generate``,
-  ``iterate`` and ``accurate`` no longer do.
+* Rate-limit spellings (``rate limit``, ``rate_limit``, ``RateLimitError``)
+  are recognised, while a bare ``rate`` and word fragments such as ``generate``
+  are not.
 * HTTP status codes are matched only in a status-code *position* — after a
-  status-ish token, at the start of a line, or in front of their reason phrase —
-  so a token count like ``15000 tokens`` is no longer read as a ``500``.
+  bounded status-ish token, at the start of a line, or in front of their reason
+  phrase — so fields such as ``zipcode: 500`` are not treated as HTTP failures.
 
 ``extra_patterns`` supplied by a caller keep substring semantics unless the
 pattern has a precise rule in :data:`_PRECISE_PATTERN_REGEXES`, so adapter-local
@@ -53,11 +53,13 @@ BASE_TRANSIENT_PATTERNS: tuple[str, ...] = (
     "connection",  # connection reset / aborted / error
 )
 
-# Tokens that put a bare number in a status-code position ("HTTP 503",
-# "error: 502", "upstream returned 500").
+# Explicit HTTP/status tokens that put a bare number in a status-code position.
+# Generic words such as "code", "got", and "returned" are deliberately absent:
+# they also describe deterministic application values, counts, and validation
+# errors.  Compound forms such as "APIStatusError" remain supported.
 _HTTP_STATUS_CONTEXT = (
-    r"(?:https?(?:/[\d.]+)?|status(?:[ _-]?code)?|code|errors?|err|response|responded"
-    r"|returns?|returned|got|received|failed with|upstream)"
+    r"(?<![a-z])(?:https?(?:/[\d.]+)?|status(?:[ _-]?code)?|response[ _-]?status"
+    r"|api[ _-]?(?:status[ _-]?)?error)(?![a-z])"
 )
 
 # Reason phrases let a leading code be recognised mid-sentence, e.g.
@@ -74,26 +76,32 @@ _HTTP_STATUS_REASONS: dict[str, str] = {
 def _http_status_regex(code: str) -> str:
     """Build a regex that matches *code* only where a status code can appear."""
     alternatives = [
-        # "HTTP 503 ...", "error: 502", "upstream returned 500"
+        # "HTTP 503 ...", "status code: 502", "APIStatusError: 500"
         rf"{_HTTP_STATUS_CONTEXT}\W{{0,4}}{code}(?![\d.])",
+        # Natural upstream reports are specific enough to distinguish a status
+        # from counts such as "received 500 tokens" or "returned 500 chars".
+        rf"(?<![a-z])upstream\W+returned\W{{0,4}}{code}(?![\d.])",
+        rf"(?<![a-z])received\W+(?:a\W+)?{code}\W+from\W+upstream(?![a-z])",
         # "429 from https://api.openai.com/v1/responses" (start of message/line)
         rf"^\W*{code}(?![\d.])",
     ]
     reason = _HTTP_STATUS_REASONS.get(code)
     if reason:
-        alternatives.append(rf"(?<![\d.]){code}\W{{0,3}}{reason}")
+        # requests/urllib3 render "503 Server Error: Service Unavailable".
+        alternatives.append(
+            rf"(?<![\d.]){code}\W{{0,3}}(?:(?:client|server)\W+error\W{{0,3}})?{reason}"
+        )
     return "|".join(alternatives)
 
 
 _ALPHA_LEFT = r"(?<![a-z])"
-_ALPHA_RIGHT = r"(?![a-z])"
 
 # Patterns whose plain-substring form produced false positives. Everything not
 # listed here is matched as a substring (see module docstring).
 _PRECISE_PATTERN_REGEXES: dict[str, str] = {
-    # "rate limit" / "rate-limited" / "rate_limit" / "RateLimitError" yes;
-    # "generate" / "iterate" / "accurate" / "corporate" no.
-    "rate": rf"{_ALPHA_LEFT}rate(?:[ _-]?limit\w*|{_ALPHA_RIGHT})",
+    # Require a rate-limit spelling; a standalone "rate" describes many
+    # deterministic validation failures (sample rate, tax rate, and so on).
+    "rate": rf"{_ALPHA_LEFT}rate[ _-]?limit\w*",
     "429": _http_status_regex("429"),
     "500": _http_status_regex("500"),
     "502": _http_status_regex("502"),

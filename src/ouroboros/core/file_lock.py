@@ -219,12 +219,14 @@ def _lock_parent_authority(
         directory_fd = os.open(lock_path.parent, flags)
     else:
         directory_fd = os.dup(parent_fd)
+    outer_body_failed = True
 
     try:
         _validate_lock_parent_binding(directory_fd, lock_path.parent)
         if not stable:
             yield directory_fd
             _validate_lock_parent_binding(directory_fd, lock_path.parent)
+            outer_body_failed = False
             return
 
         opened = os.fstat(directory_fd)
@@ -247,6 +249,7 @@ def _lock_parent_authority(
                 )
             yield directory_fd
             _validate_lock_parent_binding(directory_fd, lock_path.parent)
+            outer_body_failed = False
             return
 
         _acquire_posix_lock(
@@ -287,8 +290,12 @@ def _lock_parent_authority(
                 lambda: _reset_stable_parent_authority(token),
                 suppress_errors=body_failed,
             )
+        outer_body_failed = False
     finally:
-        os.close(directory_fd)
+        _run_release_steps(
+            lambda: os.close(directory_fd),
+            suppress_errors=outer_body_failed,
+        )
 
 
 def _validate_active_lockfile(

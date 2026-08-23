@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros import __version__
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.config.models import (
     EvaluationConfig,
     LLMConfig,
@@ -20,9 +21,11 @@ from ouroboros.config.models import (
     RuntimeProfileConfig,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import ReferenceCue, ReferenceOrigin
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPToolError
 from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig
+from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -557,6 +560,150 @@ class TestMCPServerAdapterIntegration:
         assert tool_result.content[0].text == "Echo: v2"
         assert resource_result.contents[0].text == "Static content"
         assert prompt_result.messages[0].content.text == "Hello, MCP!"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_generate_seed_preserves_typed_reopen_error(self) -> None:
+        """The public generate-seed path exposes machine-readable recovery data."""
+        from mcp import Client
+        from mcp.server import MCPServer
+        from mcp.shared.exceptions import MCPError as SDKMCPError
+
+        state = InterviewState(
+            interview_id="session-unresolved-reference",
+            initial_context="Build an issue tool",
+            status=InterviewStatus.COMPLETED,
+            ambiguity_score=0.1,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What outcome matters most?",
+                    user_response="Fast triage.",
+                )
+            ],
+            reference_cues=(
+                ReferenceCue(
+                    reference_id="linear",
+                    label="Linear-like",
+                    origin=ReferenceOrigin.USER_TEXT,
+                ),
+            ),
+        )
+        handler = GenerateSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        adapter = MCPServerAdapter(name="typed-error-boundary")
+        adapter.register_tool(handler)
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+                AsyncMock(return_value=Result.ok(state)),
+            ),
+            patch.object(MCPServer, "run_stdio_async", new=AsyncMock()),
+        ):
+            await adapter.serve(transport="stdio")
+            async with Client(adapter._mcp_server, mode="auto") as client:
+                with pytest.raises(SDKMCPError) as error_info:
+                    await client.call_tool(
+                        "ouroboros_generate_seed",
+                        {"session_id": state.interview_id},
+                    )
+
+        assert error_info.value.data == {
+            "error_code": "interview_reopen_required",
+            "details": {
+                "code": "interview_reopen_required",
+                "blockers": [
+                    {
+                        "candidate_id": "reference-0:contrast-required",
+                        "code": "reference_confirmation_required",
+                        "reason": "required_unknown",
+                        "section": "context",
+                        "reference_ids": ["linear"],
+                    }
+                ],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_keeps_untyped_errors_as_tool_results(self) -> None:
+        """Existing untyped failures remain ordinary MCP execution-error results."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UntypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="untyped_error",
+                    description="Return an ordinary tool failure",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Ordinary tool failure",
+                        tool_name="untyped_error",
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="untyped-error-boundary")
+        adapter.register_tool(UntypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("untyped_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Ordinary tool failure"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_does_not_expose_non_json_tool_error_details(
+        self,
+    ) -> None:
+        """Malformed typed details fall back to the SDK's ordinary safe error result."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UnsafeDetails:
+            def __repr__(self) -> str:
+                return "private-runtime-object"
+
+        class UnsafeTypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="unsafe_typed_error",
+                    description="Return malformed typed details",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Typed tool failure",
+                        tool_name="unsafe_typed_error",
+                        error_code="unsafe_details_probe",
+                        details={"private": UnsafeDetails()},
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="unsafe-details-boundary")
+        adapter.register_tool(UnsafeTypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("unsafe_typed_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Typed tool failure"
+        assert "private-runtime-object" not in result.content[0].text
 
     @pytest.mark.asyncio
     async def test_public_v2_boundary_preserves_canonical_schema_and_binary_resource(
