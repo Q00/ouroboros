@@ -68,16 +68,13 @@ _PI_TOOL_FLAG_NAMES: dict[str, str] = {
 _NATIVE_PARAM_PROBE_TIMEOUT_SECONDS = 10.0
 
 
-def _probe_pi_native_param_flags(cli_path: str) -> tuple[bool, bool]:
+def _probe_pi_native_param_flags(cli_path: str) -> tuple[bool, bool, bool]:
     """Detect whether the Pi CLI accepts native parameter flags.
 
-    Returns a tuple ``(has_tools_flag, has_no_tools_flag)`` where:
-    - ``has_tools_flag`` means ``--append-system-prompt`` and ``--tools`` are present.
-    - ``has_no_tools_flag`` means ``--no-tools`` is also present.
-
-    Both flags have shipped with Pi for a long time, but a missing or very old
-    binary must keep working: probing ``--help`` once lets the runtime fall
-    back to composing system prompt and tool guidance into the user message.
+    Returns ``(has_append_system_prompt, has_tools, has_no_tools)``. Preserve
+    each help-probe result independently so safety checks can distinguish a
+    tools-capable CLI from a legacy CLI even when the paired native parameter
+    path is unavailable.
     """
     try:
         result = subprocess.run(  # noqa: ASYNC100 - one-shot startup probe
@@ -87,13 +84,15 @@ def _probe_pi_native_param_flags(cli_path: str) -> tuple[bool, bool]:
             timeout=_NATIVE_PARAM_PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return (False, False)
+        return (False, False, False)
     if result.returncode != 0:
-        return (False, False)
+        return (False, False, False)
     help_text = f"{result.stdout}\n{result.stderr}"
-    has_tools = "--append-system-prompt" in help_text and "--tools" in help_text
-    has_no_tools = "--no-tools" in help_text
-    return (has_tools, has_no_tools)
+    return (
+        "--append-system-prompt" in help_text,
+        "--tools" in help_text,
+        "--no-tools" in help_text,
+    )
 
 
 class PiRuntime:
@@ -136,7 +135,7 @@ class PiRuntime:
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
-        self._native_param_flags: tuple[bool, bool] | None = None
+        self._native_param_flags: tuple[bool, bool, bool] | None = None
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
@@ -226,16 +225,22 @@ class PiRuntime:
         )
 
     def _supports_native_param_flags(self) -> bool:
-        """Lazily probe the CLI once for native parameter flag support."""
+        """Return whether the paired system-prompt and tools flags are available."""
         if self._native_param_flags is None:
             self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags[0]
+        return self._native_param_flags[0] and self._native_param_flags[1]
+
+    def _supports_tools_flag(self) -> bool:
+        """Return whether the Pi CLI supports a non-empty tools allow-list."""
+        if self._native_param_flags is None:
+            self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
+        return self._native_param_flags[1]
 
     def _supports_no_tools_flag(self) -> bool:
         """Return whether the Pi CLI supports ``--no-tools``."""
         if self._native_param_flags is None:
             self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags[1]
+        return self._native_param_flags[2]
 
     # -- CLI resolution ----------------------------------------------------
 
@@ -526,10 +531,16 @@ class PiRuntime:
             tool_list = "\n".join(f"- {t}" for t in tools)
             composed_parts.append(f"## Tooling Guidance\nPrefer these tools:\n{tool_list}")
 
-        # Fail closed: when the caller requests tools=[] (disable all tools)
-        # and the Pi CLI lacks --no-tools, we cannot enforce that restriction.
-        # Rather than silently widening to unrestricted, emit an explicit error.
-        if tools is not None and not tools and native_params and not self._supports_no_tools_flag():
+        # Fail closed when the probe proves this Pi can restrict a non-empty
+        # allow-list but lacks the companion flag required to enforce tools=[].
+        # This remains true when the paired native parameter path is disabled
+        # because --append-system-prompt is missing.
+        if (
+            tools is not None
+            and not tools
+            and self._supports_tools_flag()
+            and not self._supports_no_tools_flag()
+        ):
             yield AgentMessage(
                 type="result",
                 content=(
