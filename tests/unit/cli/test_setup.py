@@ -607,11 +607,14 @@ class TestCodexSetup:
         self, tmp_path: Path
     ) -> None:
         """Canonical argv does not make a launcher with foreign env setup-owned."""
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         original = (
             "[mcp_servers.ouroboros]\n"
-            'command = "/home/operator/.local/bin/ouroboros"\n'
+            f"command = {json.dumps(str(selected))}\n"
             'args = ["mcp", "serve"]\n'
             "[mcp_servers.ouroboros.env]\n"
             'OUROBOROS_AGENT_RUNTIME = "claude"\n'
@@ -619,12 +622,12 @@ class TestCodexSetup:
         )
         codex_config.write_text(original, encoding="utf-8")
 
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._command_matches_path_program",
-                return_value=True,
-            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
             patch(
                 "ouroboros.cli.commands.setup._render_codex_mcp_section",
                 return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
@@ -638,11 +641,17 @@ class TestCodexSetup:
         self, tmp_path: Path
     ) -> None:
         """Canonical base argv stays user-managed when PATH selects another executable."""
+        configured = tmp_path / "custom" / "ouroboros"
+        selected = tmp_path / "path" / "ouroboros"
+        configured.parent.mkdir()
+        selected.parent.mkdir()
+        configured.touch()
+        selected.touch()
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         original = (
             "[mcp_servers.ouroboros]\n"
-            'command = "/opt/operator/bin/ouroboros"\n'
+            f"command = {json.dumps(str(configured))}\n"
             'args = ["mcp", "serve"]\n'
             "[mcp_servers.ouroboros.env]\n"
             'OUROBOROS_AGENT_RUNTIME = "codex"\n'
@@ -650,12 +659,14 @@ class TestCodexSetup:
         )
         codex_config.write_text(original, encoding="utf-8")
 
+        def which(command: str) -> str | None:
+            if command == "ouroboros":
+                return str(selected)
+            return str(configured) if command == str(configured) else None
+
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._command_matches_path_program",
-                return_value=False,
-            ),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
             patch(
                 "ouroboros.cli.commands.setup._render_codex_mcp_section",
                 return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
