@@ -63,26 +63,33 @@ function seedFileCompletions(prefix: string): CompletionItem[] | null {{
   }} catch {{
     return null;
   }}
-  // Completion values carry the absolute store path: the `run` dispatcher
-  // resolves relative seed paths against the Pi session cwd, so a bare
-  // filename would only execute when the same file also exists there.
+  // Pi's CombinedAutocompleteProvider replaces the *entire* argument prefix
+  // with item.value — so the completed value must include the `run` subcommand
+  // to remain dispatchable.  The absolute path is POSIX single-argument
+  // quoted so every pathname character supported by shlex survives; embedded
+  // single quotes use the standard '\"'\"' sequence.
   // Names containing whitespace are skipped because the dispatcher
-  // tokenizes the dispatched command on whitespace.
+  // tokenizes the completion prefix on whitespace before this replacement.
   const items = names
     .filter((name) => name.endsWith(".yaml") || name.endsWith(".yml"))
     .filter((name) => !/\\s/.test(name) && matchesPrefix(name, prefix))
     .sort()
-    .map((name) => ({{
-      value: path.join(seedsDir, name),
-      label: name,
-      description: "Seed file",
-    }}));
+    .map((name) => {{
+      const abs = path.join(seedsDir, name);
+      const quoted = `'${{abs.replace(/'/g, `'\"'\"'`)}}'`;
+      return {{
+        value: `run ${{quoted}}`,
+        label: name,
+        description: "Seed file",
+      }};
+    }});
   return items.length > 0 ? items : null;
 }}
 
 // TAB completions for `/ooo <TAB>`: dispatchable subcommands for the first
-// argument, Seed files from `~/.ouroboros/seeds/` for `ooo run <TAB>`
-// (inserted as absolute paths so the value executes from any session cwd).
+// argument, Seed files from `~/.ouroboros/seeds/` for `ooo run <TAB>`.
+// Pi replaces the entire argument prefix with item.value, so Seed items
+// carry `run <quoted-absolute-path>` to remain dispatchable after selection.
 function argumentCompletions(argumentPrefix: string): CompletionItem[] | null {{
   const tokens = argumentPrefix.replace(/^\\s+/, "").split(/\\s+/);
   const completing = tokens[tokens.length - 1] ?? "";
