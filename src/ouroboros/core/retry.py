@@ -53,12 +53,13 @@ BASE_TRANSIENT_PATTERNS: tuple[str, ...] = (
     "connection",  # connection reset / aborted / error
 )
 
-# Bounded tokens that put a bare number in a status-code position ("HTTP 503",
-# "error: 502", "upstream returned 500").  Alphabetic boundaries prevent a
-# suffix such as the "code" in "zipcode" from supplying status context.
+# Explicit HTTP/status tokens that put a bare number in a status-code position.
+# Generic words such as "code", "got", and "returned" are deliberately absent:
+# they also describe deterministic application values, counts, and validation
+# errors.  Compound forms such as "APIStatusError" remain supported.
 _HTTP_STATUS_CONTEXT = (
-    r"(?<![a-z])(?:https?(?:/[\d.]+)?|status(?:[ _-]?code)?|code|errors?|err|response"
-    r"|responded|returns?|returned|got|received|failed with|upstream)(?![a-z])"
+    r"(?<![a-z])(?:https?(?:/[\d.]+)?|status(?:[ _-]?code)?|response[ _-]?status"
+    r"|api[ _-]?(?:status[ _-]?)?error)(?![a-z])"
 )
 
 # Reason phrases let a leading code be recognised mid-sentence, e.g.
@@ -75,14 +76,21 @@ _HTTP_STATUS_REASONS: dict[str, str] = {
 def _http_status_regex(code: str) -> str:
     """Build a regex that matches *code* only where a status code can appear."""
     alternatives = [
-        # "HTTP 503 ...", "error: 502", "received a 503 from upstream"
-        rf"{_HTTP_STATUS_CONTEXT}\W{{0,4}}(?:(?:an?|the)\W+)?{code}(?![\d.])",
+        # "HTTP 503 ...", "status code: 502", "APIStatusError: 500"
+        rf"{_HTTP_STATUS_CONTEXT}\W{{0,4}}{code}(?![\d.])",
+        # Natural upstream reports are specific enough to distinguish a status
+        # from counts such as "received 500 tokens" or "returned 500 chars".
+        rf"(?<![a-z])upstream\W+returned\W{{0,4}}{code}(?![\d.])",
+        rf"(?<![a-z])received\W+(?:a\W+)?{code}\W+from\W+upstream(?![a-z])",
         # "429 from https://api.openai.com/v1/responses" (start of message/line)
         rf"^\W*{code}(?![\d.])",
     ]
     reason = _HTTP_STATUS_REASONS.get(code)
     if reason:
-        alternatives.append(rf"(?<![\d.]){code}\W{{0,3}}{reason}")
+        # requests/urllib3 render "503 Server Error: Service Unavailable".
+        alternatives.append(
+            rf"(?<![\d.]){code}\W{{0,3}}(?:(?:client|server)\W+error\W{{0,3}})?{reason}"
+        )
     return "|".join(alternatives)
 
 

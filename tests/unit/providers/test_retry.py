@@ -79,6 +79,10 @@ class TestNoFalsePositives:
             "sample rate: 44100 is unsupported",
             "rate",
             "request rate exceeded",
+            "received 500 tokens but the model limit is 200",
+            "model returned 500 characters",
+            "got 429 schema violations",
+            "code: 500 is not a supported application value",
         ],
     )
     def test_digit_runs_and_word_fragments_are_not_transient(self, message: str) -> None:
@@ -97,6 +101,9 @@ class TestNoFalsePositives:
             "429 from https://api.openai.com/v1/responses",
             "received a 503 from upstream",
             "504 Gateway Timeout",
+            "requests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url",
+            "429 Client Error Too Many Requests",
+            "500 Server Error Internal Server Error",
             # Rate-limit spellings that must survive the boundary tightening.
             "rate limit exceeded",
             "rate-limited, retry in 30s",
