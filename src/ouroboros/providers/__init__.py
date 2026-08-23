@@ -59,6 +59,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
 
         return OurocodeLLMAdapter
+    if name == "DshLLMAdapter":
+        from ouroboros.providers.dsh_llm_adapter import DshLLMAdapter
+
+        return DshLLMAdapter
     if name == "ZcodeCliLLMAdapter":
         from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
 
@@ -85,6 +89,7 @@ __all__ = [
     "PiLLMAdapter",
     "GjcLLMAdapter",
     "OurocodeLLMAdapter",
+    "DshLLMAdapter",
     "ZcodeCliLLMAdapter",
     "LiteLLMAdapter",
     # Factory helpers

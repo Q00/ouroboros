@@ -148,6 +148,181 @@ def test_write_syncs_codex_plugin_manifest_version(monkeypatch, tmp_path: Path) 
     assert json.loads(codex_plugin.read_text())["version"] == "0.50.5"
 
 
+def _seed_sync_fixture(tmp_path: Path, monkeypatch, version: str = "0.50.4") -> None:
+    """Seed the required sync targets at *version* under a relocated ROOT."""
+    claude_plugin = tmp_path / ".claude-plugin" / "plugin.json"
+    marketplace = tmp_path / ".claude-plugin" / "marketplace.json"
+    source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+    for path, payload in (
+        (claude_plugin, {"version": version}),
+        (marketplace, {"plugins": [{"version": version}]}),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload))
+    for path, body in ((source_skill, "source"), (bundled_skill, "bundled")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"<!-- ooo:VERSION:{version} -->\n{body}\n")
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", claude_plugin)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+
+
+def _mcp_descriptor(from_spec: str) -> dict:
+    return {
+        "mcpServers": {
+            "ouroboros": {
+                "command": "uvx",
+                "args": [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    from_spec,
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
+            }
+        }
+    }
+
+
+def test_write_pins_both_plugin_mcp_descriptors(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Both shipped plugin MCP descriptors — Claude and Codex — pin the
+    served package to the plugin version (#2066), so a plugin update
+    changes the uvx cache key on every plugin surface."""
+    _seed_sync_fixture(tmp_path, monkeypatch)
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    codex_mcp_json = tmp_path / ".mcp.codex.json"
+    mcp_json.write_text(json.dumps(_mcp_descriptor("ouroboros-ai[mcp]")))
+    codex_mcp_json.write_text(json.dumps(_mcp_descriptor("ouroboros-ai[mcp]==0.50.4")))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    sync_plugin_version.main()
+
+    for descriptor in (mcp_json, codex_mcp_json):
+        args = json.loads(descriptor.read_text())["mcpServers"]["ouroboros"]["args"]
+        assert args[args.index("--from") + 1] == "ouroboros-ai[mcp]==0.50.5"
+    captured = capsys.readouterr()
+    assert "WRITE .claude-plugin/.mcp.json (unpinned -> 0.50.5)" in captured.out
+    assert "WRITE .mcp.codex.json (0.50.4 -> 0.50.5)" in captured.out
+
+
+def test_mcp_pin_already_current_reports_ok(monkeypatch, tmp_path: Path, capsys) -> None:
+    _seed_sync_fixture(tmp_path, monkeypatch, version="0.50.5")
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    original = json.dumps(_mcp_descriptor("ouroboros-ai[mcp]==0.50.5"))
+    mcp_json.write_text(original)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    sync_plugin_version.main()
+
+    captured = capsys.readouterr()
+    assert "OK    .claude-plugin/.mcp.json (0.50.5)" in captured.out
+    assert mcp_json.read_text() == original
+
+
+def test_mcp_pin_drift_fails_without_write(monkeypatch, tmp_path: Path, capsys) -> None:
+    _seed_sync_fixture(tmp_path, monkeypatch, version="0.50.5")
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    mcp_json.write_text(json.dumps(_mcp_descriptor("ouroboros-ai[mcp]==0.50.4")))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--version", "0.50.5"],
+    )
+
+    with pytest.raises(SystemExit):
+        sync_plugin_version.main()
+
+    captured = capsys.readouterr()
+    assert "DRIFT .claude-plugin/.mcp.json (0.50.4 != 0.50.5)" in captured.out
+
+
+def test_write_fails_before_mutation_on_ambiguous_mcp_requirement(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An ambiguous descriptor fails preflight before any target mutates."""
+    _seed_sync_fixture(tmp_path, monkeypatch)
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    descriptor = _mcp_descriptor("ouroboros-ai[mcp]")
+    descriptor["mcpServers"]["ouroboros"]["args"] += ["--from", "ouroboros-ai[mcp]"]
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    mcp_json.write_text(json.dumps(descriptor))
+    plugin_before = plugin_json.read_text()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    with pytest.raises(SystemExit, match="could not validate"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_text() == plugin_before
+    assert json.loads(mcp_json.read_text()) == descriptor
+
+
+def test_write_fails_before_mutation_on_unrelated_second_from(monkeypatch, tmp_path: Path) -> None:
+    """Every additional --from makes the shipped launcher ambiguous."""
+    _seed_sync_fixture(tmp_path, monkeypatch)
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    descriptor = _mcp_descriptor("ouroboros-ai[mcp]")
+    descriptor["mcpServers"]["ouroboros"]["args"] = [
+        "--from",
+        "other-package",
+        *descriptor["mcpServers"]["ouroboros"]["args"],
+    ]
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    mcp_json.write_text(json.dumps(descriptor))
+    plugin_before = plugin_json.read_text()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    with pytest.raises(SystemExit, match="could not validate"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_text() == plugin_before
+    assert json.loads(mcp_json.read_text()) == descriptor
+
+
+def test_write_fails_before_mutation_on_equals_form_second_from(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _seed_sync_fixture(tmp_path, monkeypatch)
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    descriptor = _mcp_descriptor("ouroboros-ai[mcp]")
+    descriptor["mcpServers"]["ouroboros"]["args"].append("--from=other-package")
+    mcp_json = tmp_path / ".claude-plugin" / ".mcp.json"
+    mcp_json.write_text(json.dumps(descriptor))
+    plugin_before = plugin_json.read_text()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "0.50.5"],
+    )
+
+    with pytest.raises(SystemExit, match="could not validate"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_text() == plugin_before
+    assert json.loads(mcp_json.read_text()) == descriptor
+
+
 def test_update_version_marker_preserves_unrelated_bytes_with_bom_and_crlf(
     tmp_path: Path,
     monkeypatch,

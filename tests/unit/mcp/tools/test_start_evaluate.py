@@ -24,6 +24,7 @@ from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     StartEvaluateHandler,
 )
+from ouroboros.mcp.tools.job_observer import extract_job_observer_inline_handoff
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -1281,6 +1282,14 @@ class TestBackgroundJobPath:
         assert observer["job_id"] == "job_abc123"
         assert observer["session_id"] == "orch_xyz"
         assert observer["recommended_host_action"] == "spawn_observer_session"
+        assert (
+            extract_job_observer_inline_handoff(
+                result.value.text_content,
+                expected_job_id="job_abc123",
+                expected_session_id="orch_xyz",
+            )
+            == observer
+        )
         # Inner evaluate must NOT have been called synchronously — fire-and-forget.
         fake_inner_handler.handle.assert_not_called()
         job_manager.start_job.assert_awaited_once()

@@ -118,6 +118,8 @@ async def test_ralph_loop_wall_clock_exhausted_surfaces_in_tool_result_meta() ->
     assert tool_result.is_error is True
     assert tool_result.meta["status"] == "failed"
     assert tool_result.meta["stop_reason"] == "wall_clock_exhausted"
+    assert tool_result.meta["failure_reason_code"] == "timeout"
+    assert tool_result.meta["recovery_action"] == "retry"
 
 
 @dataclass

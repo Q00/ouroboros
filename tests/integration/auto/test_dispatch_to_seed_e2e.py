@@ -282,13 +282,11 @@ def _install_auto_handler_stubs(
             captured["seed_saver"] = seed_saver
             captured["seed_loader"] = seed_loader
             captured["skip_run"] = skip_run
-            captured["complete_product"] = _.get("complete_product")
 
         async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
             captured["state_goal"] = state.goal
             captured["state_cwd"] = state.cwd
             captured["state_skip_run"] = state.skip_run
-            captured["state_complete_product"] = state.complete_product
             captured["state_pipeline_timeout_seconds"] = state.pipeline_timeout_seconds
             state.transition(AutoPhase.INTERVIEW, "stubbed interview start")
             state.interview_session_id = "interview_dispatch_e2e_runtime"
@@ -415,7 +413,7 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
         messages = [
             message
             async for message in runtime.execute_task(
-                f'ooo auto "{user_goal}" --complete-product --pipeline-timeout-seconds 1800.5'
+                f'ooo auto "{user_goal}" --pipeline-timeout-seconds 1800.5'
             )
         ]
 
@@ -436,7 +434,6 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert {
         "goal",
         "cwd",
-        "complete_product",
         "pipeline_timeout_seconds",
     } <= set(args.keys()), (
         "packaged ooo auto frontmatter must declare documented mcp_args; "
@@ -448,7 +445,9 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert args["cwd"] == str(cwd), (
         f"resolve_skill_dispatch must inject runtime cwd via $CWD; got {args!r}"
     )
-    assert args["complete_product"] is True
+    # `complete_product` is no longer a documented placeholder: the run job owns
+    # run -> evaluate -> ralph, so Auto has nothing to drive with it.
+    assert "complete_product" not in args
     assert args["pipeline_timeout_seconds"] == 1800.5
     assert isinstance(args["pipeline_timeout_seconds"], float)
 
@@ -459,8 +458,6 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert captured.get("state_cwd") == str(cwd), (
         "AutoHandler._run must thread runtime cwd into AutoPipelineState"
     )
-    assert captured.get("complete_product") is True
-    assert captured.get("state_complete_product") is True
     assert captured.get("state_pipeline_timeout_seconds") == 1800.5
 
     # The runtime must yield a single final result message carrying the Seed.

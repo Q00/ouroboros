@@ -251,6 +251,27 @@ def test_direct_attention_triggers(event_type: str, expected_trigger: str) -> No
     assert any(relay.get("trigger") == expected_trigger for relay in relays)
 
 
+def test_seed_qa_advisory_reports_without_claiming_ownership() -> None:
+    """An advisory verdict is information, not an ownership claim.
+
+    The engine ran the Seed despite an unresolved verdict, but whether it keeps
+    going is decided by the gates that follow — so this must never be durable
+    evidence that ownership is `active`, which a later block would falsify.
+    """
+    blocked = _event(1, "auto.seed_qa.blocked", {"reason": "repair_budget_exhausted"})
+    advisory = _event(2, "auto.seed_qa.advisory_override", {"reason": "repair_budget_exhausted"})
+
+    relays = classify_relay_events([blocked, advisory], job_id="job_1")
+    by_key = {cast(str, r.get("trigger") or r.get("subtype")): r for r in relays}
+
+    assert cast(dict, by_key["seed_qa_blocked"]["engine_ownership"])["state"] == "closed"
+    reported = by_key["seed_qa_advisory"]
+    assert reported["kind"] == "progress_advanced"
+    assert "engine_ownership" not in reported
+    assert "recommended_host_actions" not in reported
+    assert reported["evidence"]["reason"] == "repair_budget_exhausted"
+
+
 def test_proactive_relay_has_no_action_menu_and_deduplicates_unchanged_route() -> None:
     plan = _event(
         1,

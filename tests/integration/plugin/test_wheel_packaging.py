@@ -40,6 +40,7 @@ def _extract_python_resolver(contents: str) -> str:
     return fenced.removeprefix("```bash\n").removesuffix("\n```")
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     shutil.which("uv") is None,
     reason="uv not on PATH — wheel build cannot run in this environment.",
@@ -238,6 +239,10 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
     probe_env = os.environ.copy()
     probe_env["HOME"] = str(probe_home)
     probe_env["USERPROFILE"] = str(probe_home)
+    # The inherited SDK runtime may now fall back to an installed CLI. Keep this
+    # rejection probe independent of the developer machine and login shell.
+    probe_env["PATH"] = os.pathsep.join((str(probe_python.parent), os.defpath))
+    probe_env["SHELL"] = str(probe_home / "missing-shell")
     for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME", "_OUROBOROS_NESTED"):
         probe_env.pop(key, None)
     bare_probe = subprocess.run(
@@ -301,6 +306,7 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     shutil.which("uv") is None,
     reason="uv not on PATH — wheel build cannot run in this environment.",

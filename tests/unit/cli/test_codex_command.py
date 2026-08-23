@@ -39,6 +39,9 @@ _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
     "ouroboros_generate_seed",
 }
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_PLUGIN_VERSION = json.loads(
+    (_REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+)["version"]
 _CANONICAL_CODEX_MCP_ENTRY = (
     "[mcp_servers.ouroboros]\n"
     'command = "uvx"\n'
@@ -1148,12 +1151,12 @@ class TestCodexDoctor:
                     "--python",
                     ">=3.12",
                     "--from",
-                    "ouroboros-ai[mcp]==0.26.0",
+                    "ouroboros-ai[mcp]>=0.26.0",
                     "ouroboros",
                     "mcp",
                     "serve",
                 ],
-                "exactly one unpinned",
+                "exactly one `--from ouroboros-ai[mcp]`",
             ),
             (
                 [
@@ -1166,7 +1169,7 @@ class TestCodexDoctor:
                     "mcp",
                     "serve",
                 ],
-                "exactly one unpinned",
+                "exactly one `--from ouroboros-ai[mcp]`",
             ),
             (
                 [
@@ -1268,6 +1271,86 @@ class TestCodexDoctor:
         )
 
         assert failures == []
+
+    @pytest.mark.parametrize("pin", ["ouroboros-ai[mcp]", f"ouroboros-ai[mcp]=={_PLUGIN_VERSION}"])
+    def test_doctor_accepts_unpinned_and_release_pinned_requirements(self, pin: str) -> None:
+        """#2066: the shipped plugin descriptors pin the served package, so
+        the canonical launcher is accepted with the exact release pin too."""
+        args = [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            pin,
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface("uvx", args, {}, failures)
+
+        assert failures == []
+
+    def test_doctor_rejects_release_pin_that_does_not_match_manifest(self) -> None:
+        args = [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            "ouroboros-ai[mcp]==99.99.99",
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface("uvx", args, {}, failures)
+
+        assert any("manifest-matching" in failure for failure in failures)
+        assert any("is not canonical" in failure for failure in failures)
+
+    @pytest.mark.parametrize(
+        "requirement",
+        [
+            "ouroboros-ai[mcp]>=0.51.2",
+            "ouroboros-ai==0.51.2",
+            "other-package[mcp]==0.51.2",
+            "ouroboros-ai[mcp]==0.51.2.dev5",
+            "ouroboros-ai[mcp]==0.51.2+local",
+        ],
+    )
+    def test_doctor_still_rejects_arbitrary_requirements(self, requirement: str) -> None:
+        """#2066: only the canonical requirement — unpinned or with a
+        release-shaped exact pin — is accepted; ranges, other packages,
+        a missing mcp extra, and non-release pins stay rejected."""
+        args = [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            requirement,
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface("uvx", args, {}, failures)
+
+        assert failures != []
 
     def test_check_auto_dispatch_surface_accepts_setup_generated_release_config(
         self,

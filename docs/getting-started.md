@@ -22,8 +22,8 @@ compatible `python`, and otherwise run with
 `uv run --no-project --quiet --python '>=3.12' python`. Older global
 interpreters are rejected instead of entering the first-run flow.
 
-Then run the install commands in your terminal, and run setup and auto inside
-Claude Code to go from idea to execution:
+Then run the install commands in your terminal. Start Claude Code and follow
+the two commands below in order:
 
 **1. Install the plugin** (in your terminal):
 ```bash
@@ -31,13 +31,26 @@ claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 ```
 
-**2. Set up and build** (inside a Claude Code session -- start one with `claude`):
+**2. First command** (inside a Claude Code session -- start one with `claude`):
 ```
 ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is a one-time runtime configuration. `ooo interview` is the first
+useful command: it starts the Socratic interview and returns a session that can
+be continued into Seed generation and execution.
+
+For a one-command pipeline after setup, use:
+
+```
 ooo auto "Build a task management CLI"
 ```
 
-That's it. `ooo auto` runs bounded Socratic interview rounds, generates an A-grade Seed, repairs B/C Seeds when possible, and starts execution only after the A-grade gate passes. It returns an `auto_session_id` so interrupted or blocked runs can be resumed.
+`ooo auto` runs bounded Socratic interview rounds, generates an A-grade Seed,
+repairs B/C Seeds when possible, and starts execution only after the A-grade
+gate passes. It returns an `auto_session_id` so interrupted or blocked runs can
+be resumed.
 
 Prefer the manual path when you want to answer every question yourself:
 
@@ -64,10 +77,16 @@ Use this path if you prefer a standalone terminal workflow, or are using a non-C
 # Install
 pip install ouroboros-ai
 
-# Set up
+# Set up the runtime once
 ouroboros setup
 
-# Run a seed spec
+# Start your first interview
+ouroboros init start "Build a task management CLI"
+```
+
+After the interview produces a Seed, run it with:
+
+```bash
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 ```
 
@@ -84,18 +103,24 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-Start a new Codex session and enter `ooo`. If setup has not run yet, Ouroboros
-offers to prepare the runtime before it changes anything. Once prepared, it
-uses Codex's current default model automatically. Choose **Directly configure
-models** only when you want to choose or pin a model for a pipeline stage; in
-Codex this opens the local settings UI in your browser at a temporary
-`localhost` address.
+Start a new Codex session and run these commands in order:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+`ooo setup` is the one-time runtime preparation. Once prepared, Codex uses its
+current default model automatically. Choose **Directly configure models** only
+when you want to choose or pin a model for a pipeline stage; in Codex this
+opens the local settings UI in your browser at a temporary `localhost` address.
 
 For a standalone Codex CLI installation without the plugin, prepare the
 integration once:
 
 ```bash
 ouroboros setup --runtime codex
+ouroboros init start "Build a task management CLI"
 ```
 
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
@@ -180,7 +205,7 @@ ouroboros --version                   # verify CLI
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=docs-getting-started bash
 ```
 
 ### Option 3: From Source (Contributors)
@@ -318,7 +343,7 @@ The Socratic Interviewer asks clarifying questions:
 - "Mobile app or web-based?" (Desktop-only with web export)
 - "Data storage preference?" (SQLite, local file)
 
-Answer until the ambiguity score drops below 0.2. The interview then auto-generates a seed spec:
+Answer until the ambiguity score drops below 0.2, and the interview auto-generates a seed spec. If you would rather stop before that, the CLI offers to force generation at whatever score you are on:
 
 ```yaml
 # Auto-generated seed (example)

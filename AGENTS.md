@@ -92,4 +92,7 @@ Loaded on-demand — not preloaded.
 
 **Core**: socratic-interviewer, ontologist, seed-architect, evaluator, qa-judge, contrarian
 **Support**: hacker, simplifier, researcher, architect
+**Analysis**: analysis-agent, ontology-analyst, codebase-explorer, research-agent, breadth-keeper
+**Execution**: code-executor, seed-closer, consensus-reviewer, semantic-evaluator
+**Specialist**: advocate, judge
 <!-- ooo:END -->

@@ -60,6 +60,10 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+from ouroboros.providers.claude_cli_output import (
+    ClaudeCliOutputError,
+    normalize_claude_cli_output,
+)
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.providers.tool_use_diagnostics import diagnose_tool_use_turn
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
@@ -363,6 +367,8 @@ class ClaudeCodeAdapter:
 
         error_type = str(error.details.get("error_type", ""))
         stderr = str(error.details.get("stderr", "") or "").strip()
+        if stderr and self._is_retryable_error(stderr):
+            return True
         if stderr:
             return False
 
@@ -678,7 +684,6 @@ class ClaudeCodeAdapter:
         rather than assumed moot.
         """
         import asyncio
-        import json as _json
 
         cli_path = self._cli_path
         if cli_path is None:  # pragma: no cover - guarded by the caller
@@ -769,58 +774,100 @@ class ClaudeCodeAdapter:
 
         stderr_text = stderr.decode("utf-8", "replace").strip()
         try:
-            payload = _json.loads(stdout.decode("utf-8", "replace"))
-        except ValueError:
+            normalized = normalize_claude_cli_output(stdout.decode("utf-8", "replace"))
+        except ClaudeCliOutputError as exc:
             # A non-JSON body means the CLI failed before it produced a result
             # envelope -- an auth prompt, a usage limit, a bad flag. The stderr
             # text is the only diagnosis available, and it is what the user
             # needs to see.
             return Result.err(
                 ProviderError(
-                    message=f"claude CLI returned no JSON result (exit {proc.returncode})",
-                    details={"stderr": stderr_text[:2000], "returncode": proc.returncode},
+                    message=(
+                        f"claude CLI request failed: no valid JSON result (exit {proc.returncode})"
+                    ),
+                    details={
+                        "stderr": stderr_text[:2000],
+                        "returncode": proc.returncode,
+                        "parse_error": str(exc),
+                    },
                 )
             )
 
-        if payload.get("is_error") or proc.returncode != 0:
+        payload = normalized.raw_payload
+        process_failed = proc.returncode not in (0, None)
+        if process_failed:
+            # The process status is the outer authority.  A stale success
+            # envelope can remain on stdout after the CLI/service fails; using
+            # its result text would hide overload/rate-limit diagnostics and
+            # suppress the shared transient retry loop.
+            process_diagnostic = stderr_text or (normalized.result if normalized.is_error else "")
             return Result.err(
                 ProviderError(
-                    message=str(payload.get("result") or "claude CLI reported an error"),
+                    message=(
+                        process_diagnostic
+                        or f"claude CLI command failed with exit code {proc.returncode}"
+                    ),
                     details={
-                        "subtype": payload.get("subtype"),
+                        "error_type": "ProcessError",
+                        "subtype": normalized.subtype,
                         "returncode": proc.returncode,
-                        "session_id": payload.get("session_id"),
+                        "session_id": normalized.session_id,
+                        "usage": normalized.usage,
+                        "stop_reason": normalized.stop_reason,
+                        "stderr": stderr_text[:2000],
+                        "envelope_is_error": normalized.is_error,
+                    },
+                )
+            )
+        if normalized.is_error:
+            return Result.err(
+                ProviderError(
+                    message=normalized.result or "claude CLI reported an error",
+                    details={
+                        "subtype": normalized.subtype,
+                        "returncode": proc.returncode,
+                        "session_id": normalized.session_id,
+                        "usage": normalized.usage,
+                        "stop_reason": normalized.stop_reason,
                         "stderr": stderr_text[:2000],
                     },
                 )
             )
 
-        session_id = payload.get("session_id")
-        content = str(payload.get("result") or "")
+        session_id = normalized.session_id
+        content = normalized.result
         empty = self._empty_content_error(
             content, session_id=session_id, stderr_tail=stderr_text[:2000]
         )
         if empty is not None:
             return Result.err(empty)
 
-        usage = payload.get("usage") or {}
+        usage = normalized.usage or {}
+        prompt_tokens = int(usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        allocated_tokens = prompt_tokens + completion_tokens
+        authoritative_tokens = int(usage.get("total_tokens") or 0)
         log.info(
             "claude_code_adapter.cli_request_completed",
             content_length=len(content),
             session_id=session_id,
-            stop_reason=payload.get("stop_reason"),
+            stop_reason=normalized.stop_reason,
         )
         return Result.ok(
             CompletionResponse(
                 content=content,
                 model=config.model,
                 usage=UsageInfo(
-                    prompt_tokens=int(usage.get("input_tokens") or 0),
-                    completion_tokens=int(usage.get("output_tokens") or 0),
-                    total_tokens=int(usage.get("input_tokens") or 0)
-                    + int(usage.get("output_tokens") or 0),
+                    # Preserve UsageInfo's additive invariant.  The normalizer
+                    # guarantees that the authoritative total is at least the
+                    # known prompt/completion sum; cache or total-only spend is
+                    # explicit rather than silently split between components.
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=allocated_tokens,
+                    unallocated_tokens=authoritative_tokens - allocated_tokens,
                 ),
-                finish_reason=str(payload.get("stop_reason") or "stop"),
+                finish_reason=normalized.stop_reason or "stop",
                 raw_response=payload,
             )
         )

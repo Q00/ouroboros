@@ -545,7 +545,10 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 4
+    assert semantics["version"] == 6
+    assert semantics["verify_shell_identity"] is None or isinstance(
+        semantics["verify_shell_identity"], dict
+    )
     assert semantics["adaptive_concurrency_policy"] == {
         "algorithm": "aimd/v2",
         "admission_scope": "provider_call",
@@ -910,6 +913,7 @@ def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
     [
         "run_verify_commands",
         "verify_command_timeout_seconds",
+        "verify_shell_identity",
         "ac_retry_attempts",
         "cross_harness_redispatch",
         "enable_decomposition",
@@ -946,6 +950,68 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
 
     with pytest.raises(OrchestratorError, match="invalid execution contract"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_v4_execution_semantics_migrate_to_unavailable_verify_shell() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 4
+    del semantics["verify_shell_identity"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    resumed = _runner()
+    assert (
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
+    )
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == 6
+    assert migrated["verify_shell_identity"] is None
+
+
+def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 5
+    del semantics["verify_shell_identity"]
+    semantics["verify_shell_path"] = "/legacy/bash"
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    resumed = _runner()
+    assert (
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
+    )
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == 6
+    assert migrated["verify_shell_identity"] is None
+
+
+def test_resume_rejects_changed_verify_shell_authority() -> None:
+    original = _runner()
+    original._verify_shell_identity = {
+        "path": "/trusted/bash",
+        "realpath": "/trusted/bash",
+        "sha256": "0" * 64,
+    }
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    resumed = _runner()
+    resumed._verify_shell_identity = {
+        "path": "/different/bash",
+        "realpath": "/different/bash",
+        "sha256": "1" * 64,
+    }
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_current_execution_semantics_migrates_retired_preflight_authority_once() -> None:

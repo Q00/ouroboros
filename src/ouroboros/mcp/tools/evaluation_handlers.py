@@ -23,20 +23,30 @@ from ouroboros.config import (
     get_llm_backend_for_role,
     get_llm_model_for_role,
 )
-from ouroboros.core.errors import ValidationError
+from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
+from ouroboros.mcp.host_context import (
+    render_lateral_host_banner,
+    resolve_request_subagent_dispatch,
+)
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
+from ouroboros.mcp.telemetry_boundary import (
+    record_direct_evaluation_outcome,
+    record_subagent_dispatch_emitted,
+)
 from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
     FetchArtifactHandler,
     SubmitFanoutResultsHandler,
 )
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -67,6 +77,22 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+def _direct_evaluation_failure_reason(error: object) -> str | None:
+    """Map only trusted exception types to the telemetry reason vocabulary."""
+    if isinstance(error, (ConfigError,)):
+        return "config"
+    if isinstance(error, (ValidationError, PydanticValidationError)):
+        return "validation"
+    if isinstance(error, (MCPAuthError,)):
+        return "auth"
+    if isinstance(error, (MCPTimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(error, ProviderError):
+        return "model"
+    return None
+
 
 if TYPE_CHECKING:
     from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
@@ -814,7 +840,11 @@ class EvaluateHandler:
                     error=rendered_error,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(result.error),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
@@ -864,22 +894,47 @@ class EvaluateHandler:
                     meta=meta,
                 )
             )
-        except (ValueError, RuntimeError) as e:
+        except ConfigError as e:
             # Configuration/bootstrap errors (unsupported backend, missing
             # provider install) — actionable by the user, safe to surface.
             log.warning("mcp.tool.evaluate.config_error", error=str(e))
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code="config",
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
                 )
             )
-        except Exception:
+        except (ValueError, RuntimeError) as e:
+            # Preserve the historical setup-facing response for these factory
+            # failures, but do not infer ``config`` from a generic built-in
+            # exception. Only a typed ConfigError earns that telemetry reason.
+            log.warning("mcp.tool.evaluate.setup_error", error=str(e))
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(e),
+                )
+            return Result.err(
+                MCPToolError(
+                    f"Evaluation setup failed: {e}",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        except Exception as exc:
             log.exception("mcp.tool.evaluate.error")
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(exc),
+                )
             return Result.err(
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
@@ -957,7 +1012,11 @@ class EvaluateHandler:
             err = first_result.error
             rendered = err.format_details() if hasattr(err, "format_details") else str(err)
             if emit_terminal_telemetry:
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                record_direct_evaluation_outcome(
+                    final_approved=None,
+                    failed=True,
+                    failure_reason_code=_direct_evaluation_failure_reason(err),
+                )
             return Result.err(
                 MCPToolError(
                     f"Evaluation failed: {rendered}",
@@ -1003,7 +1062,11 @@ class EvaluateHandler:
                     session_id=session_id,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(entry),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed during multi-AC run: {entry}",
@@ -1019,7 +1082,11 @@ class EvaluateHandler:
                     error=rendered,
                 )
                 if emit_terminal_telemetry:
-                    record_direct_evaluation_outcome(final_approved=None, failed=True)
+                    record_direct_evaluation_outcome(
+                        final_approved=None,
+                        failed=True,
+                        failure_reason_code=_direct_evaluation_failure_reason(err),
+                    )
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered}",
@@ -1628,7 +1695,6 @@ class LateralThinkHandler(BridgeAwareMixin):
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
                 lateral_persona_panel_metadata_from_capability_definitions,
-                resolve_subagent_dispatch,
                 stamp_fanout_meta,
                 stamp_lateral_persona_fanout,
             )
@@ -1690,12 +1756,22 @@ class LateralThinkHandler(BridgeAwareMixin):
             #     from inline payloads via its own primitive (e.g. Codex). Emit
             #     the inline result stamped with ``host_action=spawn_subagents``.
             #   - SEQUENTIAL: no parallel surface at all → plain inline fallback.
-            dispatch = resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode)
+            dispatch = resolve_request_subagent_dispatch(
+                self.agent_runtime_backend,
+                self.opencode_mode,
+            )
             if dispatch is SubagentDispatchMode.PLUGIN_PASSIVE:
                 # Preserve public response shape (#442): ouroboros_lateral_think
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                record_subagent_dispatch_emitted(
+                    fanout_kind="lateral_persona_panel",
+                    payload_count=len(payloads),
+                    dispatch_mode=dispatch,
+                    worker_backend=self.agent_runtime_backend,
+                    fanout_reentry_available=False,
+                )
                 return build_multi_subagent_result(
                     payloads,
                     response_shape={
@@ -1755,16 +1831,13 @@ class LateralThinkHandler(BridgeAwareMixin):
             # spawn subagents themselves. SEQUENTIAL runtimes now get the same
             # machine-readable contract vocabulary, while preserving
             # ``inline_fallback`` as a legacy alias for older skill prose.
-            host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
             payload_dicts = [p.to_dict() for p in payloads]
             panel_metadata = lateral_persona_panel_metadata_from_capability_definitions()
-            contract_backend = self.agent_runtime_backend
-            if not contract_backend:
-                contract_backend = "codex" if host_driven else "gemini"
             contract = build_runtime_subagent_orchestration_contract(
-                contract_backend,
+                self.agent_runtime_backend or "unknown",
                 directive_metadata=panel_metadata,
                 opencode_mode=self.opencode_mode,
+                dispatch_mode=dispatch,
             )
             dispatch_record: dict[str, Any] = {
                 "persona_count": len(sections),
@@ -1782,7 +1855,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                 payloads=payloads,
                 correlation_key="context.persona",
             )
-            if not host_driven:
+            if dispatch is SubagentDispatchMode.SEQUENTIAL:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             stamp_lateral_persona_fanout(
                 dispatch_record,
@@ -1790,19 +1863,16 @@ class LateralThinkHandler(BridgeAwareMixin):
                 session_id=str(arguments.get("session_id") or ""),
                 payloads=payloads,
             )
+            record_subagent_dispatch_emitted(
+                fanout_kind="lateral_persona_panel",
+                payload_count=len(payloads),
+                dispatch_mode=dispatch,
+                worker_backend=self.agent_runtime_backend,
+                fanout_reentry_available="fanout_id" in dispatch_record,
+            )
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
-            host_banner = (
-                (
-                    "> **Host action — spawn subagents:** this runtime drives "
-                    "fan-out itself. Spawn one subagent per payload below with "
-                    "your native subagent primitive, correlate results by "
-                    f"`context.persona`, then synthesise. Payloads: {len(sections)} "
-                    "(structured copy in `meta` and the dispatch block).\n\n"
-                )
-                if host_driven
-                else ""
-            )
+            host_banner = render_lateral_host_banner(dispatch, len(sections))
             content_text = (
                 f"{host_banner}{combined}\n\n"
                 "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
@@ -2159,22 +2229,24 @@ class StartEvaluateHandler:
             acceptance_may_have_occurred=background_acceptance.may_have_accepted,
         )
 
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=session_id,
+            follow_result_job_keys=("chained_ralph_job_id",),
+        )
         text = (
             f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
             f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
             "or ouroboros_job_result to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "session_id": session_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=session_id,
-                follow_result_job_keys=("chained_ralph_job_id",),
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

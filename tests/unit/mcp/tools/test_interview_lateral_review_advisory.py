@@ -222,7 +222,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     panel = orchestration["panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["dispatch_modes"] == ["plugin", "host_driven", "host_decides", "sequential"]
     assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {
@@ -349,6 +349,22 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     # Advisory lanes correlate by lane_id (persona is None on some lanes).
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
     assert "subagent_orchestration_instruction" in meta
+
+
+def test_question_advisory_host_decides_contract_is_capability_neutral() -> None:
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DECIDES, runtime_backend="gemini")
+
+    assert meta["question_advisory_dispatch_mode"] == "host_decides"
+    assert meta["question_advisory_host_action"] == "dispatch_subagents_if_supported"
+    assert meta["question_advisory_delivery_mode"] == "inline_host"
+    assert meta["question_advisory_execution_preference"] == "parallel"
+    assert meta["question_advisory_fallback_strategy"] == "sequential"
+    assert "did not declare whether" in meta["subagent_orchestration_instruction"]
+
+    text = append_question_advisory_dispatch("Session sess-render\n\nQ?", meta)
+    assert "dispatch_subagents_if_supported" in text
+    assert "when available" in text
+    assert "otherwise process every payload below sequentially" in text
 
 
 def test_question_advisory_sequential_runtime_emits_processing_contract() -> None:

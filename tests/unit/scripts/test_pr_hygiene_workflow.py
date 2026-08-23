@@ -64,7 +64,9 @@ def run_bash(script: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
 
 
 class TestApiRetry:
-    HEADER = "set -euo pipefail\nRUNNER_TEMP=.\n"
+    # The retry backoff is the behaviour of the *runner*, not of these tests;
+    # waiting it out would cost five real seconds per case.
+    HEADER = "set -euo pipefail\nRUNNER_TEMP=.\nAPI_RETRY_DELAY_SECONDS=0\n"
 
     def test_success_on_first_try_prints_only_the_payload(self, tmp_path: Path) -> None:
         script = f"""{self.HEADER}

@@ -189,6 +189,16 @@ _STRATEGY_REGISTRY: dict[str, ExecutionStrategy] = {
 }
 
 
+def _canonicalize_task_type(task_type: str) -> str:
+    """Canonicalize a task type identifier: strip surrounding whitespace, then lower-case.
+
+    This is the single authoritative normalization used at registration, lookup,
+    and validation boundaries so that ``register_strategy("  Foo  ", s)`` and
+    ``get_strategy("foo")`` always agree.
+    """
+    return task_type.strip().lower()
+
+
 def get_strategy(task_type: str = "code") -> ExecutionStrategy:
     """Get execution strategy for a task type.
 
@@ -202,7 +212,7 @@ def get_strategy(task_type: str = "code") -> ExecutionStrategy:
     Raises:
         ValueError: If task_type is not recognized.
     """
-    strategy = _STRATEGY_REGISTRY.get(task_type.lower())
+    strategy = _STRATEGY_REGISTRY.get(_canonicalize_task_type(task_type))
     if strategy is None:
         valid = ", ".join(sorted(_STRATEGY_REGISTRY.keys()))
         msg = f"Unknown task_type: {task_type!r}. Valid types: {valid}"
@@ -217,7 +227,16 @@ def register_strategy(task_type: str, strategy: ExecutionStrategy) -> None:
         task_type: Type identifier for the strategy.
         strategy: ExecutionStrategy instance.
     """
-    _STRATEGY_REGISTRY[task_type.lower()] = strategy
+    _STRATEGY_REGISTRY[_canonicalize_task_type(task_type)] = strategy
+
+
+def is_registered_task_type(task_type: str) -> bool:
+    """Return whether *task_type* is known to the strategy registry.
+
+    This is the shared validation contract used by :class:`~ouroboros.core.seed.Seed`
+    to accept both built-in and dynamically registered custom strategy identifiers.
+    """
+    return _canonicalize_task_type(task_type) in _STRATEGY_REGISTRY
 
 
 __all__ = [
@@ -226,6 +245,8 @@ __all__ = [
     "CodeStrategy",
     "ExecutionStrategy",
     "ResearchStrategy",
+    "_canonicalize_task_type",
     "get_strategy",
+    "is_registered_task_type",
     "register_strategy",
 ]

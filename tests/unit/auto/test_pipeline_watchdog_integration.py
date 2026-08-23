@@ -266,6 +266,62 @@ async def test_pipeline_with_watchdog_over_budget_blocks(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retired_phase",
+    [AutoPhase.RALPH_HANDOFF, AutoPhase.EVALUATE, AutoPhase.UNSTUCK_LATERAL],
+)
+async def test_retired_phase_migration_preempts_fired_watchdog(
+    tmp_path, retired_phase: AutoPhase
+) -> None:
+    async def unused_start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("retired phases must not enter interview")
+
+    async def unused_answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("retired phases must not enter interview")
+
+    async def unused_seed(_session_id: str) -> Seed:
+        raise AssertionError("retired phases must not generate a Seed")
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = retired_phase
+    started = datetime.fromisoformat(state.created_at)
+    appender = _CapturingAppender()
+    watchdog = Watchdog(
+        controls=RuntimeControls(session_wall_clock_seconds=60),
+        event_appender=appender,
+        now=lambda: started + timedelta(seconds=120),
+    )
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(
+            FunctionInterviewBackend(unused_start, unused_answer),
+            store=AutoStore(tmp_path),
+            max_rounds=1,
+        ),
+        unused_seed,
+        store=AutoStore(tmp_path),
+        watchdog=watchdog,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert "was retired with --complete-product" in (result.blocker or "")
+    assert result.stop_reason_code != WATCHDOG_STOP_REASON_CODE
+    assert state.last_tool_name == "retired_phase_migration"
+    assert state.resume_capability().value == "none"
+    assert appender.events == []
+
+    # The migration blocker is intentionally non-recoverable.  Resuming the
+    # persisted state must preserve the explanation rather than dispatching
+    # through the normal run-starter recovery path.
+    second = await pipeline.run(state)
+    assert second.status == "blocked"
+    assert second.blocker == result.blocker
+    assert state.phase == AutoPhase.BLOCKED
+    assert state.resume_capability().value == "none"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("resumed_budget", [0, 10_000])
 async def test_pipeline_blocks_when_prior_watchdog_cancel_event_exists(
     tmp_path,

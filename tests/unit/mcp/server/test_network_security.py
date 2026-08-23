@@ -73,9 +73,8 @@ class TestHostClassification:
             "127.0.0.1",
             "localhost",
             "LOCALHOST",
+            "localhost.",
             "LOCALHOST.",
-            "localhost.localdomain",
-            "LOCALHOST.LOCALDOMAIN.",
             "::1",
             "[::1]",
             "127.0.0.2",
@@ -88,7 +87,18 @@ class TestHostClassification:
 
     @pytest.mark.parametrize(
         "host",
-        ["0.0.0.0", "::", "", "192.168.1.10", "example.com", "build-box.internal"],
+        [
+            "0.0.0.0",
+            "::",
+            "",
+            "192.168.1.10",
+            "example.com",
+            "build-box.internal",
+            "localhost.localdomain",
+            "LOCALHOST.LOCALDOMAIN.",
+            "127.0.0.1.",
+            "127.0.0.2.",
+        ],
     )
     def test_routable_hosts_are_not_loopback(self, host: str) -> None:
         """Anything reachable from elsewhere -- including unresolvable names."""
@@ -125,7 +135,9 @@ class TestServeRefusesUnauthenticatedExposure:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("transport", ["sse", "streamable-http"])
-    @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com"])
+    @pytest.mark.parametrize(
+        "host", ["0.0.0.0", "192.168.1.10", "example.com", "localhost.localdomain"]
+    )
     async def test_non_loopback_without_auth_is_refused(self, transport: str, host: str) -> None:
         """A routable bind with no credentials never reaches the SDK."""
         adapter = MCPServerAdapter()

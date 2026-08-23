@@ -76,7 +76,11 @@ fallback instead of retrying the failing call.
    - If neither: Check conversation history for a recently generated seed
 
    Before a fresh start, when the user has not already chosen an efficiency
-   policy, ask in outcome language:
+   policy, first check the persistent default: when `execution.default_policy`
+   in `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
+   omit both arguments and the server applies the configured default (the start
+   handoff still reports the resolved policy). When it is `ask` or unset, ask
+   in outcome language:
 
    - **Efficient execution** — start parallel/decomposed work economically and
      strengthen the route only when recovery requires it. Send
@@ -156,16 +160,40 @@ fallback instead of retrying the failing call.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   When `response.meta.job_observer` is present and the host has an independent
-   child/subagent session primitive, spawn exactly one observer session and pass
-   that object unchanged. Codex requires explicit native subagent delegation;
-   Claude Code uses one Task/Agent child. The observer must:
+   **Text-only host compatibility (OMP and similar bridges):**
+
+   If `response.meta.job_observer` is unavailable, inspect the response content
+   for the final sentinel block:
+
+   ```text
+   <!-- ouroboros-job-observer-v1 base64
+   <payload>
+   -->
+   ```
+
+   Base64-decode `<payload>`, then fail closed unless it passes the canonical v1
+   validation implemented by `extract_job_observer_inline_handoff`: exactly one
+   bounded terminal sentinel; fixed protocol, role, ownership, wait/result tools,
+   restrictions, and follow-result keys; internally consistent IDs; and a
+   `job_id` matching the visible start receipt. Use visible Job/Session/Execution
+   IDs only as identity anchors, never to reconstruct the nested contract. If
+   structured and inline surfaces differ or validation fails, do not spawn an
+   observer; report a transport-integrity failure.
+
+   When a structured or recovered `job_observer` is present and the host has an
+   independent child/subagent session primitive, spawn exactly one observer
+   session and pass that object unchanged. Codex uses `spawn_agent`, OMP uses
+   one native Task child, and Claude Code uses one Task/Agent child. The observer must:
 
    - On Codex, call the native `spawn_agent` primitive exactly once with
-     `task_name="run_observer"` and include `response.meta.job_observer`
-     unchanged in the child message. A `wait` call is not a spawn.
+     `task_name="run_observer"` and include the structured or recovered
+     `job_observer` unchanged in the child message. A `wait` call is not a spawn.
    - Require the spawn result to return a live child ID/path before saying an
      observer is connected or before ending the start turn.
+   - On OMP, submit exactly one Task item named `RunObserver` with the recovered
+     or structured contract unchanged, require the returned live agent/job ID,
+     and use the host wait/inbox relay until the observer returns terminal.
+     A job-status poll in the parent is not an observer spawn.
 
    - remain read-only: no repository edits, execution control, or worker fan-out;
    - own the job cursor exclusively and reload deferred MCP schemas immediately

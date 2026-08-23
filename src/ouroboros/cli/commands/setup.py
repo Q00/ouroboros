@@ -46,6 +46,8 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
+from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -75,6 +77,7 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
 )
+from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
@@ -435,7 +438,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -444,7 +446,7 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "http", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
@@ -543,10 +545,9 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
-    """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "http", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -1204,7 +1205,28 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
+    if is_native_windows():
+        handled, success, section = apply_windows_codex_mcp_mode(
+            mode,
+            codex_config=resolve_codex_home() / "config.toml",
+            launcher=(
+                (sys.executable, list(_CODEX_MODULE_MCP_ARGS))
+                if _is_dev_ouroboros_build()
+                else _codex_release_mcp_launcher()
+            )
+            if mode == "http"
+            else None,
+            print_info=print_info,
+            print_error=print_error,
+        )
+        if handled and (not success or section is None):
+            return success
+        rendered_section = section if handled else _render_codex_mcp_section()
+    else:
+        if mode == "http":
+            print_error("--mcp-mode http is only for native Windows Codex Desktop.")
+            return False
+        rendered_section = _render_codex_mcp_section()
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
@@ -1226,10 +1248,14 @@ def _register_codex_mcp_server(
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+        if (
+            entry is not None
+            and not _codex_mcp_entry_has_endpoint(entry)
+            and mode not in {"stdio", "http"}
+        ):
             print_error(
                 "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+                "Codex setup not saved. Use an explicit replacement mode."
             )
             return False
         if (
@@ -2275,7 +2301,9 @@ class _ConcurrentSetupMutationError(OSError):
     """A managed path no longer matches the generation setup read."""
 
 
-def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
+def _snapshot_path(
+    path: Path, *, _seen: frozenset[Path] = frozenset(), follow_links: bool = True
+) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
         stat_result = path.lstat()
@@ -2286,15 +2314,22 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISLNK(stat_result.st_mode):
         link_target = os.readlink(path)
+        if not follow_links:
+            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
         target_path = Path(link_target)
         if not target_path.is_absolute():
             target_path = path.parent / target_path
         normalized_target = target_path.expanduser().absolute()
         if normalized_target in _seen:
             return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
-        target_snapshot = _snapshot_path(
-            target_path,
-            _seen=_seen | {current_path},
+        target_snapshot = (
+            _snapshot_path(target_path, _seen=_seen | {current_path})
+            if follow_links
+            else _snapshot_path(
+                target_path,
+                _seen=_seen | {current_path},
+                follow_links=False,
+            )
         )
         try:
             target_stat = target_path.lstat()
@@ -2328,7 +2363,20 @@ def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _Path
 
     children: list[tuple[str, _PathSnapshot]] = []
     for child in sorted(path.iterdir(), key=lambda item: item.name):
-        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
+        children.append(
+            (
+                child.name,
+                (
+                    _snapshot_path(child, _seen=_seen | {current_path})
+                    if follow_links
+                    else _snapshot_path(
+                        child,
+                        _seen=_seen | {current_path},
+                        follow_links=False,
+                    )
+                ),
+            )
+        )
     return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
 
 
@@ -2401,9 +2449,13 @@ def _restore_path_snapshot_if_current_matches(
     expected_current: _PathSnapshot | None,
     *,
     restore_link_targets: bool = True,
+    follow_links: bool = True,
 ) -> bool:
     """Restore only when the current path still matches setup's last known write."""
-    if expected_current is not None and _snapshot_path(path) != expected_current:
+    if (
+        expected_current is not None
+        and _snapshot_path(path, follow_links=follow_links) != expected_current
+    ):
         print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
         return False
     _restore_path_snapshot(
@@ -2872,20 +2924,26 @@ def _setup_codex(
     return True
 
 
-def _install_hermes_artifacts() -> None:
+def _install_hermes_artifacts() -> object | bool:
     """Install packaged Ouroboros skills into ~/.hermes/."""
     from ouroboros.hermes.artifacts import install_hermes_skills
 
     hermes_dir = Path.home() / ".hermes"
 
     try:
-        skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
-        print_success(f"Installed Hermes skills → {skill_path}")
-    except FileNotFoundError:
-        print_error("Could not locate packaged skills for Hermes.")
+        publication = install_hermes_skills(
+            hermes_dir=hermes_dir,
+            prune=True,
+            return_receipt=True,
+        )
+        print_success(f"Installed Hermes skills → {publication.target}")
+    except OSError as exc:
+        print_error(f"Could not install packaged skills for Hermes: {exc}")
+        return False
+    return publication
 
 
-def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> None:
+def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> bool:
     """Install a setup-owned runtime instruction artifact when supported."""
     from ouroboros.runtime_instruction_artifacts import (
         install_copilot_instruction_artifact,
@@ -2904,13 +2962,14 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     }
     installer = installers.get(backend)
     if installer is None:
-        return
+        return False
     try:
         artifact = installer(**kwargs)
     except OSError as exc:
         print_warning(f"Could not install {backend} instruction artifact: {exc}")
-        return
+        return False
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
+    return True
 
 
 def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
@@ -2996,6 +3055,56 @@ def _setup_hermes(hermes_path: str) -> bool:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
+    from ouroboros.hermes.artifacts import (
+        HERMES_SKILL_CATEGORY,
+        HERMES_SKILL_NAME,
+        HermesPublicationReceipt,
+    )
+
+    hermes_skill_target = (
+        Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY / HERMES_SKILL_NAME
+    )
+    if hermes_skill_target.is_symlink():
+        print_error(f"Hermes activation refused symlinked skill target: {hermes_skill_target}")
+        return False
+    hermes_skill_snapshot = _snapshot_path(hermes_skill_target, follow_links=False)
+    hermes_publication = _install_hermes_artifacts()
+    if not hermes_publication:
+        print_error("Hermes runtime activation incomplete: required skills were not installed.")
+        return False
+
+    try:
+        hermes_skill_published = _snapshot_path(hermes_skill_target, follow_links=False)
+    except OSError as exc:
+        print_error(f"Hermes activation could not snapshot published skills: {exc}")
+        try:
+            restored = isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and restore_hermes_receipt(
+                hermes_skill_target,
+                hermes_skill_snapshot,
+                hermes_publication,
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as rollback_exc:
+            print_error(f"Hermes activation rollback could not restore skills: {rollback_exc}")
+        return False
+
+    def rollback_hermes_skills() -> None:
+        try:
+            if isinstance(
+                hermes_publication, HermesPublicationReceipt
+            ) and not hermes_publication.matches(hermes_skill_target):
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+                return
+            restored = restore_hermes(
+                hermes_skill_target, hermes_skill_snapshot, hermes_skill_published
+            )
+            if not restored:
+                print_warning("Preserved concurrent Hermes skill changes during rollback.")
+        except OSError as exc:
+            print_error(f"Hermes activation rollback could not restore skills: {exc}")
 
     if not _commit_runtime_activation(
         runtime_name="Hermes",
@@ -3010,13 +3119,11 @@ def _setup_hermes(hermes_path: str) -> bool:
         register_host=lambda: _register_hermes_mcp_server(detected=detected),
         create_defaults=create_default_config,
     ):
+        rollback_hermes_skills()
         return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
-
-    # Install Ouroboros skills for Hermes
-    _install_hermes_artifacts()
     return True
 
 
@@ -3498,81 +3605,7 @@ def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
 def _pi_ooo_bridge_source_text() -> str:
     """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
     command, args = _detect_pi_bridge_dispatch_entry()
-    default_command = json.dumps(command)
-    default_args = json.dumps(args)
-    return f"""/**
- * Ouroboros ooo bridge for Pi.
- *
- * Managed by `ouroboros setup --runtime pi`.
- * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
- * shared skill dispatcher instead of sending them to the model as chat.
- */
-import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
-
-const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
-const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
-const TIMEOUT_MS = Number(process.env.OUROBOROS_PI_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
-const DEFAULT_COMMAND = {default_command};
-const DEFAULT_ARGS = {default_args};
-
-function ouroborosEntry(): {{ command: string; args: string[] }} {{
-  if (process.env.OUROBOROS_CLI) return {{ command: process.env.OUROBOROS_CLI, args: [] }};
-  return {{ command: DEFAULT_COMMAND, args: DEFAULT_ARGS }};
-}}
-
-function outputText(stdout: string, stderr: string): string {{
-  const out = stdout.trim();
-  const err = stderr.trim();
-  if (out && err) return `${{out}}\\n\\n${{err}}`;
-  return out || err || "(no output)";
-}}
-
-async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): Promise<boolean> {{
-  ctx.ui.notify(`Ouroboros dispatch: ${{text}}`, "info");
-  const entry = ouroborosEntry();
-  const result = await pi.exec(
-    entry.command,
-    [...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text],
-    {{ cwd: ctx.cwd, timeout: TIMEOUT_MS }},
-  );
-  if (result.code === UNSUPPORTED_DISPATCH_EXIT_CODE) {{
-    ctx.ui.notify(`Ouroboros did not claim command; continuing in Pi`, "info");
-    return false;
-  }}
-  const body = outputText(result.stdout || "", result.stderr || "");
-  pi.sendMessage({{
-    customType: "ouroboros",
-    content: body,
-    display: true,
-    details: {{ command: text, exitCode: result.code }},
-  }});
-  if (result.code !== 0) {{
-    ctx.ui.notify(`Ouroboros dispatch failed (${{result.code ?? "unknown"}})`, "error");
-  }}
-  return true;
-}}
-
-export default function ouroborosBridge(pi: ExtensionAPI) {{
-  pi.registerCommand("ooo", {{
-    description: "Dispatch an Ouroboros ooo command",
-    handler: async (args, ctx) => {{
-      const text = `ooo ${{args}}`.trim();
-      await dispatch(pi, text, ctx);
-    }},
-  }});
-
-  pi.on("input", async (event, ctx) => {{
-    if (event.source === "extension") {{
-      return {{ action: "continue" }};
-    }}
-    if (!COMMAND_RE.test(event.text)) {{
-      return {{ action: "continue" }};
-    }}
-    const handled = await dispatch(pi, event.text.trim(), ctx);
-    return {{ action: handled ? "handled" : "continue" }};
-  }});
-}}
-"""
+    return pi_ooo_bridge_source_text(command=command, args=args)
 
 
 def _install_pi_ooo_bridge() -> bool:
@@ -3830,6 +3863,37 @@ def _setup_grok(grok_path: str) -> None:
 def _setup_zcode(zcode_path: str) -> None:
     """Configure Ouroboros for the Zcode CLI runtime."""
     _setup_runtime_only_backend("zcode", zcode_path, "zcode_cli_path")
+    _warn_zcode_model_config()
+
+
+def _warn_zcode_model_config() -> None:
+    """Warn when the Zcode CLI itself has no usable model provider config.
+
+    Ouroboros setup only records the CLI path; the Zcode CLI separately
+    resolves its model from ``~/.zcode/cli/config.json`` on every headless
+    run and exits with ``Model config is missing`` when that file has no
+    effective ``model.main`` reference. Without this probe the failure only
+    appears mid-execution, after Ouroboros has already spawned the CLI.
+    """
+
+    from ouroboros.config.zcode_model_config import inspect_zcode_model_config
+
+    status = inspect_zcode_model_config()
+    if status.ok:
+        return
+
+    print_warning(f"Zcode model provider config not ready: {status.detail}")
+    print_info(
+        "Headless Zcode runs will exit with 'Model config is missing' until "
+        f"{status.config_path} defines model.main."
+    )
+    print_info(
+        'Example: {"model": {"main": "builtin:zai-coding-plan/GLM-5.3"}, '
+        '"provider": {"builtin:zai-coding-plan": {"kind": "anthropic", '
+        '"options": {"baseURL": "https://api.z.ai/api/anthropic", "apiKey": "..."}}}} '
+        "(model.main must be the provider/model string). "
+        "See docs/runtime-guides/zcode.md"
+    )
 
 
 def _setup_pi(pi_path: str) -> None:
@@ -4658,7 +4722,7 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help="Codex MCP config mode: auto preserves native-Windows safety and user entries; http explicitly writes the native-Windows loopback URL; preserve skips MCP changes; stdio replaces with the managed entry on supported hosts.",
         ),
     ] = "auto",
     preserve_existing_llm: Annotated[
@@ -4972,94 +5036,10 @@ def _opencode_bridge_dest() -> Path:
 
 @app.command("refresh")
 def refresh_artifacts() -> None:
-    """Refresh installed Ouroboros artifacts for every detected runtime.
+    """Refresh artifacts installed by a previous setup."""
+    from ouroboros.cli.commands.setup_refresh import refresh_runtime_artifacts
 
-    Rewrites rules, skills, bridges, and instruction guides that a previous
-    setup already installed — without changing MCP registrations, the runtime
-    selection, or ~/.ouroboros/config.yaml. Codex follows ``ouroboros codex
-    refresh`` semantics and refreshes whenever Codex is present; every other
-    artifact refreshes only when it already exists, so a deliberately removed
-    integration (e.g. OpenCode subprocess mode) is never resurrected.
-    """
-    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
-    from ouroboros.runtime_instruction_artifacts import (
-        copilot_instruction_path,
-        gemini_instruction_path,
-        gjc_agent_dir,
-        gjc_instruction_path,
-        has_managed_section,
-        kiro_instruction_path,
-        opencode_instruction_path,
-    )
-
-    refreshed: list[str] = []
-
-    codex_dir = _codex_home_candidate_for_setup()
-    if codex_dir.exists() or shutil.which("codex"):
-        from ouroboros.codex import install_codex_artifacts
-
-        try:
-            result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
-        except OSError as exc:
-            # One runtime failing must not leave the remaining ones stale.
-            print_warning(f"Could not refresh Codex artifacts: {exc}")
-        else:
-            print_success(f"Installed Codex rules → {result.rules_path}")
-            print_success(
-                f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}"
-            )
-            refreshed.append("codex")
-
-    hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
-    if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
-        try:
-            _install_hermes_artifacts()
-        except OSError as exc:
-            print_warning(f"Could not refresh Hermes artifacts: {exc}")
-        else:
-            refreshed.append("hermes")
-
-    opencode_dir = opencode_config_dir()
-    opencode_touched = False
-    if _opencode_bridge_dest().exists():
-        opencode_touched = _install_opencode_bridge_plugin()
-    if has_managed_section(opencode_instruction_path(opencode_dir)):
-        _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
-        opencode_touched = True
-    if opencode_touched:
-        refreshed.append("opencode")
-
-    if has_managed_section(gemini_instruction_path()):
-        _install_runtime_instruction_artifact("gemini")
-        refreshed.append("gemini")
-
-    if kiro_instruction_path().exists():
-        _install_runtime_instruction_artifact("kiro")
-        refreshed.append("kiro")
-
-    if copilot_instruction_path().exists():
-        _install_runtime_instruction_artifact("copilot")
-        refreshed.append("copilot")
-
-    pi_bridge = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
-    if pi_bridge.exists():
-        if _install_pi_ooo_bridge():
-            refreshed.append("pi")
-
-    gjc_touched = False
-    gjc_bridge = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    if gjc_bridge.exists():
-        gjc_touched = _install_gjc_ooo_bridge()
-    if gjc_instruction_path().exists():
-        _install_runtime_instruction_artifact("gjc")
-        gjc_touched = True
-    if gjc_touched:
-        refreshed.append("gjc")
-
-    if refreshed:
-        print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
-    else:
-        print_info("No installed runtime artifacts found to refresh.")
+    refresh_runtime_artifacts()
 
 
 # ── Brownfield subcommands ───────────────────────────────────────

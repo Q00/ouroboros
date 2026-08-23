@@ -498,19 +498,23 @@ async def tracked_complete(
         capture.resolve_model(call, getattr(response, "model", None))
         usage = getattr(response, "usage", None)
         counters = [
-            getattr(usage, field, None)
-            for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+            *(
+                getattr(usage, field, None)
+                for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+            ),
+            getattr(usage, "unallocated_tokens", 0),
         ]
         normalized_counters = tuple(_non_negative_counter(counter) for counter in counters)
         if all(counter is not None for counter in normalized_counters):
-            prompt_tokens, completion_tokens, total_tokens = normalized_counters
+            prompt_tokens, completion_tokens, total_tokens, unallocated_tokens = normalized_counters
             if (
                 prompt_tokens is not None
                 and completion_tokens is not None
                 and total_tokens is not None
+                and unallocated_tokens is not None
                 and total_tokens == prompt_tokens + completion_tokens
             ):
-                token_spend = _positive_finite(total_tokens)
+                token_spend = _positive_finite(total_tokens + unallocated_tokens)
     capture.finish(call, token_spend)
     return result
 

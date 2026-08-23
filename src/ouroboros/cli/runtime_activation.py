@@ -365,6 +365,26 @@ def _snapshot_from_stat(contents: bytes, result: os.stat_result) -> _FileSnapsho
     )
 
 
+def _validate_prepared_mode(
+    path: Path,
+    prepared_mode: int,
+    *,
+    requested_mode: int,
+    preserve_exact_mode: bool,
+) -> None:
+    """Validate POSIX mode bits where the platform reports them reliably."""
+    if os.name == "nt":
+        # NTFS security is enforced by ACLs; CPython reports writable files as
+        # 0o666 regardless of the requested mode because POSIX group/other
+        # bits do not exist. Treating those synthetic bits as a violation
+        # makes every Windows activation fail before publication.
+        return
+    if preserve_exact_mode and prepared_mode != requested_mode:
+        raise OSError(f"Could not preserve file mode for {path}")
+    if prepared_mode & ~requested_mode:
+        raise OSError(f"Prepared file mode exceeds the secure default for {path}")
+
+
 def _prepare_file(
     path: Path,
     contents: bytes,
@@ -400,12 +420,14 @@ def _prepare_file(
         prepared = os.fstat(descriptor)
         if not stat.S_ISREG(prepared.st_mode) or prepared.st_nlink != 1:
             raise OSError(f"Could not prepare regular replacement for {path}")
-        if preserve_exact_mode and stat.S_IMODE(prepared.st_mode) != requested_mode:
-            raise OSError(f"Could not preserve file mode for {path}")
+        _validate_prepared_mode(
+            path,
+            stat.S_IMODE(prepared.st_mode),
+            requested_mode=requested_mode,
+            preserve_exact_mode=preserve_exact_mode,
+        )
         if requested_owner is not None and (prepared.st_uid, prepared.st_gid) != requested_owner:
             raise OSError(f"Could not preserve file ownership for {path}")
-        if stat.S_IMODE(prepared.st_mode) & ~requested_mode:
-            raise OSError(f"Prepared file mode exceeds the secure default for {path}")
         return _PreparedFile(path, _snapshot_from_stat(contents, prepared))
     except BaseException:
         failed_prepared: _PreparedFile | None = None

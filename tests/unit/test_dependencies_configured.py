@@ -163,8 +163,8 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     sdk_pins = [
-        "claude-agent-sdk==0.2.128",
-        "anthropic==0.120.2",
+        "claude-agent-sdk==0.2.139",
+        "anthropic==0.122.0",
     ]
     assert optional_deps["claude"] == sdk_pins
     assert optional_deps["claude-cli"] == []
@@ -191,18 +191,39 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
 
 def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
-    """Repository and plugin launchers must never combine MCP 2 with Claude."""
+    """Repository and plugin launchers must never combine MCP 2 with Claude.
+
+    Pin policy (#2066): the SHIPPED plugin descriptors pin the served
+    package to their plugin manifest version so a plugin update changes
+    the uvx cache key, while the repository-root development launchers
+    deliberately stay unpinned and resolve the newest release on first
+    use. scripts/sync-plugin-version.py keeps the pins in step with the
+    manifests.
+    """
     root = Path(__file__).parent.parent.parent
-    expected_args = [
-        "--isolated",
-        "--python",
-        ">=3.12",
-        "--from",
-        "ouroboros-ai[mcp]",
-        "ouroboros",
-        "mcp",
-        "serve",
-    ]
+
+    def _isolated_args(requirement: str, runtime: str, backend: str) -> list[str]:
+        return [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            requirement,
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            runtime,
+            "--llm-backend",
+            backend,
+        ]
+
+    claude_plugin_version = json.loads(
+        (root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    codex_plugin_version = json.loads(
+        (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
 
     repository_entry = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"][
         "ouroboros"
@@ -217,26 +238,26 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         "mcpServers"
     ]["ouroboros"]
 
-    claude_args = [
-        *expected_args,
-        "--runtime",
-        "claude-cli",
-        "--llm-backend",
-        "claude_code",
+    launcher_contracts = [
+        # (entry, requirement, runtime, backend)
+        (repository_entry, "ouroboros-ai[mcp]", "claude-cli", "claude_code"),
+        (
+            plugin_entry,
+            f"ouroboros-ai[mcp]=={claude_plugin_version}",
+            "claude-cli",
+            "claude_code",
+        ),
+        (codex_entry, "ouroboros-ai[mcp]", "codex", "codex"),
+        (
+            codex_plugin_entry,
+            f"ouroboros-ai[mcp]=={codex_plugin_version}",
+            "codex",
+            "codex",
+        ),
     ]
-    for entry in (repository_entry, plugin_entry):
+    for entry, requirement, runtime, backend in launcher_contracts:
         assert entry["command"] == "uvx"
-        assert entry["args"] == claude_args
-
-    for entry in (codex_entry, codex_plugin_entry):
-        assert entry["command"] == "uvx"
-        assert entry["args"] == [
-            *expected_args,
-            "--runtime",
-            "codex",
-            "--llm-backend",
-            "codex",
-        ]
+        assert entry["args"] == _isolated_args(requirement, runtime, backend)
 
 
 def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
