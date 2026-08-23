@@ -163,8 +163,8 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     sdk_pins = [
-        "claude-agent-sdk==0.2.128",
-        "anthropic==0.120.2",
+        "claude-agent-sdk==0.2.139",
+        "anthropic==0.122.0",
     ]
     assert optional_deps["claude"] == sdk_pins
     assert optional_deps["claude-cli"] == []
