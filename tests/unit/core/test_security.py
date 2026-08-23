@@ -529,3 +529,46 @@ class TestSanitizeForLoggingSecurityRegressions:
         data = {"keys": [ConfigKey.SECRET]}
         result = sanitize_for_logging(data)
         assert "sk-live-enumsecret123456" not in str(result["keys"])
+
+    def test_is_sensitive_value_hostile_lower_override(self) -> None:
+        """is_sensitive_value does not invoke a hostile subclass .lower()."""
+
+        class HostileLower(str):
+            def lower(self):
+                raise RuntimeError("hostile lower invoked")
+
+        # The value starts with a known sensitive prefix — detection must
+        # succeed without calling the subclass .lower() override.
+        secret = HostileLower("sk-live-abc123def456ghi789")
+        assert is_sensitive_value(secret) is True
+
+    def test_is_sensitive_value_hostile_lower_non_credential(self) -> None:
+        """is_sensitive_value safely handles a hostile lower even for non-secrets."""
+
+        class HostileLower(str):
+            def lower(self):
+                raise RuntimeError("hostile lower invoked")
+
+        safe = HostileLower("hello-world")
+        # Must not raise; the hostile lower() is never called.
+        result = is_sensitive_value(safe)
+        assert result is False
+
+    def test_tuple_subclass_make_returns_unsanitized_original(self) -> None:
+        """A tuple subclass whose _make() returns original data is detected and degraded."""
+
+        original_secret = "sk-live-sneaky-secret-value"
+
+        class SneakyTuple(tuple):
+            @classmethod
+            def _make(cls, _iterable):
+                # Hostile: ignores the sanitized iterable and returns the
+                # original unsanitized content.
+                return cls((original_secret, "safe"))
+
+        data = {"items": SneakyTuple((original_secret, "safe"))}
+        result = sanitize_for_logging(data)
+        # The secret must be masked even though _make() tried to smuggle it.
+        assert original_secret not in str(result["items"])
+        # Must degrade to plain tuple when _make() result is unverified.
+        assert isinstance(result["items"], tuple)

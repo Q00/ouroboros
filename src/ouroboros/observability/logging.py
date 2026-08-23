@@ -221,15 +221,34 @@ def _mask_sensitive_data(
             # credentials worth recursing into; structured (non-string) events
             # can carry nested secrets and must be sanitized or rejected.
             if isinstance(value, str):
+                # Built-in str literals are the overwhelmingly common case and
+                # are safe to pass through.  ``str`` subclasses (notably
+                # StrEnum members) must be normalized through the built-in to
+                # prevent hostile ``__str__`` / ``lower`` overrides from
+                # leaking secrets, and then checked for sensitivity.
+                if type(value) is str:
+                    continue
+                # Normalize subclass to a genuine built-in str.
+                try:
+                    normalized = str.__str__(value)
+                except Exception:
+                    event_dict[key] = "<REDACTED>"
+                    continue
+                if is_sensitive_value(value):
+                    event_dict[key] = mask_api_key(normalized)
+                else:
+                    event_dict[key] = normalized
                 continue
             if isinstance(value, dict):
                 event_dict[key] = _mask_dict_sensitive_data(value)
             elif isinstance(value, (list, tuple)):
                 event_dict[key] = _mask_sequence_sensitive_data(value)
             else:
-                # Non-string, non-container event: coerce to str to prevent
-                # arbitrary object serialization from leaking secrets.
-                event_dict[key] = str(value)
+                # Non-string, non-container scalar event: never trust the
+                # object's ``__str__`` since it may leak secrets or execute
+                # hostile code.  Use ``repr(type(...))`` for type visibility
+                # and redact the value.
+                event_dict[key] = f"<non-string event: {type(value).__name__}>"
             continue
 
         # Check if field name indicates sensitivity
@@ -308,7 +327,20 @@ def _mask_sequence_sensitive_data(
         factory = getattr(type(data), "_make", None)
         if callable(factory):
             try:
-                return factory(sanitized)
+                reconstructed = factory(sanitized)
+                # Validate that _make() actually used our sanitized values
+                # and not the original contents.  A hostile subclass may
+                # override _make() to ignore its argument or return a
+                # reference to the original unsanitized data.
+                if (
+                    isinstance(reconstructed, tuple)
+                    and len(reconstructed) == len(sanitized)
+                    and all(a is b for a, b in zip(reconstructed, sanitized, strict=True))
+                ):
+                    return reconstructed
+                # Content mismatch — degrade to plain tuple with our
+                # verified sanitized elements.
+                return tuple(sanitized)
             except Exception:
                 # Custom tuple subclass whose _make() is incompatible with
                 # sanitized values — fall back to a plain tuple rather than

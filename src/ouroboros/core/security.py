@@ -509,7 +509,15 @@ def is_sensitive_value(value: Any) -> bool:
     if not isinstance(value, str):
         return False
 
-    value_lower = value.lower()
+    # Normalize to a genuine built-in ``str`` before calling ``.lower()`` so
+    # that a hostile ``str`` subclass (e.g. one overriding ``lower``) cannot
+    # suppress detection or cause side effects.
+    try:
+        normalized = str.__str__(value)
+    except Exception:
+        # If we cannot normalize the subclass, fail closed — treat as sensitive.
+        return True
+    value_lower = str.lower(normalized)
     return is_credential_shaped(value) or any(
         value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES
     )
@@ -569,7 +577,20 @@ def _sanitize_logging_value(value: Any) -> Any:
             factory = getattr(type(value), "_make", None)
             if callable(factory):
                 try:
-                    return factory(sanitized)
+                    reconstructed = factory(sanitized)
+                    # Validate that _make() actually used our sanitized values
+                    # and not the original contents.  A hostile subclass may
+                    # override _make() to ignore its argument or return a
+                    # reference to the original unsanitized data.
+                    if (
+                        isinstance(reconstructed, tuple)
+                        and len(reconstructed) == len(sanitized)
+                        and all(a is b for a, b in zip(reconstructed, sanitized, strict=True))
+                    ):
+                        return reconstructed
+                    # Content mismatch — degrade to plain tuple with our
+                    # verified sanitized elements.
+                    return tuple(sanitized)
                 except Exception:
                     # Custom tuple subclass whose _make() is incompatible —
                     # fall back to plain tuple rather than raising during
