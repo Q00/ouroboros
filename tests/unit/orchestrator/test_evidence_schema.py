@@ -284,6 +284,63 @@ class TestExtractEvidence:
         record = extract_evidence(text)
         assert record.data == {"x": 1}
 
+    def test_nested_object_in_prose_prefixed_final_record(self) -> None:
+        """Recovery must return the complete top-level object, not an inner
+        nested object.
+
+        Regression: reverse scanning without nesting awareness encountered
+        the innermost ``{`` first and returned ``{"source": "final"}``
+        instead of the complete enclosing record.
+        """
+        text = 'Summary\n{"files_touched": ["a.py"], "metadata": {"source": "final"}}'
+        record = extract_evidence(text)
+        assert record.data == {
+            "files_touched": ["a.py"],
+            "metadata": {"source": "final"},
+        }
+
+    def test_multi_element_list_does_not_leak_any_inner_object(self) -> None:
+        """Recovery must not extract any object from a multi-element top-level
+        list, regardless of element position.
+
+        Regression: the backward comma scan in _is_inside_array stopped at
+        the first element's ``{`` before reaching the containing ``[``, so
+        the second element was accepted as evidence.
+        """
+        text = 'Summary\n[{"a": 1}, {"files_touched": ["wrong.py"]}]'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_malformed_fenced_json_reports_malformed_not_absent(self) -> None:
+        """A fenced block containing invalid JSON must report 'not valid JSON',
+        not 'no JSON object'.
+
+        Regression: error classification used only ``text.find("{")`` so
+        malformed JSON without a brace was reported as having no evidence.
+        """
+        text = "```json\nnot valid json at all\n```\n"
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_malformed_bracket_payload_reports_malformed_not_absent(self) -> None:
+        """Prose followed by a broken array ``[1, 2,]`` must report malformed,
+        not absent.
+
+        Regression: presence of ``{`` was the only signal; a broken array
+        without braces was classified as 'no JSON object'.
+        """
+        text = "Summary\n[1, 2,]"
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_deeply_nested_object_not_extracted(self) -> None:
+        """An object nested multiple levels deep must not be extracted."""
+        text = 'Summary\n{"outer": {"middle": {"deep": true}}, "files_touched": ["x.py"]}'
+        record = extract_evidence(text)
+        # Must return the full outer object, not {"deep": true} or {"middle": ...}
+        assert record.data["outer"] == {"middle": {"deep": True}}
+        assert record.data["files_touched"] == ["x.py"]
+
 
 class TestValidateCodeProfile:
     def test_accepts_complete_record(self, code_profile) -> None:

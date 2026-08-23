@@ -188,94 +188,139 @@ def _find_body_start(text: str) -> int:
     return 0
 
 
-def _iter_json_object_starts(text: str) -> Iterator[int]:
-    """Yield the offset of every ``{`` in *text*, in order of appearance."""
-    pos = text.find("{")
-    while pos != -1:
-        yield pos
-        pos = text.find("{", pos + 1)
+def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
+    """Parse all complete JSON objects in *text* and return only top-level ones.
 
+    Returns a list of (start, end, parsed_value) tuples for objects that are
+    not contained within any other successfully-parsed JSON value (object or
+    array). This uses the JSON parser itself for structural awareness — no
+    heuristic character scanning.
 
-def _iter_json_object_starts_reversed(text: str) -> Iterator[int]:
-    """Yield the offset of every ``{`` in *text*, from last to first."""
-    pos = text.rfind("{")
-    while pos != -1:
-        yield pos
-        pos = text.rfind("{", 0, pos)
-
-
-def _is_inside_array(text: str, obj_start: int) -> bool:
-    """Return True if the ``{`` at *obj_start* is nested inside a JSON array.
-
-    Scans backwards from *obj_start* skipping whitespace. If the nearest
-    non-whitespace character is ``[`` or ``,`` preceded (recursively past
-    whitespace) by another array element or ``[``, we consider this object
-    nested inside a top-level list container.
+    Strategy:
+      1. Find every ``{`` and ``[`` in text, attempt ``raw_decode`` from each.
+      2. Record all successfully-decoded spans (start, end).
+      3. Filter to only objects (dicts) whose span is not contained within
+         any other successfully-decoded span (structural top-level check).
     """
-    i = obj_start - 1
-    while i >= 0 and text[i] in " \t\n\r":
-        i -= 1
-    if i < 0:
-        return False
-    # Direct array start: [{...
-    if text[i] == "[":
-        return True
-    # Element separator after earlier array elements: , {...
-    if text[i] == ",":
-        # Walk back to find whether we're inside a [
-        depth = 0
-        j = i - 1
-        while j >= 0:
-            ch = text[j]
-            if ch == "]":
-                depth += 1
-            elif ch == "[":
-                if depth == 0:
-                    return True
-                depth -= 1
-            elif ch == "{":
-                # Skip over nested objects
-                # (simplified: if we hit { at the top level, we're not simply in an array)
+    # Collect all successfully-decoded JSON values with their spans
+    all_spans: list[tuple[int, int, Any]] = []  # (start, end, value)
+    pos = 0
+    while pos < len(text):
+        ch = text[pos]
+        if ch in "{[":
+            try:
+                parsed, end_offset = _DECODER.raw_decode(text[pos:])
+                all_spans.append((pos, pos + end_offset, parsed))
+                # Don't skip ahead — we need to also record inner objects
+                # to know containment, but we advance by 1 to find them
+            except json.JSONDecodeError:
+                pass
+        pos += 1
+
+    # Filter to only dict values that are not contained within another span
+    top_level_objects: list[tuple[int, int, Any]] = []
+    for start, end, value in all_spans:
+        if not isinstance(value, dict):
+            continue
+        # Check if this span is strictly contained within any other span
+        is_nested = False
+        for other_start, other_end, _ in all_spans:
+            if other_start == start and other_end == end:
+                continue
+            if other_start <= start and other_end >= end:
+                is_nested = True
                 break
-            j -= 1
+        if not is_nested:
+            top_level_objects.append((start, end, value))
+
+    return top_level_objects
+
+
+def _has_json_attempt(text: str) -> bool:
+    """Determine if text contains a JSON-like structure (for error classification).
+
+    Returns True when there is evidence of a JSON payload that was attempted
+    but malformed — i.e., a JSON/untagged fenced block with content, or a ``{``
+    / ``[`` character followed by something that looks like the start of a JSON
+    value (not just prose that happens to contain brackets). This is used to
+    distinguish "no JSON present at all" from "JSON present but malformed".
+
+    Explicitly non-JSON fences (e.g. ```python) are not considered evidence
+    attempts — they are code samples, not malformed evidence.
+    """
+    # Check for fenced blocks that could be JSON evidence (json-tagged or untagged)
+    for info, body_start in _top_level_fence_body_starts(text):
+        body = text[body_start:].strip()
+        if not body:
+            continue
+        # An explicitly tagged non-JSON fence is not an evidence attempt
+        tag = info.split(maxsplit=1)[0:1]
+        if tag and tag[0] not in ("json", ""):
+            continue
+        # JSON-tagged or untagged fence with content = evidence attempt
+        return True
+
+    # Check for structural JSON value attempts: { or [ followed by content
+    # that actually looks like a JSON structure.
+    # - Any { is treated as a JSON object attempt (prose never uses bare {text})
+    # - [ requires the parser to make progress past colno 2, because prose
+    #   commonly uses [TAG] or [LABEL] patterns that aren't JSON attempts
+    for ch in "{[":
+        pos = text.find(ch)
+        while pos != -1:
+            try:
+                _DECODER.raw_decode(text[pos:])
+                # If it succeeds, we'd have found it in recovery — this
+                # shouldn't happen, but if it does, it's a JSON attempt
+                return True
+            except json.JSONDecodeError as exc:
+                if ch == "{":
+                    # Any failed { parse is a malformed JSON object attempt
+                    return True
+                # For [, require the parser to get past the opener into
+                # actual content (colno > 2 means it parsed at least one
+                # element or got deep enough to be a real array attempt)
+                if exc.colno > 2:
+                    return True
+            pos = text.find(ch, pos + 1)
+
     return False
 
 
 def _recover_json_object(text: str, primary: int, primary_exc: json.JSONDecodeError) -> Any:
-    """Fallback for outputs whose strict parse failed: scan every ``{``.
+    """Fallback for outputs whose strict parse failed: structural recovery.
 
-    Scans ``{`` candidates in **reverse order** (last to first) so that the
-    terminal evidence object — which is the authoritative record — wins over
-    earlier illustrative or preamble objects. Skips candidates that are nested
-    inside a JSON array container, preserving the top-level non-object
-    rejection boundary.
+    Uses the JSON parser to identify all complete top-level objects in the
+    text (objects not contained within any other JSON value). Selects the
+    **last** such object, which is the authoritative terminal evidence record.
 
-    Raises EvidenceError when no candidate decodes, distinguishing
-    "no JSON object present at all" from "JSON present but malformed".
+    This approach:
+      - Never extracts an inner/nested object from a larger JSON structure.
+      - Never extracts objects that are elements of a top-level array.
+      - Prefers the final evidence record over earlier illustrative objects.
+
+    Raises EvidenceError when no candidate decodes, with accurate diagnostics
+    distinguishing "no JSON object present at all" from "JSON present but
+    malformed".
     """
-    last_exc = primary_exc
-    for start in _iter_json_object_starts_reversed(text):
-        if start == primary:
-            continue
-        # Reject objects nested inside array containers
-        if _is_inside_array(text, start):
-            continue
-        try:
-            parsed, _ = _DECODER.raw_decode(text[start:])
-        except json.JSONDecodeError as exc:
-            last_exc = exc
-            continue
+    top_level_objects = _collect_top_level_objects(text)
+
+    if top_level_objects:
+        # Return the last top-level object (authoritative terminal evidence)
+        _, _, parsed = top_level_objects[-1]
         return parsed
 
-    if text.find("{") == -1:
+    # No top-level objects found — produce accurate error diagnostics
+    if not _has_json_attempt(text):
         msg = "Leaf output contains no JSON object and no fenced evidence block."
         raise EvidenceError(msg)
+
     msg = (
-        f"Evidence is not valid JSON: {last_exc.msg} (line {last_exc.lineno}, "
-        f"col {last_exc.colno}). Tried the fence-guided parse from offset "
-        f"{primary} and every '{{' candidate in the output."
+        f"Evidence is not valid JSON: {primary_exc.msg} (line {primary_exc.lineno}, "
+        f"col {primary_exc.colno}). Tried the fence-guided parse from offset "
+        f"{primary} and structural recovery across the full output."
     )
-    raise EvidenceError(msg) from last_exc
+    raise EvidenceError(msg) from primary_exc
 
 
 def extract_evidence(text: str) -> EvidenceRecord:
