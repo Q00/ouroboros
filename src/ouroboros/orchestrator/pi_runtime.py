@@ -195,6 +195,14 @@ class PiRuntime:
     @property
     def capabilities(self) -> RuntimeCapabilities:
         native_params = self._supports_native_param_flags()
+        # Tool restriction is only truly NATIVE when *both* ``--tools`` (positive
+        # allow-list) and ``--no-tools`` (disable all) are available.  A Pi
+        # binary that ships ``--tools`` but not ``--no-tools`` cannot enforce
+        # ``tools=[]``; reporting NATIVE would silently widen to unrestricted.
+        # Mark that partial state as TRANSLATED so the negotiation layer can
+        # surface the gap (and ``_tool_restriction_support_for_request`` correctly
+        # downgrades empty-list requests to IGNORED).
+        full_tool_restriction = native_params and self._supports_no_tools_flag()
         return RuntimeCapabilities(
             skill_dispatch=True,
             targeted_resume=True,
@@ -207,7 +215,7 @@ class PiRuntime:
                 ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
             ),
             tool_restriction_support=(
-                ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
+                ParamSupport.NATIVE if full_tool_restriction else ParamSupport.TRANSLATED
             ),
             permission_mode_support=ParamSupport.IGNORED,
             session_signals=SessionSignalCapabilities(
@@ -517,6 +525,29 @@ class PiRuntime:
         if tools and not native_params:
             tool_list = "\n".join(f"- {t}" for t in tools)
             composed_parts.append(f"## Tooling Guidance\nPrefer these tools:\n{tool_list}")
+
+        # Fail closed: when the caller requests tools=[] (disable all tools)
+        # and the Pi CLI lacks --no-tools, we cannot enforce that restriction.
+        # Rather than silently widening to unrestricted, emit an explicit error.
+        if tools is not None and not tools and native_params and not self._supports_no_tools_flag():
+            yield AgentMessage(
+                type="result",
+                content=(
+                    f"{self._display_name} cannot enforce tools=[] (no-tools restriction): "
+                    "installed Pi CLI lacks --no-tools flag. "
+                    "Refusing to execute with silently unrestricted tool access."
+                ),
+                data={
+                    "subtype": "error",
+                    "error_type": "ToolRestrictionUnenforced",
+                    "parameter": "tools",
+                    "requested": [],
+                    "effective": "unrestricted",
+                },
+                resume_handle=current_handle,
+            )
+            return
+
         composed_parts.append(prompt)
         composed_prompt = "\n\n".join(p for p in composed_parts if p.strip())
 
