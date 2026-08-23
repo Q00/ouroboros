@@ -172,6 +172,23 @@ class TestExtractEvidence:
 
         assert record.data["files_touched"] == ["actual.py"]
 
+    @pytest.mark.parametrize(
+        "example",
+        [
+            '> {"files_touched": ["quoted-example.py"]}\n',
+            'Example:\n\n    {"files_touched": ["indented-example.py"]}\n',
+            '~~~python\n{"files_touched": ["tilde-example.py"]}\n~~~\n',
+        ],
+    )
+    def test_markdown_examples_are_not_recovered_as_evidence(
+        self, example: str
+    ) -> None:
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
+            extract_evidence(example)
+
     def test_empty_text_rejected(self) -> None:
         with pytest.raises(EvidenceError, match="empty"):
             extract_evidence("")
@@ -207,7 +224,12 @@ class TestExtractEvidence:
         "trailing_prose",
         [
             "[AC_COMPLETE: 1]",
+            "[done]",
+            "[status: done]",
+            "[ac_complete: 1]",
+            "See [issue #1] for context.",
             "Configuration remains at {config.host}.",
+            "Configuration remains at { config.host }.",
             "All requested work is complete.",
         ],
     )

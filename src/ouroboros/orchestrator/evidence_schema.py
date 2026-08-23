@@ -40,16 +40,11 @@ from typing import Any
 
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 
-# Fence openers signal where the JSON evidence body starts. Prefer
-# language-tagged JSON fences over bare fences anywhere in the output:
-# leaf results commonly include earlier non-JSON code fences before the
-# final "Validation evidence" block. Once we've located the opener,
-# parsing the body is delegated to JSON itself via
-# json.JSONDecoder.raw_decode — that's how we avoid every sentinel-
-# scanning class of bug (the closing ``` or any `}` may appear inside a
-# JSON string value, and only a real JSON parser knows string boundaries).
+# Markdown literal contexts are not evidence boundaries. Backtick and tilde
+# fences are both recognized so recovery cannot promote JSON-shaped examples.
+# JSON-tagged and untagged fences remain supported evidence boundaries.
 _FENCE_LINE_RE = re.compile(
-    r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,})(?P<info>[^`\n]*)$",
+    r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$",
     re.MULTILINE,
 )
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
@@ -150,7 +145,10 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
 
         yield info, body_start
 
-        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE)
+        marker = re.escape(opener.group("fence")[0])
+        closing_fence_re = re.compile(
+            rf"^[ \t]{{0,3}}{marker}{{{fence_len},}}[ \t]*\r?$", re.MULTILINE
+        )
         closer = closing_fence_re.search(text, body_start)
         if closer is None:
             return
@@ -196,31 +194,34 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     return 0, False
 
 
-def _mask_non_json_fences(text: str) -> str:
-    """Hide explicitly non-JSON fence bodies from bare-output recovery.
+def _mask_markdown_examples(text: str) -> str:
+    """Hide Markdown literal/example contexts from bare-output recovery.
 
-    The returned string preserves offsets so decoded spans still refer to the
-    original output. JSON-tagged and untagged fences remain visible because
-    they are supported evidence boundaries.
+    The returned string preserves offsets. Explicitly tagged non-JSON fence
+    bodies, blockquotes, and indented code blocks are examples rather than
+    emitted evidence and must never become recovery candidates.
     """
     masked: list[str] | None = None
+
     search_pos = 0
     while True:
         opener = _FENCE_LINE_RE.search(text, search_pos)
         if opener is None:
             break
 
-        fence_len = len(opener.group("fence"))
+        fence = opener.group("fence")
+        marker = re.escape(fence[0])
         info = opener.group("info").strip().lower()
         body_start = opener.end()
         if body_start < len(text) and text[body_start] == "\n":
             body_start += 1
 
-        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE)
+        closing_fence_re = re.compile(
+            rf"^[ \t]{{0,3}}{marker}{{{len(fence)},}}[ \t]*\r?$", re.MULTILINE
+        )
         closer = closing_fence_re.search(text, body_start)
         body_end = closer.start() if closer is not None else len(text)
 
-        tag = info.split(maxsplit=1)[0:1]
         if tag and tag[0] != "json":
             if masked is None:
                 masked = list(text)
@@ -229,6 +230,27 @@ def _mask_non_json_fences(text: str) -> str:
         if closer is None:
             break
         search_pos = closer.end()
+
+    offset = 0
+    in_indented_block = False
+    previous_blank = True
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        blank = not content.strip()
+        blockquote = re.match(r"^[ ]{0,3}>", content) is not None
+        indented = content.startswith("\t") or content.startswith("    ")
+
+        if not in_indented_block and indented and previous_blank:
+            in_indented_block = True
+        elif in_indented_block and not blank and not indented:
+            in_indented_block = False
+        if blockquote or in_indented_block:
+            if masked is None:
+                masked = list(text)
+            masked[offset : offset + len(line)] = " " * len(line)
+
+        offset += len(line)
+        previous_blank = blank
 
     return text if masked is None else "".join(masked)
 
@@ -275,27 +297,44 @@ def _malformed_boundary_end(text: str, opener_pos: int) -> int:
     return len(text)
 
 
+def _looks_like_json_container(text: str, opener_pos: int) -> bool:
+    """Return whether a failed line-level opener is a JSON payload attempt.
+
+    Recovery must fail closed for malformed evidence containers, but ordinary
+    prose delimiters such as ``[done]`` and ``{ config.host }`` are not JSON
+    boundaries. A malformed candidate is authoritative only when it starts a
+    Markdown line and its first token has JSON container shape. Unquoted object
+    keys followed by ``:`` remain malformed attempts so broken evidence cannot
+    expose a valid nested object.
+    """
+    line_start = text.rfind("\n", 0, opener_pos) + 1
+    if text[line_start:opener_pos].strip():
+        return False
+
+    boundary_end = _malformed_boundary_end(text, opener_pos)
+    candidate = text[opener_pos + 1 : boundary_end - 1].lstrip()
+    if not candidate:
+        return True
+
+    if text[opener_pos] == "[":
+        return bool(
+            candidate[0] in '{["'
+            or re.match(r"-?\d", candidate)
+            or re.match(r"(?:true|false|null)(?:\s*[,\]])", candidate)
+        )
+
+    if candidate[0] in '"}':
+        return True
+    return re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
+
+
 def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
-    """Parse all complete JSON objects in *text* and return only top-level ones.
+    """Parse eligible complete JSON objects in *text*.
 
-    Returns a list of (start, end, parsed_value) tuples for objects that are
-    not contained within any other successfully-parsed JSON value (object or
-    array). This uses the JSON parser itself for structural awareness — no
-    heuristic character scanning.
-
-    Strategy:
-      1. Find every ``{`` and ``[`` in text, attempt ``raw_decode`` from each.
-      2. Record all successfully-decoded spans (start, end).
-      3. Track malformed structural openers — positions where ``{`` or ``[``
-         begins a bracket-balanced region that the JSON parser cannot fully
-         decode. The extent of each malformed boundary is determined by
-         bracket matching (see ``_malformed_boundary_end``). Any valid object
-         whose span falls within such a malformed boundary is considered
-         owned by that boundary and excluded from the top-level result set.
-         This prevents inner candidates from being rescued out of a broken
-         outer container.
-      4. Filter to only objects (dicts) whose span is not contained within
-         any other successfully-decoded span **or** any malformed boundary.
+    Recovery candidates must start on their own Markdown line and outside
+    literal/example contexts (which are masked before this function runs).
+    All decoded spans are still recorded so valid arrays and outer objects
+    retain structural ownership of nested objects.
     """
     # Collect all successfully-decoded JSON values with their spans
     all_spans: list[tuple[int, int, Any]] = []  # (start, end, value)
@@ -314,8 +353,9 @@ def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
                 # Don't skip ahead — we need to also record inner objects
                 # to know containment, but we advance by 1 to find them
             except json.JSONDecodeError:
-                boundary_end = _malformed_boundary_end(text, pos)
-                malformed_boundaries.append((pos, boundary_end))
+                if _looks_like_json_container(text, pos):
+                    boundary_end = _malformed_boundary_end(text, pos)
+                    malformed_boundaries.append((pos, boundary_end))
         pos += 1
 
     # Filter to only dict values that are not contained within another span
@@ -337,15 +377,15 @@ def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
         # Check if this span falls within a malformed outer boundary.
         # A malformed boundary at (M_start, M_end) owns all objects
         # starting strictly after M_start and ending at or before M_end.
-        is_inside_malformed = False
-        for malformed_start, malformed_end in malformed_boundaries:
-            if malformed_start < start and end <= malformed_end:
-                is_inside_malformed = True
-                break
-        if is_inside_malformed:
+        line_start = text.rfind("\n", 0, start) + 1
+        if text[line_start:start].strip():
+            continue
+        if any(
+            malformed_start < start and end <= malformed_end
+            for malformed_start, malformed_end in malformed_boundaries
+        ):
             continue
         top_level_objects.append((start, end, value))
-
     return top_level_objects
 
 
@@ -412,24 +452,6 @@ def _has_json_attempt(text: str) -> bool:
     return False
 
 
-def _looks_like_json_container(text: str, opener_pos: int) -> bool:
-    """Return whether a failed opener has JSON container structure.
-
-    Completion markers such as ``[AC_COMPLETE: 1]`` and placeholders such as
-    ``{config.host}`` are prose, not later evidence attempts. Other failed
-    container openers remain authoritative so malformed final evidence cannot
-    be displaced by an earlier example.
-    """
-    try:
-        _DECODER.raw_decode(text[opener_pos:])
-    except json.JSONDecodeError:
-        boundary_end = _malformed_boundary_end(text, opener_pos)
-        candidate = text[opener_pos:boundary_end]
-        if text[opener_pos] == "[":
-            return re.fullmatch(r"\[[A-Z][A-Z0-9_ -]*(?::[^\]\n]*)?\]", candidate) is None
-        return re.fullmatch(r"\{[A-Za-z_][A-Za-z0-9_.]*\}", candidate) is None
-    return True
-
 
 def _recover_json_object(
     text: str, primary: int, primary_exc: json.JSONDecodeError, *, fence_found: bool
@@ -472,7 +494,7 @@ def _recover_json_object(
         )
         raise EvidenceError(msg) from primary_exc
 
-    recovery_text = _mask_non_json_fences(text)
+    recovery_text = _mask_markdown_examples(text)
     top_level_objects = _collect_top_level_objects(recovery_text)
 
     if top_level_objects:
