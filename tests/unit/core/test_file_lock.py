@@ -121,6 +121,40 @@ def _enter_in_copied_context(manager: object) -> None:
     copy_context().run(manager.__enter__)  # type: ignore[attr-defined]
 
 
+def _fail_next_parent_authority_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[int]:
+    """Raise after closing the next stable-parent authority descriptor."""
+    authority_fd: list[int] = []
+    failed_closes: list[int] = []
+    original_acquire = file_lock_module._acquire_posix_lock
+    original_close = file_lock_module.os.close
+
+    def record_acquire(
+        file_descriptor: int,
+        *,
+        exclusive: bool,
+        blocking: bool,
+    ) -> None:
+        if not authority_fd:
+            authority_fd.append(file_descriptor)
+        original_acquire(
+            file_descriptor,
+            exclusive=exclusive,
+            blocking=blocking,
+        )
+
+    def fail_close(file_descriptor: int) -> None:
+        original_close(file_descriptor)
+        if authority_fd == [file_descriptor] and not failed_closes:
+            failed_closes.append(file_descriptor)
+            raise OSError(errno.EIO, "directory close failed")
+
+    monkeypatch.setattr(file_lock_module, "_acquire_posix_lock", record_acquire)
+    monkeypatch.setattr(file_lock_module.os, "close", fail_close)
+    return failed_closes
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
 def test_cross_context_exit_releases_authority_without_raising(
     monkeypatch: pytest.MonkeyPatch,
@@ -177,6 +211,43 @@ def test_cross_context_exit_leaves_authority_reacquirable(tmp_path: Path) -> Non
     _enter_in_copied_context(manager)
     manager.__exit__(None, None, None)
 
+    with file_lock(contender, blocking=False, stable_parent_authority=True):
+        pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_parent_directory_close_failure_does_not_mask_body_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+    contender = tmp_path / "contender.json"
+    failed_closes = _fail_next_parent_authority_close(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="the caller's real failure"):
+        with file_lock(target, stable_parent_authority=True):
+            raise RuntimeError("the caller's real failure")
+
+    assert len(failed_closes) == 1
+    with file_lock(contender, blocking=False, stable_parent_authority=True):
+        pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_parent_directory_close_failure_surfaces_after_clean_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+    contender = tmp_path / "contender.json"
+    failed_closes = _fail_next_parent_authority_close(monkeypatch)
+
+    with pytest.raises(OSError, match="directory close failed") as raised:
+        with file_lock(target, stable_parent_authority=True):
+            pass
+
+    assert raised.value.errno == errno.EIO
+    assert len(failed_closes) == 1
     with file_lock(contender, blocking=False, stable_parent_authority=True):
         pass
 
