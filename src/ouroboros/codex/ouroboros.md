@@ -47,24 +47,36 @@ If a user input starts with `ooo auto`, call `ouroboros_start_auto`. Full auto
 runs routinely exceed interactive MCP tool-call timeouts, so the background
 starter is the supported default. It returns `job_id` and `auto_session_id`
 quickly; report both briefly, retain the `job_id` plus latest cursor, and keep
-monitoring ownership inside the agent UX. When the response includes
-`meta.job_observer`, explicitly delegate that object to exactly one native Codex
-subagent session. That observer is read-only and exclusively owns
-`ouroboros_job_wait`, its cursor, `ouroboros_job_result`, and any downstream job
-IDs named by `follow_result_job_keys`. Keep the main session available for the
-user; do not poll the same job from both sessions. The main session may perform
-an on-demand status check only when the user asks. If native subagents are not
-available, use the contract's main-session fallback and relay only meaningful
-changes. Do not hand the user polling instructions as the final UX. If that MCP
-tool is unavailable, or any required job polling/result MCP tool is unavailable,
-stop and report that the MCP dispatch surface is incomplete instead of
-continuing as a normal Codex task. Do not emulate the workflow with ordinary
-shell or coding work.
+monitoring ownership inside the agent UX.
+
+Use `meta.job_observer` when the host exposes MCP metadata. Otherwise recover
+the contract from the final `<!-- ouroboros-job-observer-v1 base64 ... -->`
+content sentinel and fail closed unless it passes canonical v1 validation:
+exactly one bounded terminal sentinel, fixed protocol/ownership/tools and
+read-only restrictions, internally consistent IDs, allowlisted downstream keys,
+and a job identity matching the visible start receipt. The visible IDs are
+identity anchors only, not a source for reconstructing executable fields. If
+structured and inline contracts differ or validation fails, stop on
+transport-integrity failure.
+
+When the response exposes an observer contract, explicitly delegate that object to exactly one native Codex subagent session.
+That observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,
+`ouroboros_job_result`, and any downstream job IDs named by
+`follow_result_job_keys`. Keep the main session available for the user; do not
+poll the same job from both sessions. The main session may perform an on-demand
+status check only when the user asks. If native subagents are not available, use
+the contract's main-session fallback and relay only meaningful changes. Do not
+hand the user polling instructions as the final UX. If that MCP tool is
+unavailable, or any required job polling/result MCP tool is unavailable, stop
+and report that the MCP dispatch surface is incomplete instead of continuing as
+a normal Codex task. Do not emulate the workflow with ordinary shell or coding
+work.
 
 For Codex delegation, call the native `spawn_agent` primitive exactly once with
-`task_name="run_observer"` and include `meta.job_observer` unchanged in the child
-message. A `wait` call does not create an observer. Do not claim delegation or
-end the start turn until the spawn result returns a live child ID/path. After a
+`task_name="run_observer"` and include the structured or recovered observer
+contract unchanged in the child message. A `wait` call does not create an
+observer. Do not claim delegation or end the start turn until the spawn result
+returns a live child ID/path. After a
 live child is acknowledged, keep the parent turn open with `wait_agent` while
 the observer is active. The observer's `send_message` only queues a parent
 mailbox event; it cannot revive a parent turn that already ended. Relay each

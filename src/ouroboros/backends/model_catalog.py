@@ -14,15 +14,17 @@ is duplicated here instead of imported because ``config.loader`` imports
 circular.
 
 Dynamic refresh is an explicit opt-in hook: a backend may declare a
-``list_command`` argv that prints one model id per line. OpenCode is wired
-because ``opencode models`` has been verified; other backends degrade to
-``None`` (use the static catalog) until their CLI support is verified.
+``list_command`` argv whose stdout is parsed into callable model ids. OpenCode,
+Kiro, and Grok are wired because their listing commands have been verified;
+other backends degrade to ``None`` (use the static catalog) until their CLI
+support is verified.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
@@ -69,11 +71,10 @@ class BackendModelCatalog:
             backends whose model space is free-form (e.g. litellm provider
             routes) — UIs must always offer a free-text custom entry on top
             of this tuple regardless of its length.
-        list_args: Optional CLI subcommand argv (appended to the resolved
-            backend binary) that prints one available model id per line.
-            Wired only where verified by hand — e.g. ``opencode models``.
-            ``None`` means dynamic listing is unsupported and callers must
-            use the static ``models``.
+        list_args: Optional primary CLI subcommand argv (appended to the
+            resolved backend binary) whose stdout is parsed into available
+            model ids. ``None`` means dynamic listing is unsupported and
+            callers must use the static ``models``.
     """
 
     backend: str
@@ -102,13 +103,61 @@ _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
 # `_LIST_PARSERS` (default: one model id per line).
 _LIST_ARGS: dict[str, tuple[str, ...]] = {
     "opencode": ("models",),
+    "kiro": ("chat", "--listmodels", "-f", "json"),
     "grok": ("models",),
+}
+
+# Kiro renamed the long-form listing flags across CLI releases. Prefer the
+# compact form verified by current users, then retry the newer spelling before
+# degrading to the static catalog.
+_LIST_ARG_FALLBACKS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "kiro": (("chat", "--list-models", "--format", "json"),),
 }
 
 
 def _parse_models_one_per_line(stdout: str) -> tuple[str, ...]:
     """Default listing parser: one model id per non-blank line."""
     return tuple(line.strip() for line in stdout.splitlines() if line.strip())
+
+
+def _parse_kiro_models(stdout: str) -> tuple[str, ...]:
+    """Parse Kiro's JSON model listing into callable model ids.
+
+    Kiro releases have emitted either a top-level list or an object containing
+    ``models``/``data``. Entries may be bare ids or records. Accept only narrow
+    id-like fields so display names and descriptions can never become
+    ``--model`` values. Invalid or unknown payloads degrade to an empty tuple.
+    """
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+
+    entries: object
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        entries = payload.get("models", payload.get("data"))
+    else:
+        return ()
+    if not isinstance(entries, list):
+        return ()
+
+    models: list[str] = []
+    for entry in entries:
+        model_id: object = entry
+        if isinstance(entry, dict):
+            model_id = next(
+                (
+                    entry[key]
+                    for key in ("id", "modelId", "model_id", "model", "value")
+                    if isinstance(entry.get(key), str)
+                ),
+                None,
+            )
+        if isinstance(model_id, str) and (value := model_id.strip()):
+            models.append(value)
+    return tuple(dict.fromkeys(models))
 
 
 def _parse_grok_models(stdout: str) -> tuple[str, ...]:
@@ -148,6 +197,7 @@ def _parse_grok_models(stdout: str) -> tuple[str, ...]:
 # Backend-specific stdout parsers for `refresh_models`. Backends absent here use
 # `_parse_models_one_per_line`.
 _LIST_PARSERS: dict[str, Callable[[str], tuple[str, ...]]] = {
+    "kiro": _parse_kiro_models,
     "grok": _parse_grok_models,
 }
 
@@ -174,6 +224,9 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
         backend="ourocode",
         models=("claude", "claude_api", "codex", "gemini"),
     )
+    # dsh's model choice lives in its Cordis composition file; the ACP wire
+    # has no per-session model parameter, so the catalog is custom-entry-only.
+    catalogs["dsh"] = BackendModelCatalog(backend="dsh", models=())
     return catalogs
 
 
@@ -212,9 +265,10 @@ def refresh_models(
     """Dynamically list models for a backend, or ``None`` to use the static catalog.
 
     Runs the backend's verified listing subcommand against its resolved CLI
-    binary (configured path first, then PATH). Degrades to ``None`` (never
-    raises) when the backend declares no listing subcommand, the CLI is not
-    installed, the command fails or times out, or output is unparseable.
+    binary (configured path first, then PATH). Backends may declare compatible
+    fallback spellings for CLI-version transitions. Degrades to ``None`` (never
+    raises) when listing is unsupported, the CLI is not installed, every
+    command fails or times out, or every output is unparseable.
     """
     catalog = get_model_catalog(backend)
     if catalog.list_args is None:
@@ -222,19 +276,26 @@ def refresh_models(
     cli_path = detect_backend_cli(backend)
     if cli_path is None:
         return None
-    try:
-        result = subprocess.run(  # noqa: S603 - resolved binary + code-owned args
-            (cli_path, *catalog.list_args),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
+
     parser = _LIST_PARSERS.get(catalog.backend, _parse_models_one_per_line)
-    models = parser(result.stdout)
-    return models or None
+    commands = (catalog.list_args, *_LIST_ARG_FALLBACKS.get(catalog.backend, ()))
+    for list_args in commands:
+        try:
+            result = subprocess.run(  # noqa: S603 - resolved binary + code-owned args
+                (cli_path, *list_args),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=True,
+            )
+        except OSError:
+            return None
+        except subprocess.SubprocessError:
+            continue
+        models = parser(result.stdout)
+        if models:
+            return models
+    return None
 
 
 # Maps canonical backend name → loader getter for its configured CLI path.
@@ -259,6 +320,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     # Without this entry, ``detect_backend_cli("zcode")`` ignored the
     # configured path and Zcode was invisible to ``installed_backends()``.
     "zcode": "get_zcode_cli_path",
+    "dsh": "get_dsh_cli_path",
 }
 
 

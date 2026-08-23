@@ -24,6 +24,14 @@ from ouroboros.core.errors import ProviderError
 
 _MAX_STREAM_LINE_BUFFER_BYTES = 50 * 1024 * 1024
 _MAX_STREAM_CAPTURE_BYTES = 50 * 1024 * 1024
+# CLI-backed completion adapters take an optional ``timeout`` that defaults to
+# ``None``.  No production call site sets it, so the unbounded
+# ``await process.wait()`` branch was the *default* path: a wedged CLI (auth
+# prompt, hung network call, orphaned child holding the pipe) blocked the whole
+# generation forever with no diagnostic.  This ceiling bounds that wait.  It
+# matches the 1800s per-iteration bound the Ralph loop already enforces, so a
+# single completion can never outlive the iteration that owns it.
+DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS = 1800.0
 # Orchestrator runtimes parse JSONL stdout; cap the line buffer so newline-free
 # output (or a stuck stream) cannot grow memory without bound.  Matches the
 # value the codex/opencode/pi runtimes already enforced inline.
@@ -422,6 +430,24 @@ class RuntimeStreamMixin:
 
     _provider_name: str
     _process_shutdown_timeout_seconds: float
+    _default_completion_timeout_seconds: float = DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
+
+    def _effective_timeout_seconds(self) -> float:
+        """Resolve the completion timeout ceiling; never returns ``None``.
+
+        An explicit positive ``timeout`` wins.  ``None`` (the constructor
+        default) falls back to :data:`DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS`
+        so no wait on a child CLI process is ever unbounded.
+        """
+        timeout = getattr(self, "_timeout", None)
+        if timeout is not None and timeout > 0:
+            return float(timeout)
+        return self._default_completion_timeout_seconds
+
+    def _timeout_is_default_ceiling(self) -> bool:
+        """Whether the effective timeout came from the module default."""
+        timeout = getattr(self, "_timeout", None)
+        return not (timeout is not None and timeout > 0)
 
     def _stream_line_reader(self) -> Callable[..., AsyncIterator[str]]:
         return iter_stream_lines
@@ -462,6 +488,7 @@ class RuntimeStreamMixin:
 
 
 __all__ = [
+    "DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS",
     "RuntimeStreamMixin",
     "collect_stream_lines",
     "iter_runtime_stream_lines",

@@ -96,7 +96,34 @@ from memory, so it is the last one to skip evidence on.
 ### Step 3: Loop
 
 Apply this to **every** MCP response that carries a question, including the one
-Step 2 returned and any question re-shown on resume.
+Step 2 returned and any question a resume plans anew.
+
+**Batched turns (RFC #2222).** A response may carry one to three questions at
+once: `meta.question_batch` lists them and `meta.question_advisories` carries
+one advisory envelope per question, each with its own
+`question_advisory_subagents` and `question_advisory_fanout_id`. Treat every
+question of the turn exactly as a single question is treated below, with these
+batch mechanics:
+
+- **Dispatch all envelopes' payloads in one wave** — one subagent per payload
+  across all questions, in a single parallel batch. Never leave a question's
+  lanes undispatched: every question shown keeps its evidence.
+- **Submit results per envelope** — each question's lanes correlate by its own
+  envelope's `question_advisory_fanout_id` and
+  `question_advisory_result_correlation_key`; one
+  `ouroboros_submit_fanout_results` call per envelope.
+- **Relay the turn's answers together** in one call:
+  `answers: [{question, answer}, ...]`, one entry per question the turn asked,
+  each naming its own exact question text. One call records the turn, so
+  collect every answer first — and never auto-answer, auto-defer, or
+  decide-later one on the user's behalf to complete the set. The server does
+  not check that you sent them all: whatever you leave out is **abandoned**,
+  not remembered.
+- The server keeps nothing between calls. A call that arrives without the
+  turn's answers plans a **new** turn from the transcript rather than restoring
+  the old one, so a turn you abandon is a turn the user will be asked again.
+- Skip sentinels are per question: give that question the answer
+  `"[decide_later]"` or `"[deferred]"` in its own entry.
 
 **A. Show alerts** (if present in `meta`):
 - `meta.deferred_this_round` → print `[DEV → deferred] "question"`
@@ -114,18 +141,15 @@ bounded by the roster, and not checked against the answer contract. This skill
 is self-contained: everything you need is here and in the tool response, so do
 not go looking for exploration rules in another skill's file.
 
-**When `meta.question_advisory_subagents` is present you MUST fan out.** Show
-the question text to the user first, then treat each entry as a spawn-ready
-payload with `title`, `agent`, `prompt`, and `context`, and dispatch every
-payload through your host's native subagent mechanism — Claude Code → **one
-Task/Agent call per payload in one parallel batch**; Codex → one native Codex
-subagent per payload; a runtime with no parallel primitive → process them
-sequentially. Pass each payload's `prompt` unchanged rather than rewriting it.
-
-This holds regardless of dispatch mode: **the payloads themselves are the spawn
-signal.** `meta.question_advisory_host_action=spawn_subagents` is a reinforcing
-cue, not a prerequisite. The only time you skip spawning is when the host has no
-subagent primitive at all.
+**When `meta.question_advisory_subagents` is present you MUST process every
+payload.** Show the question first, then pass each payload's `prompt` unchanged.
+Obey `meta.question_advisory_host_action`: `spawn_subagents` means parallel
+support was declared; `dispatch_subagents_if_supported` means use the host's
+native parallel mechanism when available and process the same payloads
+sequentially otherwise; `process_payloads_sequentially` requires ordered
+processing. Claude Code parallel dispatch is one Task/Agent call per payload in
+one batch; Codex uses one native Codex subagent per payload. The payloads are
+the work contract, while the host action selects the execution strategy.
 
 **Say what is running.** Same shape the regular interview uses: after the
 question, set off by a divider, one line naming how many perspectives are running
@@ -150,11 +174,19 @@ having two lanes instead of six:
 
 Write the line in the language the user is speaking.
 
-**Do not go to step A3 or B while the lanes are still running.** Step B is where
+**Do not go to step B while the lanes are still running.** Step B is where
 you ask the user, and asking before the evidence arrives is the exact failure
 this mechanism exists to prevent: the PM decides without the two things they
 could not have looked up themselves. Waiting is for lanes still in flight: one
 that came back empty, broke its contract, or could not be spawned has returned.
+
+**Stub payloads.** A payload's `prompt` may be a compact stub: it carries the
+lane's answer schema, where it may look, and the findings it may reuse, and
+points at `ouroboros_fetch_artifact` for the prose that explains them. Pass it
+unchanged exactly like any payload — the child fetches for itself, and a fetch
+it cannot make does not stop it. A child that replies exactly `UNDISPATCHED`
+could not work at all: submit that lane as
+`{ "key": <lane id>, "undispatched": true }` rather than as an empty finding.
 
 **Submitting results back.** Correlate by
 `meta.question_advisory_result_correlation_key` (`context.lane_id`) and call
@@ -179,11 +211,10 @@ and a reply can be accepted while one of them never ran. Where the block would
 have carried that lane, write that it did not run.
 
 There are two lanes and both are required: `code_context` and `data_context`.
-A `code_context` lane that carries a policy returns `answer_prefix:
-"[from-code]"` and a `user_confirmation_prompt` — that is a step, described in
-A3 below, not the answer. `data_context` has no prefix at all: measurements are
-shown beside the question and the answer is the user's own words. Never skip
-asking the user because a lane answered clearly.
+Both are **evidence-only** (RFC #2222): what a lane finds is shown beside the
+question and sent nowhere — the published fan-out is already its record, and
+the interview records only what the user writes. Never skip asking the user
+because a lane answered clearly, and never send a lane's finding as an answer.
 
 **Synthesize into the evidence block.** This is what
 `synthesis_contract.output_shape = "evidence_beside_question"` means, and it is a
@@ -193,17 +224,24 @@ above the question, then ask the question unchanged:
 ```
 Evidence (examined: billing-api, storefront)
 
-What the code does today
-  · [billing-api] src/billing/lapse.py  — access continues to period end
-  · [storefront]  src/checkout.ts       — access is revoked immediately
+What the system does today
+  · [billing-api] access continues to the end of the paid period
+  · [storefront]  access is revoked immediately
     ! These two repositories implement this differently.
 
 Measured — active subscriptions by plan, last 90 days
   · standard 12,480 / premium 3,120
 ```
 
-Write the block in the language the user is speaking. The labels above are
-placeholders for its shape, not text to copy.
+**The screen speaks product language; the store keeps the citations
+(RFC #2222 decision 4).** Each code claim is rendered from its lane-authored
+`plain_statement` — never from `policy_claim`, and never paraphrased by you.
+No file paths, no class names, no flag values on screen. The `path` +
+`policy_claim` citations stay in the published fan-out, fetchable by its
+contract id — they are displayed nowhere and recorded nowhere else. The lane
+writes `plain_statement` in the question's language, so no translation is
+yours to do. The labels above are placeholders for the block's shape, not
+text to copy.
 
 **What this block is not.** It carries no answer options, no recommendation, no
 ranking, and no "therefore …" sentence. The moment it proposes an answer it has
@@ -241,55 +279,15 @@ Rules for building it:
   something the record does not contain. Offer to register the repository
   instead, so the next question can be answered against it.
 
-**A3. Record a confirmed finding — its own turn, before you prompt for an answer.**
+**A3. Findings are evidence, never answers (RFC #2222).**
 
-Only when some `code_context` entry came back carrying a `policy_claims` item.
-That answer also carries `answer_prefix: "[from-code]"` and a
-`user_confirmation_prompt`, and there is no prefix that skips this step:
-`[from-code][auto-confirmed]` is not a value the contract can hold, so a lane
-cannot declare itself pre-confirmed.
-
-1. Show the evidence block (A2) and ask the lane's `user_confirmation_prompt`
-   through `AskUserQuestion`. Ask it as it is: the user is confirming that this
-   is what the code does, not deciding what it should do.
-2. If they say it is wrong, or they would rather just answer, **send nothing**
-   and go to B. A question answered with no finding recorded is an accurate
-   account of how that decision was made, not a degraded one.
-3. If they confirm, send it as the answer with its prefix, composed from the
-   `examined` entries so every claim keeps the repository it was read in:
-
-```
-Tool: ouroboros_pm_interview
-Arguments:
-  session_id: <meta.session_id>
-  last_question: <meta.question>
-  answer: |
-    [from-code] billing-api src/billing/lapse.py: access continues to period end.
-    [from-code] storefront src/checkout.ts: access is revoked immediately.
-```
-
-Send `meta.question`, never the response text — the text carries the fan-out
-directive. Omitting it files the finding under a placeholder question, and
-since the answer slot is withheld by design, the finding is then lost from
-both slots.
-
-4. The server records it as an **adopted fact**: the round is marked
-   `observation`, requirement extraction reads a withheld-note in its place, and
-   it does not count toward the decisions that complete the interview. The
-   response carries the **next** question, generated with the finding in view —
-   that is the question the user answers in their own words, from step 3-A.
-
-**Why it takes the round rather than riding beside the answer.** It was built
-the other way first, with a second parameter for findings. Two entrances meant
-two sets of rules for one payload, and they stopped agreeing: the same class of
-silent loss reappeared at a new address for six review rounds. One entrance is
-what closed it, and it is what `ouroboros_interview` always did.
-
-**What this does not license.** The finding is never sent unconfirmed to save a
-turn. What holds if you do is downstream and weaker than the user's eyes: the
-`[from-code]` prefix keeps it out of requirement extraction and out of the
-completion count, so an unconfirmed forward costs the user a question turn and
-puts nothing false in the PRD. That is a floor, not a permission.
+There is no recording step. A finding's durable record is the published
+fan-out itself — addressable by contract id, re-offered to later lanes through
+recent findings — so sending it again as an answer would duplicate the store
+and spend a question turn on it. Do not send `[from-code]` answers, do not ask
+the user to "confirm" a finding as a separate turn, and do not paste findings
+into any answer payload. The evidence block is the finding's whole appearance;
+the user answers the question in their own words, with the evidence in view.
 
 **B. Show content + get user input** (once A2's lanes have returned):
 
@@ -312,6 +310,11 @@ Then check: does `meta.ask_user_question` exist?
   Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
 
 - **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question`.
+  - **Batched turn**: put every question of the turn into ONE `AskUserQuestion`
+    call — one entry per question (the tool takes up to 4). Each keeps its own
+    options, built by the same rules below from its own entry in
+    `meta.question_batch`; a skip option follows that question's own
+    `classification`, never another's.
   - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
     - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
     - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
@@ -324,6 +327,11 @@ Then check: does `meta.ask_user_question` exist?
 If the user chose "Decide later" → send `answer="[decide_later]"`.
 If the user chose "Defer to dev" → send `answer="[deferred]"`.
 Otherwise → send the user's answer through the Refine gate below.
+
+On a batched turn: run each answer through its own Refine gate, then send them
+in one call as `answers: [{question, answer}, ...]` — the question text exactly
+as the turn asked it. The call that carries the turn returns the next turn's
+question(s).
 
 **Refine gate — structure it, mark whose it is, then have the user confirm.**
 
@@ -356,8 +364,9 @@ nothing they said is the failure this labelling exists to make visible.
 
 **No codebase-context section, and no lane findings.** The regular interview
 adds one, because there the main session inspects code itself. Here it does not.
-A lane's finding is recorded by step A3, on its own turn, as an adopted fact.
-Putting it in this payload would record it as part of the user's decision.
+A lane's finding lives in the published fan-out and on the screen beside the
+question — putting it in this payload would record it as part of the user's
+decision, which it is not (A3).
 
 **Then confirm — this is the gate, and it is what licenses the structuring
 above.** One `AskUserQuestion` before sending:
@@ -390,17 +399,15 @@ Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
   last_question: <meta.question>
-  <meta.response_param>: <the refined answer, or "[decide_later]" / "[deferred]">
+  answer: <the refined answer, or "[decide_later]" / "[deferred]">
 ```
 
 Ignored while the server holds the question unanswered; required otherwise —
 plugin mode never persists the child's questions, and an answer with no pending
 question is refused without it.
 
-There is no second parameter carrying findings. The tool has exactly the fields
-the regular interview has, and a finding travels the same way any adopted fact
-travels there — see **A3. Record a confirmed finding** above, which is a separate
-turn taken *before* the user answers, not something appended to this call.
+There is no parameter carrying findings, second or otherwise: findings never
+travel as answers (A3). Every call on this parameter is the user's own words.
 
 **D. Check completion:**
 

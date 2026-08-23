@@ -1250,6 +1250,12 @@ def test_all_event_inserts_are_owned_by_projection_wrapper() -> None:
     assert insert_sites == ["src/ouroboros/persistence/picker_projection_updates.py"]
 
 
+# Bulk size for the write/disk budget benchmark. Large enough that per-row
+# projection cost dominates fixed setup cost in the measured ratios, small
+# enough that the six parametrized budgets stay cheap in the unit suite.
+_BULK_EVENT_COUNT = 50_000
+
+
 def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tuple[float, int]:
     conn = sqlite3.connect(path)
     try:
@@ -1302,7 +1308,7 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
                 )
                 for index in range(5_000)
             ]
-            for offset in range(0, 100_000, 5_000)
+            for offset in range(0, _BULK_EVENT_COUNT, 5_000)
         ]
 
         async def append_all() -> None:
@@ -1340,7 +1346,9 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
             progress_count = conn.execute(
                 f"SELECT COUNT(*) FROM {PICKER_PROGRESS_TABLE}"
             ).fetchone()[0]
-            assert start_count == (100_000 if event_type == "orchestrator.session.started" else 0)
+            assert start_count == (
+                _BULK_EVENT_COUNT if event_type == "orchestrator.session.started" else 0
+            )
             assert progress_count == (1 if event_type == "workflow.progress.updated" else 0)
         size = int(conn.execute("PRAGMA page_count").fetchone()[0]) * int(
             conn.execute("PRAGMA page_size").fetchone()[0]
@@ -1350,6 +1358,7 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
         conn.close()
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize(
     ("event_type", "max_time_ratio", "max_size_ratio"),
     [

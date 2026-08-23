@@ -300,6 +300,8 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert manifest["mcpServers"] == "./.mcp.codex.json"
     assert manifest["interface"]["displayName"] == "Ouroboros"
     codex_mcp = json.loads((repo_root / ".mcp.codex.json").read_text(encoding="utf-8"))
+    # The shipped descriptor pins the served package to the plugin manifest
+    # version (#2066) so a plugin update changes the uvx cache key.
     assert codex_mcp["mcpServers"]["ouroboros"] == {
         "command": "uvx",
         "args": [
@@ -307,7 +309,7 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
             "--python",
             ">=3.12",
             "--from",
-            "ouroboros-ai[mcp]",
+            f"ouroboros-ai[mcp]=={manifest['version']}",
             "ouroboros",
             "mcp",
             "serve",

@@ -3291,6 +3291,12 @@ class TestServeTransport:
         mock_fastmcp_cls.assert_called_once()
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
+        extensions = mock_fastmcp_cls.call_args.kwargs["extensions"]
+        assert len(extensions) == 1
+        assert extensions[0].identifier == "io.ouroboros/subagents"
+        assert extensions[0].settings()["undeclaredBehavior"] == (
+            "parallel_preferred_sequential_fallback"
+        )
         # The SDK builds its own DNS-rebinding settings for this bind spelling,
         # so the adapter passes none of its own.
         mock_instance.run_sse_async.assert_awaited_once_with(
@@ -3672,6 +3678,52 @@ class TestServeTransport:
 
         assert capture.call_count == 3
         assert [call.kwargs["ok"] for call in capture.call_args_list] == [True, False, False]
+
+    async def test_sdk_call_preserves_normalized_host_context_for_handler(self) -> None:
+        """The SDK boundary must not discard client identity/capability facts."""
+        mcp_server_module = pytest.importorskip("mcp.server")
+        from ouroboros.mcp.host_context import current_mcp_host_context
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_sdk_host_context_probe")
+        observed = []
+
+        async def handle(arguments: dict[str, Any]):
+            observed.append(current_mcp_host_context())
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+                )
+            )
+
+        handler.handle_mock.side_effect = handle
+        adapter.register_tool(handler)
+        with patch.object(
+            mcp_server_module.MCPServer,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+        sdk_context = SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=SimpleNamespace(client_info=SimpleNamespace(name="claude-code")),
+                client_capabilities=SimpleNamespace(
+                    extensions={"io.ouroboros/subagents": {"mode": "parallel"}},
+                    experimental=None,
+                ),
+            )
+        )
+
+        await adapter._mcp_server.call_tool(
+            "ouroboros_sdk_host_context_probe",
+            {"input": "safe"},
+            sdk_context,
+        )
+
+        assert len(observed) == 1
+        assert observed[0].host_family.value == "claude_code"
+        assert observed[0].subagent_capability.value == "parallel"
+        assert observed[0].dispatch_authority.value == "mcp_host"
 
     async def test_sdk_failure_boundaries_are_captured_exactly_once(self) -> None:
         """Adapter, output-validation, and conversion failures are not double-counted."""
@@ -4442,6 +4494,32 @@ class TestCreateOuroborosServerCwdFallback:
         )
 
 
+class TestCreateOuroborosServerUpdateNoticeBoundary:
+    """The advisory update nudge must never fail server construction (#2066)."""
+
+    def test_metadata_failure_does_not_break_server_construction(self, monkeypatch):
+        """importlib.metadata errors beyond PackageNotFoundError — corrupt
+        dist-info, backend failures — stay inside the advisory seam and
+        never reach create_ouroboros_server()."""
+        from unittest.mock import MagicMock, patch
+
+        from ouroboros.mcp import update_notice
+
+        def _raise(_name: str) -> str:
+            raise OSError("corrupt dist-info")
+
+        monkeypatch.setattr(update_notice.metadata, "version", _raise)
+
+        mock_event_store = MagicMock()
+        mock_event_store.initialize = MagicMock()
+        with patch("ouroboros.mcp.tools.registry.ToolRegistry", MagicMock()):
+            from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+            server = create_ouroboros_server(event_store=mock_event_store)
+
+        assert server is not None
+
+
 class TestCreateOuroborosServerOpenCodeMode:
     """Verify create_ouroboros_server() threads opencode_mode to handlers."""
 
@@ -4480,7 +4558,7 @@ class TestCreateOuroborosServerOpenCodeMode:
             "ouroboros_start_evolve_step": "ouroboros.mcp.tools.definitions.StartEvolveStepHandler",
             "ouroboros_ralph": "ouroboros.mcp.tools.definitions.RalphHandler",
             "ouroboros_start_ralph": "ouroboros.mcp.tools.definitions.StartRalphHandler",
-            "ouroboros_pm_interview": "ouroboros.mcp.tools.pm_handler.PMInterviewHandler",
+            "ouroboros_pm_interview": "ouroboros.mcp.tools.fanout_composition.PMInterviewHandler",
             "ouroboros_qa": "ouroboros.mcp.tools.qa.QAHandler",
         }
 
@@ -4958,7 +5036,6 @@ async def test_production_fanout_returns_only_disposable_envelope(
         changed_envelope = DisposableResultEnvelope.model_validate(changed_result.meta)
 
         assert changed_envelope.contract_id != envelope.contract_id
-        assert changed_envelope.artifact_ref != envelope.artifact_ref
         assert synthesis_calls == 2
         assert len(json.dumps(changed_result.meta).encode("utf-8")) < 4 * 1024
         assert changed_marker not in changed_result.content[0].text

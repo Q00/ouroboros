@@ -657,14 +657,12 @@ async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_p
     """Through the tool that accepts the unconstrained result objects."""
     from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
     from ouroboros.orchestrator.disposable_memory import DisposableMemory
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
     required = [entry["key"] for entry in _required_results(lane_ids, identity)]
-    disposable = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore.for_project(tmp_path)
-    )
+    disposable = DisposableMemory(artifact_store=ArtifactStore.for_project(tmp_path))
     submit = SubmitFanoutResultsHandler(
         fanout_registry=registry,
         disposable_memory=disposable,

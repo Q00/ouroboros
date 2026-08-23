@@ -500,16 +500,12 @@ class AmbiguityScorer:
 
             # Parse the LLM response into scores
             try:
-                breakdown = self._parse_scoring_response(
+                ambiguity_score = self.parse_score_response(
                     result.value.content,
                     is_brownfield=is_brownfield,
                 )
-                overall_score = self._calculate_overall_score(breakdown)
-
-                ambiguity_score = AmbiguityScore(
-                    overall_score=overall_score,
-                    breakdown=breakdown,
-                )
+                breakdown = ambiguity_score.breakdown
+                overall_score = ambiguity_score.overall_score
 
                 log.info(
                     "ambiguity.scoring.completed",
@@ -684,6 +680,25 @@ Additional context (intentional deferrals — do not penalise):
         prompt += "\n\nAnalyze each component and provide scores with justifications."
 
         return prompt
+
+    def parse_score_response(
+        self,
+        response: str,
+        *,
+        is_brownfield: bool = False,
+    ) -> AmbiguityScore:
+        """Parse one scoring payload into the canonical ambiguity result.
+
+        Turn planners reuse this boundary when a single completion returns both
+        the next question and the ordinary scoring fields. Extra JSON fields are
+        ignored by the existing breakdown parser, so scoring semantics and
+        weights remain single-sourced here.
+        """
+        breakdown = self._parse_scoring_response(response, is_brownfield=is_brownfield)
+        return AmbiguityScore(
+            overall_score=self._calculate_overall_score(breakdown),
+            breakdown=breakdown,
+        )
 
     def _parse_scoring_response(
         self,

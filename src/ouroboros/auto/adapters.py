@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-import contextlib
 from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import structlog
 import yaml
@@ -31,14 +29,12 @@ from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
 )
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
-from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.runtime_evidence import HeadlessRunProbe, RuntimeEvidence
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
-from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
 
@@ -264,12 +260,11 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
-            # Auto owns its own RALPH_HANDOFF and final-evaluation path. Keep
-            # the run handoff from adding a second evaluation owner or a
-            # competing run-session Ralph lineage.
-            "auto_evaluate": False,
-            "auto_evolve": False,
         }
+        # No successor override is ever sent: Auto stops at COMPLETE as soon as
+        # the run has a durable handle, so the run job's own
+        # run → evaluate → ralph chain is the only owner. ``execution.auto_evaluate``
+        # / ``execution.auto_evolve`` govern it, exactly as for a direct ``ooo run``.
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
         if idempotency_key:
@@ -290,131 +285,6 @@ class HandlerRunStarter:
         if isinstance(meta.get("_subagent"), dict):
             run_meta["_subagent"] = meta["_subagent"]
         return run_meta
-
-
-class HandlerSynchronousRunStarter:
-    """Callable run starter backed by inline ``ouroboros_execute_seed`` execution."""
-
-    synchronous_execution = True
-
-    def __init__(
-        self,
-        handler: ExecuteSeedHandler,
-        *,
-        cwd: str,
-        skip_qa: bool = True,
-        terminal_poll_interval_seconds: float = 2.0,
-    ) -> None:
-        self.handler = handler
-        self.cwd = cwd
-        self.skip_qa = skip_qa
-        self.terminal_poll_interval_seconds = terminal_poll_interval_seconds
-        self._latest_run_meta: dict[str, object] | None = None
-
-    async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:  # noqa: ARG002
-        seed_yaml = yaml.dump(
-            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
-        session_id = f"orch_{uuid4().hex[:12]}"
-        execution_id = f"exec_{uuid4().hex[:12]}"
-        self._latest_run_meta = {
-            "job_id": None,
-            "session_id": session_id,
-            "execution_id": execution_id,
-            "status": "running",
-        }
-        task = asyncio.create_task(
-            self.handler.handle(
-                {
-                    "seed_content": seed_yaml,
-                    "cwd": self.cwd,
-                    "skip_qa": self.skip_qa,
-                    # Complete-product Auto owns Ralph and the final formal
-                    # evaluation after the run artifact is available.
-                    "auto_evaluate": False,
-                    "auto_evolve": False,
-                },
-                execution_id=execution_id,
-                session_id_override=session_id,
-                synchronous=True,
-            )
-        )
-        task.add_done_callback(_consume_background_result)
-        try:
-            while True:
-                done, _pending = await asyncio.wait(
-                    {task},
-                    timeout=max(0.1, self.terminal_poll_interval_seconds),
-                )
-                if done:
-                    result = _unwrap(await task, tool_name="ouroboros_execute_seed")
-                    break
-                recovered = await self.recover_timed_out_run()
-                if recovered is not None:
-                    return recovered
-        except asyncio.CancelledError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            if self._latest_run_meta is not None:
-                self._latest_run_meta = {
-                    **self._latest_run_meta,
-                    "status": "cancelled",
-                    "success": False,
-                }
-            raise
-        meta = result.meta or {}
-        run_meta: dict[str, object] = {
-            "job_id": None,
-            "session_id": _optional_str(meta.get("session_id")),
-            "execution_id": _optional_str(meta.get("execution_id")),
-            "status": _optional_str(meta.get("status")),
-        }
-        if isinstance(meta.get("success"), bool):
-            run_meta["success"] = meta["success"]
-        if isinstance(meta.get("_subagent"), dict):
-            run_meta["_subagent"] = meta["_subagent"]
-        self._latest_run_meta = dict(run_meta)
-        return run_meta
-
-    async def recover_timed_out_run(self) -> dict[str, object] | None:
-        """Recover terminal metadata if inline execution finished during handler teardown."""
-        latest = self._latest_run_meta
-        if not latest:
-            return None
-        session_id = _optional_str(latest.get("session_id"))
-        execution_id = _optional_str(latest.get("execution_id"))
-        if not session_id:
-            return None
-
-        event_store = EventStore()
-        try:
-            await event_store.initialize()
-            result = await SessionRepository(event_store).reconstruct_session(session_id)
-        finally:
-            close_result = event_store.close()
-            if asyncio.iscoroutine(close_result):
-                await close_result
-        if result.is_err:
-            return None
-
-        tracker = result.value
-        if tracker.status == SessionStatus.RUNNING:
-            return None
-        status = tracker.status.value
-        recovered: dict[str, object] = {
-            "job_id": None,
-            "session_id": tracker.session_id,
-            "execution_id": execution_id or tracker.execution_id,
-            "status": status,
-            "_allow_deadline_completion_grace": True,
-        }
-        if tracker.status == SessionStatus.COMPLETED:
-            recovered["success"] = True
-        elif tracker.status in (SessionStatus.FAILED, SessionStatus.CANCELLED):
-            recovered["success"] = False
-        self._latest_run_meta = dict(recovered)
-        return recovered
 
 
 def _consume_background_result(task: asyncio.Task[Any]) -> None:

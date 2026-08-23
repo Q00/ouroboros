@@ -152,6 +152,126 @@ class TestCliRunCaller:
         result = _resolve_cli_project_dir(seed, seed_file)
         assert result == tmp_path.resolve()
 
+    def test_fallback_dir_stands_in_for_the_seed_file_folder(self, tmp_path: Path) -> None:
+        """A Seed that says nothing must not make its own folder the workspace.
+
+        `init` writes Seeds to `~/.ouroboros/seeds`, so the file's folder is the
+        Seed store, not a project.
+        """
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_store = tmp_path / "seeds"
+        seed_store.mkdir()
+        seed_file = seed_store / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        invocation = tmp_path / "project"
+        invocation.mkdir()
+
+        result = _resolve_cli_project_dir(self._seed(None), seed_file, fallback_dir=invocation)
+
+        assert result == invocation.resolve()
+
+    def test_relative_file_reference_keeps_the_invocation_directory_as_root(
+        self, tmp_path: Path
+    ) -> None:
+        """The interview handoff must not push the cwd into a subdirectory.
+
+        Regression for #2194: a brownfield seed carrying a primary
+        ``context_references`` file (``app/widgets/kanban.js``) collapsed the
+        runtime cwd to the file's parent (``app/widgets``), so every AC's
+        ``expected_artifacts`` — written relative to the project root —
+        resolved to ``app/widgets/app/widgets/...`` and failed verification.
+        """
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_store = tmp_path / "seeds"
+        seed_store.mkdir()
+        seed_file = seed_store / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        invocation = tmp_path / "project"
+        widget = invocation / "app" / "widgets" / "kanban.js"
+        widget.parent.mkdir(parents=True)
+        widget.write_text("// widget\n", encoding="utf-8")
+
+        refs = [SimpleNamespace(path="app/widgets/kanban.js", role="primary")]
+        seed = SimpleNamespace(
+            metadata=None,
+            brownfield_context=SimpleNamespace(context_references=refs),
+        )
+
+        result = _resolve_cli_project_dir(seed, seed_file, fallback_dir=invocation)
+
+        assert result == invocation.resolve()
+
+    @pytest.mark.parametrize("target_kind", ["missing", "file"])
+    def test_unusable_brownfield_target_does_not_fall_back_to_the_seed_store(
+        self, tmp_path: Path, target_kind: str
+    ) -> None:
+        """An unusable `target_dir` must not send execution back to the store.
+
+        `_resolve_brownfield_target_dir` drops stale and file-valued targets, and
+        whatever fills that hole becomes the workspace. Before the fallback
+        existed that was the Seed file's own folder.
+        """
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_store = tmp_path / "seeds"
+        seed_store.mkdir()
+        seed_file = seed_store / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        invocation = tmp_path / "project"
+        invocation.mkdir()
+        target = str(tmp_path / "gone") if target_kind == "missing" else str(seed_file)
+
+        result = _resolve_cli_project_dir(
+            self._seed(None),
+            seed_file,
+            seed_data={"brownfield_context": {"target_dir": target}},
+            fallback_dir=invocation,
+        )
+
+        assert result == invocation.resolve()
+
+    def test_usable_brownfield_target_outranks_the_fallback(self, tmp_path: Path) -> None:
+        """A Seed that names a real target keeps it over the caller's directory."""
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_store = tmp_path / "seeds"
+        seed_store.mkdir()
+        seed_file = seed_store / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        invocation = tmp_path / "project"
+        invocation.mkdir()
+        target = tmp_path / "brownfield-repo"
+        target.mkdir()
+
+        result = _resolve_cli_project_dir(
+            self._seed(None),
+            seed_file,
+            seed_data={"brownfield_context": {"target_dir": str(target)}},
+            fallback_dir=invocation,
+        )
+
+        assert result == target.resolve()
+
+    def test_explicit_project_dir_outranks_the_fallback(self, tmp_path: Path) -> None:
+        """`--project-dir` stays the last word."""
+        from ouroboros.cli.commands.run import _resolve_cli_project_dir
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: x\n", encoding="utf-8")
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+
+        result = _resolve_cli_project_dir(
+            self._seed(None),
+            seed_file,
+            project_dir=explicit,
+            fallback_dir=tmp_path / "ignored",
+        )
+
+        assert result == explicit.resolve()
+
     def test_contained_seed_uses_resolved_path(self, tmp_path: Path) -> None:
         from ouroboros.cli.commands.run import _resolve_cli_project_dir
 

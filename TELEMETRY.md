@@ -94,6 +94,7 @@ together, always.
 | `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
 | `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, failure_reason_code (failed/cancelled/interrupted outcomes only), recovery_action (failed/cancelled/interrupted outcomes only), `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
 | `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, first_command_surface, app_version, os, ci — no python_version, no backend/provider context |
+| `subagent_dispatch` | A structured fan-out contract is emitted (`phase=emitted`) or correlated child results return through `ouroboros_submit_fanout_results` (`phase=submitted`) | phase, fanout_kind, payload_count, invocation_surface, dispatch_authority, host_family, host_identity_status, host_capability, capability_source, delivery_mode, execution_preference, fallback_strategy, configured_worker_backend, host_worker_mismatch, decision_reason, contract_version, fanout_reentry_available, submission_status, expected_count, received_count, undispatched_count, frontdoor, first_command_surface, app_version, os, python_version, ci |
 
 Notes:
 
@@ -147,6 +148,14 @@ Notes:
   Current recovery actions are `retry`, `setup`, `login`, `update`,
   `inspect_logs`, and `none`. An unclassified failure is always `unknown` with
   `inspect_logs`, so the failure denominator remains measurable.
+- `subagent_dispatch` uses closed enums only. Raw MCP `clientInfo.name`, client
+  versions, custom backend names, `fanout_id`, session ids, correlation values,
+  prompts, problem context, child outputs, repository paths, and file paths are
+  never sent. Recognized client identities are folded to `claude_code`, `codex`,
+  or `opencode`; every other non-empty identity becomes `other_known`, and an
+  absent identity becomes `unknown`. Custom worker backends become `other`.
+  Counts are bounded to 0–64. The submitted event reports only aggregate lane
+  counts and never infers whether execution was parallel from elapsed time.
 - Start-tool `command_run` events are submission receipts. They intentionally
   have `accepted`, not `ok`; queue acceptance is never a completed or verified
   run. `workflow_outcome` is the durable/direct terminal boundary described
