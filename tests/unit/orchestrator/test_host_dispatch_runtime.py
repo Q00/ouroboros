@@ -532,3 +532,102 @@ class TestGradingContractLeakSweep:
         result = await runtime.execute_task_to_result("implement the feature")
         await task
         assert result.is_ok
+
+
+class TestActiveWorkerBeyondTTL:
+    """Regression: a long-running worker must not cause a duplicate dispatch.
+
+    Prior to the one-shot announcement fix, the five-minute TTL on
+    ``announced_at`` would re-surface the same dispatch as actionable after
+    the TTL elapsed, instructing the host to spawn a second worker in the same
+    working directory. The public contract is:
+      "spawn each actionable dispatch_id exactly once"
+
+    These tests prove the invariant holds at both the bridge and the full
+    execute_task level, even when the worker runs far longer than the former
+    TTL window.
+    """
+
+    @pytest.mark.asyncio
+    async def test_active_worker_beyond_ttl_never_duplicates_dispatch(
+        self, bridge: HostDispatchBridge
+    ) -> None:
+        """A host polling job_wait with a long-running worker must not receive
+        a second actionable announcement for the same dispatch."""
+        runtime = _runtime(bridge)
+        runtime.bind_dispatch_scope(session_id="sess_ttl")
+
+        polls_after_initial: list[list[dict[str, Any]]] = []
+
+        async def long_running_host() -> None:
+            # Wait for the initial actionable announcement.
+            pending: list[dict[str, Any]] = []
+            while not pending:
+                await asyncio.sleep(0.005)
+                pending = bridge.pending_for_session("sess_ttl")
+            assert len(pending) == 1
+            dispatch_id = pending[0]["dispatch_id"]
+            assert pending[0]["actionable"] is True
+
+            # Simulate a worker running far beyond the former 5-min TTL:
+            # artificially age the dispatch to mimic elapsed wall-clock time.
+            bridge._pending[dispatch_id].created_at -= 10_000.0
+
+            # Poll again multiple times (simulates the host calling job_wait
+            # repeatedly while the worker is still running): NONE should
+            # return a new actionable dispatch.
+            for _ in range(5):
+                await asyncio.sleep(0.005)
+                poll = bridge.pending_for_session("sess_ttl")
+                polls_after_initial.append(poll)
+
+            # Read-only observation should also see no actionable dispatch.
+            observed = bridge.pending_for_session("sess_ttl", announce=False)
+            # It should still show the pending dispatch info (not consumed)
+            # but with actionable=False since announce=False
+            if observed:
+                for entry in observed:
+                    assert entry["actionable"] is False
+
+            # Finally submit the result (worker finished after >5 min).
+            bridge.submit(dispatch_id, {HOST_EXECUTION_RESULT_KEY: "done after long run"})
+
+        task = asyncio.create_task(long_running_host())
+        result = await runtime.execute_task_to_result("long running task")
+        await task
+
+        assert result.is_ok
+        assert "done after long run" in result.value.final_message
+
+        # Verify that no poll after the initial announcement returned
+        # any actionable dispatches — the exactly-once contract holds.
+        for poll in polls_after_initial:
+            assert poll == [], (
+                "A live dispatch was re-announced after the initial delivery; "
+                "this would cause the host to spawn a duplicate worker."
+            )
+
+    def test_bridge_one_shot_survives_arbitrary_aging(
+        self, bridge: HostDispatchBridge
+    ) -> None:
+        """No amount of elapsed time can make a once-announced dispatch actionable again."""
+        dispatch_id = bridge.park(
+            session_id="sess_aging",
+            execution_id=None,
+            payload={"prompt": "p"},
+        )
+        assert dispatch_id is not None
+
+        # Consume the one-shot announcement.
+        first = bridge.pending_for_session("sess_aging")
+        assert len(first) == 1
+        assert first[0]["actionable"] is True
+
+        # Age the dispatch to extreme values (days, weeks, years).
+        for age_seconds in [300, 3600, 86400, 604800, 31536000]:
+            bridge._pending[dispatch_id].created_at -= age_seconds
+            result = bridge.pending_for_session("sess_aging")
+            assert result == [], (
+                f"Dispatch was re-announced after aging {age_seconds}s; "
+                "the one-shot invariant is broken."
+            )
