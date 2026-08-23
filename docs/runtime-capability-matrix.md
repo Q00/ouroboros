@@ -102,7 +102,10 @@ allow-list, and `permission_mode`. Each is one of:
 > \*Pi's native `--append-system-prompt` and `--tools` flags deliver these parameters
 > directly; `--no-tools` enforces an explicit empty allow-list (all tools disabled).
 > Pi binaries without those flags fall back to user-message composition and
-> report `translated`.
+> report `translated`. A binary that has `--tools` but lacks `--no-tools` reports
+> `translated` for `tool_restriction_support` and **fails closed** when `tools=[]`
+> is requested — the runtime emits a `ToolRestrictionUnenforced` error instead of
+> silently widening to unrestricted access.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
 natively, the orchestrator surfaces a one-time notice (console + a structured
