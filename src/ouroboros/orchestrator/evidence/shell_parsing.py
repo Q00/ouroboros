@@ -72,14 +72,74 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
 
 
 def _shell_command_body(command: str) -> str | None:
-    """Return the ``-c`` body when the command starts with a shell wrapper."""
+    """Return the command body when the command starts with a shell wrapper.
+
+    Codex uses POSIX ``sh -lc`` wrappers on Unix and a native
+    ``pwsh.exe -Command`` wrapper on Windows.  Both are transport wrappers;
+    evidence may cite the exact inner command without repeating the wrapper.
+    """
     if _has_unquoted_status_masking_control(command):
         return None
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
-    return _shell_command_body_from_argv(tuple(parts))
+    argv = tuple(parts)
+    return _shell_command_body_from_argv(argv) or _powershell_command_body_from_argv(argv)
+
+
+_POWERSHELL_EXECUTABLES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+_POWERSHELL_FLAG_OPTIONS = frozenset(
+    {
+        "-nologo",
+        "-noprofile",
+        "-noninteractive",
+        "-noni",
+        "-sta",
+        "-mta",
+    }
+)
+_POWERSHELL_VALUE_OPTIONS = frozenset(
+    {
+        "-executionpolicy",
+        "-inputformat",
+        "-outputformat",
+        "-windowstyle",
+        "-workingdirectory",
+    }
+)
+
+
+def _powershell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
+    """Return a PowerShell ``-Command`` body from a narrow wrapper prefix.
+
+    Only non-executing host options are allowed before ``-Command`` and no
+    trailing arguments are accepted.  This keeps aliasing exact and prevents a
+    partial inner command from proving a larger PowerShell script.
+    """
+    if len(argv) < 3:
+        return None
+    executable = Path(argv[0].replace("\\", "/")).name.lower()
+    if executable not in _POWERSHELL_EXECUTABLES:
+        return None
+
+    index = 1
+    while index < len(argv):
+        option = argv[index].lower()
+        if option in {"-command", "-c"}:
+            if index + 2 != len(argv):
+                return None
+            return argv[index + 1].strip()
+        if option in _POWERSHELL_FLAG_OPTIONS:
+            index += 1
+            continue
+        if option in _POWERSHELL_VALUE_OPTIONS:
+            if index + 1 >= len(argv):
+                return None
+            index += 2
+            continue
+        return None
+    return None
 
 
 _SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"})
@@ -341,6 +401,7 @@ _UV_VALUE_OPTIONS = frozenset(
         "--extra-index-url",
         "--find-links",
         "--fork-strategy",
+        "--from",
         "--group",
         "--index",
         "--index-strategy",
@@ -415,10 +476,13 @@ _UV_SHORT_FLAG_OPTIONS = frozenset({"n", "q", "U", "v"})
 
 
 def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
-    """Parse the uv option prefix and return selected pytest plus its arguments."""
-    if len(parts) < 3 or parts[:2] != ["uv", "run"]:
+    """Parse a ``uv run``/``uvx`` prefix and return pytest plus its arguments."""
+    if len(parts) >= 3 and parts[:2] == ["uv", "run"]:
+        index = 2
+    elif len(parts) >= 2 and parts[0] == "uvx":
+        index = 1
+    else:
         return None
-    index = 2
     while index < len(parts):
         token = parts[index]
         if token == "--":
@@ -466,9 +530,17 @@ def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
                     return None
             position = len(cluster)
         index += 1
-    if index >= len(parts) or parts[index] not in {"pytest", "py.test"}:
+    if index >= len(parts):
         return None
-    return parts[index:]
+    if parts[index] in {"pytest", "py.test"}:
+        return parts[index:]
+    if (
+        len(parts) >= index + 3
+        and _is_python_executable(parts[index])
+        and parts[index + 1 : index + 3] == ["-m", "pytest"]
+    ):
+        return parts[index:]
+    return None
 
 
 def _test_invocation_from_prefix(command: str) -> str | None:

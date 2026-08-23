@@ -54,6 +54,12 @@ For alternative install methods and shell completions, see the [Codex CLI README
 
 > **Windows users:** Install and run both Codex CLI and Ouroboros inside a WSL 2 environment for full compatibility. See [Platform Support](../platform-support.md) for details.
 
+The evidence verifier also recognizes the narrow `powershell.exe`/`pwsh.exe
+-Command` transport shape used by native Windows runtimes and accepts current
+`uv run`/`uvx` pytest forms, including `python -m pytest`. This compatibility does
+not change native Windows from experimental support or make executable
+PowerShell forms such as `-File` and `-EncodedCommand` trusted evidence aliases.
+
 ## Configuration
 
 To select Codex CLI as the runtime backend, set the following in your Ouroboros configuration:

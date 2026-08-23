@@ -295,6 +295,11 @@ Key constraints:
 - Failures are handled by an attempt-then-bounce loop (bounded retries + evaluation feedback) rather than ever-deeper pre-execution splitting
 - Children are dependency-sorted and executed within each level
 
+Delivery receipts are matched against completed runtime tool calls. Shell transport
+wrappers are normalized conservatively, including POSIX `sh -c` and native Windows
+PowerShell `-Command` wrappers, while trailing or executable PowerShell arguments are
+rejected. Command and test claims must still match successful journal entries exactly.
+
 Values above `4` remain executable on the legacy path, but cannot authorize
 Routing D route switching or its crash-resumable parallel owner. Reducing the
 value to `4` or less opts a fresh run into that stronger durable boundary.
