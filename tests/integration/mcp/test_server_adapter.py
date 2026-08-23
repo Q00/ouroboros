@@ -559,6 +559,139 @@ class TestMCPServerAdapterIntegration:
         assert prompt_result.messages[0].content.text == "Hello, MCP!"
 
     @pytest.mark.asyncio
+    async def test_public_v2_client_receives_typed_tool_error_data(self) -> None:
+        """Typed tool failures cross the served SDK boundary as JSON-RPC error data."""
+        from mcp import Client
+        from mcp.server import MCPServer
+        from mcp.shared.exceptions import MCPError as SDKMCPError
+
+        readiness_details = {
+            "code": "interview_reopen_required",
+            "blockers": [
+                {
+                    "candidate_id": "reference-0:contrast-required",
+                    "code": "reference_confirmation_required",
+                    "reason": "required_unknown",
+                    "section": "context",
+                    "reference_ids": ["linear"],
+                }
+            ],
+        }
+
+        class TypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="typed_error",
+                    description="Return a typed readiness failure",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Interview must be reopened before Seed generation",
+                        tool_name="typed_error",
+                        error_code="interview_reopen_required",
+                        details=readiness_details,
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="typed-error-boundary")
+        adapter.register_tool(TypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            with pytest.raises(SDKMCPError) as error_info:
+                await client.call_tool("typed_error", {})
+
+        assert error_info.value.data == {
+            "error_code": "interview_reopen_required",
+            "details": readiness_details,
+        }
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_keeps_untyped_errors_as_tool_results(self) -> None:
+        """Existing untyped failures remain ordinary MCP execution-error results."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UntypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="untyped_error",
+                    description="Return an ordinary tool failure",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Ordinary tool failure",
+                        tool_name="untyped_error",
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="untyped-error-boundary")
+        adapter.register_tool(UntypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("untyped_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Ordinary tool failure"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_does_not_expose_non_json_tool_error_details(
+        self,
+    ) -> None:
+        """Malformed typed details fall back to the SDK's ordinary safe error result."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class UnsafeDetails:
+            def __repr__(self) -> str:
+                return "private-runtime-object"
+
+        class UnsafeTypedErrorTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="unsafe_typed_error",
+                    description="Return malformed typed details",
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                del arguments
+                return Result.err(
+                    MCPToolError(
+                        "Typed tool failure",
+                        tool_name="unsafe_typed_error",
+                        error_code="unsafe_details_probe",
+                        details={"private": UnsafeDetails()},
+                    )
+                )
+
+        adapter = MCPServerAdapter(name="unsafe-details-boundary")
+        adapter.register_tool(UnsafeTypedErrorTool())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            result = await client.call_tool("unsafe_typed_error", {})
+
+        assert result.is_error is True
+        assert result.content[0].text == "Typed tool failure"
+        assert "private-runtime-object" not in result.content[0].text
+
+    @pytest.mark.asyncio
     async def test_public_v2_boundary_preserves_canonical_schema_and_binary_resource(
         self,
     ) -> None:

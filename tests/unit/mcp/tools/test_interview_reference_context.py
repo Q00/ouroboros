@@ -372,7 +372,12 @@ async def test_plugin_reference_seed_succeeds_for_confirmed_requirement() -> Non
 
     assert result.is_ok
     assert confirmed_requirement in result.value.content[0].text
-    confirmed = result.value.meta["requirement_distillation"]["candidates"][-1]
+    requirement_distillation = result.value.meta["requirement_distillation"]
+    assert isinstance(requirement_distillation, dict)
+    candidates = requirement_distillation["candidates"]
+    assert isinstance(candidates, list)
+    confirmed = candidates[-1]
+    assert isinstance(confirmed, dict)
     assert confirmed["content_source"] == "reference_derived"
     assert confirmed["resolution"] == "confirmed"
     assert confirmed["confirmation_authority"] == "user"

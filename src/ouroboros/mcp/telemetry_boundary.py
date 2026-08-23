@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Awaitable, Callable
+import json
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -202,6 +203,38 @@ async def observe_adapter_tool_call[T, E](
     return result
 
 
+def _sdk_tool_error(error: object) -> Exception:
+    """Map an explicitly typed tool error onto the SDK's JSON-RPC error channel.
+
+    ``MCPToolError.error_code`` opts into the public machine-readable contract.
+    Its details cross the boundary only when they are a canonical JSON object;
+    malformed details fall back to the existing execution-error behavior without
+    rendering those details into the client-visible message. Untyped errors keep
+    the legacy ``RuntimeError(str(error))`` path and therefore remain ordinary
+    ``CallToolResult(isError=True)`` responses under the MCP SDK.
+    """
+    from mcp.shared.exceptions import MCPError as SDKMCPError
+    from mcp.types import INTERNAL_ERROR
+
+    from ouroboros.mcp.errors import MCPToolError
+
+    if not isinstance(error, MCPToolError) or not error.error_code:
+        return RuntimeError(str(error))
+
+    try:
+        details = json.loads(json.dumps(error.details, ensure_ascii=False, allow_nan=False))
+    except (TypeError, ValueError):
+        return RuntimeError(error.message)
+    if not isinstance(details, dict) or details != error.details:
+        return RuntimeError(error.message)
+
+    return SDKMCPError(
+        code=INTERNAL_ERROR,
+        message=error.message,
+        data={"error_code": error.error_code, "details": details},
+    )
+
+
 async def call_sdk_tool(
     adapter: MCPServerAdapter,
     name: str,
@@ -257,7 +290,7 @@ async def call_sdk_tool(
             )
         if result.is_err:
             error_type = _safe_error_type(result.error)
-            raise RuntimeError(str(result.error))
+            raise _sdk_tool_error(result.error)
         value = result.value
         if definition.output_schema is not None:
             Draft202012Validator(definition.output_schema).validate(value.structured_content)
