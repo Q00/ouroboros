@@ -46,6 +46,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.commands.setup_completion import print_setup_completion
 from ouroboros.cli.formatters import console
@@ -77,6 +78,7 @@ from ouroboros.cli.setup_model_config import (
 from ouroboros.cli.setup_model_config import (
     neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
 )
+from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_native_windows
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
@@ -437,7 +439,6 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
-
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -446,7 +447,7 @@ _CODEX_MCP_COMMENT_LINES = (
     "# This file is only for the Codex MCP/env registration block.",
 )
 
-CodexMcpMode = Literal["auto", "preserve", "stdio"]
+CodexMcpMode = Literal["auto", "http", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
@@ -545,10 +546,9 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
-    """Validate and normalize the Codex MCP setup mode."""
     normalized = value.lower()
-    if normalized not in {"auto", "preserve", "stdio"}:
-        print_error("Unsupported Codex MCP mode. Use one of: auto, preserve, stdio.")
+    if normalized not in {"auto", "http", "preserve", "stdio"}:
+        print_error("Unsupported Codex MCP mode. Use one of: auto, http, preserve, stdio.")
         raise typer.Exit(1)
     return normalized  # type: ignore[return-value]
 
@@ -1206,7 +1206,28 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
-    rendered_section = _render_codex_mcp_section()
+    if is_native_windows():
+        handled, success, section = apply_windows_codex_mcp_mode(
+            mode,
+            codex_config=resolve_codex_home() / "config.toml",
+            launcher=(
+                (sys.executable, list(_CODEX_MODULE_MCP_ARGS))
+                if _is_dev_ouroboros_build()
+                else _codex_release_mcp_launcher()
+            )
+            if mode == "http"
+            else None,
+            print_info=print_info,
+            print_error=print_error,
+        )
+        if handled and (not success or section is None):
+            return success
+        rendered_section = section if handled else _render_codex_mcp_section()
+    else:
+        if mode == "http":
+            print_error("--mcp-mode http is only for native Windows Codex Desktop.")
+            return False
+        rendered_section = _render_codex_mcp_section()
     if rendered_section is None:
         print_error(
             "Could not find a launchable Ouroboros MCP command. Install uv, or install "
@@ -1228,10 +1249,14 @@ def _register_codex_mcp_server(
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
-        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+        if (
+            entry is not None
+            and not _codex_mcp_entry_has_endpoint(entry)
+            and mode not in {"stdio", "http"}
+        ):
             print_error(
                 "Existing Codex Ouroboros MCP config has no usable command or URL; "
-                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+                "Codex setup not saved. Use an explicit replacement mode."
             )
             return False
         if (
@@ -3581,81 +3606,7 @@ def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
 def _pi_ooo_bridge_source_text() -> str:
     """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
     command, args = _detect_pi_bridge_dispatch_entry()
-    default_command = json.dumps(command)
-    default_args = json.dumps(args)
-    return f"""/**
- * Ouroboros ooo bridge for Pi.
- *
- * Managed by `ouroboros setup --runtime pi`.
- * Routes exact-prefix `ooo ...` inputs from interactive Pi into Ouroboros'
- * shared skill dispatcher instead of sending them to the model as chat.
- */
-import type {{ ExtensionAPI, ExtensionContext }} from "@earendil-works/pi-coding-agent";
-
-const COMMAND_RE = /^\\s*ooo(?:\\s+|$)/i;
-const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
-const TIMEOUT_MS = Number(process.env.OUROBOROS_PI_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
-const DEFAULT_COMMAND = {default_command};
-const DEFAULT_ARGS = {default_args};
-
-function ouroborosEntry(): {{ command: string; args: string[] }} {{
-  if (process.env.OUROBOROS_CLI) return {{ command: process.env.OUROBOROS_CLI, args: [] }};
-  return {{ command: DEFAULT_COMMAND, args: DEFAULT_ARGS }};
-}}
-
-function outputText(stdout: string, stderr: string): string {{
-  const out = stdout.trim();
-  const err = stderr.trim();
-  if (out && err) return `${{out}}\\n\\n${{err}}`;
-  return out || err || "(no output)";
-}}
-
-async function dispatch(pi: ExtensionAPI, text: string, ctx: ExtensionContext): Promise<boolean> {{
-  ctx.ui.notify(`Ouroboros dispatch: ${{text}}`, "info");
-  const entry = ouroborosEntry();
-  const result = await pi.exec(
-    entry.command,
-    [...entry.args, "dispatch", "--runtime", "pi", "--cwd", ctx.cwd, text],
-    {{ cwd: ctx.cwd, timeout: TIMEOUT_MS }},
-  );
-  if (result.code === UNSUPPORTED_DISPATCH_EXIT_CODE) {{
-    ctx.ui.notify(`Ouroboros did not claim command; continuing in Pi`, "info");
-    return false;
-  }}
-  const body = outputText(result.stdout || "", result.stderr || "");
-  pi.sendMessage({{
-    customType: "ouroboros",
-    content: body,
-    display: true,
-    details: {{ command: text, exitCode: result.code }},
-  }});
-  if (result.code !== 0) {{
-    ctx.ui.notify(`Ouroboros dispatch failed (${{result.code ?? "unknown"}})`, "error");
-  }}
-  return true;
-}}
-
-export default function ouroborosBridge(pi: ExtensionAPI) {{
-  pi.registerCommand("ooo", {{
-    description: "Dispatch an Ouroboros ooo command",
-    handler: async (args, ctx) => {{
-      const text = `ooo ${{args}}`.trim();
-      await dispatch(pi, text, ctx);
-    }},
-  }});
-
-  pi.on("input", async (event, ctx) => {{
-    if (event.source === "extension") {{
-      return {{ action: "continue" }};
-    }}
-    if (!COMMAND_RE.test(event.text)) {{
-      return {{ action: "continue" }};
-    }}
-    const handled = await dispatch(pi, event.text.trim(), ctx);
-    return {{ action: handled ? "handled" : "continue" }};
-  }});
-}}
-"""
+    return pi_ooo_bridge_source_text(command=command, args=args)
 
 
 def _install_pi_ooo_bridge() -> bool:
@@ -4793,7 +4744,7 @@ def setup(
         str,
         typer.Option(
             "--mcp-mode",
-            help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
+            help="Codex MCP config mode: auto preserves native-Windows safety and user entries; http explicitly writes the native-Windows loopback URL; preserve skips MCP changes; stdio replaces with the managed entry on supported hosts.",
         ),
     ] = "auto",
     preserve_existing_llm: Annotated[

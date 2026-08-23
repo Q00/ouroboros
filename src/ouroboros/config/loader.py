@@ -728,21 +728,15 @@ def _env_flag(name: str) -> bool | None:
 
 
 def get_cross_harness_redispatch_enabled() -> bool:
-    """Whether a terminally failing AC may redispatch onto an alternative harness.
+    """Return explicit process-level opt-in for cross-harness mutation.
 
-    Priority:
-        1. OUROBOROS_CROSS_HARNESS_REDISPATCH environment variable
-        2. config.yaml execution.cross_harness_redispatch
-        3. True (default: meta-harness recovery is on, but a no-op unless a
-           second runtime backend is actually installed)
+    Historical releases materialized ``true`` into generated config files, so
+    a persisted scalar cannot distinguish operator consent from the old default.
+    Only the environment flag is therefore authoritative during the deprecation
+    window; absent explicit process consent, one run keeps one runtime.
     """
     env = _env_flag("OUROBOROS_CROSS_HARNESS_REDISPATCH")
-    if env is not None:
-        return env
-    try:
-        return load_config().execution.cross_harness_redispatch
-    except ConfigError:
-        return True
+    return env if env is not None else False
 
 
 def get_n_version_tournament_enabled() -> bool:
@@ -1359,6 +1353,31 @@ def get_goose_cli_path() -> str | None:
             resolved = str(Path(goose_path).expanduser())
             if shutil.which(resolved):
                 return resolved
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_configured_verify_bash_path() -> str | None:
+    """Get ``orchestrator.verify_bash_path`` — config only, never the env.
+
+    The usual env-then-config accessor shape is deliberately not used here.
+    :func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell` reads
+    ``OUROBOROS_VERIFY_BASH`` itself, and reaches this function only after
+    finding that value stale; an accessor that returned the environment first
+    would hand back the same stale path and hide the configured shell entirely.
+    Executability is checked by that caller, which falls through to its own
+    candidate list when the configured value no longer resolves.
+
+    Returns:
+        Configured shell path or None.
+    """
+    try:
+        config = load_config()
+        verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)
+        if verify_bash_path:
+            return str(Path(verify_bash_path).expanduser())
     except ConfigError:
         pass
 
@@ -2136,14 +2155,15 @@ def _normalize_configured_models_for_backend(
 
     # Match the shipped roster element-wise against current + legacy shipped
     # defaults (#1324), so a roster persisted before a pin bump (e.g. the old
-    # OpenRouter Opus slug in the consensus slot) still normalizes to the
-    # backend-safe sentinel for Claude-incapable backends instead of leaking an
-    # unrunnable id.
+    # OpenRouter Opus slug in the consensus slot) resolves exactly like the
+    # current shipped roster. Claude-incapable backends receive their safe
+    # sentinel; Claude-capable backends receive the current provider pin rather
+    # than replaying a retired model id.
     is_shipped_roster = len(normalized) == len(default_models) and all(
         candidate in recognized_shipped_defaults(default)
         for candidate, default in zip(normalized, default_models, strict=True)
     )
-    if _resolve_llm_backend_for_models(backend) in _SENTINEL_DEFAULT_BACKENDS and is_shipped_roster:
+    if is_shipped_roster:
         return _default_models_for_backend(default_models, backend=backend)
 
     return normalized

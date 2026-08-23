@@ -296,7 +296,7 @@ A backup will be created: CLAUDE.md.bak
 **If "Preview first", show:**
 ````markdown
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.51.7 -->
+<!-- ooo:VERSION:0.51.14 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.

@@ -1058,17 +1058,42 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "description": "The already user-visible MCP interview question.",
             },
             "recent_findings": {
-                "type": "array",
-                "maxItems": 20,
-                "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    lane: {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["contract_id", "lane_id", "published_at"],
+                            "properties": {
+                                "contract_id": {"type": "string", "minLength": 1},
+                                # const, not just string: an entry under one
+                                # lane key naming a sibling lane would offer
+                                # that sibling's output, so the pairing is made
+                                # unrepresentable rather than trusted.
+                                "lane_id": {"const": lane},
+                                "published_at": {"type": "string", "minLength": 1},
+                            },
+                        },
+                    }
+                    for lane in ("code_context", "data_context")
+                },
                 "description": (
-                    "Absolute paths to findings this project published recently, "
-                    "newest first, for a lane to read before investigating. Paths "
-                    "only -- what they contain stays the child's to weigh, and "
-                    "nothing a child wrote travels on this request "
-                    "(RFC Q00/ouroboros#2153). Absent when the project has "
-                    "published nothing recent, so a lane is never sent to an "
-                    "empty place."
+                    "Where this project's recent findings are, keyed by the lane "
+                    "that produced them: a lane is offered only its own, and the "
+                    "reasoning lanes are absent because a lane that produces no "
+                    "fact that keeps consumes none either (RFC "
+                    "Q00/ouroboros#2167). Each entry is a contract_id and the "
+                    "lane_id that narrows it, both passed to "
+                    "ouroboros_fetch_artifact, and when it was published. "
+                    "Bodies do not travel: carried inline they were duplicated "
+                    "into every lane of the turn, which outgrew what a host "
+                    "accepts inline and cost the turn its fan-out. A lane with "
+                    "none is absent, as is the whole field when the project has "
+                    "published nothing recent."
                 ),
             },
             "last_question": {

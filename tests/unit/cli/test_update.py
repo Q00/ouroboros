@@ -46,13 +46,16 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_topology() -> Iterator[None]:
-    """Keep CLI-flow tests independent of the developer's real config file."""
-    with patch(
-        "ouroboros.cli.commands.update._configured_runtime_topology",
-        return_value=RuntimeRefreshTopology(
-            runtime_executable="/usr/bin/claude",
-            runtime_executable_env_key="OUROBOROS_CLI_PATH",
+    """Keep CLI-flow tests independent of developer runtime configuration."""
+    with (
+        patch(
+            "ouroboros.cli.commands.update._configured_runtime_topology",
+            return_value=RuntimeRefreshTopology(
+                runtime_executable="/usr/bin/claude",
+                runtime_executable_env_key="OUROBOROS_CLI_PATH",
+            ),
         ),
+        patch("ouroboros.cli.commands.update.configure_omp_tool_call_timeout", return_value=True),
     ):
         yield
 
@@ -994,6 +997,40 @@ class TestCheckFlow:
         assert result.exit_code == 0
         assert "up to date" in result.output
 
+    def test_up_to_date_command_repairs_omp_timeout(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        configure_omp.assert_called_once_with(dry_run=False)
+
+    def test_up_to_date_omp_failure_warns_without_failing_update(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=False,
+            ),
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        assert "Could not set OMP MCP tool timeout" in _plain(result.output)
+
     def test_unreachable_pypi_exits_nonzero(self) -> None:
         with patch(
             "ouroboros.cli.commands.update._latest_pypi_version",
@@ -1517,6 +1554,10 @@ class TestUpdateFlow:
                 "ouroboros.cli.commands.update.subprocess.run",
                 side_effect=[upgrade, version_probe],
             ) as run,
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
         ):
             result = runner.invoke(app, ["--yes", "--runtime", "none"])
 
@@ -1525,6 +1566,7 @@ class TestUpdateFlow:
         assert "Updated to v99.0.0" in _plain(result.output)
         assert run.call_count == 2
         topology.assert_not_called()
+        configure_omp.assert_called_once_with(dry_run=False)
 
     def test_failed_package_upgrade_aborts_with_exit_code_one(self) -> None:
         failed_step = MagicMock(returncode=1)

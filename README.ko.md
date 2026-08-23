@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 
 <p align="center"><sub>설치는 위 한 줄입니다. 이후 코딩 에이전트 안에서 <code>ooo setup</code>을 한 번 실행하세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
 
-<p align="center"><sub><b>서로 다른 네 번의 실행, 네 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
+<p align="center"><sub><b>서로 다른 다섯 번의 실행, 다섯 개의 호스트. 과제가 다른 건 의도한 것입니다 — 공유되는 건 엔진이지 프롬프트가 아닙니다</b></sub></p>
 
 <table align="center">
 <tr>
@@ -56,6 +56,9 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <tr>
 <td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 자동화 과제. 어드바이저리 6개가 병렬로 돌고 나서 인터뷰가 결과를 제출합니다</sub></td>
 <td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 카트 레이싱 게임 과제를 챗봇으로. <code>Final ambiguity: 0.15</code>에서 끝납니다</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI에서 Ouroboros 인터뷰를 실행하는 10배속 화면 녹화"><br><sub><b>Kiro</b> — Kiro CLI에서 Ouroboros 인터뷰 흐름을 실행해 모호한 요청을 구조화하고 검증 가능한 Seed로 구체화합니다</sub></td>
 </tr>
 </table>
 
@@ -267,7 +270,7 @@ ouroboros setup                         # 런타임 설정
 ```
 homebrew-core에는 아직 등록되지 않은 자가 호스팅 탭입니다. PyPI에 게시된 것과 동일한 패키지를 설치합니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -450,7 +453,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 ## 아홉 개의 사고
 
-아홉 개의 에이전트가 있고, 각자 생각하는 방식이 다릅니다. 필요할 때만 로드하고, 처음부터 다 띄워두지는 않습니다:
+아래 강조된 아홉 개의 에이전트 외에도 12개의 전문 에이전트가 더 있습니다 (총 21개). 필요할 때만 로드하고, 처음부터 다 띄워두지는 않습니다:
 
 | 에이전트 | 역할 | 핵심 질문 |
 |:------|:-----|:--------------|
@@ -475,13 +478,13 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 src/ouroboros/
 ├── bigbang/        Interview, 모호성 점수 산정, brownfield 탐색
 ├── routing/        PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
-├── execution/      Double Diamond, 계층적 AC 분해
+├── execution/      (deprecated — 로직이 orchestrator/ 및 mcp/tools/로 이동됨)
 ├── evaluation/     Mechanical → Semantic → Multi-Model Consensus
 ├── evolution/      Wonder / Reflect 순환, 수렴 감지
 ├── resilience/     4가지 정체 패턴 감지, 5가지 측면 페르소나
 ├── observability/  3요소 드리프트 측정, 자동 회고
 ├── persistence/    Event Sourcing (SQLAlchemy + aiosqlite), 체크포인트
-├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI)
+├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, GJC, Goose, Antigravity, Grok, Zcode)
 ├── core/           타입, 에러, Seed, 온톨로지, 보안
 ├── providers/      LiteLLM 어댑터 (100+ 모델)
 ├── mcp/            MCP 클라이언트/서버

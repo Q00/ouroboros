@@ -1,6 +1,6 @@
 """Ouroboros persistence module - event sourcing infrastructure."""
 
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import ArtifactStore
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.persistence.checkpoint import (
     CheckpointData,
@@ -17,7 +17,7 @@ __all__ = [
     "BrownfieldStore",
     "CheckpointData",
     "CheckpointStore",
-    "ContentAddressedArtifactStore",
+    "ArtifactStore",
     "EventStore",
     "PeriodicCheckpointer",
     "PhaseTransaction",

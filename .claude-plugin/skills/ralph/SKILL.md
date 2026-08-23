@@ -109,12 +109,19 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      events here. This conversation remains available for other safe work.
      ```
 
-   - If `response.meta.job_observer` is present and the host supports an
-     independent Task/Agent child, spawn exactly one read-only observer and pass
-     the contract unchanged. It owns wait/result and the cursor exclusively. The
-     main session must not poll the same job. Keep the conversation available for
-     read-only review, explicit control, or unrelated work in an isolated
-     worktree; check active-worker overlap before writing to Ralph's workspace.
+   - If `response.meta.job_observer` is unavailable, recover it from the final
+     `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail
+     closed unless the single bounded payload passes canonical v1 validation
+     and its job identity matches the visible start receipt. Visible IDs are
+     identity anchors only; never reconstruct tools or arguments from them.
+
+   - When a structured or validated recovered `job_observer` is present and the
+     host supports an independent Task/Agent child, spawn exactly one read-only
+     observer and pass the contract unchanged. It owns wait/result and the
+     cursor exclusively. The main session must not poll the same job. Keep the
+     conversation available for read-only review, explicit control, or unrelated
+     work in an isolated worktree; check active-worker overlap before writing to
+     Ralph's workspace.
      Do not claim an observer until Task/Agent returns a live child handle. If
      child creation succeeds on Codex, keep the parent turn open with
      `wait_agent` calls of at most 60 seconds until the observer returns its

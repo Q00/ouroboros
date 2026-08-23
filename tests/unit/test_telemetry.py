@@ -605,6 +605,63 @@ class TestCapture:
         assert sent[0]["properties"]["phase"] == "completion"
         assert sent[0]["properties"]["ok"] is False
 
+    def test_subagent_dispatch_event_keeps_only_closed_values(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_subagent_dispatch(
+            {
+                "phase": "emitted",
+                "fanout_kind": "lateral_persona_panel",
+                "payload_count": 5,
+                "invocation_surface": "mcp_host",
+                "dispatch_authority": "mcp_host",
+                "host_family": "claude_code",
+                "host_identity_status": "known",
+                "host_capability": "undeclared",
+                "capability_source": "none",
+                "delivery_mode": "inline_host",
+                "execution_preference": "parallel",
+                "fallback_strategy": "sequential",
+                "configured_worker_backend": "gemini",
+                "host_worker_mismatch": True,
+                "decision_reason": "host_capability_undeclared",
+                "contract_version": "v2",
+                "fanout_reentry_available": True,
+                "fanout_id": "fanout_private",
+                "prompt": "/private/repo/secret",
+            }
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["event"] == "subagent_dispatch"
+        props = event["properties"]
+        assert props["host_family"] == "claude_code"
+        assert props["configured_worker_backend"] == "gemini"
+        assert props["host_worker_mismatch"] is True
+        assert "fanout_id" not in props
+        assert "prompt" not in props
+        assert "private" not in str(props)
+
+    def test_subagent_dispatch_folds_custom_backend_and_rejects_open_enums(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_subagent_dispatch(
+            {
+                "phase": "emitted",
+                "fanout_kind": "private_customer_fanout",
+                "host_family": "private-client-name",
+                "configured_worker_backend": "private-backend",
+            }
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["configured_worker_backend"] == "other"
+        assert "fanout_kind" not in props
+        assert "host_family" not in props
+
     def test_non_ouroboros_tool_skipped(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_tool_call("some_other_tool", ok=True)
         telemetry.flush(timeout=2.0)

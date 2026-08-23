@@ -46,9 +46,10 @@ NETWORK_TRANSPORTS = ("sse", "streamable-http")
 # bare unless settings are passed explicitly.
 _SDK_AUTOPROTECTED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-# Hostnames that always resolve to this machine. ``""`` is deliberately absent:
-# an empty bind host means "every interface" to uvicorn, not loopback.
-_LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
+# DNS names guaranteed local by the supported resolver contract. ``localhost``
+# is RFC 6761 special-use; ``localhost.localdomain`` is only a conventional
+# hosts-file alias and can resolve to a routable address on other systems.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 
 #: Scope minted for every accepted credential. Ouroboros authorizes per tool
 #: through ``SecurityLayer``, so the SDK layer only needs one opaque scope to
@@ -72,7 +73,8 @@ def is_loopback_host(host: str) -> bool:
         this to decide whether credentials are mandatory.
     """
     candidate = host.strip().strip("[]").lower()
-    if candidate in _LOOPBACK_HOSTNAMES:
+    hostname_candidate = candidate.removesuffix(".")
+    if hostname_candidate in _LOOPBACK_HOSTNAMES:
         return True
     try:
         return ipaddress.ip_address(candidate).is_loopback

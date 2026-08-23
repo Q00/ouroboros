@@ -188,10 +188,16 @@ def test_resolve_cli_project_dir_rejects_raw_metadata_project_escape(
     assert "escapes" in mock_print.call_args[0][0]
 
 
-def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
+def test_resolve_cli_project_dir_keeps_target_dir_when_context_reference_is_file(
     tmp_path: Path,
 ) -> None:
-    """A primary file reference should not become the runtime cwd itself."""
+    """A primary file reference must not become the runtime cwd or drag it deeper.
+
+    The reference ``src/main.py`` resolved against ``target_dir``, which
+    proves ``target_dir`` is the base the seed's relative paths (including
+    ``expected_artifacts``) were written against. Collapsing to the file's
+    parent (``src/``) made those artifacts unresolvable (#2194).
+    """
     seed_file = tmp_path / "seed-library" / "seed.yaml"
     seed_file.parent.mkdir()
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
@@ -212,10 +218,7 @@ def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
     }
     seed = Seed.from_dict(seed_data)
 
-    assert (
-        _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
-        == source_file.parent.resolve()
-    )
+    assert _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data) == target_dir.resolve()
 
 
 def test_resolve_cli_project_dir_global_seed_store_without_hints_does_not_return_home(

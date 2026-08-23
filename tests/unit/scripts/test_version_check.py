@@ -9,6 +9,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ouroboros.mcp import update_notice
 
 # Load the script as a module
@@ -16,6 +18,15 @@ _SCRIPT_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "version
 _spec = importlib.util.spec_from_file_location("version_check", str(_SCRIPT_PATH))
 version_check = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(version_check)
+
+
+def _block_packaging_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "packaging" or name.startswith("packaging."):
+        raise ModuleNotFoundError("No module named 'packaging'", name=name)
+    return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+
+
+_ORIGINAL_IMPORT = __import__
 
 
 class TestGetInstalledVersion:
@@ -248,6 +259,20 @@ class TestCheckUpdate:
         assert result["latest"] == "0.20.0"
         assert "ooo update" in result["message"]
 
+    def test_update_available_without_packaging(self) -> None:
+        """SessionStart's host Python need not contain the packaging module."""
+        with (
+            patch("builtins.__import__", side_effect=_block_packaging_import),
+            patch.object(version_check, "get_installed_version", return_value="0.51.13"),
+            patch.object(version_check, "get_latest_version", return_value="0.51.14"),
+        ):
+            result = version_check.check_update()
+
+        assert result["update_available"] is True
+        assert result["message"] == (
+            "Ouroboros update available: v0.51.13 → v0.51.14. Run `ooo update` to upgrade."
+        )
+
     def test_up_to_date(self) -> None:
         """No update when versions match."""
         with (
@@ -288,6 +313,23 @@ class TestCheckUpdate:
             result = version_check.check_update()
 
         assert result["update_available"] is False
+
+    @pytest.mark.parametrize(
+        ("current", "latest"),
+        (
+            ("0.51.14rc1.dev1", "0.51.14b2"),
+            ("0.51.14.post1.dev1", "0.51.14.post0"),
+        ),
+    )
+    def test_composed_dev_versions_fail_closed(self, current: str, latest: str) -> None:
+        with (
+            patch.object(version_check, "get_installed_version", return_value=current),
+            patch.object(version_check, "get_latest_version", return_value=latest),
+        ):
+            result = version_check.check_update()
+
+        assert result["update_available"] is False
+        assert result["message"] is None
 
 
 class TestPrerelease:
@@ -334,6 +376,29 @@ class TestPrerelease:
             result = version_check.get_latest_version(current="0.26.0b3")
 
         assert result == "0.26.0b4"
+
+    def test_prerelease_scan_without_packaging(self, tmp_path: Path) -> None:
+        pypi_data = {
+            "info": {"version": "0.51.13"},
+            "releases": {
+                "invalid": [{"filename": "ignored"}],
+                "0.51.14.dev2": [{"filename": "x"}],
+                "0.51.14b1": [{"filename": "x"}],
+                "0.51.14rc1": [{"filename": "x"}],
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(pypi_data).encode()
+
+        with (
+            patch("builtins.__import__", side_effect=_block_packaging_import),
+            patch.object(version_check, "_CACHE_FILE", tmp_path / "cache.json"),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version(current="0.51.14b1")
+
+        assert result == "0.51.14rc1"
 
     def test_stable_user_gets_stable_only(self, tmp_path: Path) -> None:
         """Stable user does NOT see beta releases."""

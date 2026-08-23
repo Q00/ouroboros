@@ -13,6 +13,7 @@ from ouroboros.bigbang.interview import (
     AGENT_SDK_CLI_SAFE_PROMPT_CHARS,
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    RESPONSE_CONTRACT,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -1243,6 +1244,170 @@ class TestInterviewEngineSystemPrompt:
         prompt = engine._build_system_prompt(state)
 
         assert "### seed-closer" in prompt
+
+    @pytest.mark.asyncio
+    async def test_resume_after_recording_an_answer_loads_no_stale_score(
+        self, tmp_path: Path
+    ) -> None:
+        """The durable file must never pair new rounds with an old score.
+
+        The window this closes: an answer is accepted and saved, then the
+        process dies before the rescore lands. Resuming must not read the
+        previous revision's score as current, because
+        ``_select_perspectives`` would treat it as closure evidence for an
+        interview whose inputs have since changed.
+        """
+        engine = InterviewEngine(llm_adapter=MagicMock(), state_dir=tmp_path)
+        state = InterviewState(
+            interview_id="interview_resume",
+            initial_context="Add deadlines to the kanban widget",
+        )
+        state.record_answer("Q1", "A1")
+        state.store_ambiguity(score=0.18, breakdown={"from": "revision N"})
+
+        record_result = await engine.record_response(state, "A2", "Q2")
+        assert record_result.is_ok
+        # Only the answer's save happens — the rescore never runs.
+        save_result = await engine.save_state(record_result.value)
+        assert save_result.is_ok
+
+        resumed = await engine.load_state("interview_resume")
+        assert resumed.is_ok
+        assert resumed.value.ambiguity_score is None
+        assert resumed.value.ambiguity_breakdown is None
+        assert len(resumed.value.rounds) == 2
+
+    @pytest.mark.parametrize("max_chars", [None, 3500, 1200, 700])
+    @pytest.mark.parametrize("stored_score", [None, 0.18])
+    def test_response_contract_survives_every_prompt_budget(
+        self,
+        max_chars: int | None,
+        stored_score: float | None,
+    ) -> None:
+        """The two rules that make a turn a question survive any budget.
+
+        Their previous home was the tail of the loaded agent prompt, so whether
+        the model was told to end with a question depended on how large the
+        header and perspective panel happened to grow that round. Reserving a
+        slice of that prompt only moved the shortage onto the panel and, at
+        saturated caps, onto the user's own retained context. The contract now
+        rides in the dynamic header, which every build preserves first.
+        """
+        engine = InterviewEngine(llm_adapter=MagicMock())
+        state = InterviewState(
+            interview_id="test_contract",
+            initial_context="Add deadlines to the kanban widget",
+        )
+        for round_number in range(1, 7):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=round_number,
+                    question=f"Q{round_number}?",
+                    user_response=f"A{round_number}",
+                )
+            )
+        if stored_score is not None:
+            state.store_ambiguity(
+                score=stored_score,
+                breakdown={
+                    "goal_clarity": {
+                        "name": "Goal Clarity",
+                        "clarity_score": 0.9,
+                        "weight": 0.4,
+                        "justification": "clear",
+                    },
+                    "constraint_clarity": {
+                        "name": "Constraint Clarity",
+                        "clarity_score": 0.85,
+                        "weight": 0.3,
+                        "justification": "clear",
+                    },
+                    "success_criteria_clarity": {
+                        "name": "Success Criteria Clarity",
+                        "clarity_score": 0.8,
+                        "weight": 0.3,
+                        "justification": "clear",
+                    },
+                },
+            )
+
+        prompt = engine._build_system_prompt(state, max_chars=max_chars)
+
+        assert RESPONSE_CONTRACT in prompt
+        if max_chars is not None:
+            assert len(prompt) <= max_chars
+
+    def test_response_contract_survives_a_saturating_initial_context(self) -> None:
+        """A context long enough to be capped must not evict the contract."""
+        engine = InterviewEngine(llm_adapter=MagicMock())
+        state = InterviewState(
+            interview_id="test_contract_ctx",
+            initial_context="C" * 4_000,
+        )
+
+        prompt = engine._build_system_prompt(
+            state,
+            initial_context="C" * 4_000,
+            max_chars=engine._MIN_SYSTEM_PROMPT_CHARS,
+        )
+
+        assert RESPONSE_CONTRACT in prompt
+        assert len(prompt) <= engine._MIN_SYSTEM_PROMPT_CHARS
+
+    def test_closure_round_keeps_role_boundaries_alongside_seed_closer(self) -> None:
+        """A closure round must not trade the interviewer role for the closer.
+
+        Storing a snapshot grows the header and attaches another perspective,
+        both of which are preserved ahead of the base agent prompt, and that
+        pushed out the boundaries forbidding the model from answering its own
+        question — in exactly the rounds where it is most tempted to start
+        implementing. The always-present contract is pinned separately by
+        ``test_response_contract_survives_every_prompt_budget``; this pins the
+        fuller agent-prompt wording at the default cap.
+        """
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        breakdown = {
+            "goal_clarity": {
+                "name": "Goal Clarity",
+                "clarity_score": 0.90,
+                "weight": 0.4,
+                "justification": "Goal is clear.",
+            },
+            "constraint_clarity": {
+                "name": "Constraint Clarity",
+                "clarity_score": 0.85,
+                "weight": 0.3,
+                "justification": "Constraints are clear.",
+            },
+            "success_criteria_clarity": {
+                "name": "Success Criteria Clarity",
+                "clarity_score": 0.80,
+                "weight": 0.3,
+                "justification": "Criteria are measurable.",
+            },
+        }
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Add deadlines to the kanban widget",
+            ambiguity_score=0.18,
+            ambiguity_breakdown=breakdown,
+        )
+        for round_number in range(1, 7):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=round_number,
+                    question=f"Q{round_number}?",
+                    user_response=f"A{round_number}",
+                )
+            )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "### seed-closer" in prompt
+        assert 'NEVER say "I will implement X"' in prompt
+        assert "NEVER promise to build demos" in prompt
 
     def test_system_prompt_omits_seed_closer_when_closure_mode_is_inactive(self) -> None:
         """High ambiguity should keep the closure perspective disabled."""

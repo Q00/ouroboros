@@ -26,6 +26,7 @@ replayable execution contract on your choice of runtime backend.
 - [Codex CLI (한국어)](./runtime-guides/codex.ko.md) - 같은 문서의 한국어판
 - [GitHub Copilot CLI (한국어)](./runtime-guides/copilot.ko.md) - 같은 문서의 한국어판
 - [Kiro CLI (한국어)](./runtime-guides/kiro.ko.md) - 같은 문서의 한국어판
+- [Goose (한국어)](./runtime-guides/goose.ko.md) - 같은 문서의 한국어판
 
 ### Architecture
 
@@ -67,6 +68,7 @@ replayable execution contract on your choice of runtime backend.
 
 - [Contributing Guide](../CONTRIBUTING.md) - How to set up, code, test, and submit PRs
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
+- [Source Tour](./contributing/source-tour.md) - Three core mechanisms mapped to file:line coordinates, for teardown writers and reviewers
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
 - [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests

@@ -73,7 +73,6 @@ from ouroboros.core.seed_contract_prompt import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
-from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
@@ -104,7 +103,6 @@ from ouroboros.orchestrator.decomposition_limits import (
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
-    create_drift_measured_event,
     create_execution_terminal_event,
     create_guidance_injected_event,
     create_mcp_tools_loaded_event,
@@ -155,6 +153,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
@@ -206,6 +205,10 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
     runtime_resume_identity_from_payload,
+)
+from ouroboros.orchestrator.verify_shell import (
+    capture_verify_shell_identity,
+    resolve_verify_shell,
 )
 from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -1067,6 +1070,10 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        verify_shell = resolve_verify_shell() if self._run_verify_commands else None
+        self._verify_shell_identity = (
+            capture_verify_shell_identity(verify_shell) if verify_shell is not None else None
+        )
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -3915,6 +3922,11 @@ class OrchestratorRunner:
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "verify_shell_identity": (
+                dict(self._verify_shell_identity)
+                if self._verify_shell_identity is not None
+                else None
+            ),
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6108,6 +6120,32 @@ class OrchestratorRunner:
                 message=pre_adaptive_rejection.message,
                 details=pre_adaptive_rejection.details,
             )
+
+        migrated_verify_shell_semantics = migrated_pre_verify_shell_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verify_shell_semantics is not None:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-verify-shell contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_proof, dict)
+            migrated_contract["execution_semantics"] = migrated_verify_shell_semantics
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_verify_shell_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_verify_shell_semantics
+            self._verify_shell_identity = None
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -8457,6 +8495,49 @@ class OrchestratorRunner:
 
         return await self.execute_precreated_session(**execute_kwargs)
 
+    def _apply_verify_command_gate(
+        self, seed: Seed
+    ) -> Result[SessionTracker, OrchestratorError] | None:
+        """Surface — or refuse — criteria nothing can deterministically judge.
+
+        Returns ``None`` when preparation may continue, which is every case in
+        the ``warn`` stage. Only the ``block`` stage produces an error.
+        """
+        from ouroboros.core.seed_verify_gate import (
+            render_verify_command_gate_warning,
+            unverifiable_criteria,
+            verify_command_gate_mode,
+        )
+
+        findings = unverifiable_criteria(seed)
+        if not findings:
+            return None
+
+        mode = verify_command_gate_mode()
+        indices = [finding.display_index for finding in findings]
+        if mode == "block":
+            return Result.err(
+                OrchestratorError(
+                    message=("Acceptance criteria carry no verify_command and no exemption reason"),
+                    details={
+                        "gate": "seed.verify_command_gate",
+                        "mode": mode,
+                        "unverifiable_ac_indices": indices,
+                        "guidance": render_verify_command_gate_warning(findings),
+                    },
+                )
+            )
+        log.warning(
+            "orchestrator.seed.verify_command_gate_warning",
+            mode=mode,
+            unverifiable_ac_indices=indices,
+            unverifiable_ac_count=len(findings),
+        )
+        # Text, not markup interpolation: descriptions and commands are seed
+        # text and may contain Rich tags (`[/yellow]` would raise MarkupError).
+        self._console.print(Text(render_verify_command_gate_warning(findings), style="yellow"))
+        return None
+
     async def prepare_session(
         self,
         seed: Seed,
@@ -8484,6 +8565,12 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
+        # The verify-command gate runs here, at new-session preparation, so
+        # sessions already in flight are never re-judged under a gate that was
+        # tightened after they started.
+        gate_result = self._apply_verify_command_gate(seed)
+        if gate_result is not None:
+            return gate_result
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
@@ -9465,25 +9552,17 @@ class OrchestratorRunner:
                             )
                             await self._event_store.append(progress_event)
 
-                        # Measure and emit drift periodically
-                        if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
-                            # Measure and emit drift
-                            drift_measurement = DriftMeasurement()
-                            drift_metrics = drift_measurement.measure(
-                                current_output=message.content,
-                                constraint_violations=[],  # TODO: track violations
-                                current_concepts=[],  # TODO: extract concepts
-                                seed=seed,
-                            )
-                            drift_event = create_drift_measured_event(
-                                execution_id=exec_id,
-                                goal_drift=drift_metrics.goal_drift,
-                                constraint_drift=drift_metrics.constraint_drift,
-                                ontology_drift=drift_metrics.ontology_drift,
-                                combined_drift=drift_metrics.combined_drift,
-                                is_acceptable=drift_metrics.is_acceptable,
-                            )
-                            await self._event_store.append(drift_event)
+                        # NOTE: periodic drift measurement used to be emitted here
+                        # every PROGRESS_EMIT_INTERVAL messages, but the two inputs
+                        # it needs are not tracked anywhere in this loop. Passing
+                        # empty lists pinned constraint_drift to 0.0 (dropping 30%
+                        # of the weighted score) and ontology_drift to 1.0 (a fixed
+                        # +0.2 penalty), so combined_drift was always
+                        # goal_drift * 0.5 + 0.2 and is_acceptable (<= 0.3) was
+                        # effectively always False. Emitting nothing is preferable
+                        # to persisting a measurement we know is wrong; re-enable
+                        # only once constraint violations and ontology concepts are
+                        # actually tracked for the message being measured.
 
                         # Handle final message
                         if message.is_final:
@@ -10245,6 +10324,10 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            verify_shell_identity=cast(
+                Mapping[str, object] | None,
+                execution_semantics["verify_shell_identity"],
+            ),
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

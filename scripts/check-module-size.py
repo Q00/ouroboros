@@ -291,7 +291,7 @@ def _baseline_policy(ref: str) -> Policy | None:
                 cwd=REPO_ROOT,
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
             )
             policy = _policy_literals(completed.stdout)
         except (UnicodeError, subprocess.CalledProcessError, OSError, SyntaxError) as exc:

@@ -53,6 +53,20 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop and other MCP clients |
+| `plugin` | Manage UserLevel plugins (install, list, remove) |
+| `pm` | Product Management interview for requirements gathering |
+| `doctor` | Diagnose configuration and runtime health |
+| `detect` | Detect available runtime backends |
+| `artifacts` | Manage and inspect execution artifacts |
+| `harness` | Manage runtime harness configurations |
+| `codex` | Codex-specific setup and configuration |
+| `seed` | Generate or inspect seed specifications |
+| `workflow-ir` | Inspect workflow intermediate representation |
+| `zcode` | Convenience wrapper for Zcode (bundles `start`, `qa`, `run` with Zcode pre-selected; for global config use `setup --runtime zcode`) |
+
+> **Shorthand entry points:** `ooo` and `ouroboros` both launch the main CLI.
+> `ozo` is a standalone shorthand that launches only the Zcode convenience commands
+> (equivalent to `ouroboros zcode ...`).
 
 ---
 
@@ -248,7 +262,7 @@ ouroboros setup [OPTIONS]
 | `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`, `host`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
-| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
+| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, `stdio`, or native-Windows-only explicit `http` |
 
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
@@ -291,7 +305,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
-- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
+- For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`

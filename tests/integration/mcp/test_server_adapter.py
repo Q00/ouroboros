@@ -1061,6 +1061,51 @@ class TestCreateOuroborosServer:
         assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
         assert mock_reflect_engine.call_args.kwargs["adapter_backend"] == "codex"
 
+    @pytest.mark.asyncio
+    async def test_mcp_host_capability_is_not_inferred_from_reflect_worker(self) -> None:
+        """A server-composed Gemini worker cannot label a Claude host sequential."""
+        from ouroboros.mcp.host_context import (
+            DispatchAuthority,
+            HostFamily,
+            HostIdentityStatus,
+            MCPHostContext,
+            use_mcp_host_context,
+        )
+
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"reflect": "gemini"}),
+            ),
+        )
+        with (
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.create_llm_adapter", return_value=MagicMock()),
+            patch("ouroboros.orchestrator.create_agent_runtime", return_value=MagicMock()),
+        ):
+            server = create_ouroboros_server(runtime_backend="claude")
+
+        lateral = server._tool_handlers["ouroboros_lateral_think"]
+        assert lateral.agent_runtime_backend == "gemini"
+        host = MCPHostContext(
+            host_family=HostFamily.CLAUDE_CODE,
+            identity_status=HostIdentityStatus.KNOWN,
+            dispatch_authority=DispatchAuthority.MCP_HOST,
+        )
+        with use_mcp_host_context(host):
+            result = await lateral.handle(
+                {
+                    "problem_context": "stuck on X",
+                    "current_approach": "tried Y",
+                    "persona": "all",
+                }
+            )
+
+        assert result.is_ok
+        assert result.unwrap().meta["dispatch_mode"] == "host_decides"
+        assert result.unwrap().meta["host_action"] == "dispatch_subagents_if_supported"
+
     def test_legacy_llm_backend_config_override_honored_at_composition_root(self) -> None:
         """No per-stage profile: config.llm.backend drives internal LLM roles.
 
