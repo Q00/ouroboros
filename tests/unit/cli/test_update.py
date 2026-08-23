@@ -26,7 +26,9 @@ from ouroboros.cli.commands.update import (
     _fallback_version_key,
     _is_prerelease,
     _latest_pypi_version,
+    _refresh_all_runtime_artifacts,
     _refresh_claude_plugin,
+    _refresh_codex_plugin,
     _refresh_runtime_config,
     _resolve_environment_console,
     _resolve_runtime,
@@ -44,13 +46,16 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_topology() -> Iterator[None]:
-    """Keep CLI-flow tests independent of the developer's real config file."""
-    with patch(
-        "ouroboros.cli.commands.update._configured_runtime_topology",
-        return_value=RuntimeRefreshTopology(
-            runtime_executable="/usr/bin/claude",
-            runtime_executable_env_key="OUROBOROS_CLI_PATH",
+    """Keep CLI-flow tests independent of developer runtime configuration."""
+    with (
+        patch(
+            "ouroboros.cli.commands.update._configured_runtime_topology",
+            return_value=RuntimeRefreshTopology(
+                runtime_executable="/usr/bin/claude",
+                runtime_executable_env_key="OUROBOROS_CLI_PATH",
+            ),
         ),
+        patch("ouroboros.cli.commands.update.configure_omp_tool_call_timeout", return_value=True),
     ):
         yield
 
@@ -924,6 +929,37 @@ class TestClaudePluginRefresh:
         assert run.call_count == 2
 
 
+class TestCodexPluginRefresh:
+    def test_refreshes_only_the_ouroboros_marketplace(self) -> None:
+        with patch("ouroboros.cli.commands.update._run_step", return_value=True) as run:
+            assert _refresh_codex_plugin(False, "/configured/codex") is True
+
+        assert run.call_args.args[0] == [
+            "/configured/codex",
+            "plugin",
+            "marketplace",
+            "upgrade",
+            "ouroboros",
+        ]
+
+    def test_missing_codex_cli_skips_plugin_refresh(self) -> None:
+        with patch("ouroboros.cli.commands.update._run_step") as run:
+            assert _refresh_codex_plugin(False, None) is None
+
+        run.assert_not_called()
+
+
+def test_all_runtime_artifact_refresh_does_not_reconfigure_backend() -> None:
+    with patch("ouroboros.cli.commands.update._run_step", return_value=True) as run:
+        assert _refresh_all_runtime_artifacts(False, _mock_identity("uv"))
+
+    assert run.call_args.args[0] == [
+        "/managed/uv/venvs/ouroboros-ai/bin/ouroboros",
+        "setup",
+        "refresh",
+    ]
+
+
 # ── CLI flows ────────────────────────────────────────────────────
 
 
@@ -960,6 +996,40 @@ class TestCheckFlow:
 
         assert result.exit_code == 0
         assert "up to date" in result.output
+
+    def test_up_to_date_command_repairs_omp_timeout(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        configure_omp.assert_called_once_with(dry_run=False)
+
+    def test_up_to_date_omp_failure_warns_without_failing_update(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.50.7"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="0.50.7",
+            ),
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=False,
+            ),
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        assert "Could not set OMP MCP tool timeout" in _plain(result.output)
 
     def test_unreachable_pypi_exits_nonzero(self) -> None:
         with patch(
@@ -1027,6 +1097,9 @@ class TestUpdateFlow:
     def test_runtime_validation_accepts_canonical_backends(self, runtime: str) -> None:
         assert _validate_runtime_option(runtime) == runtime
 
+    def test_runtime_validation_accepts_all_host_integrations(self) -> None:
+        assert _validate_runtime_option("all") == "all"
+
     @pytest.mark.parametrize(
         ("runtime", "expected"),
         [
@@ -1091,6 +1164,150 @@ class TestUpdateFlow:
         assert "setup --runtime claude --non-interactive" in output
         assert "Dry run" in output
         run.assert_not_called()
+
+    def test_all_runtime_dry_run_refreshes_claude_and_codex_without_reselection(
+        self,
+    ) -> None:
+        def topology(runtime: str) -> RuntimeRefreshTopology:
+            env_key = "OUROBOROS_CLI_PATH" if runtime == "claude" else "OUROBOROS_CODEX_CLI_PATH"
+            return RuntimeRefreshTopology(
+                runtime_backend=runtime,
+                runtime_executable=f"/configured/{runtime}",
+                runtime_executable_env_key=env_key,
+            )
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                side_effect=topology,
+            ) as configured,
+            patch("ouroboros.cli.commands.update.subprocess.run") as run,
+        ):
+            result = runner.invoke(app, ["--dry-run", "--runtime", "all"])
+
+        assert result.exit_code == 0
+        output = _plain(result.output)
+        assert "claude plugin marketplace update ouroboros" in output
+        assert "claude plugin update ouroboros@ouroboros" in output
+        assert "codex plugin marketplace upgrade ouroboros" in output
+        assert "ouroboros setup refresh" in output
+        assert "setup --runtime claude" not in output
+        assert "setup --runtime codex" not in output
+        assert [call.args[0] for call in configured.call_args_list] == ["claude", "codex"]
+        run.assert_not_called()
+
+    def test_all_runtime_update_runs_both_host_refreshes_and_artifact_refresh(
+        self,
+    ) -> None:
+        def topology(runtime: str) -> RuntimeRefreshTopology:
+            env_key = "OUROBOROS_CLI_PATH" if runtime == "claude" else "OUROBOROS_CODEX_CLI_PATH"
+            return RuntimeRefreshTopology(
+                runtime_backend=runtime,
+                runtime_executable=f"/configured/{runtime}",
+                runtime_executable_env_key=env_key,
+            )
+
+        def run_command(command: list[str], **_kwargs: object) -> MagicMock:
+            if command == ["/managed/uv/venvs/ouroboros-ai/bin/ouroboros", "--version"]:
+                return MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                side_effect=topology,
+            ),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=run_command,
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "all"])
+
+        assert result.exit_code == 0
+        commands = [call.args[0] for call in run.call_args_list]
+        assert ["/configured/claude", "plugin", "marketplace", "update", "ouroboros"] in commands
+        assert [
+            "/configured/claude",
+            "plugin",
+            "update",
+            "ouroboros@ouroboros",
+        ] in commands
+        assert [
+            "/configured/codex",
+            "plugin",
+            "marketplace",
+            "upgrade",
+            "ouroboros",
+        ] in commands
+        assert [
+            "/managed/uv/venvs/ouroboros-ai/bin/ouroboros",
+            "setup",
+            "refresh",
+        ] in commands
+        assert "Updated to v99.0.0" in _plain(result.output)
+        assert "Restart active claude and codex sessions" in _plain(result.output)
+
+    def test_all_runtime_update_reports_partial_artifact_refresh(self) -> None:
+        def topology(runtime: str) -> RuntimeRefreshTopology:
+            env_key = "OUROBOROS_CLI_PATH" if runtime == "claude" else "OUROBOROS_CODEX_CLI_PATH"
+            return RuntimeRefreshTopology(
+                runtime_backend=runtime,
+                runtime_executable=f"/configured/{runtime}",
+                runtime_executable_env_key=env_key,
+            )
+
+        def run_command(command: list[str], **_kwargs: object) -> MagicMock:
+            if command == ["/managed/uv/venvs/ouroboros-ai/bin/ouroboros", "--version"]:
+                return MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+            if command[-2:] == ["setup", "refresh"]:
+                return MagicMock(returncode=1, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                side_effect=topology,
+            ),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=run_command,
+            ),
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "all"])
+
+        assert result.exit_code == 1
+        output = _plain(result.output)
+        assert "Ouroboros partially updated" in output
+        assert "installed runtime artifact refresh" in output
+        assert "Updated to v99.0.0" not in output
 
     def test_auto_runtime_without_claude_or_codex_skips_refresh(self) -> None:
         with (
@@ -1337,6 +1554,10 @@ class TestUpdateFlow:
                 "ouroboros.cli.commands.update.subprocess.run",
                 side_effect=[upgrade, version_probe],
             ) as run,
+            patch(
+                "ouroboros.cli.commands.update.configure_omp_tool_call_timeout",
+                return_value=True,
+            ) as configure_omp,
         ):
             result = runner.invoke(app, ["--yes", "--runtime", "none"])
 
@@ -1345,6 +1566,7 @@ class TestUpdateFlow:
         assert "Updated to v99.0.0" in _plain(result.output)
         assert run.call_count == 2
         topology.assert_not_called()
+        configure_omp.assert_called_once_with(dry_run=False)
 
     def test_failed_package_upgrade_aborts_with_exit_code_one(self) -> None:
         failed_step = MagicMock(returncode=1)

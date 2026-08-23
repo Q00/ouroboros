@@ -416,6 +416,9 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
 # Tool handler tuple type and factory
 # ---------------------------------------------------------------------------
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler  # noqa: E402
+from ouroboros.mcp.tools.fanout_composition import (  # noqa: E402
+    create_fanout_wiring,
+)
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler  # noqa: E402
 
 OuroborosToolHandlers = tuple[
@@ -515,17 +518,18 @@ def get_ouroboros_tools(
     # One shared fan-out registry: interview/lateral producers register pending
     # fan-outs into it, and the submit tool reads them back for synthesis.
     fanout_registry = FanoutRegistry()
-    from ouroboros.orchestrator.disposable_memory import DisposableMemory
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
     from ouroboros.persistence.event_store import EventStore
 
-    fanout_disposable_memory = (
-        DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore.for_project(Path(project_dir)),
-            event_store=context.event_store if context is not None else EventStore(),
-        )
-        if project_dir is not None
-        else None
+    # Both producers take the store from the side that publishes into it,
+    # through the one factory the server's composition root also calls
+    # (RFC #2153).
+    submit_fanout, fetch_artifact, interview, pm_interview = create_fanout_wiring(
+        fanout_registry=fanout_registry,
+        workspace=project_dir,
+        event_store=context.event_store if context is not None else EventStore(),
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
     )
     seed_handoff_registry = SeedHandoffRegistry()
     execute_seed = ExecuteSeedHandler(
@@ -539,12 +543,6 @@ def get_ouroboros_tools(
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
     job_result = JobResultHandler()
-    interview = InterviewHandler(
-        llm_backend=llm_backend,
-        agent_runtime_backend=runtime_backend,
-        opencode_mode=opencode_mode,
-        fanout_registry=fanout_registry,
-    )
     generate_seed = GenerateSeedHandler(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
@@ -613,11 +611,8 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(
-            fanout_registry=fanout_registry,
-            disposable_memory=fanout_disposable_memory,
-        ),
-        FetchArtifactHandler(disposable_memory=fanout_disposable_memory),
+        submit_fanout,
+        fetch_artifact,
         EvolveStepHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
@@ -650,12 +645,7 @@ def get_ouroboros_tools(
         EvolveRewindHandler(),
         CancelExecutionHandler(),
         BrownfieldHandler(),
-        PMInterviewHandler(
-            llm_backend=llm_backend,
-            agent_runtime_backend=runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-        ),
+        pm_interview,
         QAHandler(
             llm_backend=llm_backend,
             agent_runtime_backend=runtime_backend,

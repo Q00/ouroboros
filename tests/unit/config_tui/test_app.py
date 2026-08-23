@@ -102,7 +102,7 @@ async def test_agent_change_resets_incompatible_stage_model(app_env) -> None:
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
-        assert model_select.value == "claude-opus-4-8"
+        assert model_select.value == "claude-opus-5"
 
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()
@@ -352,6 +352,30 @@ async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) ->
         assert "openai/gpt-5.2-codex" in values  # fetched entries merged
         assert "default" in values  # static catalog kept first
         assert model_select.value == "default"  # selection not displaced
+
+
+@pytest.mark.asyncio
+async def test_kiro_dynamic_model_listing_appears_in_select(app_env, monkeypatch) -> None:
+    """Kiro's authenticated CLI catalog is visible without replacing default."""
+
+    def _fake_listing(backend):
+        if backend == "kiro":
+            return ("auto", "claude-opus-5", "claude-sonnet-4.6")
+        return None
+
+    monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", _fake_listing)
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "kiro"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        values = {value for _, value in model_select._options}
+        assert {"default", "auto", "claude-opus-5", "claude-sonnet-4.6"} <= values
+        assert model_select.value == "default"
 
 
 @pytest.mark.asyncio
@@ -685,7 +709,7 @@ async def test_execute_backend_change_clears_pin_instead_of_persisting_automatic
         pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
         await pilot.pause()
         displayed = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select).value
-        assert displayed == "claude-opus-4-8"
+        assert displayed == "claude-opus-5"
         # Textual may deliver the automatic model selection after the
         # programmatic guard was consumed under full-suite timing. Saving must
         # still treat this backend-switch default as automatic, not a user pin.

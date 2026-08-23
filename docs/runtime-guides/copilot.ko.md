@@ -70,11 +70,11 @@ setup은 고른 기본 모델을 출력하고, `~/.ouroboros/config.yaml`의 지
 
 ### 하이픈 표기와 점 표기 모델 ID
 
-Ouroboros 기본값은 하이픈 붙은 Anthropic SDK 형식(`claude-opus-4-8`, `claude-sonnet-4-6`)을 씁니다. Copilot CLI는 점 표기(`claude-opus-4.8`, `claude-sonnet-4.6`)를 기대합니다. 어댑터는 임의의 모델 이름을 바꾸지 않고 발견된 Copilot catalog를 기준으로 이 형식들을 해석합니다.
+Ouroboros 기본값은 Anthropic SDK 형식(`claude-opus-5`, `claude-sonnet-4-6`)을 씁니다. Copilot CLI는 catalog 형식(`claude-opus-5`, `claude-sonnet-4.6`)을 기대합니다. 어댑터는 임의의 모델 이름을 바꾸지 않고 발견된 Copilot catalog를 기준으로 이 형식들을 해석합니다.
 
 `map_to_copilot_model()`([`copilot/model_discovery.py`](../../src/ouroboros/copilot/model_discovery.py))은 명시적인 점 표기 Copilot ID를 그대로 통과시키고, 알려진 `openrouter/anthropic/` 접두사 제거, 기존의 정확한 정적 별칭, 또는 마지막 숫자 버전 구분자만 점으로 바꾸는 방식으로 후보를 만듭니다. 예를 들어 `claude-opus-4-8`은 `claude-opus-4.8` 후보가 됩니다. `claude-opus` 안의 하이픈은 건드리지 않습니다. 접두사를 제거했거나 정적 매핑으로 만든 값을 포함한 모든 변환 후보는 발견된 catalog나 번들 catalog에 정확히 같은 ID가 있을 때만 반환됩니다.
 
-따라서 현재 `DEFAULT_OPUS_MODEL`인 `claude-opus-4-8`과 `openrouter/anthropic/claude-opus-4-8`은 모두 catalog에 공개된 `claude-opus-4.8`로 해석됩니다. 앞으로 나올 Anthropic 버전도 정적 맵을 더하지 않고 같은 catalog 확인 규칙을 씁니다. 알 수 없는 모델이나 현재 catalog에 없는 변환 후보는 OpenRouter 접두사를 포함한 원래 ID를 보존합니다. 다른 모델을 조용히 고르는 대신 기존 Copilot unavailable-model 오류가 명확히 드러나게 하기 위해서입니다.
+따라서 현재 `DEFAULT_OPUS_MODEL`인 `claude-opus-5`와 `openrouter/anthropic/claude-opus-5`는 모두 catalog에 공개된 `claude-opus-5`로 해석됩니다. 앞으로 나올 Anthropic 버전도 정적 맵을 더하지 않고 같은 catalog 확인 규칙을 씁니다. 알 수 없는 모델이나 현재 catalog에 없는 변환 후보는 OpenRouter 접두사를 포함한 원래 ID를 보존합니다. 다른 모델을 조용히 고르는 대신 기존 Copilot unavailable-model 오류가 명확히 드러나게 하기 위해서입니다.
 
 Copilot이 모르는 모델을 지정하면 서브프로세스가 `Model "<id>" from --model flag is not available.`로 실패합니다. 발견된 목록에 있는 모델을 넘기거나 setup을 다시 돌려 갱신하세요.
 

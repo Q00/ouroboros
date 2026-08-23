@@ -684,6 +684,23 @@ def test_cli_install_doctor_json_uses_home(monkeypatch, tmp_path: Path) -> None:
     assert any(surface["name"] == "claude_plugin_launcher" for surface in payload)
 
 
+def test_cli_install_doctor_json_reports_non_utf8_manifest(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(doctor, "__version__", "1.2.3")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _write_current_install(tmp_path, version="1.2.3")
+    manifest = tmp_path / "plugins" / "ouroboros" / ".codex-plugin" / "plugin.json"
+    manifest.write_bytes(b"\xff")
+
+    result = runner.invoke(app, ["doctor", "install", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    by_name = {surface["name"]: surface for surface in payload}
+    assert by_name["codex_personal_plugin"]["status"] == "fail"
+    assert "invalid UTF-8" in by_name["codex_personal_plugin"]["message"]
+    assert by_name["claude_plugin_launcher"]["status"] == "pass"
+
+
 def test_cli_doctor_help_registered() -> None:
     result = runner.invoke(app, ["doctor", "--help"])
 

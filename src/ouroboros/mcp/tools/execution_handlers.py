@@ -52,7 +52,10 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -2722,6 +2725,16 @@ class StartExecuteSeedHandler:
             snapshot.links.execution_id or execution_id, self._event_store
         )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            follow_result_job_keys=(
+                "chained_evaluate_job_id",
+                "chained_ralph_job_id",
+            ),
+        )
         text = (
             f"Started background execution.\n\n"
             f"Job ID: {snapshot.job_id}\n"
@@ -2737,6 +2750,7 @@ class StartExecuteSeedHandler:
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
             "ouroboros_job_result(job_id) for the final output."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta: dict[str, Any] = {
             "job_id": snapshot.job_id,
             "session_id": snapshot.links.session_id,
@@ -2748,16 +2762,7 @@ class StartExecuteSeedHandler:
             "llm_backend": llm_backend,
             "efficiency_mode": execution_preferences.efficiency_mode.value,
             "frugality_assurance": execution_preferences.frugality_assurance.value,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=snapshot.links.session_id,
-                execution_id=snapshot.links.execution_id,
-                follow_result_job_keys=(
-                    "chained_evaluate_job_id",
-                    "chained_ralph_job_id",
-                ),
-            ),
+            "job_observer": observer,
             **_run_only_verification_meta(snapshot.links.session_id),
         }
         if idempotency_key:

@@ -20,15 +20,15 @@ Copilot setup path selects models from GitHub Copilot's own discovery catalog
 out of scope here — it is not driven by these pins.
 
 Note on id formats across providers (they are NOT interchangeable):
-- Anthropic direct API uses hyphenated, dateless ids: ``claude-opus-4-8``.
-- OpenRouter uses dotted slugs: ``anthropic/claude-opus-4.8``
-  (https://openrouter.ai/anthropic/claude-opus-4.8).
+- Anthropic direct API uses hyphenated, dateless ids: ``claude-opus-5``.
+- OpenRouter uses dotted slugs: ``anthropic/claude-opus-5``
+  (https://openrouter.ai/anthropic/claude-opus-5).
 """
 
 # Frontier reasoning tier (interview, seed, ontology, evaluation, execution
 # analysis, consensus advocate). Anthropic-direct API id. Bump on each new
 # Opus release.
-DEFAULT_OPUS_MODEL = "claude-opus-4-8"
+DEFAULT_OPUS_MODEL = "claude-opus-5"
 
 # Speed/judgment tier (QA verdicts, assertion extraction). Bump on each new
 # Sonnet release.
@@ -41,10 +41,10 @@ DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
 
 # OpenRouter-routed Opus for the multi-provider consensus roster. This is the
-# OpenRouter slug (dotted ``claude-opus-4.8``), which differs from the
+# OpenRouter slug (dotted ``claude-opus-5``), which differs from the
 # Anthropic-direct id above — LiteLLM forwards it verbatim to OpenRouter, so it
 # must match OpenRouter's published model id exactly or consensus voting fails.
-DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-4.8"
+DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-5"
 
 
 # Historical shipped default pins from prior releases, keyed by the *current*
@@ -58,9 +58,12 @@ DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-4.8"
 # default in an already-persisted config as an explicit user override and leaks
 # a Claude id to a backend that cannot execute it (Q00/ouroboros#1324 review).
 LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
-    DEFAULT_OPUS_MODEL: ("claude-opus-4-6",),
+    DEFAULT_OPUS_MODEL: ("claude-opus-4-8", "claude-opus-4-6"),
     DEFAULT_SONNET_MODEL: ("claude-sonnet-4-20250514",),
-    DEFAULT_CONSENSUS_OPUS_MODEL: ("openrouter/anthropic/claude-opus-4-6",),
+    DEFAULT_CONSENSUS_OPUS_MODEL: (
+        "openrouter/anthropic/claude-opus-4.8",
+        "openrouter/anthropic/claude-opus-4-6",
+    ),
 }
 
 
@@ -86,9 +89,10 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 # ``gpt-4o`` -> frontier ``o3`` became ``gpt-5.1-codex-mini`` / ``gpt-5-codex`` /
 # ``gpt-5.2``; anthropic frugal ``claude-3-5-haiku``, standard
 # ``claude-sonnet-4-20250514``, frontier ``claude-opus-4-5-20251101`` (and the
-# later frontier ``claude-opus-4-6``) became the DEFAULT_*_MODEL pins. The google
-# tier ids (``gemini-2.0-flash`` / ``gemini-2.5-pro``) have never been bumped, so
-# they carry no entry and are preserved as-is.
+# later frontier ``claude-opus-4-6`` and ``claude-opus-4-8``) became the
+# DEFAULT_*_MODEL pins. The google tier ids (``gemini-2.0-flash`` /
+# ``gemini-2.5-pro``) have never been bumped, so they carry no entry and are
+# preserved as-is.
 LEGACY_TIER_MODELS: dict[str, str] = {
     # openai (Codex CLI) tier ids
     "gpt-4o-mini": "gpt-5.1-codex-mini",
@@ -99,6 +103,7 @@ LEGACY_TIER_MODELS: dict[str, str] = {
     "claude-sonnet-4-20250514": DEFAULT_SONNET_MODEL,
     "claude-opus-4-5-20251101": DEFAULT_OPUS_MODEL,
     "claude-opus-4-6": DEFAULT_OPUS_MODEL,
+    "claude-opus-4-8": DEFAULT_OPUS_MODEL,
 }
 
 # Provider each historical tier default shipped under. The same model-looking
@@ -113,6 +118,7 @@ LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
     "claude-sonnet-4-20250514": "anthropic",
     "claude-opus-4-5-20251101": "anthropic",
     "claude-opus-4-6": "anthropic",
+    "claude-opus-4-8": "anthropic",
 }
 
 

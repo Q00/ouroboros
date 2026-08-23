@@ -65,6 +65,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
         "OUROBOROS_DSH_CLI_PATH",
+        # POSIX shell the orchestrator runs every AC verify_command through.
+        # A repo .env pointing this at its own binary would execute arbitrary
+        # code inside the verification gate — the one place that must stay
+        # untamperable.
+        "OUROBOROS_VERIFY_BASH",
         # Not an executable path, but it selects the Cordis composition the
         # spawned Node process loads — plugin rows in that file execute
         # arbitrary code inside `dsh-acp-demo`, so an untrusted repo .env must
@@ -187,6 +192,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # orchestrator backend profile and therefore which backend behavior /
         # executable is used — same routing class as the selectors above.
         "OUROBOROS_RUNTIME_PROFILE",
+        # Shared-workspace provider switching is execution authority, not a
+        # repository preference. Only the real process/trusted home may opt in.
+        "OUROBOROS_CROSS_HARNESS_REDISPATCH",
         # Permission-mode overrides — must not silently disable the
         # user's approval gate from an untrusted repo.
         "OUROBOROS_AGENT_PERMISSION_MODE",
@@ -212,11 +220,30 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # re-executes successful children and can double token spend.
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Shell startup files, read before the first command of *any* shell
+        # this process spawns — including the verify gate's `bash -c`. A repo
+        # `.env` pointing `BASH_ENV` at a file containing `exit 0` turns
+        # `bash -c 'exit 23'` into a pass, which is arbitrary code execution
+        # inside the one place that must stay untamperable. `ENV` is the POSIX
+        # spelling of the same hook.
+        "BASH_ENV",
+        "ENV",
+        # Shell option state carried into that child: `xtrace` writes into the
+        # output an assertion is checked against, `errexit` changes which leg
+        # of a chain decides the status, `xpg_echo` changes what `echo` prints.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_XTRACEFD",
+        "BASH_COMPAT",
     }
 )
 UNTRUSTED_ENV_DENIED_PREFIXES = (
     "DYLD_",
     "LD_",
+    # Exported shell functions. A `-c` command resolves a function before any
+    # executable of the same name, so `BASH_FUNC_pytest%%` replaces the tool a
+    # contract meant to run — the shellshock-era shape of the same hole.
+    "BASH_FUNC_",
     # Package-manager source/configuration families. Prefixes are intentional:
     # uv supports dynamically named index credentials (UV_INDEX_<NAME>_*), and
     # both uv and pip/pipx may add new controls. Trusted real-process and home

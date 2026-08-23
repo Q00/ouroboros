@@ -48,6 +48,7 @@ from ouroboros.bigbang.requirement_distillation import (
     seed_readiness_details,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.bigbang.turn_planner import InterviewTurnPlanner
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
@@ -57,25 +58,27 @@ from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
     echo_carries_dispatch,
     strip_bridge_notice,
 )
+from ouroboros.mcp.tools.interview_advisory import (
+    _attach_question_assist_requests,
+    _milestone_for_score,
+)
 from ouroboros.mcp.tools.question_advisory import (
-    attach_question_advisory,
     build_question_advisory_request,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
-    SubagentDispatchMode,
     build_generate_seed_subagent,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
-    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -85,11 +88,6 @@ from ouroboros.mcp.types import (
     MCPToolParameter,
     MCPToolResult,
     ToolInputType,
-)
-from ouroboros.orchestrator.capabilities import (
-    interview_code_investigation_answer_contract,
-    ouroboros_tool_capability_metadata,
-    stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.capabilities.question_text import (
     format_question_with_ambiguity as _format_question_with_ambiguity,
@@ -222,6 +220,7 @@ _INTERVIEW_COMPLETION_PHRASES = (
     "no ambiguity remains",
     "no ambiguity left",
 )
+_INTERVIEW_STRUCTURED_COMPLETION_PREFIX = "[from-user][refined][closure]"
 
 
 def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
@@ -319,6 +318,9 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
     ):
         return False
 
+    if stripped.startswith(_INTERVIEW_STRUCTURED_COMPLETION_PREFIX):
+        return True
+
     normalized = _normalize_interview_answer(answer)
     if not normalized:
         return False
@@ -393,14 +395,6 @@ def _completion_gate_reason(
         return f"completion floors are unmet ({'; '.join(floor_failures)})"
 
     return "requirements are not stable enough to close yet"
-
-
-def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
-    """Return the milestone label for an ambiguity score, or None."""
-    if score is None:
-        return None
-    milestone, _ = get_milestone(score.overall_score)
-    return milestone.value
 
 
 _MILESTONE_RANKS = {
@@ -612,60 +606,6 @@ def _compute_transcript_chars(state: InterviewState) -> int:
     return total
 
 
-def _build_code_investigation_request(
-    *,
-    session_id: str,
-    question: str,
-    last_question: str | None = None,
-) -> dict[str, Any]:
-    """Build stable metadata for caller-side code-fact investigation.
-
-    The interview MCP tool is only the question generator; repo inspection runs
-    in the parent runtime. This metadata gives that runtime a concrete request
-    envelope keyed to the exact question text, so investigation results can be
-    correlated even when the user-facing display has an ambiguity prefix.
-    """
-    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
-    code_investigation = mcp_tool_capability["orchestration"]["code_investigation"]
-    request: dict[str, Any] = {
-        "session_id": session_id,
-        "question_identity": stable_code_investigation_question_identity(question),
-        "question": question,
-        "investigation_goal": "describe_current_state_from_code",
-        "investigation_targets": [{"target_type": "workspace", "scope": "active"}],
-        "fact_categories": [
-            "tech_stack",
-            "frameworks",
-            "dependencies",
-            "current_patterns",
-            "architecture",
-            "file_structure",
-            "configuration",
-        ],
-        "allowed_capabilities": ["inspect_code"],
-        "repo_inspection_tool_capabilities": list(
-            code_investigation["repo_inspection_tool_capabilities"]
-        ),
-        "confidence_policy": {
-            "auto_confirm_when": ["exact manifest or config match with a single clear answer"],
-            "confirmation_required_when": [
-                "multiple code paths or configuration sources disagree",
-                "the answer implies a product or architecture decision",
-            ],
-            "human_judgment_when": [
-                "desired future behavior",
-                "priority, scope, ownership, rollout, or acceptance criteria",
-            ],
-        },
-        "answer_prefixes": ["[from-code]", "[from-code][auto-confirmed]"],
-        "answer_contract": interview_code_investigation_answer_contract(),
-        "mcp_tool_capability": mcp_tool_capability,
-    }
-    if last_question:
-        request["last_question"] = last_question
-    return request
-
-
 def _build_question_advisory_request(
     *,
     session_id: str,
@@ -690,50 +630,6 @@ def _build_question_advisory_request(
         milestone=_milestone_for_score(score),
         code_investigation_request=code_investigation_request,
         last_question=last_question,
-    )
-
-
-def _attach_question_assist_requests(
-    meta: dict[str, Any],
-    *,
-    session_id: str,
-    question: str,
-    phase: str,
-    score: AmbiguityScore | None,
-    last_question: str | None = None,
-    dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
-    runtime_backend: str | None = None,
-    opencode_mode: str | None = None,
-    fanout_registry: FanoutRegistry | None = None,
-) -> None:
-    """Attach the interview's code-fact request and its advisory fan-out.
-
-    The fan-out itself lives in ``question_advisory``, which serves every tool
-    that declares a catalog — one implementation, so the interview and the PM
-    interview cannot drift apart in the places where being identical matters.
-    What stays here is the part that is only the interview's: the code-fact
-    investigation request, which exists because in this interview a code fact
-    may become the answer.
-    """
-    code_request = _build_code_investigation_request(
-        session_id=session_id,
-        question=question,
-        last_question=last_question,
-    )
-    attach_question_advisory(
-        meta,
-        tool_name="ouroboros_interview",
-        session_id=session_id,
-        question=question,
-        phase=phase,
-        ambiguity_score=score.overall_score if score is not None else None,
-        milestone=_milestone_for_score(score),
-        code_investigation_request=code_request,
-        last_question=last_question,
-        dispatch_mode=dispatch_mode,
-        runtime_backend=runtime_backend,
-        opencode_mode=opencode_mode,
-        fanout_registry=fanout_registry,
     )
 
 
@@ -1412,12 +1308,18 @@ class GenerateSeedHandler:
             from ouroboros.core.requirement_candidate import evaluate_promotion
 
             promotion = evaluate_promotion(distillation)
-            if promotion.blockers:
-                details = seed_readiness_details(promotion)
+            reference_aware = is_reference_aware_distillation(distillation)
+            details = seed_readiness_details(
+                promotion,
+                require_promoted_acceptance_criteria=reference_aware,
+            )
+            if details["blockers"]:
                 return Result.err(
                     MCPToolError(
-                        f"Interview must be reopened before Seed generation: {details}",
+                        "Interview must be reopened before Seed generation",
                         tool_name="ouroboros_generate_seed",
+                        error_code="interview_reopen_required",
+                        details=details,
                     )
                 )
             interview_state.requirement_distillation = distillation
@@ -1429,7 +1331,7 @@ class GenerateSeedHandler:
                     error=str(cache_save_result.error),
                 )
 
-            if is_reference_aware_distillation(distillation):
+            if reference_aware:
                 reference_seed = build_promoted_reference_seed(
                     interview_state,
                     distillation,
@@ -1575,10 +1477,21 @@ class GenerateSeedHandler:
             if seed_result.is_err:
                 error = seed_result.error
                 if isinstance(error, ValidationError):
+                    readiness_code = error.details.get("code")
                     return Result.err(
                         MCPToolError(
                             f"Validation error: {error}",
                             tool_name="ouroboros_generate_seed",
+                            error_code=(
+                                readiness_code
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
+                            details=(
+                                error.details
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
                         )
                     )
                 return Result.err(
@@ -1657,6 +1570,7 @@ class InterviewHandler:
     data_dir: Path | None = field(default=None, repr=False)
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     suppress_tool_use_prompt_cues: bool = False
+    findings_store: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -1738,6 +1652,25 @@ class InterviewHandler:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    @staticmethod
+    def _apply_interview_score(
+        state: InterviewState,
+        score: AmbiguityScore,
+        *,
+        advance_streak: bool = True,
+        reset_on_failure: bool = True,
+    ) -> None:
+        """Apply one canonical ambiguity result to persisted interview state."""
+        qualifies = qualifies_for_seed_completion(score, is_brownfield=state.is_brownfield)
+        if advance_streak:
+            _update_completion_candidate_streak(state, score)
+        elif reset_on_failure and not qualifies:
+            _reset_stale_completion_streak(state)
+        state.store_ambiguity(
+            score=score.overall_score,
+            breakdown=score.breakdown.model_dump(mode="json"),
+        )
+
     async def _score_interview_state(
         self,
         llm_adapter: LLMAdapter,
@@ -1788,22 +1721,11 @@ class InterviewHandler:
             return None
 
         score = score_result.value
-        qualifies = qualifies_for_seed_completion(
+        self._apply_interview_score(
+            state,
             score,
-            is_brownfield=state.is_brownfield,
-        )
-        if advance_streak:
-            # Standard routing: single helper owns both bump-on-qualify
-            # and reset-on-fail so the two are never out of sync.
-            _update_completion_candidate_streak(state, score)
-        elif reset_on_failure and not qualifies:
-            # Explicit-done path (or any caller that owns the increment):
-            # we still MUST share the stale-streak reset contract so a
-            # weak rescore cannot let a stored streak survive.
-            _reset_stale_completion_streak(state)
-        state.store_ambiguity(
-            score=score.overall_score,
-            breakdown=score.breakdown.model_dump(mode="json"),
+            advance_streak=advance_streak,
+            reset_on_failure=reset_on_failure,
         )
         return score
 
@@ -2760,12 +2682,13 @@ class InterviewHandler:
                             question=question,
                             phase="start",
                             score=live_score,
-                            dispatch_mode=resolve_subagent_dispatch(
+                            dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
                             runtime_backend=self.agent_runtime_backend,
                             opencode_mode=self.opencode_mode,
                             fanout_registry=self._resolved_fanout_registry(),
+                            findings_store=self.findings_store,
                         )
                     finally:
                         advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
@@ -3195,22 +3118,62 @@ class InterviewHandler:
             # question generation failures downstream
             await engine.save_state(state)
 
-            # Only score ambiguity when completion is actually
-            # possible. Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
-            # result cannot trigger early exit, so the LLM call
-            # (~3-8 s) is pure waste. Once scoring starts, run it
-            # before question generation so the next prompt sees
-            # the latest ambiguity snapshot, closure threshold,
-            # and completion-candidate streak.
+            # Once completion is possible, plan the new ambiguity snapshot and
+            # next question atomically. This keeps the score→question dependency
+            # without imposing two serial provider calls or requiring adapter
+            # concurrency. Earlier rounds keep the ordinary question-only path.
             answered = _count_answered_rounds(state)
-            if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                # Scoring must complete before question generation:
-                # _score_interview_state mutates state.ambiguity_score,
-                # completion_candidate_streak, and ambiguity_breakdown.
-                # ask_next_question reads those fields to build the
-                # system prompt (closure mode, seed-ready, streak).
-                # Running them in parallel would give the question
-                # generator stale routing context.
+            supports_atomic_turn = isinstance(InterviewEngine, type) and isinstance(
+                engine, InterviewEngine
+            )
+            if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT and supports_atomic_turn:
+                backend = _handler_llm_backend(self.llm_backend, "clarification")
+                scorer = AmbiguityScorer(
+                    llm_adapter=llm_adapter,
+                    model=get_llm_model_for_role("clarification", backend=backend),
+                    max_retries=_LIVE_AMBIGUITY_MAX_RETRIES,
+                )
+                planner = InterviewTurnPlanner(engine=engine, scorer=scorer)
+                question_generation_started_at = time.perf_counter()
+                question_result: Any = None
+                try:
+                    turn_result = await planner.plan(state)
+                finally:
+                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                if turn_result.is_err:
+                    live_score = None
+                    question_result = Result.err(turn_result.error)
+                else:
+                    turn = turn_result.value
+                    live_score = turn.ambiguity
+                    if live_score is None:
+                        state.clear_stored_ambiguity()
+                        _reset_stale_completion_streak(state)
+                    else:
+                        self._apply_interview_score(state, live_score)
+                    lateral_review_meta = _maybe_record_lateral_review_advisory(
+                        state,
+                        previous_milestone=previous_milestone,
+                        score=live_score,
+                    )
+                    if (
+                        live_score is not None
+                        and qualifies_for_seed_completion(
+                            live_score,
+                            is_brownfield=state.is_brownfield,
+                        )
+                        and state.completion_candidate_streak >= AUTO_COMPLETE_STREAK_REQUIRED
+                    ):
+                        return await self._complete_interview_response(
+                            engine,
+                            state,
+                            session_id,
+                            live_score,
+                            turn_started_at=turn_started_at,
+                            question_generation_duration_ms=question_generation_duration_ms,
+                        )
+                    question_result = Result.ok(turn.question)
+            elif answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
                 ambiguity_scoring_started_at = time.perf_counter()
                 try:
                     live_score = await self._score_interview_state(llm_adapter, state)
@@ -3367,12 +3330,13 @@ class InterviewHandler:
                             question=pending_question,
                             phase="resume_pending",
                             score=_load_state_ambiguity_score(state),
-                            dispatch_mode=resolve_subagent_dispatch(
+                            dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
                             runtime_backend=self.agent_runtime_backend,
                             opencode_mode=self.opencode_mode,
                             fanout_registry=self._resolved_fanout_registry(),
+                            findings_store=self.findings_store,
                         )
                     finally:
                         advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
@@ -3645,12 +3609,13 @@ class InterviewHandler:
                     question=question,
                     phase="answer",
                     score=live_score,
-                    dispatch_mode=resolve_subagent_dispatch(
+                    dispatch_mode=resolve_request_subagent_dispatch(
                         self.agent_runtime_backend, self.opencode_mode
                     ),
                     runtime_backend=self.agent_runtime_backend,
                     opencode_mode=self.opencode_mode,
                     fanout_registry=self._resolved_fanout_registry(),
+                    findings_store=self.findings_store,
                 )
             except Exception as error:
                 advisory_build_error = error

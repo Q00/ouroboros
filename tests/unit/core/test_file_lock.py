@@ -11,7 +11,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import ouroboros.core.file_lock as file_lock_module
-from ouroboros.core.file_lock import _acquire_lock, _release_lock, file_lock
+from ouroboros.core.file_lock import (
+    _acquire_lock,
+    _release_lock,
+    _run_release_steps,
+    file_lock,
+)
 
 
 def test_file_lock_creates_lockfile(tmp_path: Path) -> None:
@@ -109,6 +114,212 @@ def test_copied_context_cannot_reuse_released_parent_authority(tmp_path: Path) -
     with file_lock(current, stable_parent_authority=True):
         with pytest.raises(BlockingIOError):
             stale_context.run(acquire_from_stale_context)
+
+
+def _enter_in_copied_context(manager: object) -> None:
+    """Enter a context manager under a copied context, as asyncio.to_thread does."""
+    copy_context().run(manager.__enter__)  # type: ignore[attr-defined]
+
+
+def _fail_next_parent_authority_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[int]:
+    """Raise after closing the next stable-parent authority descriptor."""
+    authority_fd: list[int] = []
+    failed_closes: list[int] = []
+    original_acquire = file_lock_module._acquire_posix_lock
+    original_close = file_lock_module.os.close
+
+    def record_acquire(
+        file_descriptor: int,
+        *,
+        exclusive: bool,
+        blocking: bool,
+    ) -> None:
+        if not authority_fd:
+            authority_fd.append(file_descriptor)
+        original_acquire(
+            file_descriptor,
+            exclusive=exclusive,
+            blocking=blocking,
+        )
+
+    def fail_close(file_descriptor: int) -> None:
+        original_close(file_descriptor)
+        if authority_fd == [file_descriptor] and not failed_closes:
+            failed_closes.append(file_descriptor)
+            raise OSError(errno.EIO, "directory close failed")
+
+    monkeypatch.setattr(file_lock_module, "_acquire_posix_lock", record_acquire)
+    monkeypatch.setattr(file_lock_module.os, "close", fail_close)
+    return failed_closes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_cross_context_exit_releases_authority_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A lock entered and exited in different contexts must still unwind cleanly.
+
+    ContextVar tokens are context-bound, so resetting one from a foreign context
+    raises ValueError. That must neither surface to the caller nor skip the
+    explicit release of the parent authority lock.
+    """
+    target = tmp_path / "state.json"
+    released: list[int] = []
+    original_release = file_lock_module._release_posix_lock
+
+    def record_release(file_descriptor: int) -> None:
+        released.append(file_descriptor)
+        original_release(file_descriptor)
+
+    monkeypatch.setattr(file_lock_module, "_release_posix_lock", record_release)
+
+    manager = file_lock(target, stable_parent_authority=True)
+    _enter_in_copied_context(manager)
+
+    assert manager.__exit__(None, None, None) in {None, False}
+    # Both the lockfile lock and the parent authority lock are released
+    # explicitly; before the fix the parent release was skipped entirely.
+    assert len(released) == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_cross_context_exit_does_not_mask_body_exception(tmp_path: Path) -> None:
+    """A foreign-context token must not replace the caller's real exception."""
+    target = tmp_path / "state.json"
+
+    manager = file_lock(target, stable_parent_authority=True)
+    _enter_in_copied_context(manager)
+
+    body_error = RuntimeError("the caller's real failure")
+    handled = manager.__exit__(type(body_error), body_error, body_error.__traceback__)
+
+    # Exiting must not raise on its own, and must not claim to have handled the
+    # body error -- the caller keeps propagating its own exception.
+    assert not handled
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_cross_context_exit_leaves_authority_reacquirable(tmp_path: Path) -> None:
+    """After a cross-context exit the parent authority must be free again."""
+    target = tmp_path / "state.json"
+    contender = tmp_path / "contender.json"
+
+    manager = file_lock(target, stable_parent_authority=True)
+    _enter_in_copied_context(manager)
+    manager.__exit__(None, None, None)
+
+    with file_lock(contender, blocking=False, stable_parent_authority=True):
+        pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_parent_directory_close_failure_does_not_mask_body_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+    contender = tmp_path / "contender.json"
+    failed_closes = _fail_next_parent_authority_close(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="the caller's real failure"):
+        with file_lock(target, stable_parent_authority=True):
+            raise RuntimeError("the caller's real failure")
+
+    assert len(failed_closes) == 1
+    with file_lock(contender, blocking=False, stable_parent_authority=True):
+        pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_parent_directory_close_failure_surfaces_after_clean_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+    contender = tmp_path / "contender.json"
+    failed_closes = _fail_next_parent_authority_close(monkeypatch)
+
+    with pytest.raises(OSError, match="directory close failed") as raised:
+        with file_lock(target, stable_parent_authority=True):
+            pass
+
+    assert raised.value.errno == errno.EIO
+    assert len(failed_closes) == 1
+    with file_lock(contender, blocking=False, stable_parent_authority=True):
+        pass
+
+
+def test_release_failure_does_not_mask_body_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "state.json"
+
+    def failing_release(handle: object) -> None:
+        raise OSError(errno.EBADF, "bad descriptor")
+
+    monkeypatch.setattr(file_lock_module, "_release_lock", failing_release)
+
+    with pytest.raises(RuntimeError, match="the caller's real failure"):
+        with file_lock(target):
+            raise RuntimeError("the caller's real failure")
+
+
+def test_release_failure_surfaces_when_body_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Suppression is scoped to masking only; a lone release fault still raises."""
+    target = tmp_path / "state.json"
+
+    def failing_release(handle: object) -> None:
+        raise OSError(errno.EBADF, "bad descriptor")
+
+    monkeypatch.setattr(file_lock_module, "_release_lock", failing_release)
+
+    with pytest.raises(OSError) as raised:
+        with file_lock(target):
+            pass
+
+    assert raised.value.errno == errno.EBADF
+
+
+def test_run_release_steps_attempts_every_step_and_reraises_first_error() -> None:
+    attempted: list[str] = []
+
+    def first() -> None:
+        attempted.append("first")
+        raise OSError(errno.EBADF, "first failed")
+
+    def second() -> None:
+        attempted.append("second")
+        raise ValueError("second failed")
+
+    def third() -> None:
+        attempted.append("third")
+
+    with pytest.raises(OSError, match="first failed"):
+        _run_release_steps(first, second, third, suppress_errors=False)
+
+    assert attempted == ["first", "second", "third"]
+
+
+def test_run_release_steps_suppresses_errors_for_a_failing_body() -> None:
+    attempted: list[str] = []
+
+    def failing() -> None:
+        attempted.append("failing")
+        raise OSError(errno.EBADF, "release failed")
+
+    def following() -> None:
+        attempted.append("following")
+
+    _run_release_steps(failing, following, suppress_errors=True)
+
+    assert attempted == ["failing", "following"]
 
 
 def test_file_lock_windows_nonblocking_uses_fail_fast_mode(

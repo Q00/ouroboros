@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Awaitable, Callable
+import json
 import time
 from typing import TYPE_CHECKING, Any
 
 from ouroboros import telemetry as usage_telemetry
+from ouroboros.backends.capabilities import SubagentDispatchMode
 from ouroboros.core.types import Result
 from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.host_context import (
+    DispatchAuthority,
+    HostCapabilitySource,
+    HostSubagentCapability,
+    MCPHostContext,
+    current_mcp_host_context,
+    host_worker_mismatch,
+    normalized_worker_backend,
+    use_mcp_host_context,
+)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.server.adapter import MCPServerAdapter
@@ -191,10 +203,44 @@ async def observe_adapter_tool_call[T, E](
     return result
 
 
+def _sdk_tool_error(error: object) -> Exception:
+    """Map an explicitly typed tool error onto the SDK's JSON-RPC error channel.
+
+    ``MCPToolError.error_code`` opts into the public machine-readable contract.
+    Its details cross the boundary only when they are a canonical JSON object;
+    malformed details fall back to the existing execution-error behavior without
+    rendering those details into the client-visible message. Untyped errors keep
+    the legacy ``RuntimeError(str(error))`` path and therefore remain ordinary
+    ``CallToolResult(isError=True)`` responses under the MCP SDK.
+    """
+    from mcp.shared.exceptions import MCPError as SDKMCPError
+    from mcp.types import INTERNAL_ERROR
+
+    from ouroboros.mcp.errors import MCPToolError
+
+    if not isinstance(error, MCPToolError) or not error.error_code:
+        return RuntimeError(str(error))
+
+    try:
+        details = json.loads(json.dumps(error.details, ensure_ascii=False, allow_nan=False))
+    except (TypeError, ValueError):
+        return RuntimeError(error.message)
+    if not isinstance(details, dict) or details != error.details:
+        return RuntimeError(error.message)
+
+    return SDKMCPError(
+        code=INTERNAL_ERROR,
+        message=error.message,
+        data={"error_code": error.error_code, "details": details},
+    )
+
+
 async def call_sdk_tool(
     adapter: MCPServerAdapter,
     name: str,
     arguments: dict[str, Any],
+    *,
+    host_context: MCPHostContext | None = None,
 ) -> Any:
     """Own SDK validation plus the one complete request-outcome event.
 
@@ -236,14 +282,15 @@ async def call_sdk_tool(
         # token and the raw credential is gone by now, so carry its decision
         # across instead -- that restores the client identity authorization and
         # rate limiting key on.
-        result = await adapter._call_tool_impl(
-            name,
-            arguments,
-            auth_context=current_auth_context(),
-        )
+        with use_mcp_host_context(host_context or MCPHostContext()):
+            result = await adapter._call_tool_impl(
+                name,
+                arguments,
+                auth_context=current_auth_context(),
+            )
         if result.is_err:
             error_type = _safe_error_type(result.error)
-            raise RuntimeError(str(result.error))
+            raise _sdk_tool_error(result.error)
         value = result.value
         if definition.output_schema is not None:
             Draft202012Validator(definition.output_schema).validate(value.structured_content)
@@ -308,6 +355,90 @@ def record_direct_evaluation_outcome(
         pass
 
 
+def record_subagent_dispatch_emitted(
+    *,
+    fanout_kind: str,
+    payload_count: int,
+    dispatch_mode: SubagentDispatchMode,
+    worker_backend: str | None,
+    fanout_reentry_available: bool,
+) -> None:
+    """Record the privacy-safe contract emitted to a fan-out consumer."""
+    try:
+        context = current_mcp_host_context()
+        if dispatch_mode is SubagentDispatchMode.PLUGIN_PASSIVE:
+            authority = DispatchAuthority.PASSIVE_BRIDGE.value
+            capability = HostSubagentCapability.PARALLEL.value
+            capability_source = HostCapabilitySource.PASSIVE_BRIDGE.value
+            delivery_mode = "passive_bridge"
+            preference = "parallel"
+            fallback = "none"
+            reason = "passive_bridge_detected"
+        else:
+            authority = context.dispatch_authority.value
+            capability = context.subagent_capability.value
+            capability_source = context.capability_source.value
+            delivery_mode = "inline_host" if context.is_mcp_host else "inline_runtime"
+            preference = (
+                "sequential" if dispatch_mode is SubagentDispatchMode.SEQUENTIAL else "parallel"
+            )
+            fallback = "sequential"
+            if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
+                reason = "declared_parallel"
+            elif context.is_mcp_host and dispatch_mode is SubagentDispatchMode.SEQUENTIAL:
+                reason = "declared_sequential"
+            elif dispatch_mode is SubagentDispatchMode.HOST_DECIDES:
+                reason = "host_capability_undeclared"
+            else:
+                reason = "configured_internal_runtime"
+
+        usage_telemetry.capture_subagent_dispatch(
+            {
+                "phase": "emitted",
+                "fanout_kind": fanout_kind,
+                "payload_count": payload_count,
+                "invocation_surface": ("mcp_host" if context.is_mcp_host else "internal_runtime"),
+                "dispatch_authority": authority,
+                "host_family": context.host_family.value,
+                "host_identity_status": context.identity_status.value,
+                "host_capability": capability,
+                "capability_source": capability_source,
+                "delivery_mode": delivery_mode,
+                "execution_preference": preference,
+                "fallback_strategy": fallback,
+                "configured_worker_backend": normalized_worker_backend(worker_backend),
+                "host_worker_mismatch": host_worker_mismatch(context, worker_backend),
+                "decision_reason": reason,
+                "contract_version": "v2",
+                "fanout_reentry_available": fanout_reentry_available,
+            }
+        )
+    except Exception:
+        pass
+
+
+def record_subagent_dispatch_submitted(
+    *,
+    fanout_kind: str,
+    submission_status: str,
+    expected_count: int,
+    received_count: int,
+    undispatched_count: int,
+) -> None:
+    """Record fan-out re-entry counts without identifiers or output content."""
+    usage_telemetry.capture_subagent_dispatch(
+        {
+            "phase": "submitted",
+            "fanout_kind": fanout_kind,
+            "submission_status": submission_status,
+            "expected_count": expected_count,
+            "received_count": received_count,
+            "undispatched_count": undispatched_count,
+            "contract_version": "v2",
+        }
+    )
+
+
 def stamp_backend_context(
     runtime_backend: str | None,
     execute_runtime_backend: str | None,
@@ -363,5 +494,7 @@ __all__ = [
     "call_sdk_tool",
     "observe_adapter_tool_call",
     "record_direct_evaluation_outcome",
+    "record_subagent_dispatch_emitted",
+    "record_subagent_dispatch_submitted",
     "stamp_backend_context",
 ]

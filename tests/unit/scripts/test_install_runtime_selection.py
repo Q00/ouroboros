@@ -20,6 +20,41 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 
+_SHELL_QUOTE_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,:/@%+=-"
+)
+
+
+def _expected_shell_quote(value: str) -> str:
+    """Mirror install.sh's `_shell_quote` — ASCII-only, one shell word.
+
+    The installer cannot delegate to `printf %q`: bash 3.2, the macOS system
+    bash, escapes only part of a multibyte character and emits invalid UTF-8.
+    So the expectation is spelled out here rather than read back out of bash.
+    """
+    if not value:
+        return "$''"
+    if all(char in _SHELL_QUOTE_SAFE for char in value):
+        return value
+    body = "".join(
+        char
+        if char in _SHELL_QUOTE_SAFE
+        else "".join(f"\\{byte:03o}" for byte in char.encode("utf-8"))
+        for char in value
+    )
+    return f"$'{body}'"
+
+
+def _shell_word_reads_back_as(quoted: str, expected: str) -> bool:
+    """A quoted word must survive the shell as exactly the original name."""
+    read_back = subprocess.run(
+        ["bash", "-c", f"printf '%sEND' {quoted}"],
+        check=True,
+        capture_output=True,
+    )
+    return read_back.stdout == expected.encode("utf-8") + b"END"
+
+
 # Test-only variables read by the fake commands below (never by install.sh):
 # keeping the stub bodies free of per-test paths makes their content identical
 # across tests, which is what lets _write_executable share one on-disk copy.
@@ -2082,8 +2117,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -2251,6 +2286,52 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
+
+
+def test_installer_configures_omp_after_runtime_setup_source_order() -> None:
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    assert source.rfind("_ensure_omp_tool_call_timeout") > source.index(
+        "setup --runtime $RUNTIME --non-interactive"
+    )
+
+
+def test_installer_preserves_higher_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 120000; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_preserves_oversized_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 9223372036854775808; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_sets_omp_tool_call_timeout_when_omp_is_available(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nprintf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" in calls
 
 
 def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
@@ -2430,5 +2511,194 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
+
+
+_DSH_STUB = f"""#!/bin/sh
+printf 'dsh %s\\n' "$*" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+
+def _dsh_calls(tmp_path: Path) -> list[str]:
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    return [line for line in calls if line.startswith("dsh ")]
+
+
+def test_installer_without_dsh_touches_no_profile(tmp_path: Path) -> None:
+    """The bundle install is conditional on the host actually being installed."""
+    result = _run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not _dsh_calls(tmp_path)
+    assert "DeepSeek Harness plugin" not in result.stdout
+
+
+def test_installer_covers_the_profile_a_dsh_user_boots(tmp_path: Path) -> None:
+    """`dsh web` scaffolds `web`, so that is the profile worth covering blind."""
+    result = _run_installer(tmp_path, fake_commands={"dsh": _DSH_STUB})
+
+    assert result.returncode == 0, result.stderr
+    assert _dsh_calls(tmp_path) == [
+        "dsh plugin --profile web add github:Q00/ouroboros#main&path:integrations/dsh-plugin"
+    ]
+
+
+def test_installer_refreshes_profiles_that_already_opted_in(tmp_path: Path) -> None:
+    """An existing install picks up a release; an unrelated profile is left alone."""
+    profiles = tmp_path / "home" / ".dsh" / "profiles"
+    (profiles / "tui").mkdir(parents=True)
+    (profiles / "tui" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    (profiles / "unrelated").mkdir(parents=True)
+    (profiles / "unrelated" / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"not-dsh-ouroboros": "1.0.0"},
+                "description": "mentions dsh-ouroboros without installing it",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (profiles / "malformed").mkdir(parents=True)
+    (profiles / "malformed" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros":', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": _DSH_STUB,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = sorted(
+        line.split("--profile ")[1].split()[0] for line in _dsh_calls(tmp_path)
+    )
+    assert profiles_called == ["tui", "web"]
+
+
+def test_installer_preserves_an_opted_in_profile_name_as_one_argument(tmp_path: Path) -> None:
+    """Profile discovery must not split or expand user-owned directory names."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / "team alpha"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    dsh_stub = f"""#!/bin/sh
+printf 'dsh-profile:%s\\n' "$3" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": dsh_stub,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = [
+        line.removeprefix("dsh-profile:")
+        for line in (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+        if line.startswith("dsh-profile:")
+    ]
+    assert profiles_called == ["web", "team alpha"]
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    [
+        "team alpha",
+        "team's alpha",
+        "team$alpha*",
+        "team$(printf PWNED)",
+        "team`printf PWNED`",
+        "team;printf PWNED",
+        "team\nalpha",
+        "team\n",
+        "team\ralpha",
+        "team\x1b[31mred",
+        "team\u202etxt",
+        "team\u200btxt",
+        "팀 alpha",
+    ],
+)
+def test_installer_quotes_profile_in_manual_recovery_command(
+    tmp_path: Path, profile_name: str
+) -> None:
+    """The printed fallback command must preserve a profile name as one shell argument."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 1\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manual_commands = [
+        line.split("Manual install: ", 1)[1]
+        for line in result.stdout.splitlines()
+        if "Manual install: " in line
+    ]
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
+    assert manual_commands == [
+        'dsh plugin --profile web add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+        f'dsh plugin --profile {quoted_profile} add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+    ]
+    expected_warning = f"dsh profile {quoted_profile}: install skipped"
+    assert sum(line.endswith(expected_warning) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    ["team\n", "team\x1b[31mred", "team\u202etxt", "team\u200btxt", "팀 alpha"],
+)
+def test_installer_quotes_profile_in_success_log(tmp_path: Path, profile_name: str) -> None:
+    """Successful installs must not emit raw profile control characters."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 0\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
+    expected_status = f"dsh profile {quoted_profile}: Ouroboros tools installed"
+    assert sum(line.endswith(expected_status) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
+def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
+    """A broken host cannot fail an install that already put Ouroboros on disk."""
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"dsh": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "install skipped" in result.stdout
+    assert "Manual install: dsh plugin --profile web add" in result.stdout

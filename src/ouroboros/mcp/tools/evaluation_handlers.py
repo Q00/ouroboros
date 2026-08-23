@@ -28,15 +28,25 @@ from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
+from ouroboros.mcp.host_context import (
+    render_lateral_host_banner,
+    resolve_request_subagent_dispatch,
+)
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
+from ouroboros.mcp.telemetry_boundary import (
+    record_direct_evaluation_outcome,
+    record_subagent_dispatch_emitted,
+)
 from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
     FetchArtifactHandler,
     SubmitFanoutResultsHandler,
 )
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -1685,7 +1695,6 @@ class LateralThinkHandler(BridgeAwareMixin):
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
                 lateral_persona_panel_metadata_from_capability_definitions,
-                resolve_subagent_dispatch,
                 stamp_fanout_meta,
                 stamp_lateral_persona_fanout,
             )
@@ -1747,12 +1756,22 @@ class LateralThinkHandler(BridgeAwareMixin):
             #     from inline payloads via its own primitive (e.g. Codex). Emit
             #     the inline result stamped with ``host_action=spawn_subagents``.
             #   - SEQUENTIAL: no parallel surface at all → plain inline fallback.
-            dispatch = resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode)
+            dispatch = resolve_request_subagent_dispatch(
+                self.agent_runtime_backend,
+                self.opencode_mode,
+            )
             if dispatch is SubagentDispatchMode.PLUGIN_PASSIVE:
                 # Preserve public response shape (#442): ouroboros_lateral_think
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                record_subagent_dispatch_emitted(
+                    fanout_kind="lateral_persona_panel",
+                    payload_count=len(payloads),
+                    dispatch_mode=dispatch,
+                    worker_backend=self.agent_runtime_backend,
+                    fanout_reentry_available=False,
+                )
                 return build_multi_subagent_result(
                     payloads,
                     response_shape={
@@ -1812,16 +1831,13 @@ class LateralThinkHandler(BridgeAwareMixin):
             # spawn subagents themselves. SEQUENTIAL runtimes now get the same
             # machine-readable contract vocabulary, while preserving
             # ``inline_fallback`` as a legacy alias for older skill prose.
-            host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
             payload_dicts = [p.to_dict() for p in payloads]
             panel_metadata = lateral_persona_panel_metadata_from_capability_definitions()
-            contract_backend = self.agent_runtime_backend
-            if not contract_backend:
-                contract_backend = "codex" if host_driven else "gemini"
             contract = build_runtime_subagent_orchestration_contract(
-                contract_backend,
+                self.agent_runtime_backend or "unknown",
                 directive_metadata=panel_metadata,
                 opencode_mode=self.opencode_mode,
+                dispatch_mode=dispatch,
             )
             dispatch_record: dict[str, Any] = {
                 "persona_count": len(sections),
@@ -1839,7 +1855,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                 payloads=payloads,
                 correlation_key="context.persona",
             )
-            if not host_driven:
+            if dispatch is SubagentDispatchMode.SEQUENTIAL:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             stamp_lateral_persona_fanout(
                 dispatch_record,
@@ -1847,19 +1863,16 @@ class LateralThinkHandler(BridgeAwareMixin):
                 session_id=str(arguments.get("session_id") or ""),
                 payloads=payloads,
             )
+            record_subagent_dispatch_emitted(
+                fanout_kind="lateral_persona_panel",
+                payload_count=len(payloads),
+                dispatch_mode=dispatch,
+                worker_backend=self.agent_runtime_backend,
+                fanout_reentry_available="fanout_id" in dispatch_record,
+            )
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
-            host_banner = (
-                (
-                    "> **Host action — spawn subagents:** this runtime drives "
-                    "fan-out itself. Spawn one subagent per payload below with "
-                    "your native subagent primitive, correlate results by "
-                    f"`context.persona`, then synthesise. Payloads: {len(sections)} "
-                    "(structured copy in `meta` and the dispatch block).\n\n"
-                )
-                if host_driven
-                else ""
-            )
+            host_banner = render_lateral_host_banner(dispatch, len(sections))
             content_text = (
                 f"{host_banner}{combined}\n\n"
                 "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
@@ -2216,22 +2229,24 @@ class StartEvaluateHandler:
             acceptance_may_have_occurred=background_acceptance.may_have_accepted,
         )
 
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=session_id,
+            follow_result_job_keys=("chained_ralph_job_id",),
+        )
         text = (
             f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
             f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
             "or ouroboros_job_result to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "session_id": session_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=session_id,
-                follow_result_job_keys=("chained_ralph_job_id",),
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

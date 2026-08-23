@@ -6,6 +6,8 @@ from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -41,8 +43,11 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
+from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
 def _terminate_and_reap_test_process(process: subprocess.Popen[str] | None) -> None:
@@ -4473,6 +4478,85 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_native_windows_auto_skips_persistent_mcp_registration(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="auto") is True
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_native_windows_stdio_fails_closed(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="stdio") is False
+
+    def test_native_windows_http_mode_writes_explicit_loopback_url(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is True
+
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config
+
+    def test_native_windows_http_fails_without_launchable_mcp(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup._codex_release_mcp_launcher", return_value=None),
+            patch("ouroboros.cli.commands.setup._is_dev_ouroboros_build", return_value=False),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is False
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_native_windows_http_repairs_endpointless_entry(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[mcp_servers.ouroboros]\n", encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._codex_release_mcp_launcher",
+                return_value=("uvx", ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]),
+            ),
+            patch("ouroboros.cli.windows_codex_mcp._launcher_is_usable", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is True
+
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config.read_text(encoding="utf-8")
+
+    def test_windows_prepared_file_ignores_synthetic_posix_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with patch.object(runtime_activation.os, "name", "nt"):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
+    def test_posix_prepared_file_still_rejects_broader_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with (
+            patch.object(runtime_activation.os, "name", "posix"),
+            pytest.raises(OSError, match="Prepared file mode exceeds"),
+        ):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
     @pytest.mark.parametrize(
         ("persisted", "profile"),
         [("claude_mcp", "claude-cli"), ("claude", "claude")],
@@ -7697,6 +7781,417 @@ class TestHermesSetup:
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
+    def test_setup_hermes_reports_failure_when_required_skills_are_not_installed(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_runtime_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_runtime_config, encoding="utf-8")
+        hermes_config = tmp_path / ".hermes" / "config.yaml"
+        hermes_config.parent.mkdir()
+        original_hermes_config = "mcp_servers:\n  existing:\n    command: keep\n"
+        hermes_config.write_text(original_hermes_config, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_hermes_artifacts",
+                return_value=False,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as mock_register,
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        output = capsys.readouterr().out
+        assert result is False
+        assert "activation incomplete" in output
+        assert "Configured Hermes runtime" not in output
+        assert config_path.read_text(encoding="utf-8") == original_runtime_config
+        assert hermes_config.read_text(encoding="utf-8") == original_hermes_config
+        mock_register.assert_not_called()
+
+    @pytest.mark.parametrize("target_existed", (False, True))
+    def test_setup_hermes_rolls_back_skills_when_activation_fails(
+        self, tmp_path: Path, target_existed: bool
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_run = source_skills / "run"
+        source_run.mkdir(parents=True)
+        source_run.joinpath("SKILL.md").write_text("fresh skill\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        if target_existed:
+            target.joinpath("run").mkdir(parents=True)
+            target.joinpath("run", "SKILL.md").write_text("operator generation\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        if target_existed:
+            assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == (
+                "operator generation\n"
+            )
+        else:
+            assert not target.exists()
+
+    def test_setup_hermes_failed_first_publication_leaves_no_unactivated_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        real_replace = os.replace
+
+        def interrupt_after_first_publication(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst) == target and Path(src).name.startswith(".ouroboros-skills-"):
+                raise OSError("committed first publication")
+            return result
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.os.replace",
+                side_effect=interrupt_after_first_publication,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert not target.exists()
+        register.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == (
+            "orchestrator:\n  runtime_backend: claude\n"
+        )
+
+    def test_setup_hermes_rolls_back_when_post_publication_snapshot_fails(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        original_snapshot = setup_cmd._snapshot_path
+
+        def fail_published_snapshot(path: Path, **kwargs):
+            skill = target / "run" / "SKILL.md"
+            if path == target and skill.exists() and skill.read_text(encoding="utf-8") == "fresh\n":
+                raise OSError("synthetic post-publication snapshot failure")
+            return original_snapshot(path, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._snapshot_path",
+                side_effect=fail_published_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
+        assert config_path.read_text(encoding="utf-8") == original_config
+        register.assert_not_called()
+
+    def test_setup_hermes_preserves_edit_after_publication_before_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        from ouroboros.hermes.artifacts import install_hermes_skills
+
+        real_install = install_hermes_skills
+
+        def publish_then_operator_edit(**kwargs):
+            receipt = real_install(**kwargs)
+            target.joinpath("operator-after-publish.txt").write_text("preserve\n", encoding="utf-8")
+            return receipt
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.install_hermes_skills",
+                side_effect=publish_then_operator_edit,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("operator-after-publish.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+
+    def test_setup_hermes_rollback_staging_failure_keeps_published_generation(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=OSError("synthetic staging write failure"),
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "published\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_revalidates_after_staging(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        real_restore = setup_cmd._restore_path_snapshot
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        def stage_then_mutate(path, snapshot, **kwargs) -> None:
+            real_restore(path, snapshot, **kwargs)
+            target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=stage_then_mutate,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-state.txt"
+        external.write_text("before\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+
+        def fail_after_external_update(*, detected) -> bool:  # noqa: ARG001
+            external.write_text("concurrent\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_external_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "concurrent\n"
+
+    def test_setup_hermes_never_reads_nested_symlink_targets(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-secret.txt"
+        external.write_text("secret\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+        real_read_bytes = Path.read_bytes
+
+        def refuse_external_read(path: Path) -> bytes:
+            if path == external:
+                raise AssertionError("nested symlink target was read")
+            return real_read_bytes(path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.read_bytes", refuse_external_read),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "secret\n"
+
+    def test_setup_hermes_rollback_preserves_concurrent_managed_tree_edits(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("operator-note.txt").parent.mkdir(parents=True)
+        target.joinpath("operator-note.txt").write_text("before\n", encoding="utf-8")
+
+        def fail_after_tree_update(*, detected) -> bool:  # noqa: ARG001
+            target.joinpath("operator-note.txt").write_text("concurrent\n", encoding="utf-8")
+            target.joinpath("new-note.txt").write_text("new concurrent file\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_tree_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "concurrent\n"
+        assert target.joinpath("new-note.txt").read_text(encoding="utf-8") == (
+            "new concurrent file\n"
+        )
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"
@@ -10126,6 +10621,189 @@ class TestCopilotSetup:
             assert setup_cmd._install_pi_ooo_bridge() is True
 
         assert bridge_path.stat().st_mtime_ns == first_mtime
+
+    def test_pi_bridge_registers_argument_completions(self) -> None:
+        """The managed bridge should TAB-complete `/ooo` arguments.
+
+        `/ooo <TAB>` lists the dispatchable subcommands and `ooo run <TAB>`
+        lists Seed files from `~/.ouroboros/seeds/` as `run <quoted-absolute-path>`
+        so Pi's full-prefix replacement preserves the subcommand and the
+        completed value executes regardless of the Pi session cwd.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+
+        assert "getArgumentCompletions: argumentCompletions" in bridge_source
+        assert "function argumentCompletions(argumentPrefix: string)" in bridge_source
+        assert 'path.join(homedir(), ".ouroboros", "seeds")' in bridge_source
+        # Seed completion values carry `run <quoted path>` — Pi replaces the
+        # entire argument prefix with the value, so `run` must be part of it.
+        assert "value: `run ${quoted}`" in bridge_source
+        assert ".sort()" in bridge_source
+        assert 'tokens[0].toLowerCase() === "run"' in bridge_source
+
+    def test_pi_bridge_completions_mirror_dispatchable_skills(self) -> None:
+        """Completion subcommands must mirror dispatcher-eligible skills.
+
+        Eligibility is derived through ``resolve_skill_dispatch`` itself —
+        frontmatter loading, ``normalize_mcp_frontmatter`` validation, and
+        template resolution — instead of a textual ``mcp_tool:`` grep, so a
+        body example or an invalid/missing ``mcp_args`` mapping cannot make
+        an undispatchable skill look dispatchable.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+        completed = set(re.findall(r'cmd: "([a-z0-9][a-z0-9_-]*)"', bridge_source))
+
+        with resolve_packaged_skills_dir(anchor_file=Path(__file__)) as skills_dir:
+            dispatchable = {
+                skill_dir.name
+                for skill_dir in skills_dir.iterdir()
+                if (skill_dir / "SKILL.md").is_file()
+                and isinstance(
+                    resolve_skill_dispatch(
+                        ResolveRequest(prompt=f"ooo {skill_dir.name}", cwd=Path.cwd())
+                    ),
+                    Resolved,
+                )
+            }
+
+        assert completed == dispatchable
+
+    async def test_pi_bridge_run_completion_value_round_trips_to_global_seed(
+        self, tmp_path: Path
+    ) -> None:
+        """Absolute Seed completion values must stay executable end to end.
+
+        The `run` dispatcher forwards ``seed_path`` unchanged and the seed
+        resolver treats relative paths as session-cwd-relative, degrading a
+        missing file to inline YAML. Completion therefore advertises
+        ``run <quoted-absolute-path>``; this test pins that contract from the
+        completed value through router resolution to seed loading.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        absolute_path = str(seeds_dir / "demo.yaml")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        # The completion value now carries `run <path>` — the full replacement
+        # that Pi will substitute for the argument prefix.
+        completed_value = f"run {absolute_path}"
+
+        resolved = resolve_skill_dispatch(
+            ResolveRequest(prompt=f"ooo {completed_value}", cwd=session_cwd)
+        )
+        assert isinstance(resolved, Resolved)
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            loaded = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": absolute_path},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+            bare_name = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": "demo.yaml"},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+
+        assert loaded.is_ok
+        assert loaded.value == "goal: demo\n"
+        # The pre-fix completion shape: a bare name never reaches the global
+        # store from a session cwd and degrades to inline YAML.
+        assert bare_name.is_ok
+        assert bare_name.value == "demo.yaml"
+
+    def test_pi_completion_value_survives_combined_autocomplete_provider_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Seed completion values remain dispatchable after Pi's full-prefix replacement.
+
+        Pi's ``CombinedAutocompleteProvider.applyCompletion`` replaces the
+        entire argument prefix with ``item.value``. For example, when a user
+        types ``/ooo run de<TAB>`` and selects a Seed completion, the argument
+        text ``run de`` is replaced wholesale with the item's ``value``.
+
+        Before the fix, ``value`` was just the absolute path, so the result
+        was ``/ooo /path/to/demo.yaml`` — which the shared dispatcher could
+        not recognize (no ``run`` subcommand). This regression test verifies
+        that the completed value, when applied as Pi does, produces a
+        dispatchable command.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+
+        # --- Simulate Pi's CombinedAutocompleteProvider semantics ---
+        # The user types: /ooo run de
+        # argumentPrefix passed to getArgumentCompletions: "run de"
+        # The rendered bridge returns: { value: "run <absolute-path>", ... }
+        # Pi applies the completion: replaces "run de" with item.value.
+        # The final command dispatched: /ooo <item.value>
+
+        # The completion value as the bridge would render it (without
+        # shell-quoting since this path has no special chars):
+        completed_item_value = f"run {absolute_path}"
+
+        # Pi replaces the full argument prefix with item.value, making the
+        # dispatched command: `ooo <completed_item_value>`
+        dispatched_text = f"ooo {completed_item_value}"
+
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Pi full-prefix replacement produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        # --- Verify the OLD (broken) behavior would fail ---
+        # Before the fix, value was just the absolute path (no 'run' prefix).
+        broken_item_value = absolute_path
+        broken_dispatched = f"ooo {broken_item_value}"
+        broken_result = resolve_skill_dispatch(
+            ResolveRequest(prompt=broken_dispatched, cwd=session_cwd)
+        )
+        # The absolute path alone is not a recognized skill subcommand
+        assert not isinstance(broken_result, Resolved), (
+            "Bare absolute path should NOT dispatch — it means Pi's replacement "
+            "lost the 'run' subcommand"
+        )
+
+    def test_pi_completion_value_with_quoted_path_survives_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Every shlex-supported pathname character survives Pi replacement.
+
+        The rendered bridge uses POSIX single-argument quoting, including the
+        standard quote break for an embedded single quote. The dispatcher's
+        ``shlex.split`` must recover the exact original path without expanding
+        dollar signs or backticks or retaining escape characters.
+        """
+        seeds_dir = tmp_path / "my $projects`archive'\\data" / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: quoted\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+        quoted_path = shlex.quote(absolute_path)
+        completed_item_value = f"run {quoted_path}"
+
+        dispatched_text = f"ooo {completed_item_value}"
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Quoted-path completion produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
 
 
 class TestRuntimeFlagDispatch:

@@ -62,6 +62,7 @@ from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
+from ouroboros.mcp.tools.job_observer import extract_job_observer_inline_handoff
 from ouroboros.mcp.tools.synapse_handler import SynapseTargetsHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.synapse import EventStoreSessionSignalTargetResolver
@@ -338,6 +339,14 @@ async def test_start_evolve_links_generation_selected_after_interleaving(
         stale = f"evolve:{lineage_id}:generation:1"
         assert started.value.meta["execution_id"] == expected
         assert started.value.meta["job_observer"]["execution_id"] == expected
+        assert (
+            extract_job_observer_inline_handoff(
+                started.value.text_content,
+                expected_job_id=started.value.meta["job_id"],
+                expected_execution_id=expected,
+            )
+            == started.value.meta["job_observer"]
+        )
         assert started.value.structured_content["execution_id"] == expected
 
         await asyncio.wait_for(generation_started.wait(), timeout=1.0)

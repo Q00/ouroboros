@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Mapping
+import json
+import re
 from typing import Any
 
 JOB_OBSERVER_PROTOCOL = "ouroboros.job_observer.v1"
+JOB_OBSERVER_INLINE_OPEN = "<!-- ouroboros-job-observer-v1 base64\n"
+JOB_OBSERVER_INLINE_CLOSE = "\n-->"
+_JOB_OBSERVER_INLINE_MAX_DECODED_BYTES = 8_192
+_JOB_OBSERVER_INLINE_MAX_ENCODED_CHARS = 10_924
+_JOB_OBSERVER_JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_JOB_OBSERVER_FOLLOW_RESULT_KEYS = frozenset(
+    {
+        "job_id",
+        "ralph_job_id",
+        "chained_evaluate_job_id",
+        "chained_ralph_job_id",
+    }
+)
 
 
 def build_job_observer_contract(
@@ -24,6 +41,11 @@ def build_job_observer_contract(
     hosts use the declared fallback.
     """
     normalized_cursor = cursor if isinstance(cursor, int) and not isinstance(cursor, bool) else 0
+    normalized_follow_result_job_keys = list(follow_result_job_keys)
+    if len(normalized_follow_result_job_keys) != len(set(normalized_follow_result_job_keys)):
+        raise ValueError("Observer follow-result job keys must be unique")
+    if not set(normalized_follow_result_job_keys).issubset(_JOB_OBSERVER_FOLLOW_RESULT_KEYS):
+        raise ValueError("Observer follow-result job key is not allowed by protocol v1")
     if normalized_cursor < 0:
         normalized_cursor = 0
 
@@ -51,7 +73,7 @@ def build_job_observer_contract(
             "tool": "ouroboros_job_result",
             "arguments": {"job_id": job_id},
         },
-        "follow_result_job_keys": list(follow_result_job_keys),
+        "follow_result_job_keys": normalized_follow_result_job_keys,
         "main_session_policy": "start_and_on_demand_only",
         "host_lifecycle": {
             "spawn_required_for_live_relay": True,
@@ -138,4 +160,126 @@ def build_job_observer_contract(
     }
 
 
-__all__ = ["JOB_OBSERVER_PROTOCOL", "build_job_observer_contract"]
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON object while rejecting keys hidden by last-write-wins."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def validate_job_observer_contract(
+    value: object,
+    *,
+    expected_job_id: str | None = None,
+    expected_session_id: str | None = None,
+    expected_execution_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a complete canonical observer contract or fail closed."""
+    if not isinstance(value, dict):
+        return None
+
+    job_id = value.get("job_id")
+    cursor = value.get("cursor")
+    session_id = value.get("session_id")
+    execution_id = value.get("execution_id")
+    follow_result_job_keys = value.get("follow_result_job_keys")
+
+    if not isinstance(job_id, str) or not _JOB_OBSERVER_JOB_ID_PATTERN.fullmatch(job_id):
+        return None
+    if expected_job_id is not None and job_id != expected_job_id:
+        return None
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+        return None
+    if session_id is not None and (not isinstance(session_id, str) or not session_id):
+        return None
+    if expected_session_id is not None and session_id != expected_session_id:
+        return None
+    if execution_id is not None and (not isinstance(execution_id, str) or not execution_id):
+        return None
+    if expected_execution_id is not None and execution_id != expected_execution_id:
+        return None
+    if not isinstance(follow_result_job_keys, list) or any(
+        not isinstance(key, str) or key not in _JOB_OBSERVER_FOLLOW_RESULT_KEYS
+        for key in follow_result_job_keys
+    ):
+        return None
+    if len(follow_result_job_keys) != len(set(follow_result_job_keys)):
+        return None
+    expected = build_job_observer_contract(
+        job_id=job_id,
+        cursor=cursor,
+        session_id=session_id,
+        execution_id=execution_id,
+        follow_result_job_keys=tuple(follow_result_job_keys),
+    )
+    return dict(value) if value == expected else None
+
+
+def append_job_observer_inline_handoff(
+    text: str,
+    contract: Mapping[str, Any],
+) -> str:
+    """Append one bounded canonical observer contract for text-only hosts."""
+    canonical = validate_job_observer_contract(dict(contract))
+    if canonical is None:
+        raise ValueError("Observer inline handoff requires a canonical protocol v1 contract")
+    payload = json.dumps(
+        {"job_observer": canonical},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _JOB_OBSERVER_INLINE_MAX_DECODED_BYTES:
+        raise ValueError("Observer inline handoff exceeds the bounded payload size")
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"{text.rstrip()}\n\n{JOB_OBSERVER_INLINE_OPEN}{encoded}{JOB_OBSERVER_INLINE_CLOSE}"
+
+
+def extract_job_observer_inline_handoff(
+    text: str,
+    *,
+    expected_job_id: str,
+    expected_session_id: str | None = None,
+    expected_execution_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Recover and validate the canonical observer contract from text output."""
+    if text.count(JOB_OBSERVER_INLINE_OPEN) != 1:
+        return None
+    open_idx = text.rfind(JOB_OBSERVER_INLINE_OPEN)
+    close_idx = text.find(JOB_OBSERVER_INLINE_CLOSE, open_idx)
+    if close_idx == -1:
+        return None
+    if text[close_idx + len(JOB_OBSERVER_INLINE_CLOSE) :].strip():
+        return None
+    encoded = text[open_idx + len(JOB_OBSERVER_INLINE_OPEN) : close_idx]
+    if not encoded or len(encoded) > _JOB_OBSERVER_INLINE_MAX_ENCODED_CHARS:
+        return None
+    try:
+        payload_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+        if len(payload_bytes) > _JOB_OBSERVER_INLINE_MAX_DECODED_BYTES:
+            return None
+        decoded = payload_bytes.decode("utf-8")
+        payload = json.loads(decoded, object_pairs_hook=_reject_duplicate_json_keys)
+    except (RecursionError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"job_observer"}:
+        return None
+    return validate_job_observer_contract(
+        payload["job_observer"],
+        expected_job_id=expected_job_id,
+        expected_session_id=expected_session_id,
+        expected_execution_id=expected_execution_id,
+    )
+
+
+__all__ = [
+    "JOB_OBSERVER_INLINE_CLOSE",
+    "JOB_OBSERVER_INLINE_OPEN",
+    "JOB_OBSERVER_PROTOCOL",
+    "append_job_observer_inline_handoff",
+    "build_job_observer_contract",
+    "extract_job_observer_inline_handoff",
+    "validate_job_observer_contract",
+]

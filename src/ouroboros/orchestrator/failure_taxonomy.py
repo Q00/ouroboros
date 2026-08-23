@@ -46,6 +46,12 @@ class FailureClass(StrEnum):
         BLOCKED: Leaf surfaced a hard precondition it could not satisfy
             (missing tool, missing access, env variable). Verifier-
             classified.
+        TRANSCRIPT_MISSING_INFRASTRUCTURE: The leaf's runtime transcript
+            reached the verifier completely empty, so there was nothing to
+            check its evidence against. This is a collection failure, not a
+            worker failure: a gaming leaf leaves plausible-looking messages,
+            not none. Kept distinct from EVIDENCE_MISSING so an infrastructure
+            fault is never reported — or counted — as a worker rejection.
     """
 
     EVIDENCE_MISSING = "EVIDENCE_MISSING"
@@ -54,6 +60,7 @@ class FailureClass(StrEnum):
     SCOPE_CREEP = "SCOPE_CREEP"
     STALL = "STALL"
     BLOCKED = "BLOCKED"
+    TRANSCRIPT_MISSING_INFRASTRUCTURE = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
 
 
 _HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
@@ -173,6 +180,7 @@ class RecoveryAction(StrEnum):
     """What the orchestrator should do next after a classified failure."""
 
     RETRY = "RETRY"  # same dispatch, with the verifier's feedback.
+    CONTINUE = "CONTINUE"  # preserve completed work; verification stayed unavailable.
     ESCALATE_MODEL = "ESCALATE_MODEL"  # rerun on a higher model tier.
     REDISPATCH = "REDISPATCH"  # discard and split the AC again.
     ESCALATE_HUMAN = "ESCALATE_HUMAN"  # surface to the operator.
@@ -248,6 +256,13 @@ _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
         rationale=(
             "Leaf reported a hard precondition the harness cannot "
             "satisfy automatically (missing tool / access / config)."
+        ),
+    ),
+    FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE: RecoveryPolicy(
+        action=RecoveryAction.CONTINUE,
+        rationale=(
+            "The harness lost the transcript after the leaf completed. Preserve "
+            "the work as unverified instead of repeating provider effects."
         ),
     ),
 }

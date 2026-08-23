@@ -43,6 +43,7 @@ _CORRELATION_KEY = "question_advisory_result_correlation_key"
 _FANOUT_ID_KEY = "question_advisory_fanout_id"
 _DEFAULT_CORRELATION_KEY = "context.lane_id"
 _SEQUENTIAL_HOST_ACTION = "process_payloads_sequentially"
+_HOST_DECIDES_ACTION = "dispatch_subagents_if_supported"
 
 #: Boundary between the question and the host directive that follows it.
 #:
@@ -150,11 +151,15 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
     correlation_key = str(meta.get(_CORRELATION_KEY) or _DEFAULT_CORRELATION_KEY)
     lanes = _lane_ids(payloads)
     required_lanes = _lane_ids(payloads, required_only=True)
-    directive = (
-        "process every payload below sequentially"
-        if host_action == _SEQUENTIAL_HOST_ACTION
-        else "spawn one subagent per payload below with your native subagent primitive"
-    )
+    if host_action == _SEQUENTIAL_HOST_ACTION:
+        directive = "process every payload below sequentially"
+    elif host_action == _HOST_DECIDES_ACTION:
+        directive = (
+            "use your native parallel subagent primitive when available; "
+            "otherwise process every payload below sequentially"
+        )
+    else:
+        directive = "spawn one subagent per payload below with your native subagent primitive"
 
     lines = [
         response_text,

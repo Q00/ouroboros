@@ -75,6 +75,16 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executor = _make_executor(enabled=True)
+    executor._run_verify_commands = False
+    executor._verify_command_timeout_seconds = 17
+    executor_kwargs: dict[str, object] = {}
+    original_init = ParallelACExecutor.__init__
+
+    def _capture_executor_init(self: ParallelACExecutor, *args: object, **kwargs: object) -> None:
+        executor_kwargs.update(kwargs)
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ParallelACExecutor, "__init__", _capture_executor_init)
     created_kwargs: dict[str, object] = {}
 
     def _fake_create_agent_runtime(**kwargs: object) -> MagicMock:
@@ -118,6 +128,8 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
 
     assert result is not None and result.success is True
     assert created_kwargs["permission_mode"] == "bypassPermissions"
+    assert executor_kwargs["run_verify_commands"] is False
+    assert executor_kwargs["verify_command_timeout_seconds"] == 17
 
 
 @pytest.mark.asyncio

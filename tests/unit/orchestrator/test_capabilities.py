@@ -239,7 +239,11 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "session_id",
     ),
     "ouroboros_start_ralph": ("lineage_id",),
-    "ouroboros_fetch_artifact": ("contract_id",),
+    # Empty because neither parameter is required on its own: a `contract_id`
+    # reads one artifact, a `lane_id` alone lists what a lane published here
+    # recently, and an MCP schema cannot say "one of these". The handler is
+    # where the pair is judged, and it refuses a request carrying neither.
+    "ouroboros_fetch_artifact": (),
     "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }
 
@@ -4646,7 +4650,7 @@ def test_lateral_persona_panel_metadata_is_structured_without_prose_parsing() ->
     panel = lateral.metadata.orchestration["lateral_panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["dispatch_modes"] == ["plugin", "host_driven", "host_decides", "sequential"]
     assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {
