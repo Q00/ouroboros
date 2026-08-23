@@ -500,8 +500,12 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
 
     There is no ``observed_at``. It was required here for two rounds and is
     removed by RFC #1754's second revision: ageing is accepted unconditionally,
-    and the interview session is the measurement's time envelope, so a field
-    restating it bought nothing a consumer read. It also asked an LLM child with
+    so a field restating it bought nothing a consumer read. The envelope that
+    reasoning named was the interview session; RFC #2153 supersedes that with
+    recency, on the reasoning that a measurement moves on the system's clock
+    rather than on the clock of whoever is being interviewed. What is unchanged
+    is why no field is needed: the aggregate is shown beside the question and
+    the user answers in their own words, so its age is theirs to weigh. It also asked an LLM child with
     no clock to testify about time, which cost three rounds of validators —
     digits, then component ranges, then a wall clock with a skew allowance. The
     close is structural rather than another validator: a field that does not
@@ -1052,6 +1056,45 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "description": "The already user-visible MCP interview question.",
+            },
+            "recent_findings": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    lane: {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["contract_id", "lane_id", "published_at"],
+                            "properties": {
+                                "contract_id": {"type": "string", "minLength": 1},
+                                # const, not just string: an entry under one
+                                # lane key naming a sibling lane would offer
+                                # that sibling's output, so the pairing is made
+                                # unrepresentable rather than trusted.
+                                "lane_id": {"const": lane},
+                                "published_at": {"type": "string", "minLength": 1},
+                            },
+                        },
+                    }
+                    for lane in ("code_context", "data_context")
+                },
+                "description": (
+                    "Where this project's recent findings are, keyed by the lane "
+                    "that produced them: a lane is offered only its own, and the "
+                    "reasoning lanes are absent because a lane that produces no "
+                    "fact that keeps consumes none either (RFC "
+                    "Q00/ouroboros#2167). Each entry is a contract_id and the "
+                    "lane_id that narrows it, both passed to "
+                    "ouroboros_fetch_artifact, and when it was published. "
+                    "Bodies do not travel: carried inline they were duplicated "
+                    "into every lane of the turn, which outgrew what a host "
+                    "accepts inline and cost the turn its fan-out. A lane with "
+                    "none is absent, as is the whole field when the project has "
+                    "published nothing recent."
+                ),
             },
             "last_question": {
                 "type": "string",

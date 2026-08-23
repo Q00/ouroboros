@@ -72,7 +72,11 @@ fallback instead of retrying the failing call.
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
-   Before a fresh start, when no efficiency choice is already known, ask in
+   Before a fresh start, when no efficiency choice is already known, first
+   check the persistent default: when `execution.default_policy` in
+   `~/.ouroboros/config.yaml` is `efficient` or `quality_first`, do not ask —
+   omit both arguments and the server applies the configured default (the
+   start handoff still reports the resolved policy). Otherwise ask in
    user-outcome language: **Efficient execution** maps to
    `efficiency_mode="adaptive"` plus `frugality_assurance="observe"`;
    **Quality-first execution** maps to `efficiency_mode="quality_first"` plus
@@ -122,11 +126,17 @@ fallback instead of retrying the failing call.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   When `response.meta.job_observer` is present and an independent Task/Agent
-   child is available, spawn exactly one read-only observer and pass the contract
-   unchanged. It exclusively owns job wait/result and the cursor. The main
-   session must not poll the same job. Before writing to the active workspace,
-   check worker overlap or use an isolated worktree.
+   If `response.meta.job_observer` is unavailable, recover it from the final
+   `<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail closed
+   unless the single bounded payload passes canonical v1 validation and its
+   job/session/execution identity matches the visible start receipt. Visible IDs
+   are identity anchors only; never reconstruct tools or arguments from them.
+
+   When a structured or validated recovered `job_observer` is present and an
+   independent Task/Agent child is available, spawn exactly one read-only
+   observer and pass the contract unchanged. It exclusively owns job wait/result
+   and the cursor. The main session must not poll the same job. Before writing to
+   the active workspace, check worker overlap or use an isolated worktree.
    Do not claim an observer exists until Task/Agent returns a live child handle.
    On Codex, once `spawn_agent` returns that handle, keep the parent turn open
    with `wait_agent` calls of at most 60 seconds until the observer returns its

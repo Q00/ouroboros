@@ -31,6 +31,17 @@ PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 CODEX_PLUGIN_JSON = ROOT / ".codex-plugin" / "plugin.json"
 _DEFAULT_CODEX_PLUGIN_JSON = CODEX_PLUGIN_JSON
+MCP_JSON = ROOT / ".claude-plugin" / ".mcp.json"
+_DEFAULT_MCP_JSON = MCP_JSON
+CODEX_MCP_JSON = ROOT / ".mcp.codex.json"
+_DEFAULT_CODEX_MCP_JSON = CODEX_MCP_JSON
+# The uvx --from requirement in the SHIPPED plugin MCP descriptors (#2066):
+# pinned to the plugin version so a plugin update changes the uvx cache key
+# and the served package moves with it. Both the Claude plugin descriptor
+# and the Codex plugin descriptor (declared by .codex-plugin/plugin.json)
+# share this pin; repository-root development launchers stay unpinned. An
+# unpinned spec is accepted on read so the first sync can introduce the pin.
+MCP_FROM_SPEC_RE = re.compile(r"^ouroboros-ai\[mcp\](?:==(?P<version>[0-9A-Za-z.!+]+))?$")
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
@@ -501,6 +512,87 @@ def update_json(
     )
 
 
+def _read_mcp_from_spec(data: object) -> tuple[int, str]:
+    """Locate the single uvx ``--from`` requirement for ``ouroboros-ai[mcp]``.
+
+    Returns the args index of the requirement and its current version pin
+    (empty string when unpinned). Raises ``ValueError`` on any shape that
+    would make the rewrite ambiguous.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("top-level JSON value must be an object")
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        raise ValueError("mcpServers must be an object")
+    server = servers.get("ouroboros")
+    if not isinstance(server, dict):
+        raise ValueError("mcpServers.ouroboros must be an object")
+    args = server.get("args")
+    if not isinstance(args, list):
+        raise ValueError("mcpServers.ouroboros.args must be an array")
+    from_positions = [
+        index
+        for index, arg in enumerate(args)
+        if arg == "--from" or (isinstance(arg, str) and arg.startswith("--from="))
+    ]
+    if len(from_positions) != 1:
+        raise ValueError("expected exactly one --from option")
+    positions = [
+        index + 1
+        for index, arg in enumerate(args[:-1])
+        if arg == "--from"
+        and isinstance(args[index + 1], str)
+        and args[index + 1].startswith("ouroboros-ai[mcp]")
+    ]
+    if len(positions) != 1:
+        raise ValueError("expected exactly one --from ouroboros-ai[mcp] requirement")
+    spec = args[positions[0]]
+    match = MCP_FROM_SPEC_RE.match(spec)
+    if match is None:
+        raise ValueError(f"unrecognized ouroboros-ai[mcp] requirement: {spec}")
+    return positions[0], match.group("version") or ""
+
+
+def _mcp_pinned_content(original: bytes, version: str) -> tuple[bytes, str]:
+    """Return the pinned ``.mcp.json`` bytes and the old pin for *version*."""
+    data = _parse_json_bytes(original)
+    index, old_pin = _read_mcp_from_spec(data)
+    assert isinstance(data, dict)  # _read_mcp_from_spec validated the shape
+    data["mcpServers"]["ouroboros"]["args"][index] = f"ouroboros-ai[mcp]=={version}"
+    content = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    return content, old_pin
+
+
+def update_mcp_from_pin(
+    path: Path,
+    version: str,
+    *,
+    expected_current: bytes | None = None,
+    expected_generation: _PathGeneration | None = None,
+) -> _PathGeneration | None:
+    """Pin the plugin MCP server requirement to *version* (#2066)."""
+    original = expected_current if expected_current is not None else path.read_bytes()
+    content, _old_pin = _mcp_pinned_content(original, version)
+    if original == content:
+        return None
+    owned_generation = _atomic_write_bytes(
+        path,
+        content,
+        expected_current=original,
+        expected_generation=expected_generation,
+    )
+    try:
+        updated = path.read_bytes()
+        if updated != content:
+            raise RuntimeError(f"failed to verify MCP requirement pin in {path}")
+        _index, new_pin = _read_mcp_from_spec(_parse_json_bytes(updated))
+        if new_pin != version:
+            raise RuntimeError(f"failed to verify MCP requirement pin in {path}")
+    except BaseException as exc:
+        raise _OwnedWriteError(path, owned_generation, exc) from exc
+    return owned_generation
+
+
 def _run() -> None:
     write = "--write" in sys.argv
 
@@ -590,6 +682,31 @@ def _run() -> None:
             sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
         json_targets.append((path, nested, data, old))
 
+    # The shipped plugin MCP descriptors pin the served package to the plugin
+    # version (#2066). Optional like the Codex manifest so relocated test
+    # roots without a descriptor skip it; the real repository has both.
+    descriptor_candidates = (
+        ROOT / ".claude-plugin" / ".mcp.json"
+        if MCP_JSON == _DEFAULT_MCP_JSON and ROOT != _DEFAULT_ROOT
+        else MCP_JSON,
+        ROOT / ".mcp.codex.json"
+        if CODEX_MCP_JSON == _DEFAULT_CODEX_MCP_JSON and ROOT != _DEFAULT_ROOT
+        else CODEX_MCP_JSON,
+    )
+    mcp_descriptors: list[tuple[Path, str]] = []
+    for descriptor in descriptor_candidates:
+        if not descriptor.exists():
+            continue
+        try:
+            original_generations[descriptor] = _path_generation(descriptor)
+            original = descriptor.read_bytes()
+            originals[descriptor] = original
+            pinned_content, old_pin = _mcp_pinned_content(original, version)
+            expected_writes[descriptor] = original if old_pin == version else pinned_content
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            sys.exit(f"Error: could not validate {descriptor.relative_to(ROOT)}: {exc}")
+        mcp_descriptors.append((descriptor, old_pin))
+
     changed = False
     for path, (_text, old_marker) in setup_markers.items():
         expected_writes[path] = originals[path].replace(
@@ -619,6 +736,27 @@ def _run() -> None:
                 changed = True
             else:
                 print(f"  DRIFT {path.relative_to(ROOT)} ({old} != {version})")
+                changed = True
+
+        for descriptor, old_pin in mcp_descriptors:
+            shown_pin = old_pin or "unpinned"
+            if old_pin == version:
+                print(f"  OK    {descriptor.relative_to(ROOT)} ({shown_pin})")
+            elif write:
+                attempted.append(descriptor)
+                owned_generation = update_mcp_from_pin(
+                    descriptor,
+                    version,
+                    expected_current=originals[descriptor],
+                    expected_generation=original_generations[descriptor],
+                )
+                if owned_generation is None:
+                    sys.exit(f"Error: failed to update {descriptor.relative_to(ROOT)}")
+                owned_writes[descriptor] = owned_generation
+                print(f"  WRITE {descriptor.relative_to(ROOT)} ({shown_pin} -> {version})")
+                changed = True
+            else:
+                print(f"  DRIFT {descriptor.relative_to(ROOT)} ({shown_pin} != {version})")
                 changed = True
 
         for path, (_text, old_marker) in setup_markers.items():

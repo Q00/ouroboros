@@ -84,6 +84,18 @@ AGENT_SDK_CLI_PER_MESSAGE_FRAMING_CHARS = 128
 # model locally while still tripling the original 4.8k interview budget.
 AGENT_SDK_CLI_SAFE_PROMPT_CHARS = 14_000
 
+# The two rules that make a generated turn a question at all. They live in the
+# dynamic header — which every build preserves first — instead of only inside
+# the loaded agent prompt, whose tail is the first thing the character budget
+# trims. Leaving them there made their survival depend on where they happen to
+# sit in a markdown file and on how large the header and perspective panel grew
+# that round: in a late round with a stored ambiguity snapshot, the response
+# format was silently dropped from the prompt that needed it most.
+RESPONSE_CONTRACT = (
+    "Response contract: emit exactly ONE question and end with it. "
+    "Never announce implementation work — another agent does that later."
+)
+
 _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - You are only an interviewer.
 - Generate exactly one Socratic question that reduces requirements ambiguity.
@@ -481,6 +493,13 @@ class InterviewState(BaseModel):
         if detected_terms:
             self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
         self.invalidate_requirement_distillation()
+        # The ambiguity snapshot is derived from the answered rounds, exactly
+        # like the distillation above, so it dies where its inputs change
+        # rather than at each call site that remembers to clear it. Leaving it
+        # to callers let a durable save land rounds from revision N+1 next to a
+        # score from revision N: an interrupted process then resumed with a
+        # score that _select_perspectives reads as current.
+        self.clear_stored_ambiguity()
         self.mark_updated()
         return round_data
 
@@ -683,6 +702,18 @@ def _parse_question_candidate(persona: str, response: str) -> QuestionCandidate 
     return QuestionCandidate(persona=persona, question=question, target_dimension=target)
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedInterviewQuestion:
+    """Provider-ready question request or an immediate deterministic question."""
+
+    immediate_question: str | None = None
+    messages: tuple[Message, ...] = ()
+    config: CompletionConfig | None = None
+    system_prompt: str = ""
+    conversation_history: tuple[Message, ...] = ()
+    preserve_prefix_messages: int = 0
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -845,20 +876,21 @@ class InterviewEngine:
 
         return Result.ok(state)
 
-    async def ask_next_question(
-        self, state: InterviewState
-    ) -> Result[str, ProviderError | ValidationError]:
-        """Generate the next question based on current state.
+    def prepare_next_question(
+        self,
+        state: InterviewState,
+    ) -> Result[PreparedInterviewQuestion, ValidationError]:
+        """Build the canonical provider request for the next interview question.
 
-        Args:
-            state: Current interview state.
-
-        Returns:
-            Result containing the next question or error.
+        The ordinary question path and the atomic turn planner share this exact
+        prompt-budgeting boundary. This prevents a fused turn from drifting from
+        the long-context, glossary, reference, and PM-steering behavior already
+        owned by :class:`InterviewEngine`.
         """
         if state.is_complete and state.needs_initial_context_summary:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
-
+            return Result.ok(
+                PreparedInterviewQuestion(immediate_question=self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            )
         if state.is_complete:
             return Result.err(
                 ValidationError(
@@ -867,15 +899,17 @@ class InterviewEngine:
                     value=state.status,
                 )
             )
+
         effective_initial_context = self._effective_initial_context(state)
         if effective_initial_context is None:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            return Result.ok(
+                PreparedInterviewQuestion(immediate_question=self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            )
 
         adapter_question = state.next_adapter_question()
         if adapter_question is not None:
-            return Result.ok(adapter_question)
+            return Result.ok(PreparedInterviewQuestion(immediate_question=adapter_question))
 
-        # Build the context from previous rounds
         conversation_history = self._build_conversation_history(
             state,
             initial_context=effective_initial_context,
@@ -894,10 +928,6 @@ class InterviewEngine:
             max_chars=history_budget,
             preserve_prefix_messages=preserve_prefix_messages,
         )
-
-        # Generate next question. Budget against estimated serialized CLI
-        # prompt cost, not raw message content, because CLI adapters add
-        # framing around every message before sending prompts to the model.
         history_cost = self._message_budget_cost(conversation_history)
         system_prompt_budget = min(
             self._MAX_SYSTEM_PROMPT_CHARS,
@@ -911,10 +941,10 @@ class InterviewEngine:
             initial_context=effective_initial_context,
             max_chars=system_prompt_budget,
         )
-        messages = [
+        messages = (
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             *conversation_history,
-        ]
+        )
 
         assert self.model is not None
         config = CompletionConfig(
@@ -924,7 +954,29 @@ class InterviewEngine:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
+        return Result.ok(
+            PreparedInterviewQuestion(
+                messages=messages,
+                config=config,
+                system_prompt=system_prompt,
+                conversation_history=tuple(conversation_history),
+                preserve_prefix_messages=preserve_prefix_messages,
+            )
+        )
 
+    async def ask_next_question(
+        self, state: InterviewState
+    ) -> Result[str, ProviderError | ValidationError]:
+        """Generate the next question based on current state."""
+        prepared_result = self.prepare_next_question(state)
+        if prepared_result.is_err:
+            return Result.err(prepared_result.error)
+        prepared = prepared_result.value
+        if prepared.immediate_question is not None:
+            return Result.ok(prepared.immediate_question)
+
+        assert prepared.config is not None
+        messages = list(prepared.messages)
         log.debug(
             "interview.generating_question",
             interview_id=state.interview_id,
@@ -932,22 +984,17 @@ class InterviewEngine:
             message_count=len(messages),
         )
 
-        # Question candidate panel (K2): three persona candidates + deterministic
-        # selection. Falls through to the single call when disabled, when no
-        # per-dimension breakdown is stored, or when no valid candidate is
-        # produced — so existing behavior is always reachable.
         if self.question_candidate_panel:
             candidate = await self._select_question_from_candidates(
                 state,
-                system_prompt=system_prompt,
-                conversation_history=conversation_history,
-                config=config,
+                system_prompt=prepared.system_prompt,
+                conversation_history=list(prepared.conversation_history),
+                config=prepared.config,
             )
             if candidate is not None:
                 return Result.ok(candidate)
 
-        result = await self._require_llm_adapter().complete(messages, config)
-
+        result = await self._require_llm_adapter().complete(messages, prepared.config)
         if result.is_err:
             log.warning(
                 "interview.question_generation_failed",
@@ -958,14 +1005,12 @@ class InterviewEngine:
             return Result.err(result.error)
 
         question = result.value.content.strip()
-
         log.info(
             "interview.question_generated",
             interview_id=state.interview_id,
             round_number=state.current_round_number,
             question_length=len(question),
         )
-
         return Result.ok(question)
 
     async def _select_question_from_candidates(
@@ -1259,12 +1304,14 @@ class InterviewEngine:
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
 
@@ -1310,6 +1357,12 @@ class InterviewEngine:
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
+        #
+        # The interviewer contract does not compete for this budget: it rides in
+        # the dynamic header, which is preserved first. Reserving a slice of the
+        # base agent prompt for the same rules was tried and removed — it bought
+        # one guarantee twice and took the characters from the perspective panel
+        # and, at saturated caps, from the user's own retained context.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
@@ -1458,7 +1511,17 @@ class InterviewEngine:
             state.ambiguity_score is not None
             and state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
         ):
-            perspectives.append(InterviewPerspective.SEED_CLOSER)
+            # Closure rounds run a narrower panel, led by the closer. Two
+            # reasons, one budget and one substantive: the panel is trimmed
+            # from the tail, so appending the closer would drop it in exactly
+            # the rounds it exists for; and researcher/simplifier drilling is
+            # the behavior closure is meant to stop. The characters this frees
+            # are what let the base agent prompt survive the same round.
+            perspectives = [
+                InterviewPerspective.SEED_CLOSER,
+                InterviewPerspective.BREADTH_KEEPER,
+                InterviewPerspective.ARCHITECT,
+            ]
 
         if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
             perspectives.append(InterviewPerspective.ARCHITECT)

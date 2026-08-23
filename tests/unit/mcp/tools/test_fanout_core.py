@@ -46,16 +46,14 @@ from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import ArtifactStore
 
 
 def _bounded_submit(
     registry: FanoutRegistry,
     project_dir: Any,
 ) -> tuple[SubmitFanoutResultsHandler, DisposableMemory]:
-    disposable = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore.for_project(project_dir)
-    )
+    disposable = DisposableMemory(artifact_store=ArtifactStore.for_project(project_dir))
     return (
         SubmitFanoutResultsHandler(
             fanout_registry=registry,
@@ -575,11 +573,12 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert submit_result.is_ok, submit_result
     envelope = submit_result.unwrap().meta
     contract_id = envelope["contract_id"]
-    contract_component = disposable.artifact_store._manifest_path(contract_id).parent.name
+    # The colon-carrying fanout id is stored and fetched verbatim below; the
+    # store has no filesystem layout left for the id's characters to violate.
     assert contract_id.startswith("fanout:")
-    assert contract_id not in str(disposable.artifact_store._manifest_path(contract_id))
-    assert len(contract_component) == 64
-    assert set(contract_component) <= set("0123456789abcdef")
+    digest_component = contract_id.removeprefix("fanout:")
+    assert len(digest_component) == 64
+    assert set(digest_component) <= set("0123456789abcdef")
     out = disposable.fetch(envelope["contract_id"]).body
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
@@ -633,9 +632,8 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     ``status`` and the fields it implies; a complete one answers with the
     disposable-memory envelope, which has no ``status`` of its own -- its
     ``result.status`` is that subsystem's word for its own run, and the envelope
-    is ``extra="forbid"`` because ``artifact_validation`` re-parses the same
-    model out of the manifest event. So the tool cannot add a discriminator
-    without making the reply stop being that model.
+    is ``extra="forbid"``. So the tool cannot add a discriminator without making
+    the reply stop being that model.
 
     ``contract_id`` is the discriminator it already has: only the completed
     reply carries one. The PM and interview skills both read it, and the PM
@@ -695,6 +693,9 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
         skill = (root / "pm" / "SKILL.md").read_text(encoding="utf-8")
         assert "With a `contract_id`, synthesize" in skill, root
         assert "leave out a lane you submitted as\n`undispatched`" in skill, root
+        assert "dispatch_subagents_if_supported" in skill, root
+        assert "process_payloads_sequentially" in skill, root
+        assert "host action selects the execution strategy" in skill, root
 
 
 @pytest.mark.asyncio
@@ -805,6 +806,72 @@ def test_interview_handler_threads_state_dir_into_registry(tmp_path: Any) -> Non
 # --------------------------------------------------------------------------- #
 # Handler-level: lateral producer registers + submit tool re-entry
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_lateral_and_submit_emit_privacy_safe_dispatch_telemetry(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_subagent_dispatch",
+        lambda properties: captured.append(properties),
+    )
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(
+        agent_runtime_backend="gemini",
+        fanout_registry=registry,
+    )
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": ["researcher", "contrarian"],
+        }
+    )
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    submit, _ = _bounded_submit(registry, tmp_path)
+    submitted = await submit.handle(
+        {
+            "correlation_key": "context.persona",
+            "fanout_id": fanout_id,
+            "results": [
+                {"key": "researcher", "content": "r"},
+                {"key": "contrarian", "undispatched": True},
+            ],
+        }
+    )
+
+    assert submitted.is_ok
+    assert captured[0] == {
+        "phase": "emitted",
+        "fanout_kind": "lateral_persona_panel",
+        "payload_count": 2,
+        "invocation_surface": "internal_runtime",
+        "dispatch_authority": "internal_runtime",
+        "host_family": "unknown",
+        "host_identity_status": "unknown",
+        "host_capability": "undeclared",
+        "capability_source": "none",
+        "delivery_mode": "inline_runtime",
+        "execution_preference": "sequential",
+        "fallback_strategy": "sequential",
+        "configured_worker_backend": "gemini",
+        "host_worker_mismatch": False,
+        "decision_reason": "configured_internal_runtime",
+        "contract_version": "v2",
+        "fanout_reentry_available": True,
+    }
+    assert captured[1] == {
+        "phase": "submitted",
+        "fanout_kind": "lateral_persona_panel",
+        "submission_status": "complete",
+        "expected_count": 2,
+        "received_count": 1,
+        "undispatched_count": 1,
+        "contract_version": "v2",
+    }
 
 
 @pytest.mark.asyncio

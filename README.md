@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.Q00/ouroboros -->
 <p align="right">
   <strong>English</strong> | <a href="./README.ko.md">한국어</a> | <a href="./README.zh-CN.md">简体中文</a>
 </p>
@@ -45,16 +46,24 @@
   <a href="https://ouroboros.page/learn/en/">Guide</a>
 </p>
 
-<p align="center"><sub><b>Four separate runs, four hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+<p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
+
+<p align="center"><sub><b>Separate runs, separate hosts. Different tasks on purpose — the engine is what is shared, not the prompt</b></sub></p>
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b> — a task-management CLI: <code>ouroboros init start</code> asking about ordering and scope, then reporting an ambiguity score</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — called as an integration, on a video-publishing harness: the interview, its advisory lanes, and the ambiguity ledger</sub></td>
+<td align="center" width="33%"><img src="./docs/images/ooo-interview.gif" width="300" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>Terminal CLI</b> — a task-management CLI: <code>ouroboros init start</code> asking about ordering and scope, then reporting an ambiguity score</sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-codex.gif" width="300" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — called as an integration, on a video-publishing harness: the interview, its advisory lanes, and the ambiguity ledger</sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-claude.gif" width="300" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — a YouTube automation task, with the six advisory lanes running in parallel before the interview submits</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — a YouTube automation task, with the six advisory lanes running in parallel before the interview submits</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — a kart-racing game, run as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-hermes.gif" width="300" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — a kart-racing game, run as a chat bot, ending at <code>Final ambiguity: 0.15</code></sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-dsh.gif" width="300" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — an OSS-trend outreach script, driven from a dsh chat: <code>mcp__ouroboros__ouroboros_interview</code> turn by turn, fan-out results submitted between rounds</sub></td>
+<td align="center" width="33%"><img src="./docs/images/host-kiro.gif" width="300" alt="10x screen recording of Kiro CLI running an Ouroboros interview"><br><sub><b>Kiro</b> — the Kiro CLI running the Ouroboros interview flow, turning a vague request into a structured, testable Seed</sub></td>
 </tr>
 </table>
 
@@ -166,7 +175,9 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
   <sub><code>ouroboros setup refresh</code> on one machine. It installs into the hosts that machine actually has, each in the shape that host expects: rules and skills for Codex, skills for Hermes, a plugin and an <code>AGENTS.md</code> for OpenCode, bridges for Pi and GJC. Your machine will show whichever of the thirteen you have installed.</sub>
 </p>
 
-> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
+> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. Copilot live-discovers its subscription catalog via the GitHub Copilot models API; Kiro's settings picker queries the authenticated CLI with `kiro-cli chat --listmodels -f json`, so account and enterprise allow-list changes appear without a hardcoded model table.
+
+> **DeepSeek support.** Ouroboros speaks DeepSeek two ways. Point the interview/Seed/QA pipeline at DeepSeek's own models with `--llm-backend dsh` (`ouroboros mcp serve --runtime claude-cli --llm-backend dsh`, or `OUROBOROS_LLM_BACKEND=dsh`) — this drives [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)'s ACP server under the hood. Or go the other way: install the [`dsh-ouroboros` plugin](./integrations/dsh-plugin) (`dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"`) and type `ooo interview` / `ooo auto` directly in the DeepSeek Harness chat — the same `ouroboros_interview` / `ouroboros_auto` tools run natively inside it, Socratic questions and all. Both directions, including what the `dsh` backend needs beyond the one variable, are in the [DeepSeek Harness guide](./docs/guides/deepseek-harness.md).
 
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
@@ -219,7 +230,7 @@ ouroboros setup --runtime copilot            # discovers models live, picks a de
                                              # registers MCP server in ~/.copilot/mcp-config.json
 ```
 
-Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is narrower than it looks: the static map covers `claude-opus-4-6` and `claude-sonnet-4-5`, any ID already containing a `.` passes through unchanged, and the hyphen-to-dot fallback rewrites *every* hyphen, so the current default `claude-opus-4-8` becomes `claude.opus.4.8` and misses. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid dotted ID explicitly. See [#1995](https://github.com/Q00/ouroboros/issues/1995) and the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
+Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is catalog-gated: the current direct and OpenRouter Opus defaults resolve to Copilot's published `claude-opus-5`, while legacy Anthropic versions convert only their trailing numeric separator and only when the discovered catalog contains the exact candidate. Unknown IDs remain unchanged so Copilot reports an explicit unavailable-model error instead of silently selecting a different model. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid ID explicitly. See the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
 
 See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 
@@ -416,7 +427,7 @@ See the [CLI reference](./docs/cli-reference.md) for full details.
 
 ## The Nine Minds
 
-Nine agents, each a different mode of thinking. Loaded on-demand, never preloaded:
+Nine highlighted agents below, with 12 more specialized agents available (21 total). All loaded on-demand, never preloaded:
 
 | Agent                    | Role                               | Core Question                                       |
 | :----------------------- | :--------------------------------- | :-------------------------------------------------- |
@@ -441,13 +452,13 @@ Nine agents, each a different mode of thinking. Loaded on-demand, never preloade
 src/ouroboros/
 +-- bigbang/        Interview, ambiguity scoring, brownfield explorer
 +-- routing/        PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
-+-- execution/      Double Diamond, hierarchical AC decomposition
++-- execution/      (deprecated — logic moved to orchestrator/ and mcp/tools/)
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect cycle, convergence detection
 +-- resilience/     4-pattern stagnation detection, 5 lateral personas
 +-- observability/  3-component drift measurement, auto-retrospective
 +-- persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
-+-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi)
++-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, GJC, Goose, Antigravity, Grok, Zcode)
 +-- core/           Types, errors, seed, ontology, security
 +-- providers/      LiteLLM adapter (100+ models)
 +-- mcp/            MCP client/server integration

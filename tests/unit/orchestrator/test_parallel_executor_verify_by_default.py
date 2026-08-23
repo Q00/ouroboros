@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -34,12 +35,19 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
+    ParallelExecutionResult,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
+    _deserialize_verify_gate_outcome,
     _missing_expected_artifacts,
+    _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
+    render_parallel_completion_message,
+    render_parallel_verification_report,
 )
+from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
 class _StubAdapter:
@@ -495,9 +503,9 @@ async def test_final_verify_settlement_invalidates_prior_success_after_mutation(
 
 
 @pytest.mark.asyncio
-async def test_apply_verify_gate_recovers_failed_result_once(tmp_path: Any) -> None:
+async def test_apply_verify_gate_never_recovers_failed_worker_result(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="test -d ."))
     result = ACExecutionResult(
         ac_index=0,
         ac_content="ac",
@@ -506,17 +514,13 @@ async def test_apply_verify_gate_recovers_failed_result_once(tmp_path: Any) -> N
         outcome=ACExecutionOutcome.FAILED,
     )
 
-    recovered = await executor._apply_verify_gate(
+    gated = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
 
-    assert recovered.success is True
-    assert recovered.error is None
-    assert recovered.outcome == ACExecutionOutcome.SUCCEEDED
-    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
-    recovery_events = [event for event in emitted if event.type == "execution.verify.recovered"]
-    assert len(recovery_events) == 1
-    assert recovery_events[0].data["prior_error"] == "runtime false negative"
+    assert gated is result
+    assert gated.success is False
+    executor._event_store.append.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -533,6 +537,7 @@ async def test_verify_gate_times_out_hung_command(tmp_path: Any) -> None:
     assert time.monotonic() - started < 5
     assert outcome.passed is False
     assert outcome.reason == "verify_command timed out after 1s"
+    assert outcome.environment_unverifiable is True
 
 
 @pytest.mark.asyncio
@@ -1257,6 +1262,427 @@ def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:
     assert "File operation observed (succeeded)" in prompt
     assert assertion not in prompt
     assert command not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("MIGRATION_COMPLETE_v2", "MIGRATION_COMPLETE_\nv2"),
+        ("MIGRATION_COMPLETE_v2", "+ MIGRATION_COMPLETE_\n+ v2"),
+        ("MIGRATION_COMPLETE_v2", "\x1b[31mMIGRATION\x1b[0m_COMPLETE_v2"),
+        ("MIGRATION_COMPLETE_v2", "migration_complete_V2"),
+        ("MIGRATION<COMPLETE>&v2", "MIGRATION&lt;COMPLETE&gt;&amp;v2"),
+        (
+            "MIGRATION_COMPLETE_v2",
+            "E   assert 'MIGRATION_COMPLETE_' +\nE       'v2'",
+        ),
+    ),
+)
+def test_retry_prompt_drops_transformed_hidden_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    executor = _make_executor()
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=transformed,
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+    assert transformed not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("<=>", "&amp;amp;amp;lt;=&amp;amp;amp;gt;"),
+        ("!!!", "!\u200b!\u200b!"),
+        ("<=>", "<\u2060=\u2060>"),
+        ("!!!", "!\ufe0f!\ufe0f!"),
+        ("<=>", "&" + "amp;" * 65 + "lt;=&" + "amp;" * 65 + "gt;"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\U0000200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\uFE0FSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[31mSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[5DSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u0053ENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\x53ENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\UFFFFFFFFSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u005cu0053ENTINEL"),
+        ("<=>", r"\x26lt;=\x26gt;"),
+        ("ERROR", r"E\nRROR"),
+        ("+++", r"+\n+\n+"),
+        ("café", r"b'caf\xc3\xa9'"),
+        ("PRIVATE_SENTINEL", "\x1b]0;PRIVATE_SENTINEL\x07"),
+        ("!!!", "!\x7f!!"),
+        ("PRIVATE", "＼ｘ５０＼ｘ５２＼ｘ４９＼ｘ５６＼ｘ４１＼ｘ５４＼ｘ４５"),
+        ("PRIVATE", r"\120\122\111\126\101\124\105"),
+        ("😀", r"\ud83d\ude00"),
+        ("PRIVATE_SENTINEL", "PRIVATE%5FSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE%255FSENTINEL"),
+        ("PRIVATE_SENTINEL", "%50%52%49%56%41%54%45%5F%53%45%4E%54%49%4E%45%4C"),
+        ("PRIVATE_SENTINEL", "PRIVATE&#37;5FSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\400SENTINEL"),
+        ("SECRET", "\u202eTERCES\u202c"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#x110000;SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#xD800;SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#999999999999999999999;SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\xG0SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_%G0SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\uZZZZSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#xZZ;SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\12SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\11SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\15SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\0SENTINEL"),
+        ("PRIVATE_SENTINEL", "safe\ud800diagnostic"),
+    ),
+)
+def test_retry_prompt_drops_deep_entities_and_invisible_formats(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("café", "cafe\u0301"),
+        ("ＳＥＣＲＥＴ", "SECRET"),
+        ("MIGRATION<COMPLETE>", "MIGRATION&amp;lt;COMPLETE&amp;gt;"),
+        ("PRİVATE_SENTINEL", "private_sentinel"),
+    ),
+)
+def test_retry_prompt_drops_unicode_and_nested_entity_equivalents(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize("escaped_whitespace", (r"\n", r"\r", r"\t", r"\x0a", r"\u0009"))
+def test_retry_prompt_drops_pytest_escaped_whitespace(escaped_whitespace: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"E assert 'PRIVATE_{escaped_whitespace}SENTINEL'",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    "escaped_control",
+    (r"\x1b[31m", r"\u001b[31m", r"\033[31m", r"\e[31m", r"\^[31m"),
+)
+def test_retry_prompt_drops_pytest_escaped_terminal_controls(escaped_control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"E assert 'PRIVATE_{escaped_control}SENTINEL'",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize("control", ("\x9b31m", "\x1b(B", "\x1b[5D", "\b"))
+def test_retry_prompt_drops_residual_terminal_controls(control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"PRIVATE_{control}SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    "control",
+    ("\x1bP1;2\x1b\\", "\x90payload\x9c"),
+)
+def test_retry_prompt_drops_unsupported_terminal_control_strings(control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"PRIVATE_{control}SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_osc_split_hidden_assertion() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    osc = "\x1b]8;;https://example.invalid\x07"
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"{osc}PRIVATE_{osc}\x1b]8;;\x07SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_mixed_exact_and_transformed_hidden_copies() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"expected {assertion} but received private_ sentinel",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_preserves_safe_context_around_exact_hidden_value() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"actual result; expected {assertion}",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "actual result; expected [REDACTED CONTRACT VALUE]" in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (("!!!", "! ! !"), ("<=>", "&lt; = &gt;")),
+)
+def test_retry_prompt_drops_transformed_punctuation_only_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_transformed_command_with_exact_assertion() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    command = "python hidden_grader.py --expect PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command=command,
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail="PYTHON HIDDEN_GRADER.PY --EXPECT PRIVATE_SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+    assert "HIDDEN_GRADER" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -2053,3 +2479,223 @@ class TestSuccessContractBlock:
         assert "pytest -q" not in block
         assert "Expected artifacts" not in block
         assert "Expected output" not in block
+
+
+# ---------------------------------------------------------------------------
+# RFC Part A — Windows-safe verify_command execution + quarantine
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_runs_the_command_through_a_resolved_posix_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The gate must exec a real interpreter, not inherit the platform shell."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="exit 0")
+    recorded: dict[str, Any] = {}
+
+    expected_shell = verify_shell_path_from_identity(executor._verify_shell_identity)
+    assert expected_shell is not None
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spy_exec(*argv: str, **kwargs: Any) -> Any:
+        recorded["argv"] = argv
+        return await real_exec("/bin/sh", "-c", "exit 0", **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert recorded["argv"] == (expected_shell, "-c", "exit 0")
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_quarantines_when_no_posix_shell_exists(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    # No real shell means the arbitrary pipeline is unavailable, never emulated.
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
+    executor._verify_shell_identity = None
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.environment_unverifiable is True
+    assert "needs bash" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_ac_keeps_worker_success_without_retry(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok | tee log")
+    seed = _seed_with_specs(spec)
+    executor._verify_shell_identity = None
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=True,
+        messages=(),
+        final_message="done",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=result,
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert gated.success is True
+    assert gated is not result
+    assert gated.verify_gate_outcome.environment_unverifiable is True
+    assert gated.error is None
+    assert is_retryable_failure(gated) is False
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_preserves_unverified_success(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ok", verify_command="echo ok")
+    seed = _seed_with_specs(spec)
+    executor._verify_shell_identity = None
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=True,
+        final_message="done",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+    )
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[gated],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is True
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
+
+
+def test_report_surfaces_unverified_success() -> None:
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="verify_command needs a POSIX shell",
+        output_tail="",
+        environment_unverifiable=True,
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ok",
+        success=True,
+        messages=(),
+        final_message="done",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        verify_gate_outcome=outcome,
+    )
+    parallel_result = ParallelExecutionResult(
+        results=[result],
+        success_count=1,
+        failure_count=0,
+        blocked_count=0,
+        skipped_count=0,
+        total_duration_seconds=0.0,
+    )
+
+    report = render_parallel_verification_report(parallel_result, 1)
+
+    assert "Success: 1/1" in report
+    assert "needs confirmation: AC 1" in report
+
+
+def test_completion_message_distinguishes_blocked_and_failure_reasons() -> None:
+    failed = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the tests",
+        success=False,
+        error="unsupported uv evidence command",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+    blocked = ACExecutionResult(
+        ac_index=1,
+        ac_content="Package the result",
+        success=False,
+        error="Skipped: dependency failed",
+        outcome=ACExecutionOutcome.BLOCKED,
+    )
+    parallel_result = ParallelExecutionResult(
+        results=(failed, blocked),
+        success_count=0,
+        failure_count=1,
+        blocked_count=1,
+        skipped_count=1,
+        total_duration_seconds=0.0,
+    )
+
+    message = render_parallel_completion_message(parallel_result, 2)
+
+    assert "Failed: 1" in message
+    assert "Blocked: 1" in message
+    assert "\nSkipped:" not in message
+    assert "[FAILED] Run the tests — unsupported uv evidence command" in message
+    assert "[BLOCKED] Package the result — Skipped: dependency failed" in message
+
+
+def test_verify_gate_outcome_roundtrips_the_quarantine_flag() -> None:
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason="no shell",
+        output_tail="",
+        environment_unverifiable=True,
+    )
+
+    payload = _serialize_verify_gate_outcome(outcome)
+    assert payload is not None
+    assert _deserialize_verify_gate_outcome(payload) == outcome
+
+
+def test_legacy_verify_gate_checkpoints_stay_readable() -> None:
+    legacy_payload = {
+        "passed": True,
+        "reason": None,
+        "output_tail": "",
+        "missing_artifacts": [],
+        "workspace_mutated": False,
+        "workspace_digest": None,
+    }
+
+    restored = _deserialize_verify_gate_outcome(legacy_payload)
+
+    assert restored is not None
+    assert restored.passed is True
+    assert restored.environment_unverifiable is False
+
+
+@pytest.mark.asyncio
+async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Bash sources `BASH_ENV` before it evaluates a `-c` command, so a file the
+    repository controls would otherwise run inside the gate itself and turn a
+    failing contract into a pass."""
+    import shutil as _shutil
+
+    if _shutil.which("bash") is None:  # pragma: no cover - CI always has bash
+        pytest.skip("no bash on this machine")
+
+    injected = tmp_path / "inject.sh"
+    injected.write_text("exit 0\n")
+    monkeypatch.setenv("BASH_ENV", str(injected))
+
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="fails honestly", verify_command="exit 23")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False

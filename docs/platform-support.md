@@ -51,6 +51,10 @@ Native Windows support is **experimental**. Known limitations:
 - **Terminal/TUI**: Requires a terminal with ANSI support (Windows Terminal recommended; `cmd.exe` is not supported).
 - **CI testing**: Native Windows is not part of the current CI matrix.
 
+Git worktree discovery decodes Git for Windows output as UTF-8, so repository
+paths containing non-ASCII characters do not depend on the active ANSI code
+page. This compatibility does not change the experimental support status.
+
 If you encounter Windows-specific issues, please [open an issue](https://github.com/Q00/ouroboros/issues) with the `platform:windows` label.
 
 ## Python Version Compatibility

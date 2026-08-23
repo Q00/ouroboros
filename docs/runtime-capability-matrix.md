@@ -80,15 +80,15 @@ allow-list, and `permission_mode`. Each is one of:
 
 | Parameter       | Claude Code | Codex | Gemini | Goose | Copilot | OpenCode | Hermes | Pi | Kiro |
 | --------------- | :---------: | :---: | :-----: | :---: | :-----: | :------: | :----: | :-: | :--: |
-| `system_prompt` | native | translated | translated | translated | translated | translated | translated | translated | translated |
+| `system_prompt` | native | translated | translated | translated | translated | translated | translated | native* | translated |
 | `permission_mode` | native | native | native | native | native | translated | translated | ignored | translated |
-| `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | translated | translated |
+| `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | native* | translated |
 | `reasoning_effort` | native | native | ignored | ignored | native | ignored | ignored | ignored | ignored |
 | `model` (per call) | native | native | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
 
 > Most CLI runtimes compose the system prompt **into the user message** (e.g.
 > `## System Instructions\n...`) rather than passing a native system directive. Codex,
-> Gemini, Goose, Copilot, OpenCode, Hermes, and Pi also render requested tool
+> Gemini, Goose, Copilot, OpenCode, and Hermes also render requested tool
 > allow-lists only as prompt guidance, so `tools` is translated rather than a
 > native runtime allow-list when the list is non-empty. An explicit empty
 > allow-list (`tools=[]`) cannot be translated by those prompt-only composers
@@ -99,6 +99,13 @@ allow-list, and `permission_mode`. Each is one of:
 > OpenCode and Hermes translate full bypass onto
 > `--dangerously-skip-permissions` and `--yolo --accept-hooks`, respectively. Pi keeps the
 > requested mode in runtime metadata because its CLI does not expose an approval switch.
+> \*Pi's native `--append-system-prompt` and `--tools` flags deliver these parameters
+> directly; `--no-tools` enforces an explicit empty allow-list (all tools disabled).
+> Pi binaries without those flags fall back to user-message composition and
+> report `translated`. A binary that has `--tools` but lacks `--no-tools` reports
+> `translated` for `tool_restriction_support` and **fails closed** when `tools=[]`
+> is requested — the runtime emits a `ToolRestrictionUnenforced` error instead of
+> silently widening to unrestricted access.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
 natively, the orchestrator surfaces a one-time notice (console + a structured

@@ -32,6 +32,7 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
 from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
 
 # Re-exported: split out in #1754, still imported from here by evaluation tests.
@@ -85,7 +86,6 @@ try:  # Keep the core package importable when the optional MCP extra is absent.
 except ImportError:  # pragma: no cover - exercised by packaging smoke tests.
     _SDKMCPServer = None  # type: ignore[assignment,misc]
 
-
 if _SDKMCPServer is not None:
 
     class _OuroborosSDKServer(_SDKMCPServer):  # type: ignore[misc,valid-type]
@@ -116,10 +116,14 @@ if _SDKMCPServer is not None:
             arguments: dict[str, Any],
             context: Any = None,
         ) -> Any:
-            del context
             from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
+            return await call_sdk_tool(
+                self._ouroboros_adapter,
+                name,
+                arguments,
+                host_context=from_sdk_context(context),
+            )
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -1131,6 +1135,7 @@ class MCPServerAdapter:
             version=self._version,
             token_verifier=wiring.token_verifier,
             auth=wiring.auth_settings,
+            extensions=subagent_capability_extensions(),
         )
 
         # Register tools with MCPServer.
@@ -1606,11 +1611,10 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        create_fanout_handlers,
     )
     from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
@@ -2369,11 +2373,16 @@ def create_ouroboros_server(
     # ``call_tool()``, so durable fan-out publication receives this same
     # explicit readiness boundary as server transport requests.
     from ouroboros.backends import render_mcp_server_instructions
+    from ouroboros.mcp.update_notice import append_cached_update_notice
 
     server = MCPServerAdapter(
         name=name,
         version=version,
-        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
+        # Every MCP host gets the cached update nudge (#2066); the append is
+        # offline-only and a no-op without a fresh cache entry.
+        instructions=append_cached_update_notice(
+            instructions if instructions is not None else render_mcp_server_instructions()
+        ),
         auth_config=auth_config,
         rate_limit_config=rate_limit_config,
     )
@@ -2470,23 +2479,6 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(event_store=event_store),
-        InterviewHandler(
-            interview_engine=interview_engine,
-            event_store=event_store,
-            llm_backend=interview_llm_backend,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-            suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
-        PMInterviewHandler(
-            data_dir=state_dir_path,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-        ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
@@ -2496,10 +2488,19 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        *create_fanout_handlers(
-            fanout_registry,
-            effective_cwd,
-            event_store,
+        # One store, and both producers are handed it rather than deriving a
+        # path from the workspace when a question is asked (RFC #2153).
+        *create_fanout_wiring(
+            interview_engine=interview_engine,
+            suppress_tool_use_prompt_cues=interview_envelope_sealed,
+            fanout_registry=fanout_registry,
+            workspace=effective_cwd,
+            event_store=event_store,
+            handler_event_store=event_store,
+            state_dir=state_dir_path,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=interview_runtime_backend,
+            opencode_mode=opencode_mode,
             ensure_ready=server.startup,
         ),
         evolve_step,

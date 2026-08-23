@@ -33,8 +33,8 @@ def test_public_runtime_backend_preserves_profile_contract(
 @pytest.mark.parametrize(
     ("versions", "unsupported"),
     [
-        ({"mcp": "2.0.0", "claude-agent-sdk": "0.2.128"}, True),
-        ({"mcp": "1.28.1", "claude-agent-sdk": "0.2.128"}, False),
+        ({"mcp": "2.0.0", "claude-agent-sdk": "0.2.139"}, True),
+        ({"mcp": "1.28.1", "claude-agent-sdk": "0.2.139"}, False),
         ({"mcp": "2.0.0"}, False),
     ],
 )
