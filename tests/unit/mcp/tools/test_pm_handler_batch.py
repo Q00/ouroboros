@@ -418,6 +418,32 @@ async def test_persisted_planned_question_rejects_a_caller_invented_identity(
     assert reloaded.rounds[-1].user_response is None
 
 
+@pytest.mark.asyncio
+async def test_legacy_single_answer_may_replace_a_stale_pending_question(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_legacy_question_repair", pending="Stale placeholder?")
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
+    engine.plan_next_turns = AsyncMock(return_value=Result.ok([_plan("Next question?")]))
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answer": "The review workflow.",
+            "last_question": Q_PRIMARY,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.rounds[-1].question == Q_PRIMARY
+    assert reloaded.rounds[-1].user_response == "The review workflow."
+
+
 def test_persisted_planned_question_accepts_its_normalized_identity() -> None:
     pairs, error = turn_answers(
         [{"question": f"  {Q_PRIMARY}  ", "answer": "The review workflow."}],
