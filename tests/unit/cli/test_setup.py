@@ -680,6 +680,7 @@ class TestCodexSetup:
             assert setup_cmd._register_codex_mcp_server()
 
         assert codex_config.read_text(encoding="utf-8") == original
+
     def test_register_codex_mcp_server_preserves_path_direct_with_process_controls(
         self, tmp_path: Path
     ) -> None:
