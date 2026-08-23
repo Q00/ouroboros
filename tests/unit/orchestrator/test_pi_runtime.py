@@ -80,7 +80,7 @@ def test_build_command_uses_documented_json_prompt_argument() -> None:
 
 def test_build_command_passes_native_system_prompt_and_tools_when_supported() -> None:
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = True
+    runtime._native_param_flags = (True, True)
 
     command = runtime._build_command(
         prompt="Do the task",
@@ -102,7 +102,7 @@ def test_build_command_passes_native_system_prompt_and_tools_when_supported() ->
 
 def test_build_command_skips_native_flags_when_unsupported() -> None:
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = False
+    runtime._native_param_flags = (False, False)
 
     command = runtime._build_command(
         prompt="Do the task",
@@ -115,9 +115,9 @@ def test_build_command_skips_native_flags_when_unsupported() -> None:
 
 def test_capabilities_follow_probed_native_param_support() -> None:
     native = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    native._native_param_flags = True
+    native._native_param_flags = (True, True)
     legacy = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    legacy._native_param_flags = False
+    legacy._native_param_flags = (False, False)
 
     assert native.capabilities.system_prompt_support == ParamSupport.NATIVE
     assert native.capabilities.tool_restriction_support == ParamSupport.NATIVE
@@ -365,7 +365,7 @@ async def test_execute_task_passes_params_natively_when_supported() -> None:
         returncode=0,
     )
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = True
+    runtime._native_param_flags = (True, True)
 
     with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
         _ = [
@@ -402,7 +402,7 @@ async def test_execute_task_composes_params_into_prompt_when_unsupported() -> No
         returncode=0,
     )
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-    runtime._native_param_flags = False
+    runtime._native_param_flags = (False, False)
 
     with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
         _ = [
@@ -564,3 +564,149 @@ def test_runtime_handle_accepts_pi_backend() -> None:
     handle = RuntimeHandle(backend="pi_cli", native_session_id="session-1")
 
     assert handle.backend == "pi"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for PR #2203 review blockers
+# ---------------------------------------------------------------------------
+
+
+def test_build_command_emits_no_tools_for_explicit_empty_list() -> None:
+    """Blocker 1: tools=[] must emit --no-tools, not be silently dropped."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do the task", tools=[])
+
+    assert "--no-tools" in command
+    assert "--tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "--no-tools", "Do the task"]
+
+
+def test_build_command_omits_tools_flag_for_none() -> None:
+    """tools=None means 'use defaults'; neither --tools nor --no-tools should appear."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do the task", tools=None)
+
+    assert "--tools" not in command
+    assert "--no-tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_build_command_empty_tools_without_no_tools_support() -> None:
+    """When Pi lacks --no-tools, tools=[] falls through without error."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)  # has --tools but not --no-tools
+
+    command = runtime._build_command(prompt="Do the task", tools=[])
+
+    assert "--tools" not in command
+    assert "--no-tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_glob_maps_to_pi_find_builtin() -> None:
+    """Blocker 2: Glob must map to Pi's 'find', not nonexistent 'glob'."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do it", tools=["Glob"])
+
+    assert command == ["/tmp/pi", "--mode", "json", "--tools", "find", "Do it"]
+
+
+def test_command_and_execute_map_to_pi_bash_builtin() -> None:
+    """Command and Execute must map to Pi's 'bash' built-in."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do it", tools=["Command", "Execute"])
+
+    assert command == ["/tmp/pi", "--mode", "json", "--tools", "bash,bash", "Do it"]
+
+
+def test_all_known_ouroboros_builtins_map_to_valid_pi_tools() -> None:
+    """Every known Ouroboros built-in must map to a documented Pi tool name."""
+    from ouroboros.orchestrator.pi_runtime import _PI_TOOL_FLAG_NAMES
+
+    # Pi's documented built-in tools
+    pi_builtins = {"read", "write", "edit", "bash", "grep", "find", "ls"}
+
+    for ouroboros_name, pi_name in _PI_TOOL_FLAG_NAMES.items():
+        assert pi_name in pi_builtins, (
+            f"Ouroboros tool {ouroboros_name!r} maps to {pi_name!r} "
+            f"which is not a documented Pi built-in: {pi_builtins}"
+        )
+
+
+def test_ls_maps_to_pi_ls_builtin() -> None:
+    """LS/Ls must map to Pi's 'ls' built-in."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command_upper = runtime._build_command(prompt="Do it", tools=["LS"])
+    command_title = runtime._build_command(prompt="Do it", tools=["Ls"])
+
+    assert "--tools" in command_upper
+    assert command_upper[command_upper.index("--tools") + 1] == "ls"
+    assert command_title[command_title.index("--tools") + 1] == "ls"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_emits_no_tools_for_empty_list() -> None:
+    """End-to-end: execute_task with tools=[] should emit --no-tools natively."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [msg async for msg in runtime.execute_task("Do it", tools=[])]
+
+    args = mock_exec.call_args.args
+    assert "--no-tools" in args
+    assert "--tools" not in args
+
+
+@pytest.mark.asyncio
+async def test_execute_task_tools_none_omits_all_tool_flags() -> None:
+    """End-to-end: execute_task with tools=None should omit --tools and --no-tools."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [msg async for msg in runtime.execute_task("Do it", tools=None)]
+
+    args = mock_exec.call_args.args
+    assert "--no-tools" not in args
+    assert "--tools" not in args

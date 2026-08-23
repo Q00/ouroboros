@@ -84,7 +84,7 @@ For a normal execution task, Ouroboros launches:
 
 ```text
 pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
-  [--append-system-prompt <SYSTEM>] [--tools <TOOLS>] <PROMPT>
+  [--append-system-prompt <SYSTEM>] [--tools <TOOLS>] [--no-tools] <PROMPT>
 ```
 
 | Argument | Why |
@@ -93,7 +93,8 @@ pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
 | `--model` | Optional model override passed by the caller |
 | `--session` | Optional native Pi session id for targeted resume |
 | `--append-system-prompt` | Native delivery of Ouroboros' `system_prompt` parameter (appended to Pi's base coding prompt) |
-| `--tools` | Native tool allow-list: Pi's own flag enables only the listed tools. Claude-style names (`Read`, `Bash`, …) are mapped to Pi's lowercase built-ins (`read`, `bash`, …); unknown names pass through for extension tools |
+| `--tools` | Native tool allow-list: Pi's own flag enables only the listed tools. Claude-style names (`Read`, `Bash`, `Glob`, …) are mapped to Pi's lowercase built-ins (`read`, `bash`, `find`, …); unknown names pass through for extension tools |
+| `--no-tools` | Explicit tool-free mode: emitted when Ouroboros requests `tools=[]` (no tools allowed). Distinguishes "use defaults" (`tools=None`, flag omitted) from "disable all tools" |
 | `<PROMPT>` | The composed task prompt from Ouroboros |
 
 The native parameter flags are probed once via `pi --help`. Pi binaries without
