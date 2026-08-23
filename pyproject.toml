@@ -50,10 +50,10 @@ dependencies = [
     # uv.lock pins the exact version for reproducible installs regardless.
     "python-dotenv>=1.2.2,<1.3.0",
     "pyyaml>=6.0.0,<7.0.0",
-    "rich>=13.0.0,<14.0.0",
+    "rich>=13.0.0,<16.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
-    "structlog>=24.0.0,<26.0.0",
-    "typer>=0.12.0,<0.16.0",
+    "structlog>=24.0.0,<27.0.0",
+    "typer>=0.12.0,<0.28.0",
 ]
 
 [project.urls]
