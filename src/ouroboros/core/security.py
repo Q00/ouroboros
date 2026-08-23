@@ -616,19 +616,40 @@ def _sanitize_logging_value(value: Any) -> Any:
     return value
 
 
-def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a copy of data with sensitive values masked.
+def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
+    """Return a JSON-safe mapping key and whether its value must be redacted."""
+    if isinstance(key, str):
+        try:
+            normalized = str.__str__(key)
+        except Exception:
+            return "<REDACTED>", True
+        if is_credential_shaped(normalized):
+            return "<REDACTED>", False
+        return normalized, is_sensitive_field(normalized)
+
+    if key is None or isinstance(key, (int, float, bool)):
+        return key, False
+
+    # JSON renderers reject arbitrary object keys. Do not call caller-controlled
+    # __str__ or __repr__ while converting them into a safe placeholder.
+    return "<unsupported-key>", False
+
+
+def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
+    """Create a copy of data with sensitive keys and values masked.
 
     Use this before logging dictionaries that might contain sensitive data.
     Nested mappings and nested sequences (lists/tuples) are both traversed, so
-    a credential buried inside a list of provider configs is masked rather than
-    passed through verbatim.
+    a credential buried inside a collection cannot reach a log sink. Mapping
+    keys are normalized to built-in strings; credential-shaped keys are
+    redacted and unsupported JSON key types are replaced without invoking
+    caller-controlled string conversion.
 
     Args:
         data: Dictionary that might contain sensitive data.
 
     Returns:
-        New dictionary with sensitive values masked.
+        New dictionary with sensitive keys and values masked.
 
     Example:
         >>> sanitize_for_logging({"api_key": "sk-secret123", "name": "test"})
@@ -636,10 +657,11 @@ def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
     """
     result = {}
     for key, value in data.items():
-        if is_sensitive_field(key):
-            result[key] = "<REDACTED>"
+        sanitized_key, redact_value = _sanitize_logging_key(key)
+        if redact_value:
+            result[sanitized_key] = "<REDACTED>"
         else:
-            result[key] = _sanitize_logging_value(value)
+            result[sanitized_key] = _sanitize_logging_value(value)
     return result
 
 

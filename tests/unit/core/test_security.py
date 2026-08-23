@@ -357,6 +357,29 @@ class TestSanitizeForLogging:
         assert isinstance(result, dict)
         assert result == data
 
+    def test_sanitize_credential_shaped_nested_key(self) -> None:
+        """A credential used as a mapping key is fully redacted."""
+        secret = "sk-live-abc123def456ghi789"
+
+        result = sanitize_for_logging({"config": {secret: "safe"}})
+
+        assert secret not in repr(result)
+        assert result["config"] == {"<REDACTED>": "safe"}
+
+    def test_sanitize_unsupported_nested_key_without_string_conversion(self) -> None:
+        """Unsupported JSON keys become safe placeholders without calling __str__."""
+
+        class HostileKey:
+            def __str__(self) -> str:
+                raise AssertionError("mapping key string conversion must not run")
+
+            def __repr__(self) -> str:
+                raise AssertionError("mapping key repr must not run")
+
+        result = sanitize_for_logging({"config": {HostileKey(): "safe"}})
+
+        assert result["config"] == {"<unsupported-key>": "safe"}
+
 
 class TestStrSubclassGuardBypass:
     """Guards must inspect ``str`` subclasses such as ``enum.StrEnum`` members."""

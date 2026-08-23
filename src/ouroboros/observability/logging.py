@@ -57,6 +57,7 @@ from ouroboros.core.security import (
     is_sensitive_field,
     is_sensitive_value,
     mask_api_key,
+    sanitize_for_logging,
 )
 
 
@@ -275,28 +276,9 @@ def _mask_sensitive_data(
     return event_dict
 
 
-def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Recursively mask sensitive data in a dictionary.
-
-    Args:
-        data: Dictionary to process.
-
-    Returns:
-        Dictionary with sensitive values masked.
-    """
-    result = {}
-    for key, value in data.items():
-        if is_sensitive_field(key):
-            result[key] = "<REDACTED>"
-        elif isinstance(value, str) and is_sensitive_value(value):
-            result[key] = mask_api_key(str.__str__(value))
-        elif isinstance(value, dict):
-            result[key] = _mask_dict_sensitive_data(value)
-        elif isinstance(value, (list, tuple)):
-            result[key] = _mask_sequence_sensitive_data(value)
-        else:
-            result[key] = value
-    return result
+def _mask_dict_sensitive_data(data: dict[Any, Any]) -> dict[Any, Any]:
+    """Recursively sanitize a mapping through the shared logging boundary."""
+    return sanitize_for_logging(data)
 
 
 def _mask_sequence_sensitive_data(

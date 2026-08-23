@@ -1467,14 +1467,27 @@ class TestSensitiveDataMasking:
         assert "hunter2" not in output
         assert json.loads(output)["config"]["api_key"] == "<REDACTED>"
 
-    def test_non_string_mapping_key_does_not_abort_live_logging(self, capsys: Any) -> None:
-        """Unsupported mapping-key types pass classification without raising."""
+    def test_credential_shaped_nested_mapping_key_masked_live(self, capsys: Any) -> None:
+        """A credential used as a nested mapping key cannot reach PROD JSON."""
+        secret = "sk-live-abc123def456ghi789"
         configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
 
-        get_logger().info("config.loaded", config={7: "safe"})
+        get_logger().info("config.loaded", config={secret: "safe"})
 
         output = capsys.readouterr().err.strip()
-        assert json.loads(output)["config"]["7"] == "safe"
+        assert secret not in output
+        assert json.loads(output)["config"] == {"<REDACTED>": "safe"}
+
+    def test_unsupported_nested_mapping_key_does_not_abort_live_logging(
+        self, capsys: Any
+    ) -> None:
+        """Arbitrary object keys become safe placeholders before JSON rendering."""
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info("config.loaded", config={object(): "safe"})
+
+        output = capsys.readouterr().err.strip()
+        assert json.loads(output)["config"] == {"<unsupported-key>": "safe"}
 
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""
