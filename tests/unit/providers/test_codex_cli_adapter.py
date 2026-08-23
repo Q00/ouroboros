@@ -1937,9 +1937,7 @@ class TestStreamDrainLifecycle:
         adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
         adapter._default_completion_timeout_seconds = 0.05
 
-        async def fake_create_subprocess_exec(
-            *command: str, **kwargs: Any
-        ) -> _BlockedStdinProcess:
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _BlockedStdinProcess:
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("", encoding="utf-8")
             return process
