@@ -1478,9 +1478,7 @@ class TestSensitiveDataMasking:
         assert secret not in output
         assert json.loads(output)["config"] == {"<REDACTED>": "safe"}
 
-    def test_unsupported_nested_mapping_key_does_not_abort_live_logging(
-        self, capsys: Any
-    ) -> None:
+    def test_unsupported_nested_mapping_key_does_not_abort_live_logging(self, capsys: Any) -> None:
         """Arbitrary object keys become safe placeholders before JSON rendering."""
         configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
 

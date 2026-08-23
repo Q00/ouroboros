@@ -623,9 +623,11 @@ def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
             normalized = str.__str__(key)
         except Exception:
             return "<REDACTED>", True
+        if is_sensitive_field(normalized):
+            return normalized, True
         if is_credential_shaped(normalized):
             return "<REDACTED>", False
-        return normalized, is_sensitive_field(normalized)
+        return normalized, False
 
     if key is None or isinstance(key, (int, float, bool)):
         return key, False
