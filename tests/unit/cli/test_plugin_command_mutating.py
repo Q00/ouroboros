@@ -20,14 +20,16 @@ import typer
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.plugin import (
-    _GIT_CLONE_TIMEOUT_SECONDS,
-    _GIT_REV_PARSE_TIMEOUT_SECONDS,
     _enumerate_catalog,
     _select_plugins,
     _shallow_clone,
 )
 from ouroboros.cli.commands.plugin import (
     app as plugin_app,
+)
+from ouroboros.cli.commands.plugin_cache import (
+    GIT_CLONE_TIMEOUT_SECONDS,
+    GIT_REV_PARSE_TIMEOUT_SECONDS,
 )
 from ouroboros.plugin.lockfile import Lockfile
 from ouroboros.plugin.trust_store import TrustStore
@@ -5190,8 +5192,8 @@ def test_shallow_clone_bounds_git_and_refuses_credential_prompts(
     clone_kwargs = calls[0][1]
     rev_parse_kwargs = calls[1][1]
     # Network reach gets a generous ceiling; a local object-store read does not.
-    assert clone_kwargs["timeout"] == _GIT_CLONE_TIMEOUT_SECONDS
-    assert rev_parse_kwargs["timeout"] == _GIT_REV_PARSE_TIMEOUT_SECONDS
+    assert clone_kwargs["timeout"] == GIT_CLONE_TIMEOUT_SECONDS
+    assert rev_parse_kwargs["timeout"] == GIT_REV_PARSE_TIMEOUT_SECONDS
     assert clone_kwargs["timeout"] > rev_parse_kwargs["timeout"]
 
 

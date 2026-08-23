@@ -1090,12 +1090,34 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             process.stdin.close()
 
         if not hasattr(process, "stdout") or not callable(getattr(process, "wait", None)):
-            (
-                stdout_lines,
-                stderr_lines,
-                session_id,
-                last_content,
-            ) = await self._collect_legacy_process_output(process)
+            timeout_seconds = self._effective_timeout_seconds()
+            try:
+                (
+                    stdout_lines,
+                    stderr_lines,
+                    session_id,
+                    last_content,
+                ) = await self._collect_legacy_process_output(process)
+            except TimeoutError:
+                await self._terminate_process(process)
+                output_path.unlink(missing_ok=True)
+                if schema_path:
+                    schema_path.unlink(missing_ok=True)
+                return Result.err(
+                    ProviderError(
+                        message=(
+                            f"{self._display_name} legacy request timed out"
+                            f" after {timeout_seconds:.1f}s"
+                        ),
+                        provider=self._provider_name,
+                        details={
+                            "timed_out": True,
+                            "timeout_seconds": timeout_seconds,
+                            "timeout_was_default": self._timeout_is_default_ceiling(),
+                            "returncode": getattr(process, "returncode", None),
+                        },
+                    )
+                )
             content = self._read_output_message(output_path)
             output_path.unlink(missing_ok=True)
             if schema_path:
@@ -1185,8 +1207,8 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         try:
             async with asyncio.timeout(timeout_seconds):
                 await process.wait()
-            await stdout_task
-            stderr_lines = await stderr_task
+                await stdout_task
+                stderr_lines = await stderr_task
         except ProviderError as exc:
             await self._terminate_process(process)
             if not stdout_task.done():

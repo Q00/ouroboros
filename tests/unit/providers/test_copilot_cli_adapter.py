@@ -1264,3 +1264,117 @@ class TestRegressionToolEventDoesNotReplaceAssistantContent:
         assert result.error.details["session_id"] == "sess-legacy-tool-only"
         assert "cat ~/.ssh/id_rsa" not in result.error.message
         assert messages == [("tool", "shell")]
+
+    @pytest.mark.asyncio
+    async def test_streaming_exited_parent_non_eof_pipe_bounded(self) -> None:
+        """Process exits but a descendant holds stdout open — must not hang.
+
+        Regression for review blocker #1: if the direct child exits but a
+        stream never reaches EOF, the adapter must still return within the
+        completion deadline rather than hanging indefinitely on the pipe drain.
+        """
+
+        class _NeverEOFStream:
+            """A stream whose read() hangs forever, simulating a held-open pipe."""
+
+            async def read(self, chunk_size: int = 16384) -> bytes:
+                await asyncio.Future()  # never returns
+                return b""  # unreachable
+
+        class _ExitedButPipesOpenProcess:
+            def __init__(self) -> None:
+                self.stdin = _FakeStdin()
+                self.stdout = _NeverEOFStream()
+                self.stderr = _FakeStream("")
+                self.returncode = 0
+                self.terminated = False
+                self.killed = False
+
+            async def wait(self) -> int:
+                return 0  # process exited immediately
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(
+            *command: str, **kwargs: Any
+        ) -> _ExitedButPipesOpenProcess:
+            return _ExitedButPipesOpenProcess()
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang on pipe")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_was_default"] is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_timeout_returns_result_err_provider_error(self) -> None:
+        """Legacy communicate() timeout must be translated to Result.err(ProviderError).
+
+        Regression for review blocker #2: the legacy path must not propagate a
+        bare TimeoutError. It must terminate the child and return a structured
+        error with timed_out, timeout_seconds, and timeout_was_default details.
+        """
+
+        class _HangingLegacyProcess:
+            """Legacy process whose communicate() hangs forever."""
+
+            def __init__(self) -> None:
+                self.stdin = _FakeStdin()
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                await asyncio.Future()  # never returns
+                return b"", b""  # unreachable
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(
+            *command: str, **kwargs: Any
+        ) -> _HangingLegacyProcess:
+            return _HangingLegacyProcess()
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang legacy")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is True
+        assert "timed out" in result.error.message

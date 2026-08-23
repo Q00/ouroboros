@@ -20,6 +20,32 @@ import secrets
 import shutil
 import subprocess
 
+# `git clone` reaches the network, so it gets a generous ceiling; `git rev-parse`
+# is a local object-store read that either answers immediately or is wedged.
+# Both are bounded because `capture_output=True` hides a credential prompt: an
+# untimed call turns an unreachable host into a silent, permanent hang of
+# `ooo plugin add`.
+GIT_CLONE_TIMEOUT_SECONDS = 300
+GIT_REV_PARSE_TIMEOUT_SECONDS = 30
+
+
+def git_noninteractive_env() -> dict[str, str]:
+    """Environment that makes Git fail instead of prompting for credentials.
+
+    `GIT_TERMINAL_PROMPT=0` is Git's own kill switch for terminal prompts.
+    Pointing `GIT_ASKPASS`/`SSH_ASKPASS` at `true` stops a GUI helper from
+    waiting on input off-screen, and `ssh -oBatchMode=yes` does the same for
+    the SSH transport.  Combined with a `DEVNULL` stdin, a private or moved
+    repository fails fast with a real stderr message instead of blocking on a
+    prompt nobody can see.
+    """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "true"
+    env["SSH_ASKPASS"] = "true"
+    env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
+    return env
+
 
 class CacheRefreshRecoveryError(OSError):
     """Promotion failed and the previous cache remains at ``backup_path``."""

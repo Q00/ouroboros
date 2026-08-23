@@ -708,12 +708,31 @@ class CopilotCliLLMAdapter(RuntimeStreamMixin):
         normalized_model: str | None,
         response_format: dict[str, object] | None,
     ) -> Result[CompletionResponse, ProviderError]:
-        (
-            stdout_lines,
-            stderr_lines,
-            session_id,
-            last_content,
-        ) = await self._collect_legacy_process_output(process)
+        timeout_seconds = self._effective_timeout_seconds()
+        try:
+            (
+                stdout_lines,
+                stderr_lines,
+                session_id,
+                last_content,
+            ) = await self._collect_legacy_process_output(process)
+        except TimeoutError:
+            await self._terminate_process(process)
+            return Result.err(
+                ProviderError(
+                    message=(
+                        f"{self._display_name} legacy request timed out"
+                        f" after {timeout_seconds:.1f}s"
+                    ),
+                    provider=self._provider_name,
+                    details={
+                        "timed_out": True,
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_was_default": self._timeout_is_default_ceiling(),
+                        "returncode": getattr(process, "returncode", None),
+                    },
+                )
+            )
         preserve_structured_json = self._is_structured_response_format(response_format)
         fallback_content = self._plain_text_stdout_fallback(
             stdout_lines,
@@ -800,8 +819,8 @@ class CopilotCliLLMAdapter(RuntimeStreamMixin):
         try:
             async with asyncio.timeout(timeout_seconds):
                 await process.wait()
-            await stdout_task
-            stderr_lines = await stderr_task
+                await stdout_task
+                stderr_lines = await stderr_task
         except ProviderError as exc:
             await self._terminate_process(process)
             await self._cancel_tasks(stdout_task, stderr_task)
