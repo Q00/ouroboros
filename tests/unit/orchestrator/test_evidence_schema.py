@@ -236,7 +236,7 @@ class TestExtractEvidence:
         """
         text = (
             'For example: {"illustrative": true}\n'
-            'Here is the actual result:\n'
+            "Here is the actual result:\n"
             '{"files_touched": ["main.py"], "pass": true}'
         )
         record = extract_evidence(text)
