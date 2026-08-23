@@ -73,13 +73,9 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator import host_dispatch
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus
-from ouroboros.orchestrator.host_dispatch import (
-    HostDispatchBridge,
-    bind_host_dispatch_bridge,
-    reject_host_runtime_for_evolve,
-)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.job_manager import JobManager
@@ -1882,7 +1878,7 @@ def create_ouroboros_server(
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         await _ensure_evolution_store_initialized()
-        reject_host_runtime_for_evolve(execute_runtime_backend, phase="execution")
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="execution")
         task_cwd = evolutionary_loop.get_project_dir()
         runner_adapter = create_agent_runtime(
             backend=execute_runtime_backend,
@@ -2149,7 +2145,7 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
-        reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
         validation_adapter = create_agent_runtime(
             backend=execute_runtime_backend,
             model=validation_model,
@@ -2364,8 +2360,6 @@ def create_ouroboros_server(
     # ``ouroboros_submit_fanout_results``, so both sides must observe the same
     # directory. Until #1754 this composition root injected no registry and
     # registered no submit handler, so on the shipped stdio server no
-    # ``fanout_id`` was ever stamped and the re-entry contract in
-    # skills/interview/SKILL.md named a tool that was not there.
     #
     # Built at its FINAL directory (``state_dir_path``, resolved above), not a
     # mutable path re-rooted later: a producer registering before the first
@@ -2373,8 +2367,9 @@ def create_ouroboros_server(
     # already-issued fan-out id, whose valid submission then returns
     # ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
-    host_dispatch_bridge = HostDispatchBridge(fanout_registry)
-    bind_host_dispatch_bridge(default_execute_runtime, host_dispatch_bridge)
+    host_dispatch_bridge = host_dispatch.compose_host_dispatch_bridge(
+        default_execute_runtime, fanout_registry
+    )
     execute_seed.host_dispatch_bridge = host_dispatch_bridge
     # Lifecycle owner before its handlers: raw builtin interception calls
     # handlers directly, bypassing ``call_tool()``'s readiness boundary.

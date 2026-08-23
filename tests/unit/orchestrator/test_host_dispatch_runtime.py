@@ -607,9 +607,7 @@ class TestActiveWorkerBeyondTTL:
                 "this would cause the host to spawn a duplicate worker."
             )
 
-    def test_bridge_one_shot_survives_arbitrary_aging(
-        self, bridge: HostDispatchBridge
-    ) -> None:
+    def test_bridge_one_shot_survives_arbitrary_aging(self, bridge: HostDispatchBridge) -> None:
         """No amount of elapsed time can make a once-announced dispatch actionable again."""
         dispatch_id = bridge.park(
             session_id="sess_aging",

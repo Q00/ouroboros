@@ -364,6 +364,13 @@ def bind_host_dispatch_bridge(
     adapter.bind_dispatch_scope(session_id=session_id, execution_id=execution_id)
 
 
+def compose_host_dispatch_bridge(adapter: Any, fanout_registry: Any) -> HostDispatchBridge:
+    """Build and bind the server-owned bridge for a composed runtime."""
+    bridge = HostDispatchBridge(fanout_registry)
+    bind_host_dispatch_bridge(adapter, bridge)
+    return bridge
+
+
 def reject_host_runtime_for_evolve(backend: str, *, phase: str) -> None:
     """Fail fast when ``host`` is selected for evolve/Ralph execution.
 
@@ -786,4 +793,5 @@ __all__ = [
     "HostDispatchNotBoundError",
     "HostDispatchRuntime",
     "bind_host_dispatch_bridge",
+    "compose_host_dispatch_bridge",
 ]
