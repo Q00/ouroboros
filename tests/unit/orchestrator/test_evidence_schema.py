@@ -153,6 +153,31 @@ class TestExtractEvidence:
         ):
             extract_evidence(text)
 
+    def test_json_shaped_content_in_non_json_fence_is_not_evidence(self) -> None:
+        text = 'summary\n```python\n{"files_touched": ["example.py"]}\n```\n'
+
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("code_fence_first", [True, False])
+    def test_non_json_fence_cannot_displace_real_evidence(
+        self, code_fence_first: bool
+    ) -> None:
+        code_fence = '```python\n{"files_touched": ["example.py"]}\n```'
+        evidence = '{"files_touched": ["actual.py"], "tests_passed": ["test_actual"]}'
+        text = (
+            f"{code_fence}\n{evidence}"
+            if code_fence_first
+            else f"{evidence}\n{code_fence}"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data["files_touched"] == ["actual.py"]
+
     def test_empty_text_rejected(self) -> None:
         with pytest.raises(EvidenceError, match="empty"):
             extract_evidence("")
@@ -183,6 +208,27 @@ class TestExtractEvidence:
             "commands_run": ["npx jest"],
             "tests_passed": ["graceful.test.ts::test_basic"],
         }
+
+    @pytest.mark.parametrize(
+        "trailing_prose",
+        [
+            "[AC_COMPLETE: 1]",
+            "Configuration remains at {config.host}.",
+            "All requested work is complete.",
+        ],
+    )
+    def test_prose_after_recovered_evidence_is_ignored(
+        self, trailing_prose: str
+    ) -> None:
+        text = (
+            "Summary before evidence.\n"
+            '{"files_touched": ["main.py"], "tests_passed": ["test_main"]}\n'
+            f"{trailing_prose}\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data["files_touched"] == ["main.py"]
 
     def test_unfenced_json_after_prose_only_brace_fallback(self) -> None:
         """Fallback should also work when there's no fence at all, just

@@ -183,20 +183,55 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     JSON decoder will skip leading whitespace itself.
     """
     first_fence_body_start: int | None = None
-    first_fence_is_evidence: bool = False
 
     for info, body_start in _top_level_fence_body_starts(text):
         tag = info.split(maxsplit=1)[0:1]
-        is_evidence_fence = not tag or tag[0] == "json"
-        if first_fence_body_start is None:
-            first_fence_body_start = body_start
-            first_fence_is_evidence = is_evidence_fence
         if tag and tag[0] == "json":
             return _skip_json_whitespace(text, body_start), True
+        if not tag and first_fence_body_start is None:
+            first_fence_body_start = body_start
 
     if first_fence_body_start is not None:
-        return _skip_json_whitespace(text, first_fence_body_start), first_fence_is_evidence
+        return _skip_json_whitespace(text, first_fence_body_start), True
     return 0, False
+
+def _mask_non_json_fences(text: str) -> str:
+    """Hide explicitly non-JSON fence bodies from bare-output recovery.
+
+    The returned string preserves offsets so decoded spans still refer to the
+    original output. JSON-tagged and untagged fences remain visible because
+    they are supported evidence boundaries.
+    """
+    masked: list[str] | None = None
+    search_pos = 0
+    while True:
+        opener = _FENCE_LINE_RE.search(text, search_pos)
+        if opener is None:
+            break
+
+        fence_len = len(opener.group("fence"))
+        info = opener.group("info").strip().lower()
+        body_start = opener.end()
+        if body_start < len(text) and text[body_start] == "\n":
+            body_start += 1
+
+        closing_fence_re = re.compile(
+            rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE
+        )
+        closer = closing_fence_re.search(text, body_start)
+        body_end = closer.start() if closer is not None else len(text)
+
+        tag = info.split(maxsplit=1)[0:1]
+        if tag and tag[0] != "json":
+            if masked is None:
+                masked = list(text)
+            masked[body_start:body_end] = " " * (body_end - body_start)
+
+        if closer is None:
+            break
+        search_pos = closer.end()
+
+    return text if masked is None else "".join(masked)
 
 
 def _malformed_boundary_end(text: str, opener_pos: int) -> int:
@@ -378,6 +413,28 @@ def _has_json_attempt(text: str) -> bool:
     return False
 
 
+def _looks_like_json_container(text: str, opener_pos: int) -> bool:
+    """Return whether a failed opener has JSON container structure.
+
+    Completion markers such as ``[AC_COMPLETE: 1]`` and placeholders such as
+    ``{config.host}`` are prose, not later evidence attempts. Other failed
+    container openers remain authoritative so malformed final evidence cannot
+    be displaced by an earlier example.
+    """
+    try:
+        _DECODER.raw_decode(text[opener_pos:])
+    except json.JSONDecodeError:
+        boundary_end = _malformed_boundary_end(text, opener_pos)
+        candidate = text[opener_pos:boundary_end]
+        if text[opener_pos] == "[":
+            return (
+                re.fullmatch(r"\[[A-Z][A-Z0-9_ -]*(?::[^\]\n]*)?\]", candidate)
+                is None
+            )
+        return re.fullmatch(r"\{[A-Za-z_][A-Za-z0-9_.]*\}", candidate) is None
+    return True
+
+
 def _recover_json_object(
     text: str, primary: int, primary_exc: json.JSONDecodeError, *, fence_found: bool
 ) -> Any:
@@ -419,39 +476,40 @@ def _recover_json_object(
         )
         raise EvidenceError(msg) from primary_exc
 
-    top_level_objects = _collect_top_level_objects(text)
+    recovery_text = _mask_non_json_fences(text)
+    top_level_objects = _collect_top_level_objects(recovery_text)
 
     if top_level_objects:
         # Check if a malformed structural boundary appears AFTER the last
         # valid top-level object. If so, the malformed boundary is the
         # intended final evidence — earlier objects cannot override it.
         last_obj_end = max(end for _, end, _ in top_level_objects)
-        for ch_pos in range(last_obj_end, len(text)):
-            if text[ch_pos] in "{[":
-                try:
-                    _DECODER.raw_decode(text[ch_pos:])
-                except json.JSONDecodeError:
-                    # A malformed structural boundary after the last valid
-                    # object means the agent intended this as the evidence.
-                    # Fail closed: earlier objects cannot become authoritative.
-                    msg = (
-                        f"Evidence is not valid JSON: {primary_exc.msg} "
-                        f"(line {primary_exc.lineno}, col {primary_exc.colno}). "
-                        f"Malformed evidence at position {ch_pos} follows earlier "
-                        f"objects; recovery refused because the final boundary "
-                        f"is authoritative."
-                    )
-                    raise EvidenceError(msg) from primary_exc
-                else:
-                    # A valid parse here means it was already captured; skip
-                    break
+        for ch_pos in range(last_obj_end, len(recovery_text)):
+            if recovery_text[ch_pos] not in "{[":
+                continue
+            try:
+                _DECODER.raw_decode(recovery_text[ch_pos:])
+            except json.JSONDecodeError:
+                if not _looks_like_json_container(recovery_text, ch_pos):
+                    continue
+                msg = (
+                    f"Evidence is not valid JSON: {primary_exc.msg} "
+                    f"(line {primary_exc.lineno}, col {primary_exc.colno}). "
+                    f"Malformed evidence at position {ch_pos} follows earlier "
+                    f"objects; recovery refused because the final boundary "
+                    f"is authoritative."
+                )
+                raise EvidenceError(msg) from primary_exc
+            else:
+                # A valid parse here means it was already captured; skip
+                break
 
         # Return the last top-level object (authoritative terminal evidence)
         _, _, parsed = top_level_objects[-1]
         return parsed
 
     # No top-level objects found — produce accurate error diagnostics
-    if not _has_json_attempt(text):
+    if not _has_json_attempt(recovery_text):
         msg = "Leaf output contains no JSON object and no fenced evidence block."
         raise EvidenceError(msg)
 
@@ -472,11 +530,11 @@ def extract_evidence(text: str) -> EvidenceRecord:
     ends. That keeps `}` and ``` inside string values from truncating
     valid payloads.
 
-    **Resilience**: If the strict fence-based or bare-JSON-from-start
-    parse fails, ``_recover_json_object`` scans every ``{`` in the output
-    and adopts the first one that decodes. This handles cases where
-    smaller models (e.g. adaptive tier) emit prose markers like
-    ``[AC_COMPLETE: 6]`` before the evidence JSON. When the strict parse
+    **Resilience**: If the strict fence-based or bare-JSON-from-start parse
+    fails, ``_recover_json_object`` structurally scans eligible output for
+    complete top-level objects. This handles cases where smaller models
+    (e.g. adaptive tier) emit prose markers like ``[AC_COMPLETE: 6]`` before
+    the evidence JSON. When the strict parse
     *succeeds*, its result is authoritative: a non-object there is an
     error, never a cue to keep scanning (so ``[{...}]`` cannot leak its
     inner object out as evidence).
