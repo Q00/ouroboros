@@ -588,19 +588,19 @@ def _sanitize_logging_sequence(
     # Preserve generated named-tuple types without invoking their constructor,
     # ``_make``, or iteration hooks. Other tuple subclasses degrade to a plain
     # tuple because their invariants are not part of the logging contract.
-    fields = type(value).__dict__.get("_fields")
-    if type(fields) is tuple and all(type(field) is str for field in fields):
-        try:
+    try:
+        fields = type.__getattribute__(type(value), "__dict__").get("_fields")
+        if type(fields) is tuple and all(type(field) is str for field in fields):
             reconstructed = tuple.__new__(type(value), sanitized)
-            if len(reconstructed) == len(sanitized) and all(
+            if tuple.__len__(reconstructed) == len(sanitized) and all(
                 actual is expected
                 for actual, expected in zip(
                     tuple.__iter__(reconstructed), sanitized, strict=True
                 )
             ):
                 return reconstructed
-        except Exception:
-            pass
+    except Exception:
+        pass
     return tuple(sanitized)
 
 

@@ -200,7 +200,7 @@ def _mask_sensitive_data(
     arbitrary objects that a JSON renderer would serialize via ``repr()``.
     """
     marker = object()
-    callsite = event_dict.pop(_CALLSITE_EVENT_KEY, marker)
+    callsite = dict.pop(event_dict, _CALLSITE_EVENT_KEY, marker)
     sanitized = sanitize_for_logging(event_dict)
     if callsite is not marker:
         sanitized[_CALLSITE_EVENT_KEY] = callsite
