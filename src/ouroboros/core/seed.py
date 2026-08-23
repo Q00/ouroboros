@@ -879,16 +879,18 @@ class Seed(BaseModel, frozen=True):
         """
         if not isinstance(value, str):
             return value
-        normalized = value.strip().lower()
+        # Late import to avoid circular dependency (core -> orchestrator).
+        from ouroboros.orchestrator.execution_strategy import (
+            _canonicalize_task_type,
+            is_registered_task_type,
+        )
+
+        normalized = _canonicalize_task_type(value)
         if not normalized:
             msg = "task_type must be a non-empty string"
             raise ValueError(msg)
         if normalized in BUILTIN_TASK_TYPES:
             return normalized
-        # Late import to avoid circular dependency (core -> orchestrator).
-        from ouroboros.orchestrator.execution_strategy import (
-            is_registered_task_type,
-        )
 
         if is_registered_task_type(normalized):
             return normalized
