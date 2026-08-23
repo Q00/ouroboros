@@ -160,6 +160,26 @@ def _input_ipv6_authority(host: str) -> str | None:
     return f"[{candidate}]"
 
 
+def _has_scope_id(host: str) -> bool:
+    """Return True when ``host`` is an IPv6 literal carrying a zone identifier.
+
+    Zone identifiers (scope IDs) such as ``fe80::1%eth0`` are valid for socket
+    binding but cannot be represented in a URL authority that the MCP SDK's
+    Pydantic URL parser accepts — neither the raw form ``[fe80::1%eth0]`` nor
+    the percent-encoded form ``[fe80::1%25eth0]`` passes validation. This
+    helper identifies such addresses so callers can reject them early with a
+    clear error rather than crashing deep inside SDK metadata construction.
+    """
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address.version == 6 and bool(address.scope_id)
+
+
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
     """Map a bearer token onto the credential dict its auth method expects."""
     if method == AuthMethod.API_KEY:
@@ -423,7 +443,9 @@ def resolve_network_security(
     Raises:
         ValueError: If the bind would expose tool execution without
             credentials, if authentication is configured for a transport that
-            cannot carry it, or if a wildcard bind has no Host allowlist.
+            cannot carry it, if a wildcard bind has no Host allowlist, or if
+            a scoped IPv6 address (zone ID) is used on a non-loopback network
+            bind where authentication metadata URLs cannot be constructed.
     """
     is_network = transport in NETWORK_TRANSPORTS
     auth_method = security.auth_config.method
@@ -461,6 +483,23 @@ def resolve_network_security(
 
     if not is_network:
         return NetworkSecurityWiring()
+
+    # Scoped IPv6 addresses (zone IDs) are valid socket bind targets but
+    # cannot be represented in a URL that the MCP SDK's Pydantic URL parser
+    # accepts. Reject early with a clear message rather than failing deep
+    # inside AuthSettings construction.
+    if is_network and _has_scope_id(host) and not is_loopback_host(host):
+        msg = (
+            f"Cannot serve on scoped IPv6 address {host!r}. "
+            f"The zone identifier (scope ID) cannot be represented in a URL "
+            f"authority that the MCP SDK accepts — neither raw "
+            f"(e.g. [fe80::1%eth0]) nor percent-encoded "
+            f"(e.g. [fe80::1%25eth0]) forms pass Pydantic URL validation. "
+            f"Use the address without a zone ID, bind to a non-link-local "
+            f"address, or use --allowed-host to specify the authority "
+            f"clients will connect to."
+        )
+        raise ValueError(msg)
 
     token_verifier = None
     auth_settings = None

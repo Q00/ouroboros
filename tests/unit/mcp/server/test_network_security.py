@@ -15,6 +15,7 @@ import pytest
 from ouroboros.mcp.server.adapter import MCPServerAdapter
 from ouroboros.mcp.server.auth import (
     OuroborosTokenVerifier,
+    _has_scope_id,
     as_url_authority,
     auth_context_from_access_token,
     build_auth_settings,
@@ -477,6 +478,87 @@ class TestIPv6Binds:
                 port=8080,
                 security=SecurityLayer(),
             )
+
+    # --- Scoped IPv6 (zone ID) regression tests ---
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("fe80::1%lo", True),
+            ("fe80::1%eth0", True),
+            ("[fe80::1%lo]", True),
+            ("::1%lo", True),
+            ("fe80::1", False),
+            ("::1", False),
+            ("2001:db8::1", False),
+            ("127.0.0.1", False),
+            ("localhost", False),
+        ],
+    )
+    def test_has_scope_id_detection(self, host: str, expected: bool) -> None:
+        """Scoped IPv6 addresses are correctly identified by zone ID presence."""
+        assert _has_scope_id(host) == expected
+
+    def test_scoped_ipv6_link_local_authenticated_bind_is_rejected(self) -> None:
+        """A link-local scoped IPv6 bind requiring auth fails early.
+
+        The MCP SDK's Pydantic URL parser rejects zone identifiers in both raw
+        and percent-encoded forms. Rather than crashing inside AuthSettings
+        construction, ``resolve_network_security`` rejects scoped IPv6 network
+        binds with a clear, actionable error message.
+        """
+        with pytest.raises(ValueError, match="Cannot serve on scoped IPv6 address"):
+            resolve_network_security(
+                transport="streamable-http",
+                host="fe80::1%lo",
+                port=8080,
+                security=SecurityLayer(auth_config=_auth_config()),
+            )
+
+    def test_scoped_ipv6_bracketed_link_local_bind_is_rejected(self) -> None:
+        """Bracketed scoped IPv6 bind also fails early."""
+        with pytest.raises(ValueError, match="Cannot serve on scoped IPv6 address"):
+            resolve_network_security(
+                transport="sse",
+                host="[fe80::1%eth0]",
+                port=8080,
+                security=SecurityLayer(auth_config=_auth_config()),
+            )
+
+    def test_scoped_ipv6_loopback_bind_remains_credential_free(self) -> None:
+        """A scoped loopback like ``::1%lo`` is still loopback — no auth needed.
+
+        Scoped loopback does not hit the rejection path because
+        ``is_loopback_host`` returns True and authentication is not required.
+        """
+        wiring = resolve_network_security(
+            transport="streamable-http",
+            host="::1%lo",
+            port=8080,
+            security=SecurityLayer(),
+        )
+        # Credential-free loopback still gets transport security
+        assert wiring.token_verifier is None
+        assert wiring.auth_settings is None
+        assert wiring.transport_security is not None
+
+    def test_scoped_ipv6_url_authority_includes_zone_id(self) -> None:
+        """as_url_authority preserves the zone ID — it's callers that must gate."""
+        # The zone ID passes through as_url_authority verbatim, which is correct
+        # for the text serialization. The SDK URL parser is what rejects it.
+        authority = as_url_authority("fe80::1%lo")
+        assert authority == "[fe80::1%lo]"
+
+    def test_build_auth_settings_rejects_scoped_ipv6(self) -> None:
+        """Confirm the SDK AuthSettings actually rejects a scoped IPv6 URL.
+
+        This documents the SDK limitation that motivates the early rejection
+        in ``resolve_network_security``.
+        """
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="invalid IPv6 address"):
+            build_auth_settings(host="fe80::1%lo", port=8080)
 
 
 class TestTransportSecurityBuilder:
