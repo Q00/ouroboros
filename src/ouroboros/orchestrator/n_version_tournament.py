@@ -188,17 +188,19 @@ class RunWorktreeManager:
         """Remove every worktree created by this manager and prune the temp root.
 
         The temp root is removed in a ``finally`` so a hung or failing git step
-        can never leak the ``mkdtemp`` directory.
+        can never leak the ``mkdtemp`` directory. ``git worktree prune`` runs
+        AFTER the ``rmtree`` so that stale worktree registrations left behind
+        by a removed directory are cleaned up.
         """
         try:
             for path in list(self._created):
                 self.cleanup(path)
+        finally:
+            shutil.rmtree(self._root, ignore_errors=True)
             try:
                 self._git("worktree", "prune")
             except _GIT_CLEANUP_ERRORS as exc:
                 log.warning("n_version.worktree_prune_failed", error=str(exc))
-        finally:
-            shutil.rmtree(self._root, ignore_errors=True)
 
     def __enter__(self) -> RunWorktreeManager:
         return self
@@ -210,9 +212,10 @@ class RunWorktreeManager:
 def export_worktree_diff(worktree_path: Path | str) -> str | None:
     """Return the winner worktree's working-tree diff against HEAD.
 
-    Includes untracked files via ``--`` intent-to-add is out of scope for the
-    scaffold; we capture tracked changes, which is the common case for an AC that
-    edits existing files.
+    Captures both tracked changes (``git diff HEAD``) and untracked new files
+    (detected via ``git ls-files --others --exclude-standard``, then each
+    diffed with ``git diff --no-index /dev/null <file>``). This ensures a
+    winner that only creates new files still produces a usable patch.
 
     Returns ``None`` when git could not be consulted at all, and ``""`` only when
     git succeeded and genuinely reported no changes. The distinction matters: a
@@ -233,7 +236,59 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         log.error("n_version.export_diff_failed", path=str(path), error=str(exc))
         return None
-    return result.stdout
+
+    diff_output = result.stdout
+
+    # Capture untracked files so winners that only create new files are not lost.
+    try:
+        untracked_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        log.error("n_version.export_untracked_list_failed", path=str(path), error=str(exc))
+        return None
+
+    untracked_files = [f for f in untracked_result.stdout.splitlines() if f.strip()]
+
+    for ufile in untracked_files:
+        try:
+            # git diff --no-index exits with code 1 when there are differences,
+            # which is the expected case here (comparing /dev/null to a new file).
+            file_diff_result = subprocess.run(
+                ["git", "diff", "--no-index", "/dev/null", ufile],
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+            )
+            # exit code 1 means differences found (expected), 0 means no diff (unlikely),
+            # anything else is an error.
+            if file_diff_result.returncode > 1:
+                log.error(
+                    "n_version.export_untracked_diff_failed",
+                    path=str(path),
+                    file=ufile,
+                    stderr=file_diff_result.stderr,
+                )
+                return None
+            if file_diff_result.stdout:
+                diff_output += file_diff_result.stdout
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            log.error(
+                "n_version.export_untracked_diff_failed",
+                path=str(path),
+                file=ufile,
+                error=str(exc),
+            )
+            return None
+
+    return diff_output
 
 
 def apply_diff_to_workspace(workspace: Path | str, diff: str | None) -> bool:

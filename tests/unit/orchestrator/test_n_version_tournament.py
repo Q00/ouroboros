@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -256,3 +257,113 @@ class TestGitCommandTimeouts:
         finally:
             monkeypatch.undo()
             manager.cleanup_all()
+
+
+class TestUntrackedFilesInExport:
+    """Regression: a winner that only creates new files must still export a patch.
+
+    Previously ``export_worktree_diff`` used only ``git diff HEAD`` which omits
+    untracked files entirely, causing an empty diff (``""``) when the winner only
+    created new files. ``apply_diff_to_workspace`` would then report a no-op
+    success and the winner's new files would be silently lost.
+    """
+
+    def test_export_includes_untracked_new_files(self, git_workspace: Path) -> None:
+        """A worktree with only new (untracked) files produces a non-empty diff."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            # Create a brand-new file that is untracked (never staged/committed).
+            (winner / "new_feature.py").write_text("print('hello')\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            assert "new_feature.py" in diff
+            assert "print('hello')" in diff
+
+    def test_export_includes_both_tracked_and_untracked(self, git_workspace: Path) -> None:
+        """A worktree with both tracked edits and new files captures everything."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            # Edit existing tracked file.
+            (winner / "file.txt").write_text("tracked change\n")
+            # Create untracked new file.
+            (winner / "brand_new.rs").write_text("fn main() {}\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert "tracked change" in diff
+            assert "brand_new.rs" in diff
+            assert "fn main()" in diff
+
+    def test_untracked_diff_applies_to_workspace(self, git_workspace: Path) -> None:
+        """Exported untracked-file diff can be applied to the main workspace."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            (winner / "new_file.txt").write_text("new content\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        assert (git_workspace / "new_file.txt").exists()
+        assert (git_workspace / "new_file.txt").read_text() == "new content\n"
+
+    def test_export_returns_none_when_ls_files_fails(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If listing untracked files fails, export returns None (not partial)."""
+        call_count = {"n": 0}
+        real_run = subprocess.run
+
+        def _fail_ls_files(*args: object, **kwargs: object) -> object:
+            call_count["n"] += 1
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and "ls-files" in cmd:
+                raise OSError("ls-files failed")
+            return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            (winner / "new.txt").write_text("x\n")
+            monkeypatch.setattr(nvt.subprocess, "run", _fail_ls_files)
+            assert nvt.export_worktree_diff(winner) is None
+
+
+class TestWorktreeCleanupOrdering:
+    """Regression: ``git worktree prune`` must run AFTER ``rmtree``.
+
+    Previously prune ran before rmtree, meaning stale worktree registrations
+    left by a force-removed directory were not cleaned up — the registration
+    pointed to a path that still existed at prune time.
+    """
+
+    def test_prune_runs_after_rmtree(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify that git worktree prune is called after the temp root is gone."""
+        call_order: list[str] = []
+        real_rmtree = shutil.rmtree
+        manager = nvt.RunWorktreeManager(git_workspace)
+        manager.create("codex")
+        root = manager._root
+        assert root.exists()
+
+        original_git = manager._git
+
+        def _tracking_rmtree(path: object, **kwargs: object) -> None:
+            call_order.append("rmtree")
+            real_rmtree(path, **kwargs)  # type: ignore[arg-type]
+
+        def _tracking_git(*args: str, **kwargs: object) -> object:
+            if args and args[0] == "worktree" and len(args) > 1 and args[1] == "prune":
+                call_order.append("prune")
+                # At prune time, root should already be gone.
+                assert not root.exists(), "prune must run after rmtree removes the root"
+            return original_git(*args, **kwargs)
+
+        monkeypatch.setattr(shutil, "rmtree", _tracking_rmtree)
+        monkeypatch.setattr(manager, "_git", _tracking_git)
+        manager.cleanup_all()
+
+        assert "rmtree" in call_order
+        assert "prune" in call_order
+        assert call_order.index("rmtree") < call_order.index("prune")
