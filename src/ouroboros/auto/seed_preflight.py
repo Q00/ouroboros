@@ -610,6 +610,29 @@ def _nested_shell_scopes(
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
                 continue
+            if command_name == "setsid":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    remaining = remaining[1:]
+                continue
+            if command_name == "stdbuf":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    if token in {"-i", "-o", "-e", "--input", "--output", "--error"}:
+                        remaining = remaining[2:] if len(remaining) >= 2 else []
+                    elif token.startswith(("--input=", "--output=", "--error=")):
+                        remaining = remaining[1:]
+                    else:
+                        remaining = remaining[1:]
+                continue
             if command_name == "time":
                 remaining = remaining[1:]
                 while remaining and remaining[0].startswith("-"):
@@ -1546,6 +1569,29 @@ def _command_program_tokens(command: str) -> frozenset[str]:
                 remaining = remaining[1:]
                 if remaining and remaining[0] == "--":
                     remaining = remaining[1:]
+                continue
+            if command_name == "setsid":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    remaining = remaining[1:]
+                continue
+            if command_name == "stdbuf":
+                remaining = remaining[1:]
+                while remaining and remaining[0].startswith("-"):
+                    token = remaining[0]
+                    if token == "--":
+                        remaining = remaining[1:]
+                        break
+                    if token in {"-i", "-o", "-e", "--input", "--output", "--error"}:
+                        remaining = remaining[2:] if len(remaining) >= 2 else []
+                    elif token.startswith(("--input=", "--output=", "--error=")):
+                        remaining = remaining[1:]
+                    else:
+                        remaining = remaining[1:]
                 continue
             if command_name == "time":
                 remaining = remaining[1:]

@@ -1722,6 +1722,101 @@ def test_negated_time_missing_program_is_blocked_with_shell_parity(
 @pytest.mark.parametrize(
     "command",
     (
+        "! stdbuf -oL ./definitely-missing-verifier",
+        "! stdbuf -i0 -o0 -eL ./definitely-missing-verifier",
+        "! stdbuf --output=L ./definitely-missing-verifier",
+        "! stdbuf -o 0 -- ./definitely-missing-verifier",
+    ),
+)
+def test_negated_stdbuf_missing_program_is_blocked_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    """stdbuf wraps a command; a negated missing verifier must still block."""
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Negated stdbuf verifier",
+                    verify_command=command,
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "! setsid ./definitely-missing-verifier",
+        "! setsid --wait ./definitely-missing-verifier",
+        "! setsid -w ./definitely-missing-verifier",
+        "! setsid -- ./definitely-missing-verifier",
+    ),
+)
+def test_negated_setsid_missing_program_is_blocked_with_shell_parity(
+    tmp_path: Path, command: str
+) -> None:
+    """setsid wraps a command; a negated missing verifier must still block.
+
+    Note: setsid may not be installed on macOS, but the preflight parser
+    must still detect the missing verifier regardless of local availability.
+    The /bin/sh parity assertion is skipped when setsid is not on PATH because
+    sh itself will report 'command not found' for setsid (non-zero), while
+    on Linux where setsid exists the negated missing program returns 0.
+    """
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Negated setsid verifier",
+                    verify_command=command,
+                ),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+    # On systems with setsid, the negated command exits 0 — proving the
+    # preflight gate is essential.  On systems without setsid, sh itself
+    # fails, so the parity assertion only applies when setsid is available.
+    import shutil
+
+    if shutil.which("setsid"):
+        assert subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, check=False).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "stdbuf -oL ./missing-verify",
+        "stdbuf --output=0 -- ./missing-verify",
+        "setsid ./missing-verify",
+        "setsid --wait -- ./missing-verify",
+    ),
+)
+def test_setsid_stdbuf_wrapper_option_forms_preserve_program_position(
+    tmp_path: Path, command: str
+) -> None:
+    """setsid/stdbuf wrappers must expose the wrapped program for preflight."""
+    report = run_seed_preflight(
+        _seed(
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(description="Wrapper verifier", verify_command=command),
+            )
+        ),
+        workspace_root=tmp_path,
+    )
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "if false; then ./missing; fi; true",
         "false && ./missing; true",
         "true || ./missing; true",
