@@ -16,10 +16,12 @@ mechanically-testable primitives as pure functions plus a worktree manager:
 * :func:`select_tournament_winner` — first contestant whose verification passed
   wins, deterministically (pure).
 * :func:`export_worktree_diff` / :func:`apply_diff_to_workspace` — the simplest
-  robust winner-apply mechanism: capture the winner worktree's ``git diff`` and
-  ``git apply`` it onto the main workspace. A failed export is reported as
-  ``None`` (distinct from an empty ``""`` diff) so a git error can never be
-  mistaken for "the winner changed nothing".
+  robust winner-apply mechanism: capture the winner worktree's
+  ``git diff --binary`` and ``git apply`` it onto the main workspace. Uses
+  ``--binary`` for full binary content transfer, ``-z`` for NUL-safe untracked
+  file listing, ``--`` before pathnames, and rejects rc=1 with no patch. A
+  failed export is reported as ``None`` (distinct from an empty ``""`` diff) so
+  a git error can never be mistaken for "the winner changed nothing".
 
 Wiring the live per-AC trigger into ``parallel_executor`` is intentionally left
 out: it is deeply entangled with the executor's per-AC dispatch internals and the
@@ -212,10 +214,20 @@ class RunWorktreeManager:
 def export_worktree_diff(worktree_path: Path | str) -> str | None:
     """Return the winner worktree's working-tree diff against HEAD.
 
-    Captures both tracked changes (``git diff HEAD``) and untracked new files
-    (detected via ``git ls-files --others --exclude-standard``, then each
-    diffed with ``git diff --no-index /dev/null <file>``). This ensures a
-    winner that only creates new files still produces a usable patch.
+    Captures both tracked changes (``git diff --binary HEAD``) and untracked new
+    files (detected via ``git ls-files -z --others --exclude-standard``, then
+    each diffed with ``git diff --binary --no-index -- /dev/null <file>``).
+    This ensures a winner that only creates new files — including binary files —
+    still produces a usable patch.
+
+    The ``--binary`` flag generates full binary content in the patch so that
+    ``git apply`` can reconstruct binary files rather than emitting an
+    inapplicable "Binary files differ" marker.
+
+    Untracked file listing uses ``-z`` (NUL-terminated) output to safely handle
+    filenames that Git would otherwise C-quote (non-ASCII, tabs, newlines,
+    quotes). Each pathname is passed after ``--`` to prevent interpretation as
+    an option.
 
     Returns ``None`` when git could not be consulted at all, and ``""`` only when
     git succeeded and genuinely reported no changes. The distinction matters: a
@@ -226,7 +238,7 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     path = Path(worktree_path)
     try:
         result = subprocess.run(
-            ["git", "diff", "HEAD"],
+            ["git", "diff", "--binary", "HEAD"],
             cwd=str(path),
             capture_output=True,
             text=True,
@@ -240,9 +252,12 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     diff_output = result.stdout
 
     # Capture untracked files so winners that only create new files are not lost.
+    # Use -z for NUL-terminated output: Git C-quotes pathnames containing
+    # non-ASCII, tabs, newlines, or literal quotes when printing line-by-line,
+    # but -z emits the raw bytes separated by NUL with no quoting.
     try:
         untracked_result = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
+            ["git", "ls-files", "-z", "--others", "--exclude-standard"],
             cwd=str(path),
             capture_output=True,
             text=True,
@@ -253,28 +268,45 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
         log.error("n_version.export_untracked_list_failed", path=str(path), error=str(exc))
         return None
 
-    untracked_files = [f for f in untracked_result.stdout.splitlines() if f.strip()]
+    # Split on NUL; filter out the trailing empty element from a final NUL.
+    untracked_files = [f for f in untracked_result.stdout.split("\0") if f]
 
     for ufile in untracked_files:
         try:
             # git diff --no-index exits with code 1 when there are differences,
             # which is the expected case here (comparing /dev/null to a new file).
+            # --binary ensures binary content is encoded in the patch.
+            # '--' separates options from pathnames so filenames starting with
+            # '-' are not misinterpreted.
             file_diff_result = subprocess.run(
-                ["git", "diff", "--no-index", "/dev/null", ufile],
+                ["git", "diff", "--binary", "--no-index", "--", "/dev/null", ufile],
                 cwd=str(path),
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=GIT_COMMAND_TIMEOUT_SECONDS,
             )
-            # exit code 1 means differences found (expected), 0 means no diff (unlikely),
-            # anything else is an error.
+            # exit code 1 means differences found (expected), 0 means no diff
+            # (unlikely for /dev/null vs a real file), anything else is an error.
             if file_diff_result.returncode > 1:
                 log.error(
                     "n_version.export_untracked_diff_failed",
                     path=str(path),
                     file=ufile,
                     stderr=file_diff_result.stderr,
+                )
+                return None
+            # Reject rc=1 with no patch output: this indicates git could not
+            # read the file (e.g. a broken symlink or permission error) rather
+            # than a real difference. Treating it as empty would silently lose
+            # the file.
+            if file_diff_result.returncode == 1 and not file_diff_result.stdout.strip():
+                log.error(
+                    "n_version.export_untracked_diff_empty_patch",
+                    path=str(path),
+                    file=ufile,
+                    stderr=file_diff_result.stderr,
+                    reason="git diff --no-index returned rc=1 but produced no patch",
                 )
                 return None
             if file_diff_result.stdout:

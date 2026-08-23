@@ -367,3 +367,136 @@ class TestWorktreeCleanupOrdering:
         assert "rmtree" in call_order
         assert "prune" in call_order
         assert call_order.index("rmtree") < call_order.index("prune")
+
+
+class TestBinaryPatchExport:
+    """Regression: binary files must produce applicable --binary patches.
+
+    Without ``--binary``, git emits only a "Binary files differ" marker that
+    ``git apply`` rejects. The winner's binary content would be silently lost.
+    """
+
+    def test_tracked_binary_change_exports_applicable_patch(self, git_workspace: Path) -> None:
+        """A tracked binary file modified in the winner worktree produces a patch that applies."""
+        # Create a binary file in the base repo.
+        binary_content_base = bytes(range(256))
+        (git_workspace / "image.bin").write_bytes(binary_content_base)
+        _git(git_workspace, "add", "-A")
+        _git(git_workspace, "commit", "-m", "add binary")
+
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            # Modify the tracked binary in the winner worktree.
+            binary_content_new = bytes(range(255, -1, -1))
+            (winner / "image.bin").write_bytes(binary_content_new)
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            # The patch must apply cleanly.
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        # Verify the binary content was transferred.
+        assert (git_workspace / "image.bin").read_bytes() == binary_content_new
+
+    def test_untracked_binary_file_exports_applicable_patch(self, git_workspace: Path) -> None:
+        """An untracked binary file in the winner worktree produces an applicable patch."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            # Create a new binary file (untracked).
+            binary_content = b"\x00\x01\x02\xff\xfe\xfd" * 100
+            (winner / "data.bin").write_bytes(binary_content)
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            assert "data.bin" in diff
+            # The patch must apply cleanly.
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        # Verify the binary content was transferred.
+        assert (git_workspace / "data.bin").read_bytes() == binary_content
+
+
+class TestNonAsciiAndQuotedFilenames:
+    """Regression: filenames that Git would C-quote must be handled correctly.
+
+    Git quotes filenames containing non-ASCII characters, tabs, newlines, or
+    literal quotes when using line-oriented display. Using ``-z`` for NUL-safe
+    output and ``--`` before pathnames ensures these files are correctly captured.
+    """
+
+    def test_non_ascii_filename_exports_and_applies(self, git_workspace: Path) -> None:
+        """An untracked file with a non-ASCII name (e.g. café.py) is captured."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            non_ascii_name = "café.py"
+            (winner / non_ascii_name).write_text("# encoding test\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        assert (git_workspace / non_ascii_name).exists()
+        assert (git_workspace / non_ascii_name).read_text() == "# encoding test\n"
+
+    def test_filename_with_space_exports_and_applies(self, git_workspace: Path) -> None:
+        """An untracked file with spaces in the name is captured correctly."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            spaced_name = "my file (1).txt"
+            (winner / spaced_name).write_text("spaced\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        assert (git_workspace / spaced_name).exists()
+        assert (git_workspace / spaced_name).read_text() == "spaced\n"
+
+    def test_filename_with_quotes_exports_and_applies(self, git_workspace: Path) -> None:
+        """An untracked file with literal quotes in the name is captured."""
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            quoted_name = 'say"hello".txt'
+            (winner / quoted_name).write_text("quoted\n")
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != ""
+            applied = nvt.apply_diff_to_workspace(git_workspace, diff)
+            assert applied is True
+        assert (git_workspace / quoted_name).exists()
+        assert (git_workspace / quoted_name).read_text() == "quoted\n"
+
+
+class TestRejectRc1WithNoPatch:
+    """Regression: rc=1 from git diff --no-index with empty stdout is a failure.
+
+    If git cannot read an untracked file (broken symlink, permission error) it
+    may return rc=1 with empty stdout. Treating that as "no difference" would
+    silently lose the file. The export must return None.
+    """
+
+    def test_rc1_no_stdout_returns_none(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """git diff --no-index returning rc=1 with empty stdout causes export failure."""
+        call_count = {"n": 0}
+        real_run = subprocess.run
+
+        def _fake_no_index_empty(*args: object, **kwargs: object) -> object:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and "--no-index" in cmd:
+                call_count["n"] += 1
+                # Simulate rc=1 with no patch output (e.g. file unreadable).
+                result = subprocess.CompletedProcess(
+                    args=cmd, returncode=1, stdout="", stderr="fatal: cannot read file"
+                )
+                return result
+            return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            (winner / "unreadable.bin").write_text("x\n")
+            monkeypatch.setattr(nvt.subprocess, "run", _fake_no_index_empty)
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is None
+            assert call_count["n"] >= 1
