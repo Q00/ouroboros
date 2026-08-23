@@ -48,23 +48,32 @@ _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # Ouroboros speaks a Claude-style capitalized tool vocabulary while Pi's
-# built-in tools are lowercase (``read``, ``bash``, ``edit``, ``write``).
-# Unknown names pass through unchanged so extension/custom tool names keep
-# working; unmatched allow-list entries are inert for Pi.
+# built-in tools are lowercase (``read``, ``bash``, ``edit``, ``write``,
+# ``grep``, ``find``, ``ls``).  Unknown names pass through unchanged so
+# extension/custom tool names keep working; unmatched allow-list entries
+# are inert for Pi.
 _PI_TOOL_FLAG_NAMES: dict[str, str] = {
     "Read": "read",
     "Write": "write",
     "Edit": "edit",
     "Bash": "bash",
-    "Glob": "glob",
+    "Command": "bash",
+    "Execute": "bash",
+    "Glob": "find",
     "Grep": "grep",
+    "LS": "ls",
+    "Ls": "ls",
 }
 
 _NATIVE_PARAM_PROBE_TIMEOUT_SECONDS = 10.0
 
 
-def _probe_pi_native_param_flags(cli_path: str) -> bool:
-    """Detect whether the Pi CLI accepts ``--append-system-prompt`` and ``--tools``.
+def _probe_pi_native_param_flags(cli_path: str) -> tuple[bool, bool]:
+    """Detect whether the Pi CLI accepts native parameter flags.
+
+    Returns a tuple ``(has_tools_flag, has_no_tools_flag)`` where:
+    - ``has_tools_flag`` means ``--append-system-prompt`` and ``--tools`` are present.
+    - ``has_no_tools_flag`` means ``--no-tools`` is also present.
 
     Both flags have shipped with Pi for a long time, but a missing or very old
     binary must keep working: probing ``--help`` once lets the runtime fall
@@ -78,11 +87,13 @@ def _probe_pi_native_param_flags(cli_path: str) -> bool:
             timeout=_NATIVE_PARAM_PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return False
+        return (False, False)
     if result.returncode != 0:
-        return False
+        return (False, False)
     help_text = f"{result.stdout}\n{result.stderr}"
-    return "--append-system-prompt" in help_text and "--tools" in help_text
+    has_tools = "--append-system-prompt" in help_text and "--tools" in help_text
+    has_no_tools = "--no-tools" in help_text
+    return (has_tools, has_no_tools)
 
 
 class PiRuntime:
@@ -125,7 +136,7 @@ class PiRuntime:
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
-        self._native_param_flags: bool | None = None
+        self._native_param_flags: tuple[bool, bool] | None = None
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
@@ -210,7 +221,13 @@ class PiRuntime:
         """Lazily probe the CLI once for native parameter flag support."""
         if self._native_param_flags is None:
             self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags
+        return self._native_param_flags[0]
+
+    def _supports_no_tools_flag(self) -> bool:
+        """Return whether the Pi CLI supports ``--no-tools``."""
+        if self._native_param_flags is None:
+            self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
+        return self._native_param_flags[1]
 
     # -- CLI resolution ----------------------------------------------------
 
@@ -254,9 +271,13 @@ class PiRuntime:
         if self._supports_native_param_flags():
             if system_prompt:
                 command.extend(["--append-system-prompt", system_prompt])
-            if tools:
-                pi_names = ",".join(_PI_TOOL_FLAG_NAMES.get(tool, tool) for tool in tools)
-                command.extend(["--tools", pi_names])
+            if tools is not None:
+                if tools:
+                    pi_names = ",".join(_PI_TOOL_FLAG_NAMES.get(tool, tool) for tool in tools)
+                    command.extend(["--tools", pi_names])
+                elif self._supports_no_tools_flag():
+                    # Explicit empty list means "disable all tools"; use --no-tools.
+                    command.append("--no-tools")
 
         command.append(prompt)
         return command

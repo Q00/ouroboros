@@ -100,7 +100,8 @@ allow-list, and `permission_mode`. Each is one of:
 > `--dangerously-skip-permissions` and `--yolo --accept-hooks`, respectively. Pi keeps the
 > requested mode in runtime metadata because its CLI does not expose an approval switch.
 > \*Pi's native `--append-system-prompt` and `--tools` flags deliver these parameters
-> directly; Pi binaries without those flags fall back to user-message composition and
+> directly; `--no-tools` enforces an explicit empty allow-list (all tools disabled).
+> Pi binaries without those flags fall back to user-message composition and
 > report `translated`.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
