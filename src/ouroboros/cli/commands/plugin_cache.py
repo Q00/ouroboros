@@ -29,6 +29,32 @@ GIT_CLONE_TIMEOUT_SECONDS = 300
 GIT_REV_PARSE_TIMEOUT_SECONDS = 30
 
 
+def _ssh_command_with_batch_mode(existing: str | None) -> str:
+    """Build a GIT_SSH_COMMAND that preserves caller settings and adds BatchMode.
+
+    When the caller has already set GIT_SSH_COMMAND (e.g. for a custom
+    identity file, proxy jump, or nonstandard port), we append
+    ``-oBatchMode=yes`` so the SSH transport fails on prompts without
+    discarding the operator's transport configuration.
+
+    If no GIT_SSH_COMMAND is inherited, we fall back to the minimal
+    ``ssh -oBatchMode=yes``.
+
+    The option is appended using shlex.quote on the existing value is
+    unnecessary — ``-oBatchMode=yes`` is a literal flag with no
+    shell-metacharacter content — and the existing command is already a
+    shell-interpreted string (Git invokes it via ``sh -c "$GIT_SSH_COMMAND"
+    host``). We therefore concatenate with a single space, which is safe
+    because ``-oBatchMode=yes`` contains no characters requiring quoting.
+    """
+    if not existing:
+        return "ssh -oBatchMode=yes"
+    # If the caller already specifies BatchMode, respect it as-is.
+    if "-oBatchMode=" in existing or "-o BatchMode=" in existing:
+        return existing
+    return f"{existing} -oBatchMode=yes"
+
+
 def git_noninteractive_env() -> dict[str, str]:
     """Environment that makes Git fail instead of prompting for credentials.
 
@@ -38,12 +64,17 @@ def git_noninteractive_env() -> dict[str, str]:
     the SSH transport.  Combined with a `DEVNULL` stdin, a private or moved
     repository fails fast with a real stderr message instead of blocking on a
     prompt nobody can see.
+
+    Caller-supplied ``GIT_SSH_COMMAND`` is preserved: we append
+    ``-oBatchMode=yes`` rather than replacing the entire value, so custom
+    identity files, proxy jumps, wrapper scripts, and other transport
+    settings continue to work.
     """
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = "true"
     env["SSH_ASKPASS"] = "true"
-    env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
+    env["GIT_SSH_COMMAND"] = _ssh_command_with_batch_mode(os.environ.get("GIT_SSH_COMMAND"))
     return env
 
 

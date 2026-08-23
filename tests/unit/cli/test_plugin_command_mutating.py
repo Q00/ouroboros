@@ -5237,3 +5237,120 @@ def test_url_refresh_clone_timeout_is_reported_without_traceback(
     assert result.exit_code == 1, result.output
     assert "timed out" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+
+
+# ---------------------------------------------------------------------------
+# git_noninteractive_env: inherited SSH transport preservation (review round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_git_noninteractive_env_preserves_inherited_git_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git_noninteractive_env() must preserve a caller-supplied GIT_SSH_COMMAND.
+
+    Users relying on GIT_SSH_COMMAND for a nonstandard port, identity file,
+    proxy jump, SSH config, or wrapper script must not have those settings
+    silently discarded. The function must append -oBatchMode=yes to the
+    inherited command rather than replacing it.
+
+    Regression catch for the ouroboros-agent BLOCKING finding at
+    src/ouroboros/cli/commands/plugin_cache.py:46 (HEAD 967bf3492).
+    """
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    custom_cmd = "ssh -i /home/deploy/.ssh/id_ed25519 -o ProxyJump=bastion.internal"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom_cmd)
+
+    env = git_noninteractive_env()
+
+    # The inherited command is preserved.
+    assert custom_cmd in env["GIT_SSH_COMMAND"], (
+        f"caller-supplied GIT_SSH_COMMAND was discarded; got {env['GIT_SSH_COMMAND']!r}"
+    )
+    # BatchMode=yes is appended.
+    assert "-oBatchMode=yes" in env["GIT_SSH_COMMAND"], (
+        f"BatchMode=yes was not appended; got {env['GIT_SSH_COMMAND']!r}"
+    )
+    # The other noninteractive variables are still set.
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_ASKPASS"] == "true"
+    assert env["SSH_ASKPASS"] == "true"
+
+
+def test_git_noninteractive_env_defaults_when_no_inherited_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no GIT_SSH_COMMAND is inherited, the fallback is ssh -oBatchMode=yes."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == "ssh -oBatchMode=yes"
+
+
+def test_git_noninteractive_env_respects_existing_batchmode_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the caller already specifies BatchMode, do not append a duplicate."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    # -oBatchMode=no is a conscious caller choice (e.g. testing). Respect it.
+    custom = "ssh -oBatchMode=no -i /tmp/key"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == custom, (
+        f"existing BatchMode setting was overridden; got {env['GIT_SSH_COMMAND']!r}"
+    )
+
+
+def test_git_noninteractive_env_handles_wrapper_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper script (common in CI) is preserved with BatchMode appended."""
+    from ouroboros.cli.commands.plugin_cache import git_noninteractive_env
+
+    wrapper = "/usr/local/bin/ssh-wrapper.sh"
+    monkeypatch.setenv("GIT_SSH_COMMAND", wrapper)
+
+    env = git_noninteractive_env()
+
+    assert env["GIT_SSH_COMMAND"] == f"{wrapper} -oBatchMode=yes"
+
+
+def test_shallow_clone_passes_inherited_ssh_command_to_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_shallow_clone must forward the preserved GIT_SSH_COMMAND to git.
+
+    End-to-end regression: set a custom GIT_SSH_COMMAND, call
+    _shallow_clone, and verify the subprocess.run env includes it.
+    """
+    custom_cmd = "ssh -p 2222 -i /opt/keys/deploy"
+    monkeypatch.setenv("GIT_SSH_COMMAND", custom_cmd)
+
+    calls: list[tuple[list[str], dict]] = []
+
+    def _spy(argv, *_args, **kwargs):
+        calls.append((list(argv), kwargs))
+        if argv[:2] == ["git", "clone"]:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="deadbeef\n", stderr="")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
+
+    sha = _shallow_clone("git@github.com:Q00/ouroboros-plugins.git", tmp_path / "clone")
+
+    assert sha == "deadbeef"
+    # Both git calls must carry the preserved custom SSH command.
+    for argv, kwargs in calls:
+        git_ssh = kwargs["env"]["GIT_SSH_COMMAND"]
+        assert custom_cmd in git_ssh, (
+            f"custom GIT_SSH_COMMAND not forwarded to {argv[:2]}; got {git_ssh!r}"
+        )
+        assert "-oBatchMode=yes" in git_ssh
