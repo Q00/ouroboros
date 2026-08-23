@@ -20,7 +20,7 @@ mechanically-testable primitives as pure functions plus a worktree manager:
   ``git diff --binary`` and ``git apply`` it onto the main workspace. Uses
   ``--binary`` for full binary content transfer, ``-z`` for NUL-safe untracked
   file listing, ``--`` before pathnames, and rejects rc=1 with no patch. A
-  failed export is reported as ``None`` (distinct from an empty ``""`` diff) so
+  failed export is reported as ``None`` (distinct from an empty ``b""`` diff) so
   a git error can never be mistaken for "the winner changed nothing".
 
 Wiring the live per-AC trigger into ``parallel_executor`` is intentionally left
@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import tempfile
@@ -211,7 +212,7 @@ class RunWorktreeManager:
         self.cleanup_all()
 
 
-def export_worktree_diff(worktree_path: Path | str) -> str | None:
+def export_worktree_diff(worktree_path: Path | str) -> bytes | None:
     """Return the winner worktree's working-tree diff against HEAD.
 
     Captures both tracked changes (``git diff --binary HEAD``) and untracked new
@@ -219,6 +220,12 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     each diffed with ``git diff --binary --no-index -- /dev/null <file>``).
     This ensures a winner that only creates new files — including binary files —
     still produces a usable patch.
+
+    The patch and NUL-delimited pathname listing remain bytes throughout so
+    arbitrary valid Git path bytes and non-UTF-8 file content round-trip without
+    implicit text decoding. Pathnames are converted with :func:`os.fsdecode`
+    only when passed back to the operating system; its surrogateescape behavior
+    preserves undecodable bytes on POSIX.
 
     The ``--binary`` flag generates full binary content in the patch so that
     ``git apply`` can reconstruct binary files rather than emitting an
@@ -229,11 +236,11 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     quotes). Each pathname is passed after ``--`` to prevent interpretation as
     an option.
 
-    Returns ``None`` when git could not be consulted at all, and ``""`` only when
-    git succeeded and genuinely reported no changes. The distinction matters: a
-    failed export means the winning contestant's work has *not* been captured, so
-    treating it as "nothing to apply" would silently discard that work while
-    reporting a successful merge.
+    Returns ``None`` when git could not be consulted at all, and ``b""`` only
+    when git succeeded and genuinely reported no changes. The distinction
+    matters: a failed export means the winning contestant's work has *not* been
+    captured, so treating it as "nothing to apply" would silently discard that
+    work while reporting a successful merge.
     """
     path = Path(worktree_path)
     try:
@@ -241,7 +248,6 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
             ["git", "diff", "--binary", "HEAD"],
             cwd=str(path),
             capture_output=True,
-            text=True,
             check=True,
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
@@ -251,16 +257,14 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
 
     diff_output = result.stdout
 
-    # Capture untracked files so winners that only create new files are not lost.
-    # Use -z for NUL-terminated output: Git C-quotes pathnames containing
-    # non-ASCII, tabs, newlines, or literal quotes when printing line-by-line,
-    # but -z emits the raw bytes separated by NUL with no quoting.
+    # Git emits raw pathname bytes with -z. Decode only at the filesystem
+    # boundary so os.fsdecode/os.fsencode can round-trip undecodable bytes via
+    # surrogateescape instead of applying strict stdout text decoding.
     try:
         untracked_result = subprocess.run(
             ["git", "ls-files", "-z", "--others", "--exclude-standard"],
             cwd=str(path),
             capture_output=True,
-            text=True,
             check=True,
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
@@ -268,21 +272,20 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
         log.error("n_version.export_untracked_list_failed", path=str(path), error=str(exc))
         return None
 
-    # Split on NUL; filter out the trailing empty element from a final NUL.
-    untracked_files = [f for f in untracked_result.stdout.split("\0") if f]
+    untracked_files = [
+        os.fsdecode(raw_path) for raw_path in untracked_result.stdout.split(b"\0") if raw_path
+    ]
 
     for ufile in untracked_files:
         try:
             # git diff --no-index exits with code 1 when there are differences,
             # which is the expected case here (comparing /dev/null to a new file).
-            # --binary ensures binary content is encoded in the patch.
-            # '--' separates options from pathnames so filenames starting with
-            # '-' are not misinterpreted.
+            # --binary ensures binary content is encoded in the patch. ``--``
+            # prevents option-like pathnames from being interpreted as options.
             file_diff_result = subprocess.run(
                 ["git", "diff", "--binary", "--no-index", "--", "/dev/null", ufile],
                 cwd=str(path),
                 capture_output=True,
-                text=True,
                 check=False,
                 timeout=GIT_COMMAND_TIMEOUT_SECONDS,
             )
@@ -292,8 +295,8 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
                 log.error(
                     "n_version.export_untracked_diff_failed",
                     path=str(path),
-                    file=ufile,
-                    stderr=file_diff_result.stderr,
+                    file=repr(ufile),
+                    stderr=file_diff_result.stderr.decode(errors="backslashreplace"),
                 )
                 return None
             # Reject rc=1 with no patch output: this indicates git could not
@@ -304,8 +307,8 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
                 log.error(
                     "n_version.export_untracked_diff_empty_patch",
                     path=str(path),
-                    file=ufile,
-                    stderr=file_diff_result.stderr,
+                    file=repr(ufile),
+                    stderr=file_diff_result.stderr.decode(errors="backslashreplace"),
                     reason="git diff --no-index returned rc=1 but produced no patch",
                 )
                 return None
@@ -315,7 +318,7 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
             log.error(
                 "n_version.export_untracked_diff_failed",
                 path=str(path),
-                file=ufile,
+                file=repr(ufile),
                 error=str(exc),
             )
             return None
@@ -323,12 +326,12 @@ def export_worktree_diff(worktree_path: Path | str) -> str | None:
     return diff_output
 
 
-def apply_diff_to_workspace(workspace: Path | str, diff: str | None) -> bool:
+def apply_diff_to_workspace(workspace: Path | str, diff: bytes | None) -> bool:
     """Apply a captured winner diff onto the main workspace via ``git apply``.
 
     Returns ``True`` when the patch applied cleanly. A genuinely empty diff
-    (``""``) counts as success — there is nothing to apply. A ``None`` diff means
-    :func:`export_worktree_diff` failed and the winner's changes were never
+    (``b""``) counts as success — there is nothing to apply. A ``None`` diff
+    means :func:`export_worktree_diff` failed and the winner's changes were never
     captured; that is a hard failure, never a no-op success. Any conflict/error
     returns ``False`` so the caller keeps the main workspace untouched rather
     than half-applied.
@@ -348,7 +351,6 @@ def apply_diff_to_workspace(workspace: Path | str, diff: str | None) -> bool:
             cwd=str(Path(workspace)),
             input=diff,
             capture_output=True,
-            text=True,
             check=True,
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )

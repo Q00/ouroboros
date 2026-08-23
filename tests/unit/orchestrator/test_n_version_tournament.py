@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -103,26 +104,25 @@ class TestWorktreeIsolation:
             (winner / "file.txt").write_text("winning change\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert "winning change" in diff
+            assert b"winning change" in diff
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
         assert (git_workspace / "file.txt").read_text() == "winning change\n"
 
     def test_empty_diff_is_noop_success(self, git_workspace: Path) -> None:
-        assert nvt.apply_diff_to_workspace(git_workspace, "") is True
+        assert nvt.apply_diff_to_workspace(git_workspace, b"") is True
 
     def test_unchanged_winner_exports_empty_not_none(self, git_workspace: Path) -> None:
-        """A contestant that genuinely changed nothing exports ``""``, not ``None``."""
+        """A contestant that genuinely changed nothing exports ``b""``, not ``None``."""
         with nvt.RunWorktreeManager(git_workspace) as manager:
             winner = manager.create("codex")
-            assert nvt.export_worktree_diff(winner) == ""
+            assert nvt.export_worktree_diff(winner) == b""
 
 
 class TestExportFailureIsNotSilentDataLoss:
     """Regression: a failed ``git diff`` must not look like "winner changed nothing".
-
-    Previously ``export_worktree_diff`` returned ``""`` on any git error and
-    ``apply_diff_to_workspace("")`` returned ``True``, so a git failure while
+    Previously ``export_worktree_diff`` returned ``b""`` on any git error and
+    ``apply_diff_to_workspace(b"")`` returned ``True``, so a git failure while
     exporting the tournament winner's work was reported as a *successful* merge
     and the winning contestant's code was silently discarded.
     """
@@ -160,7 +160,7 @@ class TestExportFailureIsNotSilentDataLoss:
         diff = nvt.export_worktree_diff(not_a_repo)
         # The failure is distinguishable from "no changes"...
         assert diff is None
-        assert diff != ""
+        assert diff != b""
         # ...and is never laundered into a successful no-op merge.
         assert nvt.apply_diff_to_workspace(tmp_path, diff) is False
 
@@ -202,7 +202,7 @@ class TestGitCommandTimeouts:
             raise subprocess.TimeoutExpired(cmd="git apply", timeout=1)
 
         monkeypatch.setattr(nvt.subprocess, "run", _spy)
-        assert nvt.apply_diff_to_workspace(git_workspace, "some diff\n") is False
+        assert nvt.apply_diff_to_workspace(git_workspace, b"some diff\n") is False
         assert seen.get("timeout") == nvt.GIT_COMMAND_TIMEOUT_SECONDS
 
     def test_cleanup_survives_timeout_and_still_prunes_temp_root(
@@ -276,9 +276,9 @@ class TestUntrackedFilesInExport:
             (winner / "new_feature.py").write_text("print('hello')\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
-            assert "new_feature.py" in diff
-            assert "print('hello')" in diff
+            assert diff != b""
+            assert b"new_feature.py" in diff
+            assert b"print('hello')" in diff
 
     def test_export_includes_both_tracked_and_untracked(self, git_workspace: Path) -> None:
         """A worktree with both tracked edits and new files captures everything."""
@@ -290,9 +290,9 @@ class TestUntrackedFilesInExport:
             (winner / "brand_new.rs").write_text("fn main() {}\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert "tracked change" in diff
-            assert "brand_new.rs" in diff
-            assert "fn main()" in diff
+            assert b"tracked change" in diff
+            assert b"brand_new.rs" in diff
+            assert b"fn main()" in diff
 
     def test_untracked_diff_applies_to_workspace(self, git_workspace: Path) -> None:
         """Exported untracked-file diff can be applied to the main workspace."""
@@ -301,7 +301,7 @@ class TestUntrackedFilesInExport:
             (winner / "new_file.txt").write_text("new content\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
+            assert diff != b""
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
         assert (git_workspace / "new_file.txt").exists()
@@ -391,7 +391,7 @@ class TestBinaryPatchExport:
             (winner / "image.bin").write_bytes(binary_content_new)
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
+            assert diff != b""
             # The patch must apply cleanly.
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
@@ -407,8 +407,8 @@ class TestBinaryPatchExport:
             (winner / "data.bin").write_bytes(binary_content)
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
-            assert "data.bin" in diff
+            assert diff != b""
+            assert b"data.bin" in diff
             # The patch must apply cleanly.
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
@@ -417,11 +417,12 @@ class TestBinaryPatchExport:
 
 
 class TestNonAsciiAndQuotedFilenames:
-    """Regression: filenames that Git would C-quote must be handled correctly.
+    """Regression: Git path bytes must survive export and apply unchanged.
 
     Git quotes filenames containing non-ASCII characters, tabs, newlines, or
-    literal quotes when using line-oriented display. Using ``-z`` for NUL-safe
-    output and ``--`` before pathnames ensures these files are correctly captured.
+    literal quotes when using line-oriented display. NUL-delimited byte output,
+    filesystem decoding, and option separators preserve both ordinary Unicode
+    names and path bytes that are not valid UTF-8.
     """
 
     def test_non_ascii_filename_exports_and_applies(self, git_workspace: Path) -> None:
@@ -432,7 +433,7 @@ class TestNonAsciiAndQuotedFilenames:
             (winner / non_ascii_name).write_text("# encoding test\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
+            assert diff != b""
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
         assert (git_workspace / non_ascii_name).exists()
@@ -446,7 +447,7 @@ class TestNonAsciiAndQuotedFilenames:
             (winner / spaced_name).write_text("spaced\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
+            assert diff != b""
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
         assert (git_workspace / spaced_name).exists()
@@ -460,11 +461,33 @@ class TestNonAsciiAndQuotedFilenames:
             (winner / quoted_name).write_text("quoted\n")
             diff = nvt.export_worktree_diff(winner)
             assert diff is not None
-            assert diff != ""
+            assert diff != b""
             applied = nvt.apply_diff_to_workspace(git_workspace, diff)
             assert applied is True
         assert (git_workspace / quoted_name).exists()
         assert (git_workspace / quoted_name).read_text() == "quoted\n"
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows filenames are Unicode-only")
+    def test_undecodable_filename_exports_and_applies(self, git_workspace: Path) -> None:
+        """A valid non-UTF-8 Git pathname reaches the workspace byte-for-byte."""
+        raw_name = b"winner-\xff.bin"
+        content = b"\x00winning bytes\xff\n"
+
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            winner_file = os.path.join(os.fsencode(winner), raw_name)
+            fd = os.open(winner_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+
+            diff = nvt.export_worktree_diff(winner)
+            assert diff is not None
+            assert diff != b""
+            assert nvt.apply_diff_to_workspace(git_workspace, diff) is True
+
+        exported_file = os.path.join(os.fsencode(git_workspace), raw_name)
+        with open(exported_file, "rb") as stream:
+            assert stream.read() == content
 
 
 class TestRejectRc1WithNoPatch:
@@ -488,7 +511,7 @@ class TestRejectRc1WithNoPatch:
                 call_count["n"] += 1
                 # Simulate rc=1 with no patch output (e.g. file unreadable).
                 result = subprocess.CompletedProcess(
-                    args=cmd, returncode=1, stdout="", stderr="fatal: cannot read file"
+                    args=cmd, returncode=1, stdout=b"", stderr=b"fatal: cannot read file"
                 )
                 return result
             return real_run(*args, **kwargs)  # type: ignore[arg-type]
