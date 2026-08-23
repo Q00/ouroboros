@@ -453,7 +453,6 @@ def _has_json_attempt(text: str) -> bool:
     return False
 
 
-
 def _recover_json_object(
     text: str, primary: int, primary_exc: json.JSONDecodeError, *, fence_found: bool
 ) -> Any:

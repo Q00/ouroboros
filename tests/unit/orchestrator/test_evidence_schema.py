@@ -180,9 +180,7 @@ class TestExtractEvidence:
             '~~~python\n{"files_touched": ["tilde-example.py"]}\n~~~\n',
         ],
     )
-    def test_markdown_examples_are_not_recovered_as_evidence(
-        self, example: str
-    ) -> None:
+    def test_markdown_examples_are_not_recovered_as_evidence(self, example: str) -> None:
         with pytest.raises(
             EvidenceError,
             match="Leaf output contains no JSON object and no fenced evidence block",
