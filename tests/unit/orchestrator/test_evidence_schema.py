@@ -341,6 +341,85 @@ class TestExtractEvidence:
         assert record.data["outer"] == {"middle": {"deep": True}}
         assert record.data["files_touched"] == ["x.py"]
 
+    def test_malformed_final_evidence_fence_fails_closed(self) -> None:
+        """A malformed JSON body inside the final evidence fence must fail.
+
+        Regression (round2): when the authoritative fence contained invalid
+        JSON wrapping a valid inner object, recovery rescued the inner object.
+        The fence is the strongest structural boundary and must own its body.
+        """
+        text = (
+            "Validation evidence:\n\n"
+            "```json\n"
+            '{invalid_wrapper: {"files_touched": ["rescued.py"]}}\n'
+            "```\n"
+        )
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_fence_with_earlier_valid_object_fails_closed(self) -> None:
+        """Earlier illustrative objects cannot override a malformed final fence.
+
+        Regression (round2): when an earlier valid object existed in prose
+        before a malformed evidence fence, recovery adopted the earlier object
+        instead of failing closed on the authoritative fence.
+        """
+        text = (
+            'Earlier example: {"illustrative": true}\n\n'
+            "Validation evidence:\n\n"
+            "```json\n"
+            "{not valid json at all\n"
+            "```\n"
+        )
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_untagged_fence_fails_closed(self) -> None:
+        """An untagged fence (```) with malformed body also has fence authority.
+
+        Regression (round2): only json-tagged fences were treated as
+        authoritative; untagged fences allowed recovery to bypass them.
+        """
+        text = 'Earlier: {"illustrative": true}\n\n```\n{broken json\n```\n'
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_array_does_not_yield_inner_candidates(self) -> None:
+        """A malformed outer array cannot yield valid inner objects.
+
+        Regression (round2): `[{"valid": true}, {broken` allowed recovery
+        to rescue `{"valid": true}` because the malformed outer boundary
+        was absent from the containment check.
+        """
+        text = 'Summary\n[{"files_touched": ["wrong.py"]}, {broken'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_malformed_object_does_not_yield_inner_candidates(self) -> None:
+        """A malformed outer object cannot yield valid inner objects.
+
+        Regression (round2): `{wrapper: {"valid": true}` (no closer) allowed
+        recovery to rescue the inner object.
+        """
+        text = 'Summary\n{wrapper: {"files_touched": ["wrong.py"]}'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_earlier_example_cannot_override_malformed_final_evidence(self) -> None:
+        """When the final structural evidence is malformed, earlier objects
+        in prose must not become authoritative.
+
+        Regression (round2): the last-object preference in recovery meant
+        the earlier object was returned when the final one was malformed.
+        """
+        text = (
+            'Example output: {"illustrative": true}\n'
+            "Actual evidence follows:\n"
+            '{broken: {"files_touched": ["wrong.py"]}}'
+        )
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
 
 class TestValidateCodeProfile:
     def test_accepts_complete_record(self, code_profile) -> None:
