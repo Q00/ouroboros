@@ -1921,6 +1921,48 @@ class TestStreamDrainLifecycle:
     """Regression tests for review blockers #1 and #2 on Codex CLI adapter."""
 
     @pytest.mark.asyncio
+    async def test_prompt_drain_uses_completion_deadline(self) -> None:
+        """A child that stops reading stdin is terminated at the completion deadline."""
+
+        class _BlockedStdin(_FakeStdin):
+            async def drain(self) -> None:
+                await asyncio.Future()
+
+        class _BlockedStdinProcess(_FakeProcess):
+            def __init__(self) -> None:
+                super().__init__(wait_forever=True)
+                self.stdin = _BlockedStdin()
+
+        process = _BlockedStdinProcess()
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(
+            *command: str, **kwargs: Any
+        ) -> _BlockedStdinProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            return process
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Block prompt delivery")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is True
+        assert process.terminated is True
+
+    @pytest.mark.asyncio
     async def test_streaming_exited_parent_non_eof_pipe_bounded(self) -> None:
         """Process exits but a descendant holds stdout open — must not hang.
 

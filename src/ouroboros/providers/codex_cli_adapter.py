@@ -945,9 +945,11 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
     async def _collect_legacy_process_output(
         self,
         process: Any,
+        *,
+        deadline: float,
     ) -> tuple[list[str], list[str], str | None, str]:
         """Fallback for tests or wrappers that only expose communicate()."""
-        async with asyncio.timeout(self._effective_timeout_seconds()):
+        async with asyncio.timeout_at(deadline):
             stdout_bytes, stderr_bytes = await process.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -1081,23 +1083,54 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                 )
             )
 
-        # Feed prompt via stdin when the backend expects stdin delivery.
-        if process.stdin is not None and prompt_stdin_bytes is not None:
-            process.stdin.write(prompt_stdin_bytes)
-            await process.stdin.drain()
-            process.stdin.close()
-        elif process.stdin is not None:
-            process.stdin.close()
+        timeout_seconds = self._effective_timeout_seconds()
+        completion_deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+        # Prompt delivery is part of the completion lifecycle: a child that
+        # stops reading stdin must not escape the same deadline as its output.
+        try:
+            async with asyncio.timeout_at(completion_deadline):
+                if process.stdin is not None and prompt_stdin_bytes is not None:
+                    process.stdin.write(prompt_stdin_bytes)
+                    await process.stdin.drain()
+                    process.stdin.close()
+                elif process.stdin is not None:
+                    process.stdin.close()
+        except TimeoutError:
+            await self._terminate_process(process)
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+            return Result.err(
+                ProviderError(
+                    message=f"{self._display_name} request timed out after {timeout_seconds:.1f}s",
+                    provider=self._provider_name,
+                    details={
+                        "timed_out": True,
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_was_default": self._timeout_is_default_ceiling(),
+                        "returncode": getattr(process, "returncode", None),
+                    },
+                )
+            )
+        except asyncio.CancelledError:
+            await self._terminate_process(process)
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+            raise
 
         if not hasattr(process, "stdout") or not callable(getattr(process, "wait", None)):
-            timeout_seconds = self._effective_timeout_seconds()
             try:
                 (
                     stdout_lines,
                     stderr_lines,
                     session_id,
                     last_content,
-                ) = await self._collect_legacy_process_output(process)
+                ) = await self._collect_legacy_process_output(
+                    process,
+                    deadline=completion_deadline,
+                )
             except TimeoutError:
                 await self._terminate_process(process)
                 output_path.unlink(missing_ok=True)
@@ -1202,10 +1235,9 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                 last_content = self._update_last_content(last_content, event_content)
 
         stdout_task = asyncio.create_task(_read_stdout())
-        timeout_seconds = self._effective_timeout_seconds()
 
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with asyncio.timeout_at(completion_deadline):
                 await process.wait()
                 await stdout_task
                 stderr_lines = await stderr_task
