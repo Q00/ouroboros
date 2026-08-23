@@ -481,7 +481,7 @@ def validate_api_key_format(api_key: str, provider: str | None = None) -> bool:
     return True
 
 
-def is_sensitive_field(field_name: str) -> bool:
+def is_sensitive_field(field_name: Any) -> bool:
     """Check if a field name indicates sensitive data.
 
     Args:
@@ -490,10 +490,17 @@ def is_sensitive_field(field_name: str) -> bool:
     Returns:
         True if the field likely contains sensitive data.
     """
-    if not field_name:
+    if not isinstance(field_name, str):
         return False
 
-    field_lower = field_name.lower()
+    try:
+        normalized = str.__str__(field_name)
+    except Exception:
+        # A string-like key that cannot be safely normalized must not be
+        # allowed to bypass field-name redaction.
+        return True
+
+    field_lower = str.lower(normalized)
     return any(sensitive in field_lower for sensitive in SENSITIVE_FIELD_NAMES)
 
 
@@ -540,16 +547,22 @@ def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:
     if field_name and is_sensitive_field(field_name):
         return "<REDACTED>"
 
-    # Check if value looks sensitive
+    # Normalize string subclasses before any indexing, slicing, or return so
+    # caller-controlled overrides cannot disclose the original credential.
     if isinstance(value, str):
+        try:
+            normalized = str.__str__(value)
+        except Exception:
+            return "<REDACTED>"
+
         if is_sensitive_value(value):
-            return mask_api_key(value)
+            return mask_api_key(normalized)
 
         # Truncate long strings
-        if len(value) > 100:
-            return f"{value[:50]}...({len(value)} chars)"
+        if len(normalized) > 100:
+            return f"{normalized[:50]}...({len(normalized)} chars)"
 
-        return value
+        return normalized
 
     # For other types, show type info
     if isinstance(value, (dict, list)):

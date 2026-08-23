@@ -279,6 +279,18 @@ class TestMaskSensitiveValue:
         result = mask_sensitive_value(long_string)
         assert "200 chars" in result
 
+    def test_hostile_str_subclass_is_normalized_before_masking(self) -> None:
+        """Caller-controlled slicing cannot disclose a detected credential."""
+
+        class HostileString(str):
+            def __getitem__(self, _index):
+                return str.__str__(self)
+
+        secret = "sk-live-abc123def456ghi789"
+        masked = mask_sensitive_value(HostileString(secret))
+
+        assert secret not in masked
+
 
 class TestSanitizeForLogging:
     """Tests for sanitize_for_logging function."""

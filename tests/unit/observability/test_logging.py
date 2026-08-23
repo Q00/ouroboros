@@ -1442,6 +1442,40 @@ class TestSensitiveDataMasking:
         output = captured.err.strip()
         assert "sk-live-dictevent" not in output
 
+    def test_plain_string_event_secret_masked_live(self, capsys: Any) -> None:
+        """A credential used as the event string is masked in PROD JSON."""
+        secret = "sk-live-plain-event-secret"
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info(secret)
+
+        output = capsys.readouterr().err.strip()
+        assert secret not in output
+
+    def test_hostile_sensitive_mapping_key_masked_live(self, capsys: Any) -> None:
+        """A string-subclass key cannot bypass sensitive-field detection."""
+
+        class HostileKey(str):
+            def lower(self) -> str:
+                return "safe"
+
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info("config.loaded", config={HostileKey("api_key"): "hunter2"})
+
+        output = capsys.readouterr().err.strip()
+        assert "hunter2" not in output
+        assert json.loads(output)["config"]["api_key"] == "<REDACTED>"
+
+    def test_non_string_mapping_key_does_not_abort_live_logging(self, capsys: Any) -> None:
+        """Unsupported mapping-key types pass classification without raising."""
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info("config.loaded", config={7: "safe"})
+
+        output = capsys.readouterr().err.strip()
+        assert json.loads(output)["config"]["7"] == "safe"
+
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""
 

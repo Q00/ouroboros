@@ -210,31 +210,31 @@ def _mask_sensitive_data(
         Event dictionary with sensitive values masked.
     """
     for key, value in list(event_dict.items()):
+        if isinstance(key, str):
+            try:
+                key_name = str.__str__(key)
+            except Exception:
+                event_dict[key] = "<REDACTED>"
+                continue
+        else:
+            key_name = None
         # Skip standard structlog keys that are not user-controlled —
         # except ``event``: if a caller passes a non-string positional arg
         # it is stored under ``event`` and may contain structured secrets.
-        if key in ("level", "timestamp", "filename", "lineno"):
+        if key_name in ("level", "timestamp", "filename", "lineno"):
             continue
 
-        if key == "event":
-            # String events are the common case and never contain embedded
-            # credentials worth recursing into; structured (non-string) events
-            # can carry nested secrets and must be sanitized or rejected.
+        if key_name == "event":
+            # Event strings are caller-controlled just like other scalar
+            # values. Normalize subclasses through the built-in implementation
+            # before sensitivity checks or rendering.
             if isinstance(value, str):
-                # Built-in str literals are the overwhelmingly common case and
-                # are safe to pass through.  ``str`` subclasses (notably
-                # StrEnum members) must be normalized through the built-in to
-                # prevent hostile ``__str__`` / ``lower`` overrides from
-                # leaking secrets, and then checked for sensitivity.
-                if type(value) is str:
-                    continue
-                # Normalize subclass to a genuine built-in str.
                 try:
                     normalized = str.__str__(value)
                 except Exception:
                     event_dict[key] = "<REDACTED>"
                     continue
-                if is_sensitive_value(value):
+                if is_sensitive_value(normalized):
                     event_dict[key] = mask_api_key(normalized)
                 else:
                     event_dict[key] = normalized
@@ -252,7 +252,7 @@ def _mask_sensitive_data(
             continue
 
         # Check if field name indicates sensitivity
-        if is_sensitive_field(key):
+        if is_sensitive_field(key_name):
             event_dict[key] = "<REDACTED>"
             continue
 
