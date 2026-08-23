@@ -195,6 +195,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         return _skip_json_whitespace(text, first_fence_body_start), True
     return 0, False
 
+
 def _mask_non_json_fences(text: str) -> str:
     """Hide explicitly non-JSON fence bodies from bare-output recovery.
 
@@ -215,9 +216,7 @@ def _mask_non_json_fences(text: str) -> str:
         if body_start < len(text) and text[body_start] == "\n":
             body_start += 1
 
-        closing_fence_re = re.compile(
-            rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE
-        )
+        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*\r?$", re.MULTILINE)
         closer = closing_fence_re.search(text, body_start)
         body_end = closer.start() if closer is not None else len(text)
 
@@ -427,10 +426,7 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
         boundary_end = _malformed_boundary_end(text, opener_pos)
         candidate = text[opener_pos:boundary_end]
         if text[opener_pos] == "[":
-            return (
-                re.fullmatch(r"\[[A-Z][A-Z0-9_ -]*(?::[^\]\n]*)?\]", candidate)
-                is None
-            )
+            return re.fullmatch(r"\[[A-Z][A-Z0-9_ -]*(?::[^\]\n]*)?\]", candidate) is None
         return re.fullmatch(r"\{[A-Za-z_][A-Za-z0-9_.]*\}", candidate) is None
     return True
 

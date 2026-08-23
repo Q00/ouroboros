@@ -163,16 +163,10 @@ class TestExtractEvidence:
             extract_evidence(text)
 
     @pytest.mark.parametrize("code_fence_first", [True, False])
-    def test_non_json_fence_cannot_displace_real_evidence(
-        self, code_fence_first: bool
-    ) -> None:
+    def test_non_json_fence_cannot_displace_real_evidence(self, code_fence_first: bool) -> None:
         code_fence = '```python\n{"files_touched": ["example.py"]}\n```'
         evidence = '{"files_touched": ["actual.py"], "tests_passed": ["test_actual"]}'
-        text = (
-            f"{code_fence}\n{evidence}"
-            if code_fence_first
-            else f"{evidence}\n{code_fence}"
-        )
+        text = f"{code_fence}\n{evidence}" if code_fence_first else f"{evidence}\n{code_fence}"
 
         record = extract_evidence(text)
 
@@ -217,9 +211,7 @@ class TestExtractEvidence:
             "All requested work is complete.",
         ],
     )
-    def test_prose_after_recovered_evidence_is_ignored(
-        self, trailing_prose: str
-    ) -> None:
+    def test_prose_after_recovered_evidence_is_ignored(self, trailing_prose: str) -> None:
         text = (
             "Summary before evidence.\n"
             '{"files_touched": ["main.py"], "tests_passed": ["test_main"]}\n'
