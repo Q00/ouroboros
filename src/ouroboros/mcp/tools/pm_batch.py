@@ -104,9 +104,16 @@ def turn_answers(
     handoff), ``planned_questions`` closes that gap: the caller must answer
     exactly those identities and cannot substitute a question it invented.
 
-    An omitted ``answers`` and ``answer`` means reconnect. An explicitly
-    malformed or empty batch is rejected rather than treated as reconnect.
+    The singular and batched forms are mutually exclusive so neither can be
+    silently discarded. An omitted ``answers`` and ``answer`` means reconnect.
+    An explicitly malformed or empty batch is rejected rather than treated as
+    reconnect.
     """
+    if answers is not None and answer is not None:
+        return [], (
+            "'answer' and 'answers' are mutually exclusive; send exactly one answer form."
+        )
+
     pairs: list[tuple[str, str]] = []
     if answers is not None:
         if not isinstance(answers, list):

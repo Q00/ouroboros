@@ -347,6 +347,12 @@ def test_batch_answer_schema_is_closed_and_bounded() -> None:
     }
 
 
+def test_answer_schema_makes_singular_and_batch_forms_mutually_exclusive() -> None:
+    schema = PMInterviewHandler().definition.to_input_schema()
+
+    assert schema["not"] == {"required": ["answer", "answers"]}
+
+
 @pytest.mark.parametrize(
     ("answers", "error_fragment"),
     [
@@ -376,6 +382,18 @@ def test_malformed_and_duplicate_batch_answers_are_rejected(
     assert pairs == []
     assert error is not None
     assert error_fragment in error
+
+
+def test_singular_and_batch_answer_forms_are_rejected_together() -> None:
+    pairs, error = turn_answers(
+        [{"question": Q_PRIMARY, "answer": "The review workflow."}],
+        "A singular answer that must not be discarded.",
+        Q_PRIMARY,
+    )
+
+    assert pairs == []
+    assert error is not None
+    assert "mutually exclusive" in error
 
 
 def test_valid_batch_answers_preserve_the_producer_attention_budget() -> None:

@@ -19,7 +19,7 @@ ambiguity scoring.  User controls when to stop.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -420,7 +420,7 @@ class PMInterviewHandler:
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition with flat optional parameters."""
-        return MCPToolDefinition(
+        definition = MCPToolDefinition(
             name="ouroboros_pm_interview",
             description=(
                 "PM interview for product requirements gathering. "
@@ -448,7 +448,8 @@ class PMInterviewHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "PM's response to a single-question turn. Pass the question it "
-                        "answers as 'last_question'. For a turn that asked more than one "
+                        "answers as 'last_question'. This singular form is mutually "
+                        "exclusive with 'answers'; for a turn that asked more than one "
                         "question, use 'answers' instead."
                     ),
                     required=False,
@@ -458,9 +459,10 @@ class PMInterviewHandler:
                     type=ToolInputType.ARRAY,
                     description=(
                         "A turn's answers, sent together: [{question, answer}, ...], one "
-                        "entry per question the turn asked. A turn is recorded whole, so "
-                        "collect every answer before calling. Each entry names its own "
-                        "question and the batch accepts one to three entries."
+                        "entry per question the turn asked. This batch form is mutually "
+                        "exclusive with 'answer'. A turn is recorded whole, so collect "
+                        "every answer before calling. Each entry names its own question "
+                        "and the batch accepts one to three entries."
                     ),
                     required=False,
                     items={
@@ -522,6 +524,9 @@ class PMInterviewHandler:
                 ),
             ),
         )
+        input_schema = definition.to_input_schema()
+        input_schema["not"] = {"required": ["answer", "answers"]}
+        return replace(definition, input_schema=input_schema)
 
     def _get_engine(self) -> PMInterviewEngine:
         """Return the injected engine or create a new one using the server's configured backend."""
