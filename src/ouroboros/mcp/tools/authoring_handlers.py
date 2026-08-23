@@ -1316,8 +1316,10 @@ class GenerateSeedHandler:
             if details["blockers"]:
                 return Result.err(
                     MCPToolError(
-                        f"Interview must be reopened before Seed generation: {details}",
+                        "Interview must be reopened before Seed generation",
                         tool_name="ouroboros_generate_seed",
+                        error_code="interview_reopen_required",
+                        details=details,
                     )
                 )
             interview_state.requirement_distillation = distillation
@@ -1475,10 +1477,21 @@ class GenerateSeedHandler:
             if seed_result.is_err:
                 error = seed_result.error
                 if isinstance(error, ValidationError):
+                    readiness_code = error.details.get("code")
                     return Result.err(
                         MCPToolError(
                             f"Validation error: {error}",
                             tool_name="ouroboros_generate_seed",
+                            error_code=(
+                                readiness_code
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
+                            details=(
+                                error.details
+                                if readiness_code == "interview_reopen_required"
+                                else None
+                            ),
                         )
                     )
                 return Result.err(
