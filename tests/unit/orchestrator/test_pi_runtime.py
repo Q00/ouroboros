@@ -113,6 +113,39 @@ def test_build_command_skips_native_flags_when_unsupported() -> None:
     assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
 
 
+@pytest.mark.parametrize(
+    "help_text",
+    [
+        "Usage: pi [options]\n  --append-system-prompt <prompt>\n",
+        "Usage: pi [options]\n  --tools <tools>\n",
+    ],
+    ids=["append-system-prompt-only", "tools-only"],
+)
+def test_build_command_falls_back_when_probe_finds_only_one_native_param_flag(
+    help_text: str,
+) -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = help_text
+        mock_run.return_value.stderr = ""
+        command = runtime._build_command(
+            prompt="Do the task",
+            system_prompt="Be a careful test runner.",
+            tools=["Read"],
+        )
+
+    assert runtime._native_param_flags == (False, False)
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+    mock_run.assert_called_once_with(
+        ["/tmp/pi", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+
+
 def test_capabilities_follow_probed_native_param_support() -> None:
     native = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
     native._native_param_flags = (True, True)
