@@ -1,8 +1,6 @@
 """Regression tests for security fixes in observability/logging.py.
 
-Covers:
-- Scalar event StrEnum/arbitrary objects fail-open (event key must not trust __str__)
-- Tuple subclass _make() returning unsanitized original in _mask_sequence_sensitive_data
+Covers fail-closed scalar event handling and safe tuple-subclass reconstruction.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ class TestScalarEventStrEnumFailOpen:
         assert type(result["event"]) is str
 
     def test_arbitrary_object_in_event_key_does_not_invoke_str(self) -> None:
-        """An arbitrary object in the 'event' key must not have __str__ called."""
+        """An arbitrary object in the 'event' key is redacted without conversion."""
 
         class HostileObj:
             def __str__(self):
@@ -58,10 +56,8 @@ class TestScalarEventStrEnumFailOpen:
 
         event_dict: dict[str, Any] = {"event": HostileObj(), "level": "info"}
         result = _mask_sensitive_data(_FakeLogger(), "info", event_dict)
-        # The hostile __str__ output must not appear
-        assert "sk-live-leaked" not in str(result["event"])
-        # Should be a safe type descriptor instead
-        assert "HostileObj" in result["event"]
+
+        assert result["event"] == "<REDACTED>"
 
     def test_hostile_str_subclass_in_event_key(self) -> None:
         """A str subclass with hostile __str__ in event key is handled safely."""

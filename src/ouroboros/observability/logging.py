@@ -53,12 +53,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
-from ouroboros.core.security import (
-    is_sensitive_field,
-    is_sensitive_value,
-    mask_api_key,
-    sanitize_for_logging,
-)
+from ouroboros.core.security import sanitize_for_logging
 
 
 class LogMode(StrEnum):
@@ -197,83 +192,19 @@ def _mask_sensitive_data(
     _method_name: str,
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Structlog processor that masks sensitive data in log entries.
+    """Return a renderer-safe event dictionary with nested secrets masked.
 
-    Automatically detects and masks API keys, tokens, and other sensitive
-    values to prevent accidental exposure in logs.
-
-    Args:
-        _logger: The logger instance (unused).
-        _method_name: The log method name (unused).
-        event_dict: The event dictionary to process.
-
-    Returns:
-        Event dictionary with sensitive values masked.
+    The application callsite marker is trusted internal state consumed by a
+    later processor. Every caller-controlled key and value otherwise crosses
+    the shared sanitizer, including top-level credential-shaped keys and
+    arbitrary objects that a JSON renderer would serialize via ``repr()``.
     """
-    for key, value in list(event_dict.items()):
-        if isinstance(key, str):
-            try:
-                key_name = str.__str__(key)
-            except Exception:
-                event_dict[key] = "<REDACTED>"
-                continue
-        else:
-            key_name = None
-        # Skip standard structlog keys that are not user-controlled —
-        # except ``event``: if a caller passes a non-string positional arg
-        # it is stored under ``event`` and may contain structured secrets.
-        if key_name in ("level", "timestamp", "filename", "lineno"):
-            continue
-
-        if key_name == "event":
-            # Event strings are caller-controlled just like other scalar
-            # values. Normalize subclasses through the built-in implementation
-            # before sensitivity checks or rendering.
-            if isinstance(value, str):
-                try:
-                    normalized = str.__str__(value)
-                except Exception:
-                    event_dict[key] = "<REDACTED>"
-                    continue
-                if is_sensitive_value(normalized):
-                    event_dict[key] = mask_api_key(normalized)
-                else:
-                    event_dict[key] = normalized
-                continue
-            if isinstance(value, dict):
-                event_dict[key] = _mask_dict_sensitive_data(value)
-            elif isinstance(value, (list, tuple)):
-                event_dict[key] = _mask_sequence_sensitive_data(value)
-            else:
-                # Non-string, non-container scalar event: never trust the
-                # object's ``__str__`` since it may leak secrets or execute
-                # hostile code.  Use ``repr(type(...))`` for type visibility
-                # and redact the value.
-                event_dict[key] = f"<non-string event: {type(value).__name__}>"
-            continue
-
-        # Check if field name indicates sensitivity
-        if is_sensitive_field(key_name):
-            event_dict[key] = "<REDACTED>"
-            continue
-
-        # Check if value looks sensitive — normalize to built-in str before
-        # masking so a hostile subclass cannot override indexing/slicing to
-        # emit the original secret through the masked output.
-        if isinstance(value, str) and is_sensitive_value(value):
-            event_dict[key] = mask_api_key(str.__str__(value))
-            continue
-
-        # Recursively handle nested dicts
-        if isinstance(value, dict):
-            event_dict[key] = _mask_dict_sensitive_data(value)
-            continue
-
-        # Recursively handle lists and tuples
-        if isinstance(value, (list, tuple)):
-            event_dict[key] = _mask_sequence_sensitive_data(value)
-
-    return event_dict
+    marker = object()
+    callsite = event_dict.pop(_CALLSITE_EVENT_KEY, marker)
+    sanitized = sanitize_for_logging(event_dict)
+    if callsite is not marker:
+        sanitized[_CALLSITE_EVENT_KEY] = callsite
+    return sanitized
 
 
 def _mask_dict_sensitive_data(data: dict[Any, Any]) -> dict[Any, Any]:
@@ -284,51 +215,9 @@ def _mask_dict_sensitive_data(data: dict[Any, Any]) -> dict[Any, Any]:
 def _mask_sequence_sensitive_data(
     data: list[Any] | tuple[Any, ...],
 ) -> list[Any] | tuple[Any, ...]:
-    """Recursively mask sensitive data in a list or tuple.
-
-    Preserves the sequence type (list vs tuple, including named tuples).
-
-    Args:
-        data: List or tuple to process.
-
-    Returns:
-        Sequence of the same type with sensitive values masked.
-    """
-    sanitized = []
-    for item in data:
-        if isinstance(item, dict):
-            sanitized.append(_mask_dict_sensitive_data(item))
-        elif isinstance(item, (list, tuple)):
-            sanitized.append(_mask_sequence_sensitive_data(item))
-        elif isinstance(item, str) and is_sensitive_value(item):
-            sanitized.append(mask_api_key(str.__str__(item)))
-        else:
-            sanitized.append(item)
-
-    if isinstance(data, tuple):
-        factory = getattr(type(data), "_make", None)
-        if callable(factory):
-            try:
-                reconstructed = factory(sanitized)
-                # Validate that _make() actually used our sanitized values
-                # and not the original contents.  A hostile subclass may
-                # override _make() to ignore its argument or return a
-                # reference to the original unsanitized data.
-                if (
-                    isinstance(reconstructed, tuple)
-                    and len(reconstructed) == len(sanitized)
-                    and all(a is b for a, b in zip(reconstructed, sanitized, strict=True))
-                ):
-                    return reconstructed
-                # Content mismatch — degrade to plain tuple with our
-                # verified sanitized elements.
-                return tuple(sanitized)
-            except Exception:
-                # Custom tuple subclass whose _make() is incompatible with
-                # sanitized values — fall back to a plain tuple rather than
-                # letting an availability failure suppress sanitization.
-                return tuple(sanitized)
-        return tuple(sanitized)
+    """Sanitize a sequence through the shared renderer boundary."""
+    sanitized = sanitize_for_logging({"value": data})["value"]
+    assert isinstance(sanitized, (list, tuple))
     return sanitized
 
 

@@ -571,49 +571,72 @@ def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:
     return str(value)
 
 
-def _sanitize_logging_value(value: Any) -> Any:
-    """Mask sensitive data inside an arbitrary nested logging value.
+def _sanitize_logging_sequence(
+    value: list[Any] | tuple[Any, ...],
+) -> list[Any] | tuple[Any, ...]:
+    """Copy a built-in sequence without trusting subclass iteration hooks."""
 
-    Dictionaries recurse through :func:`sanitize_for_logging`. Lists and tuples
-    recurse element-wise and preserve their sequence type so that a secret
-    nested inside a sequence cannot reach a log sink verbatim. Scalar strings
-    reuse the same :func:`is_sensitive_value` check applied to mapping values.
+    try:
+        items = list(list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value))
+    except Exception:
+        return [] if isinstance(value, list) else ()
+
+    sanitized = [_sanitize_logging_value(item) for item in items]
+    if isinstance(value, list):
+        return sanitized
+
+    # Preserve generated named-tuple types without invoking their constructor,
+    # ``_make``, or iteration hooks. Other tuple subclasses degrade to a plain
+    # tuple because their invariants are not part of the logging contract.
+    fields = type(value).__dict__.get("_fields")
+    if type(fields) is tuple and all(type(field) is str for field in fields):
+        try:
+            reconstructed = tuple.__new__(type(value), sanitized)
+            if len(reconstructed) == len(sanitized) and all(
+                actual is expected
+                for actual, expected in zip(
+                    tuple.__iter__(reconstructed), sanitized, strict=True
+                )
+            ):
+                return reconstructed
+        except Exception:
+            pass
+    return tuple(sanitized)
+
+
+def _sanitize_logging_value(value: Any) -> Any:
+    """Return a renderer-safe copy of an arbitrary nested logging value.
+
+    Only JSON scalar types and copied built-in containers cross the logging
+    boundary. Caller-defined objects are redacted instead of being handed to a
+    renderer that may invoke their ``__repr__`` implementation.
     """
 
     if isinstance(value, dict):
         return sanitize_for_logging(value)
     if isinstance(value, (list, tuple)):
-        sanitized = [_sanitize_logging_value(item) for item in value]
-        # Preserve the original sequence type (including named tuples, which
-        # build from positional arguments rather than a single iterable).
-        if isinstance(value, tuple):
-            factory = getattr(type(value), "_make", None)
-            if callable(factory):
-                try:
-                    reconstructed = factory(sanitized)
-                    # Validate that _make() actually used our sanitized values
-                    # and not the original contents.  A hostile subclass may
-                    # override _make() to ignore its argument or return a
-                    # reference to the original unsanitized data.
-                    if (
-                        isinstance(reconstructed, tuple)
-                        and len(reconstructed) == len(sanitized)
-                        and all(a is b for a, b in zip(reconstructed, sanitized, strict=True))
-                    ):
-                        return reconstructed
-                    # Content mismatch — degrade to plain tuple with our
-                    # verified sanitized elements.
-                    return tuple(sanitized)
-                except Exception:
-                    # Custom tuple subclass whose _make() is incompatible —
-                    # fall back to plain tuple rather than raising during
-                    # sanitization.
-                    return tuple(sanitized)
-            return tuple(sanitized)
-        return sanitized
-    if isinstance(value, str) and is_sensitive_value(value):
-        return mask_api_key(str.__str__(value))
-    return value
+        return _sanitize_logging_sequence(value)
+    if isinstance(value, str):
+        try:
+            normalized = str.__str__(value)
+        except Exception:
+            return "<REDACTED>"
+        if is_sensitive_value(normalized):
+            return mask_api_key(normalized)
+        return normalized
+    if value is None or type(value) in (bool, int, float):
+        return value
+    if isinstance(value, int):
+        try:
+            return int.__index__(value)
+        except Exception:
+            return "<REDACTED>"
+    if isinstance(value, float):
+        try:
+            return float.__float__(value)
+        except Exception:
+            return "<REDACTED>"
+    return "<REDACTED>"
 
 
 def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
@@ -626,11 +649,21 @@ def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
         if is_sensitive_field(normalized):
             return normalized, True
         if is_credential_shaped(normalized):
-            return "<REDACTED>", False
+            return "<REDACTED>", True
         return normalized, False
 
-    if key is None or isinstance(key, (int, float, bool)):
+    if key is None or type(key) in (bool, int, float):
         return key, False
+    if isinstance(key, int):
+        try:
+            return int.__index__(key), False
+        except Exception:
+            return "<unsupported-key>", True
+    if isinstance(key, float):
+        try:
+            return float.__float__(key), False
+        except Exception:
+            return "<unsupported-key>", True
 
     # JSON renderers reject arbitrary object keys. Do not call caller-controlled
     # __str__ or __repr__ while converting them into a safe placeholder.
@@ -638,14 +671,14 @@ def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
 
 
 def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
-    """Create a copy of data with sensitive keys and values masked.
+    """Create a renderer-safe copy of potentially sensitive logging data.
 
-    Use this before logging dictionaries that might contain sensitive data.
-    Nested mappings and nested sequences (lists/tuples) are both traversed, so
-    a credential buried inside a collection cannot reach a log sink. Mapping
-    keys are normalized to built-in strings; credential-shaped keys are
-    redacted and unsupported JSON key types are replaced without invoking
-    caller-controlled string conversion.
+    Built-in mappings, lists, and tuples are copied recursively without
+    trusting protocol overrides on subclasses. Sensitive field names retain
+    their normalized key for compatibility while their values are redacted;
+    credential-shaped keys and their paired values are both redacted.
+    Unsupported scalar values are replaced before a renderer can call a
+    caller-controlled ``__repr__`` implementation.
 
     Args:
         data: Dictionary that might contain sensitive data.
@@ -657,13 +690,20 @@ def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
         >>> sanitize_for_logging({"api_key": "sk-secret123", "name": "test"})
         {'api_key': '<REDACTED>', 'name': 'test'}
     """
-    result = {}
-    for key, value in data.items():
-        sanitized_key, redact_value = _sanitize_logging_key(key)
-        if redact_value:
-            result[sanitized_key] = "<REDACTED>"
-        else:
-            result[sanitized_key] = _sanitize_logging_value(value)
+    result: dict[Any, Any] = {}
+    try:
+        items = dict.items(data)
+        for key, value in items:
+            sanitized_key, redact_value = _sanitize_logging_key(key)
+            if redact_value:
+                result[sanitized_key] = "<REDACTED>"
+            else:
+                result[sanitized_key] = _sanitize_logging_value(value)
+    except Exception:
+        # A malformed mapping subclass must not suppress the log call. Values
+        # that cannot be extracted through the built-in dict implementation
+        # are not safe to serialize.
+        return {}
     return result
 
 

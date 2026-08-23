@@ -1468,15 +1468,17 @@ class TestSensitiveDataMasking:
         assert json.loads(output)["config"]["api_key"] == "<REDACTED>"
 
     def test_credential_shaped_nested_mapping_key_masked_live(self, capsys: Any) -> None:
-        """A credential used as a nested mapping key cannot reach PROD JSON."""
+        """A credential mapping key and its paired value cannot reach PROD JSON."""
         secret = "sk-live-abc123def456ghi789"
+        paired_value = "value-paired-with-secret-key"
         configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
 
-        get_logger().info("config.loaded", config={secret: "safe"})
+        get_logger().info("config.loaded", config={secret: paired_value})
 
         output = capsys.readouterr().err.strip()
         assert secret not in output
-        assert json.loads(output)["config"] == {"<REDACTED>": "safe"}
+        assert paired_value not in output
+        assert json.loads(output)["config"] == {"<REDACTED>": "<REDACTED>"}
 
     def test_unsupported_nested_mapping_key_does_not_abort_live_logging(self, capsys: Any) -> None:
         """Arbitrary object keys become safe placeholders before JSON rendering."""
@@ -1486,6 +1488,90 @@ class TestSensitiveDataMasking:
 
         output = capsys.readouterr().err.strip()
         assert json.loads(output)["config"] == {"<unsupported-key>": "safe"}
+
+    def test_top_level_credential_key_and_paired_value_masked_live(self, capsys: Any) -> None:
+        """Top-level credential-shaped keys fail closed before rendering."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        paired_value = "value-paired-with-top-level-secret-key"
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info("config.loaded", **{secret: paired_value})
+
+        output = capsys.readouterr().err.strip()
+        assert secret not in output
+        assert paired_value not in output
+        assert json.loads(output)["<REDACTED>"] == "<REDACTED>"
+
+    def test_arbitrary_scalar_fields_never_reach_renderer_repr(self, capsys: Any) -> None:
+        """Ordinary structured fields redact objects before JSON fallback repr."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+
+        class LeakyScalar:
+            def __repr__(self) -> str:
+                return secret
+
+        class RaisingScalar:
+            def __repr__(self) -> str:
+                raise RuntimeError("hostile repr")
+
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info("config.loaded", leaky=LeakyScalar(), raising=RaisingScalar())
+
+        output = capsys.readouterr().err.strip()
+        assert secret not in output
+        data = json.loads(output)
+        assert data["leaky"] == "<REDACTED>"
+        assert data["raising"] == "<REDACTED>"
+
+    def test_hostile_container_protocols_do_not_abort_live_logging(self, capsys: Any) -> None:
+        """List iteration and dict items overrides cannot suppress a log event."""
+
+        class HostileDict(dict):
+            def items(self):
+                raise RuntimeError("hostile items")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise RuntimeError("hostile iteration")
+
+        secret = "sk-live-hostile-container-secret"
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+
+        get_logger().info(
+            "config.loaded",
+            payload=HostileDict({"values": HostileList([secret, "safe"])}),
+        )
+
+        output = capsys.readouterr().err.strip()
+        assert secret not in output
+        assert json.loads(output)["payload"]["values"][1] == "safe"
+
+    def test_blockers_are_sanitized_in_persistent_json_log(self, temp_log_dir: Path) -> None:
+        """The same sanitized event reaches the live file sink without secrets."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        paired_value = "persistent-paired-secret-value"
+
+        class LeakyScalar:
+            def __repr__(self) -> str:
+                return secret
+
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        get_logger().info(
+            "config.loaded",
+            scalar=LeakyScalar(),
+            **{secret: paired_value},
+        )
+
+        content = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert secret not in content
+        assert paired_value not in content
+        data = json.loads(content)
+        assert data["<REDACTED>"] == "<REDACTED>"
+        assert data["scalar"] == "<REDACTED>"
 
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""

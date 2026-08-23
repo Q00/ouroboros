@@ -358,13 +358,15 @@ class TestSanitizeForLogging:
         assert result == data
 
     def test_sanitize_credential_shaped_nested_key(self) -> None:
-        """A credential used as a mapping key is fully redacted."""
+        """A credential used as a mapping key and its paired value are redacted."""
         secret = "sk-live-abc123def456ghi789"
+        paired_value = "value-paired-with-secret-key"
 
-        result = sanitize_for_logging({"config": {secret: "safe"}})
+        result = sanitize_for_logging({"config": {secret: paired_value}})
 
         assert secret not in repr(result)
-        assert result["config"] == {"<REDACTED>": "safe"}
+        assert paired_value not in repr(result)
+        assert result["config"] == {"<REDACTED>": "<REDACTED>"}
 
     def test_sanitize_unsupported_nested_key_without_string_conversion(self) -> None:
         """Unsupported JSON keys become safe placeholders without calling __str__."""
@@ -379,6 +381,40 @@ class TestSanitizeForLogging:
         result = sanitize_for_logging({"config": {HostileKey(): "safe"}})
 
         assert result["config"] == {"<unsupported-key>": "safe"}
+
+    def test_hostile_container_protocols_cannot_abort_sanitization(self) -> None:
+        """Built-in container access bypasses hostile subclass overrides."""
+
+        class HostileDict(dict):
+            def items(self):
+                raise RuntimeError("hostile items")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise RuntimeError("hostile iteration")
+
+        dict_secret = "sk-live-dict-secret"
+        list_secret = "sk-live-list-secret"
+        data = HostileDict(
+            {"nested": HostileList([{"api_key": dict_secret}, list_secret, "safe"])}
+        )
+
+        result = sanitize_for_logging(data)
+
+        assert dict_secret not in repr(result)
+        assert list_secret not in repr(result)
+        assert result["nested"] == [{"api_key": "<REDACTED>"}, "sk-...cret", "safe"]
+
+    def test_arbitrary_scalar_is_redacted_without_repr(self) -> None:
+        """Unsupported objects never reach a renderer-controlled repr fallback."""
+
+        class HostileScalar:
+            def __repr__(self) -> str:
+                raise RuntimeError("hostile repr")
+
+        result = sanitize_for_logging({"metadata": HostileScalar()})
+
+        assert result == {"metadata": "<REDACTED>"}
 
 
 class TestStrSubclassGuardBypass:
