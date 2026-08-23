@@ -220,6 +220,15 @@ def register_strategy(task_type: str, strategy: ExecutionStrategy) -> None:
     _STRATEGY_REGISTRY[task_type.lower()] = strategy
 
 
+def is_registered_task_type(task_type: str) -> bool:
+    """Return whether *task_type* is known to the strategy registry.
+
+    This is the shared validation contract used by :class:`~ouroboros.core.seed.Seed`
+    to accept both built-in and dynamically registered custom strategy identifiers.
+    """
+    return task_type.lower() in _STRATEGY_REGISTRY
+
+
 __all__ = [
     "AnalysisStrategy",
     "ArtifactStrategy",
@@ -227,5 +236,6 @@ __all__ = [
     "ExecutionStrategy",
     "ResearchStrategy",
     "get_strategy",
+    "is_registered_task_type",
     "register_strategy",
 ]

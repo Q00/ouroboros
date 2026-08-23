@@ -479,19 +479,31 @@ InvestmentLevel = Literal["low", "medium", "high"]
 InvestmentProvenance = Literal["declared", "measured", "inferred", "absent"]
 InvestmentConfidence = Literal["low", "medium", "high"]
 
-TaskType = Literal[
-    "code",
-    "research",
-    "analysis",
-    "artifact",
-    "document",
-    "documentation",
-    "presentation",
-]
-"""Closed set of execution task types.
+BUILTIN_TASK_TYPES: frozenset[str] = frozenset(
+    {
+        "code",
+        "research",
+        "analysis",
+        "artifact",
+        "document",
+        "documentation",
+        "presentation",
+    }
+)
+"""Built-in execution task types.
 
-Must stay in sync with ``ouroboros.orchestrator.execution_strategy``'s strategy
-registry keys; a typo previously validated and silently rerouted execution.
+Typos against these values are rejected unconditionally.  Custom identifiers
+registered via ``register_strategy()`` are also accepted so the Seed schema
+stays compatible with the documented pluggable strategy contract.
+"""
+
+TaskType = str
+"""Execution task type identifier.
+
+Built-in values are the seven keys in :data:`BUILTIN_TASK_TYPES`.  Additional
+identifiers are valid if and only if they have been registered via
+``ouroboros.orchestrator.execution_strategy.register_strategy`` before Seed
+construction.
 """
 
 
@@ -812,8 +824,9 @@ class Seed(BaseModel, frozen=True):
     task_type: TaskType = Field(
         default="code",
         description=(
-            "Type of task execution: 'code', 'research', 'analysis', "
-            "'artifact', 'document', 'documentation', or 'presentation'"
+            "Execution strategy identifier. Built-in types: 'code', 'research', "
+            "'analysis', 'artifact', 'document', 'documentation', 'presentation'. "
+            "Custom identifiers are accepted if registered via register_strategy()."
         ),
     )
     brownfield_context: BrownfieldContext = Field(
@@ -856,15 +869,37 @@ class Seed(BaseModel, frozen=True):
     @field_validator("task_type", mode="before")
     @classmethod
     def _normalize_task_type(cls, value: Any) -> Any:
-        """Fold case and surrounding whitespace for hand-authored seeds.
+        """Normalize and validate task_type against the strategy registry.
 
-        ``execution_strategy.get_strategy`` has always lower-cased its lookup,
-        so ``task_type: Code`` in a YAML seed used to route correctly. Keep that
-        tolerance while the ``Literal`` closes the typo hole.
+        Folds case and surrounding whitespace for hand-authored seeds, then
+        rejects identifiers that are neither a built-in task type nor a
+        dynamically registered custom strategy.  This preserves typo rejection
+        for the seven built-in types while honouring the documented
+        ``register_strategy()`` extension contract.
         """
-        if isinstance(value, str):
-            return value.strip().lower()
-        return value
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower()
+        if not normalized:
+            msg = "task_type must be a non-empty string"
+            raise ValueError(msg)
+        if normalized in BUILTIN_TASK_TYPES:
+            return normalized
+        # Late import to avoid circular dependency (core -> orchestrator).
+        from ouroboros.orchestrator.execution_strategy import (
+            is_registered_task_type,
+        )
+
+        if is_registered_task_type(normalized):
+            return normalized
+        valid = ", ".join(sorted(BUILTIN_TASK_TYPES))
+        msg = (
+            f"Unknown task_type: {value!r}. "
+            f"Built-in types: {valid}. "
+            f"Custom types must be registered via register_strategy() "
+            f"before Seed construction."
+        )
+        raise ValueError(msg)
 
     @field_validator("evaluation_principles", mode="before")
     @classmethod

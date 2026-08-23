@@ -1320,14 +1320,12 @@ class TestSeedTaskType:
 
         assert seed.task_type == task_type
 
-    def test_every_task_type_resolves_to_a_strategy(self) -> None:
-        """The literal set may not drift from the strategy registry."""
-        from typing import get_args
-
-        from ouroboros.core.seed import TaskType
+    def test_every_builtin_task_type_resolves_to_a_strategy(self) -> None:
+        """The built-in set may not drift from the strategy registry."""
+        from ouroboros.core.seed import BUILTIN_TASK_TYPES
         from ouroboros.orchestrator.execution_strategy import get_strategy
 
-        for task_type in get_args(TaskType):
+        for task_type in BUILTIN_TASK_TYPES:
             assert get_strategy(task_type) is not None
 
     @pytest.mark.parametrize("bad", ["cod", "Coding", "codee", "", "test"])
@@ -1349,3 +1347,83 @@ class TestSeedTaskType:
         )
 
         assert seed.task_type == "research"
+
+    def test_registered_custom_strategy_accepted_in_seed(self) -> None:
+        """A dynamically registered custom strategy passes Seed validation.
+
+        Regression for the blocker: static Literal broke register_strategy().
+        """
+        from ouroboros.orchestrator.execution_strategy import (
+            _STRATEGY_REGISTRY,
+            register_strategy,
+        )
+        from ouroboros.orchestrator.workflow_state import ActivityType
+
+        class _TestCustomStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "custom"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "custom"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        register_strategy("my_plugin_task", _TestCustomStrategy())
+        try:
+            seed = Seed(
+                goal="Custom strategy test",
+                task_type="my_plugin_task",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed.task_type == "my_plugin_task"
+        finally:
+            # Clean up to avoid polluting other tests.
+            _STRATEGY_REGISTRY.pop("my_plugin_task", None)
+
+    def test_registered_custom_strategy_case_normalized(self) -> None:
+        """Custom strategies are normalized like built-ins."""
+        from ouroboros.orchestrator.execution_strategy import (
+            _STRATEGY_REGISTRY,
+            register_strategy,
+        )
+        from ouroboros.orchestrator.workflow_state import ActivityType
+
+        class _TestCustomStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "custom"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "custom"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        register_strategy("my_plugin", _TestCustomStrategy())
+        try:
+            seed = Seed(
+                goal="Custom strategy case test",
+                task_type="  My_Plugin  ",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed.task_type == "my_plugin"
+        finally:
+            _STRATEGY_REGISTRY.pop("my_plugin", None)
+
+    def test_unregistered_custom_identifier_rejected(self) -> None:
+        """An identifier that is neither built-in nor registered is rejected."""
+        with pytest.raises(PydanticValidationError):
+            Seed(
+                goal="Test goal",
+                task_type="never_registered_xyz",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
