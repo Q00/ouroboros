@@ -196,20 +196,69 @@ def _iter_json_object_starts(text: str) -> Iterator[int]:
         pos = text.find("{", pos + 1)
 
 
+def _iter_json_object_starts_reversed(text: str) -> Iterator[int]:
+    """Yield the offset of every ``{`` in *text*, from last to first."""
+    pos = text.rfind("{")
+    while pos != -1:
+        yield pos
+        pos = text.rfind("{", 0, pos)
+
+
+def _is_inside_array(text: str, obj_start: int) -> bool:
+    """Return True if the ``{`` at *obj_start* is nested inside a JSON array.
+
+    Scans backwards from *obj_start* skipping whitespace. If the nearest
+    non-whitespace character is ``[`` or ``,`` preceded (recursively past
+    whitespace) by another array element or ``[``, we consider this object
+    nested inside a top-level list container.
+    """
+    i = obj_start - 1
+    while i >= 0 and text[i] in " \t\n\r":
+        i -= 1
+    if i < 0:
+        return False
+    # Direct array start: [{...
+    if text[i] == "[":
+        return True
+    # Element separator after earlier array elements: , {...
+    if text[i] == ",":
+        # Walk back to find whether we're inside a [
+        depth = 0
+        j = i - 1
+        while j >= 0:
+            ch = text[j]
+            if ch == "]":
+                depth += 1
+            elif ch == "[":
+                if depth == 0:
+                    return True
+                depth -= 1
+            elif ch == "{":
+                # Skip over nested objects
+                # (simplified: if we hit { at the top level, we're not simply in an array)
+                break
+            j -= 1
+    return False
+
+
 def _recover_json_object(text: str, primary: int, primary_exc: json.JSONDecodeError) -> Any:
     """Fallback for outputs whose strict parse failed: scan every ``{``.
 
-    Tries each ``{`` in *text* (skipping the already-failed *primary*
-    offset) and returns the first position that decodes as a JSON value.
-    A decode that starts at ``{`` always yields an object, so the caller's
-    dict check cannot reject a recovered value.
+    Scans ``{`` candidates in **reverse order** (last to first) so that the
+    terminal evidence object — which is the authoritative record — wins over
+    earlier illustrative or preamble objects. Skips candidates that are nested
+    inside a JSON array container, preserving the top-level non-object
+    rejection boundary.
 
     Raises EvidenceError when no candidate decodes, distinguishing
     "no JSON object present at all" from "JSON present but malformed".
     """
     last_exc = primary_exc
-    for start in _iter_json_object_starts(text):
+    for start in _iter_json_object_starts_reversed(text):
         if start == primary:
+            continue
+        # Reject objects nested inside array containers
+        if _is_inside_array(text, start):
             continue
         try:
             parsed, _ = _DECODER.raw_decode(text[start:])

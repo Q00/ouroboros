@@ -216,6 +216,34 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError, match="must be a JSON object"):
             extract_evidence("[1, 2, 3]")
 
+    def test_prose_prefixed_list_does_not_leak_inner_object(self) -> None:
+        """Recovery must not extract an object nested inside a top-level list.
+
+        Regression: `Summary\n[{"files_touched":["wrong.py"]}]` previously
+        caused recovery to accept the inner object, contradicting the
+        requirement that list payloads cannot be rescued.
+        """
+        text = 'Summary\n[{"files_touched": ["wrong.py"]}]'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_earlier_illustrative_object_does_not_displace_final(self) -> None:
+        """Recovery must prefer the terminal evidence object over earlier ones.
+
+        Regression: prose containing an earlier valid illustrative object
+        previously caused that object to be returned instead of the later
+        final evidence record.
+        """
+        text = (
+            'For example: {"illustrative": true}\n'
+            'Here is the actual result:\n'
+            '{"files_touched": ["main.py"], "pass": true}'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["main.py"]
+        assert record.data["pass"] is True
+        assert "illustrative" not in record.data
+
     def test_quoted_brace_inside_string_value(self) -> None:
         # Regression: old regex stopped at the first `}` even inside a
         # JSON string value, truncating the payload (bot finding #1 on
