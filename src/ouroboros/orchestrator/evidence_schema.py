@@ -212,6 +212,7 @@ def _mask_markdown_examples(text: str) -> str:
         fence = opener.group("fence")
         marker = re.escape(fence[0])
         info = opener.group("info").strip().lower()
+        tag = info.split(maxsplit=1)[0:1]
         body_start = opener.end()
         if body_start < len(text) and text[body_start] == "\n":
             body_start += 1
