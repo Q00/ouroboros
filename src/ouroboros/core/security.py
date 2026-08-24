@@ -324,6 +324,60 @@ def _has_strict_compact_authority_label(value: str) -> bool:
     return False
 
 
+def _normalize_credential_shape(value: str) -> tuple[str | None, bool]:
+    """Normalize a credential candidate and flag values that must fail closed."""
+
+    if not isinstance(value, str):
+        return None, False
+    try:
+        # Never call a caller-controlled override (``strip``, ``__str__``, ...).
+        normalized = str.strip(str.__str__(value))
+    except Exception:
+        return None, True
+    if type(normalized) is not str:
+        return None, True
+    return normalized, False
+
+
+def _is_opaque_credential_shape(normalized: str) -> bool:
+    """Detect provider tokens and opaque bearer values without namespace labels."""
+
+    if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
+        return True
+    if any(pattern.search(normalized) for pattern in _EMBEDDED_CREDENTIAL_SHAPES):
+        return True
+    candidates = [normalized]
+    # Preserve the opaque payload after a stable namespace delimiter so a
+    # descriptor such as ``runtime:SG.<id>.<secret>`` cannot hide a credential.
+    candidates.extend(
+        normalized.split(delimiter, 1)[1]
+        for delimiter in (":", "/", ".")
+        if delimiter in normalized
+    )
+    candidates.extend(part for part in re.split(r"[:/.]", normalized) if part)
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered.startswith(("bearer ", "token ", "secret_")):
+            return True
+        if any(pattern.match(candidate) for pattern in _CREDENTIAL_SHAPE_PATTERNS):
+            return True
+    return False
+
+
+def is_opaque_credential_shaped(value: str) -> bool:
+    """Return whether a string has an opaque credential shape.
+
+    Unlike :func:`is_credential_shaped`, this excludes semantic namespace
+    labels such as ``auth.token_valid`` so structured event identifiers can
+    remain exact without allowing JWTs or provider tokens through.
+    """
+
+    normalized, fail_closed = _normalize_credential_shape(value)
+    if fail_closed:
+        return True
+    return bool(normalized) and _is_opaque_credential_shape(normalized)
+
+
 def is_credential_shaped(value: str) -> bool:
     """Return whether a string matches a high-confidence credential shape.
 
@@ -340,45 +394,15 @@ def is_credential_shaped(value: str) -> bool:
     a value that cannot be normalized is treated as credential-shaped.
     """
 
-    if not isinstance(value, str):
-        return False
-    try:
-        # Never call a caller-controlled override (``strip``, ``__str__``, ...).
-        # Renormalizing through the built-ins yields a genuine ``str`` whose
-        # content is what the shape matchers below actually inspect.
-        normalized = str.strip(str.__str__(value))
-    except Exception:
-        # A subclass that cannot be normalized is not provably safe, so fail
-        # closed and treat it as a credential.
-        return True
-    if type(normalized) is not str:
+    normalized, fail_closed = _normalize_credential_shape(value)
+    if fail_closed:
         return True
     if not normalized:
         return False
-    if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
+    if _is_opaque_credential_shape(normalized):
         return True
-    if any(pattern.search(normalized) for pattern in _EMBEDDED_CREDENTIAL_SHAPES):
-        return True
-    candidates = [normalized]
-    # Preserve the opaque payload after a stable namespace delimiter so a
-    # descriptor such as ``runtime:SG.<id>.<secret>`` cannot hide a credential
-    # from the shape matcher when the namespace is split below.
-    candidates.extend(
-        normalized.split(delimiter, 1)[1]
-        for delimiter in (":", "/", ".")
-        if delimiter in normalized
-    )
     namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
-    candidates.extend(namespace_parts)
-    if any(_is_credential_namespace_label(part) for part in namespace_parts):
-        return True
-    for candidate in candidates:
-        lowered = candidate.lower()
-        if lowered.startswith(("bearer ", "token ", "secret_")):
-            return True
-        if any(pattern.match(candidate) for pattern in _CREDENTIAL_SHAPE_PATTERNS):
-            return True
-    return False
+    return any(_is_credential_namespace_label(part) for part in namespace_parts)
 
 
 def is_stable_authority_identity(value: str) -> bool:
@@ -571,28 +595,48 @@ def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:
     return str(value)
 
 
+_MAX_LOGGING_SANITIZATION_DEPTH = 64
+
+
 def _sanitize_logging_sequence(
     value: list[Any] | tuple[Any, ...],
-) -> list[Any] | tuple[Any, ...]:
+    active_containers: set[int],
+    depth: int,
+) -> list[Any] | tuple[Any, ...] | str:
     """Copy a built-in sequence without trusting subclass iteration hooks."""
 
+    identity = id(value)
+    if identity in active_containers or depth >= _MAX_LOGGING_SANITIZATION_DEPTH:
+        return "<REDACTED>"
+    active_containers.add(identity)
     try:
-        items = list(list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value))
-    except Exception:
-        return [] if isinstance(value, list) else ()
+        try:
+            items = list(
+                list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value)
+            )
+        except Exception:
+            return [] if isinstance(value, list) else ()
 
-    sanitized = [_sanitize_logging_value(item) for item in items]
-    if isinstance(value, list):
-        return sanitized
+        sanitized = [
+            _sanitize_logging_value(item, active_containers, depth + 1) for item in items
+        ]
+        if isinstance(value, list):
+            return sanitized
 
-    # Tuple subclasses can override renderer-visible protocols such as
-    # iteration or repr and expose data that differs from their sanitized base
-    # storage. Degrade every subclass, including named tuples, to an inert
-    # built-in tuple before crossing the logging boundary.
-    return tuple(sanitized)
+        # Tuple subclasses can override renderer-visible protocols such as
+        # iteration or repr and expose data that differs from their sanitized base
+        # storage. Degrade every subclass, including named tuples, to an inert
+        # built-in tuple before crossing the logging boundary.
+        return tuple(sanitized)
+    finally:
+        active_containers.remove(identity)
 
 
-def _sanitize_logging_value(value: Any) -> Any:
+def _sanitize_logging_value(
+    value: Any,
+    active_containers: set[int],
+    depth: int,
+) -> Any:
     """Return a renderer-safe copy of an arbitrary nested logging value.
 
     Only JSON scalar types and copied built-in containers cross the logging
@@ -601,9 +645,9 @@ def _sanitize_logging_value(value: Any) -> Any:
     """
 
     if isinstance(value, dict):
-        return sanitize_for_logging(value)
+        return _sanitize_logging_mapping(value, active_containers, depth)
     if isinstance(value, (list, tuple)):
-        return _sanitize_logging_sequence(value)
+        return _sanitize_logging_sequence(value, active_containers, depth)
     if isinstance(value, str):
         try:
             normalized = str.__str__(value)
@@ -658,6 +702,39 @@ def _sanitize_logging_key(key: Any) -> tuple[Any, bool]:
     return "<unsupported-key>", False
 
 
+def _sanitize_logging_mapping(
+    data: dict[Any, Any],
+    active_containers: set[int],
+    depth: int,
+) -> dict[Any, Any] | str:
+    """Copy a mapping while bounding recursive and cyclic caller data."""
+
+    identity = id(data)
+    if identity in active_containers or depth >= _MAX_LOGGING_SANITIZATION_DEPTH:
+        return "<REDACTED>"
+    active_containers.add(identity)
+    result: dict[Any, Any] = {}
+    try:
+        try:
+            items = dict.items(data)
+            for key, value in items:
+                sanitized_key, redact_value = _sanitize_logging_key(key)
+                if redact_value:
+                    result[sanitized_key] = "<REDACTED>"
+                else:
+                    result[sanitized_key] = _sanitize_logging_value(
+                        value, active_containers, depth + 1
+                    )
+        except Exception:
+            # A malformed mapping subclass must not suppress the log call. Values
+            # that cannot be extracted through the built-in dict implementation
+            # are not safe to serialize.
+            return {}
+        return result
+    finally:
+        active_containers.remove(identity)
+
+
 def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
     """Create a renderer-safe copy of potentially sensitive logging data.
 
@@ -666,7 +743,8 @@ def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
     their normalized key for compatibility while their values are redacted;
     credential-shaped keys and their paired values are both redacted.
     Unsupported scalar values are replaced before a renderer can call a
-    caller-controlled ``__repr__`` implementation.
+    caller-controlled ``__repr__`` implementation. Cyclic or excessively deep
+    containers are replaced with ``<REDACTED>`` before rendering.
 
     Args:
         data: Dictionary that might contain sensitive data.
@@ -678,21 +756,8 @@ def sanitize_for_logging(data: dict[Any, Any]) -> dict[Any, Any]:
         >>> sanitize_for_logging({"api_key": "sk-secret123", "name": "test"})
         {'api_key': '<REDACTED>', 'name': 'test'}
     """
-    result: dict[Any, Any] = {}
-    try:
-        items = dict.items(data)
-        for key, value in items:
-            sanitized_key, redact_value = _sanitize_logging_key(key)
-            if redact_value:
-                result[sanitized_key] = "<REDACTED>"
-            else:
-                result[sanitized_key] = _sanitize_logging_value(value)
-    except Exception:
-        # A malformed mapping subclass must not suppress the log call. Values
-        # that cannot be extracted through the built-in dict implementation
-        # are not safe to serialize.
-        return {}
-    return result
+    sanitized = _sanitize_logging_mapping(data, set(), 0)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def truncate_input(text: str, max_length: int, suffix: str = "...") -> str:

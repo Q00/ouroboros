@@ -56,6 +56,7 @@ import structlog
 
 from ouroboros.core.security import (
     is_credential_shaped,
+    is_opaque_credential_shaped,
     mask_sensitive_value,
     sanitize_for_logging,
 )
@@ -192,7 +193,6 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
-_STRUCTURED_EVENT_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
     r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
@@ -238,8 +238,8 @@ def _mask_sensitive_data(
 ) -> dict[str, Any]:
     """Return a renderer-safe event dictionary with nested secrets masked.
 
-    ``event`` is structlog's structured event identifier, so ordinary event
-    names must not be passed through the generic namespace heuristic. Reserved
+    ``event`` is structlog's structured event value. String event identifiers
+    remain exact unless their content is credential-shaped. Reserved
     ``exc_info`` is retained for the exception formatter and sanitized after
     rendering by ``_format_exc_info_safely``.
     """
@@ -255,16 +255,14 @@ def _mask_sensitive_data(
                 normalized_event = str.__str__(event)
             except Exception:
                 normalized_event = "<REDACTED>"
-            if _STRUCTURED_EVENT_IDENTIFIER.fullmatch(normalized_event):
-                sanitized["event"] = normalized_event
-            else:
-                sanitized["event"] = (
-                    mask_sensitive_value(normalized_event)
-                    if is_credential_shaped(normalized_event)
-                    else normalized_event
-                )
+            sanitized["event"] = (
+                mask_sensitive_value(normalized_event)
+                if is_opaque_credential_shaped(normalized_event)
+                else normalized_event
+            )
         else:
-            sanitized["event"] = sanitize_for_logging({"value": event})["value"]
+            sanitized_event = sanitize_for_logging({"value": event})
+            sanitized["event"] = sanitized_event.get("value", "<REDACTED>")
     if exc_info is not marker:
         sanitized["exc_info"] = exc_info
     if callsite is not marker:

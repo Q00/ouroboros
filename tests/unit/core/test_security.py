@@ -350,6 +350,32 @@ class TestSanitizeForLogging:
         assert "abcdef" not in repr(result)
         assert result["values"][1] == "harmless"
 
+    def test_sanitize_cyclic_mappings_and_sequences_fail_closed(self) -> None:
+        """Caller-controlled cycles are replaced instead of recursed indefinitely."""
+        mapping: dict[str, object] = {}
+        sequence: list[object] = []
+        mapping["self"] = mapping
+        sequence.append(sequence)
+
+        result = sanitize_for_logging({"mapping": mapping, "sequence": sequence})
+
+        assert result == {"mapping": {"self": "<REDACTED>"}, "sequence": ["<REDACTED>"]}
+
+    def test_sanitize_excessively_deep_containers_fail_closed(self) -> None:
+        """Untrusted depth is bounded before Python recursion can abort logging."""
+        deepest: list[object] = ["safe"]
+        nested: list[object] = deepest
+        for _ in range(100):
+            nested = [nested]
+
+        result = sanitize_for_logging({"nested": nested})
+
+        current: object = result["nested"]
+        for _ in range(63):
+            assert isinstance(current, list)
+            current = current[0]
+        assert current == "<REDACTED>"
+
     def test_sanitize_returns_dict_for_dict_input(self) -> None:
         """Dict input still yields a dict, and non-sequence values pass through."""
         data = {"count": 3, "enabled": True, "ratio": 1.5, "nothing": None}

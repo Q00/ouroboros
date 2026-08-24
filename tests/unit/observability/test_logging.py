@@ -1452,6 +1452,41 @@ class TestSensitiveDataMasking:
         output = capsys.readouterr().err.strip()
         assert secret not in output
 
+    def test_jwt_shaped_event_masked_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Structured-event compatibility never overrides credential redaction."""
+        secret = "abcdefgh.ijklmnop.qrstuvwx"
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        get_logger().info(secret)
+
+        console = capsys.readouterr().err.strip()
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8").strip()
+        assert secret not in console
+        assert secret not in persistent
+        assert json.loads(console)["event"] != secret
+        assert json.loads(persistent)["event"] != secret
+
+    def test_cyclic_structured_event_safe_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """A cyclic positional event produces a safe record instead of raising."""
+        cycle: list[Any] = []
+        cycle.append(cycle)
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        get_logger().info(cycle)
+
+        console = capsys.readouterr().err.strip()
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8").strip()
+        assert json.loads(console)["event"] == ["<REDACTED>"]
+        assert json.loads(persistent)["event"] == ["<REDACTED>"]
+
     def test_hostile_sensitive_mapping_key_masked_live(self, capsys: Any) -> None:
         """A string-subclass key cannot bypass sensitive-field detection."""
 
