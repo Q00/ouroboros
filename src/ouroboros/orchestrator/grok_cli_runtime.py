@@ -284,6 +284,7 @@ class GrokCliRuntime(CodexCliRuntime):
             structured_output=True,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
 
     # -- Event parsing and normalization -----------------------------------

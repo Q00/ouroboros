@@ -42,6 +42,7 @@ from ouroboros.orchestrator.rate_limit import (
     SharedRateLimitBucket,
     estimate_runtime_request_tokens,
 )
+from ouroboros.orchestrator.runtime_handle_aliases import RUNTIME_HANDLE_BACKEND_ALIASES
 from ouroboros.router.types import Resolved
 
 if TYPE_CHECKING:
@@ -307,38 +308,7 @@ def _clone_runtime_handle_data(value: object) -> Any:
     return value
 
 
-# Keep this boundary map limited to canonical selectors and legacy spellings
-# already exercised by current runtimes or persisted RuntimeHandle payloads.
-_RUNTIME_HANDLE_BACKEND_ALIASES = {
-    "claude": "claude",
-    "claude_code": "claude",
-    "claude_mcp": "claude_mcp",
-    "codex": "codex_cli",
-    "codex_cli": "codex_cli",
-    "codex_mcp": "codex_mcp",
-    "opencode": "opencode",
-    "opencode_cli": "opencode",
-    "hermes": "hermes_cli",
-    "hermes_cli": "hermes_cli",
-    "kiro": "kiro",
-    "kiro_cli": "kiro",
-    "copilot": "copilot_cli",
-    "copilot_cli": "copilot_cli",
-    "goose": "goose",
-    "goose_cli": "goose",
-    "pi": "pi",
-    "pi_cli": "pi",
-    "gjc": "gjc",
-    "gjc_cli": "gjc",
-    "gemini": "gemini_cli",
-    "gemini_cli": "gemini_cli",
-    "grok": "grok_cli",
-    "grok_cli": "grok_cli",
-    "antigravity": "antigravity_cli",
-    "antigravity_cli": "antigravity_cli",
-    "zcode": "zcode_cli",
-    "zcode_cli": "zcode_cli",
-}
+_RUNTIME_HANDLE_BACKEND_ALIASES = RUNTIME_HANDLE_BACKEND_ALIASES
 
 
 def _normalize_runtime_handle_selector(
@@ -925,15 +895,14 @@ class RuntimeCapabilities:
             plain-text stdout lines only.
         system_prompt_support: How the runtime honors the ``system_prompt``
             execution parameter (see :class:`ParamSupport`).
-        tool_restriction_support: How the runtime honors the ``tools``
-            allow-list passed to ``execute_task``.
+        tool_restriction_support: Support for non-empty ``tools`` allow-lists.
+        empty_tool_restriction_support: Independent support for ``tools=[]``.
         permission_mode_support: How the runtime honors ``permission_mode``.
         session_signals: Ouroboros Synapse capabilities. Every field defaults to
             unsupported; resumability never implies live signal delivery.
 
-    The three ``*_support`` fields default to :attr:`ParamSupport.NATIVE` so
-    existing runtimes and ``FULL_CAPABILITIES`` are unchanged; a runtime opts in
-    to a non-native value only when its handling is demonstrably lossy.
+    Execution-parameter supports default to :attr:`ParamSupport.NATIVE`; runtimes
+    opt out only when handling is demonstrably lossy.
     """
 
     skill_dispatch: bool
@@ -941,9 +910,10 @@ class RuntimeCapabilities:
     structured_output: bool
     system_prompt_support: ParamSupport = ParamSupport.NATIVE
     tool_restriction_support: ParamSupport = ParamSupport.NATIVE
+    empty_tool_restriction_support: ParamSupport = ParamSupport.NATIVE
     permission_mode_support: ParamSupport = ParamSupport.NATIVE
     # The effort-first investment lever (RFC #1405): how the runtime honors the
-    # ``reasoning_effort`` execution parameter. Unlike the three fields above it
+    # ``reasoning_effort`` execution parameter. Unlike the four fields above it
     # defaults to IGNORED, because most agent runtimes have no per-call effort
     # knob — a runtime must opt in to NATIVE (or TRANSLATED) only when it can
     # actually route the level to its backend (e.g. Claude Agent SDK ``effort``,

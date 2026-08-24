@@ -73,6 +73,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator import host_dispatch
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus
 
@@ -1622,9 +1623,8 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
-    from ouroboros.orchestrator.runner import (
-        OrchestratorRunner,
-    )
+    from ouroboros.orchestrator.runner import OrchestratorRunner
+    from ouroboros.orchestrator.runtime_factory import create_agent_runtime_async
     from ouroboros.orchestrator.synapse import (
         EventStoreSessionSignalTargetResolver,
         SessionSignalHub,
@@ -1879,8 +1879,10 @@ def create_ouroboros_server(
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         await _ensure_evolution_store_initialized()
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="execution")
         task_cwd = evolutionary_loop.get_project_dir()
-        runner_adapter = create_agent_runtime(
+        runner_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=execution_model,
             cwd=task_cwd or effective_cwd,
@@ -2145,7 +2147,9 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
-        validation_adapter = create_agent_runtime(
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
+        validation_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,
@@ -2359,21 +2363,16 @@ def create_ouroboros_server(
     # ``ouroboros_submit_fanout_results``, so both sides must observe the same
     # directory. Until #1754 this composition root injected no registry and
     # registered no submit handler, so on the shipped stdio server no
-    # ``fanout_id`` was ever stamped and the re-entry contract in
-    # skills/interview/SKILL.md named a tool that was not there.
-    #
-    # Built at its FINAL directory rather than at the default plus a later
-    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
-    # the mutable path never had a reason to exist here — and leaving it mutable
-    # is not free: a producer that registers before the first interview turn (a
-    # lateral panel) would have its record moved out from under an already
-    # issued fan-out id, whose valid submission then returns
-    # ``unknown_fanout_id``.
+    # Built at its FINAL directory (``state_dir_path``, resolved above), not a
+    # mutable path: moving a producer record after issuing its fan-out id makes
+    # valid submissions return ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
-    # Create the lifecycle owner before its production handlers. Raw builtin
-    # runtime interception calls handlers directly rather than through
-    # ``call_tool()``, so durable fan-out publication receives this same
-    # explicit readiness boundary as server transport requests.
+    host_dispatch_bridge = host_dispatch.compose_host_dispatch_bridge(
+        default_execute_runtime, fanout_registry
+    )
+    execute_seed.host_dispatch_bridge = host_dispatch_bridge
+    # Lifecycle owner before its handlers: raw builtin interception calls
+    # handlers directly, bypassing ``call_tool()``'s readiness boundary.
     from ouroboros.backends import render_mcp_server_instructions
     from ouroboros.mcp.update_notice import append_cached_update_notice
 
@@ -2450,11 +2449,13 @@ def create_ouroboros_server(
         JobStatusHandler(
             event_store=event_store,
             job_manager=job_manager,
+            host_dispatch_bridge=host_dispatch_bridge,
         ),
         JobWaitHandler(
             event_store=event_store,
             job_manager=job_manager,
             available_conductor_tools=conductor_action_tools,
+            host_dispatch_bridge=host_dispatch_bridge,
         ),
         JobResultHandler(
             event_store=event_store,
@@ -2495,6 +2496,7 @@ def create_ouroboros_server(
         *create_fanout_wiring(
             interview_engine=interview_engine,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
+            host_dispatch_bridge=host_dispatch_bridge,
             fanout_registry=fanout_registry,
             workspace=effective_cwd,
             event_store=event_store,

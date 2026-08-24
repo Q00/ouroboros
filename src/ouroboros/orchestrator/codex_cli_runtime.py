@@ -438,6 +438,7 @@ class CodexCliRuntime:
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             reasoning_effort_support=ParamSupport.NATIVE,
             # Codex enforces only the allow-listed levels (see _build_command); a
             # level outside this set is silently dropped, so declare the vocabulary

@@ -67,6 +67,20 @@ _RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
 
 _HOST_PLUGIN_RUNTIMES = ("claude", "codex")
 
+
+def _is_cli_less_runtime_backend(backend: str) -> bool:
+    """Return whether ``backend`` is a registry runtime with no CLI to refresh.
+
+    The ``host`` dispatch runtime spawns nothing — the calling MCP host model
+    executes the work — so update's executable refresh has no identity to
+    resolve for it. Such a backend is still a valid, supported selection;
+    rejecting it here would make ``OUROBOROS_AGENT_RUNTIME=host`` break
+    ``ooo update`` for no operational reason.
+    """
+    capability = get_backend_capability(backend)
+    return capability is not None and capability.supports_runtime and capability.cli_name is None
+
+
 # ── Version helpers ──────────────────────────────────────────────
 
 _FALLBACK_VERSION_RE = re.compile(
@@ -566,7 +580,7 @@ def _validate_runtime_option(runtime: str) -> str:
     if normalized in {"all", "auto", "none"}:
         return normalized
     backend = _canonical_runtime_backend(normalized)
-    if backend not in _RUNTIME_CLI_IDENTITIES:
+    if backend not in _RUNTIME_CLI_IDENTITIES and not _is_cli_less_runtime_backend(backend):
         supported = ", ".join(("all", "auto", "none", *_RUNTIME_CLI_IDENTITIES))
         raise typer.BadParameter(
             f"unsupported runtime {runtime!r}; choose one of: {supported}",
@@ -638,7 +652,9 @@ def _configured_runtime_topology(requested_runtime: str = "auto") -> RuntimeRefr
         runtime_backend = _canonical_runtime_backend(requested_runtime)
     elif env_backend:
         runtime_backend = _canonical_runtime_backend(env_backend)
-        if runtime_backend not in _RUNTIME_CLI_IDENTITIES:
+        if runtime_backend not in _RUNTIME_CLI_IDENTITIES and not _is_cli_less_runtime_backend(
+            runtime_backend
+        ):
             raise ConfigError(
                 f"Configured runtime backend is unsupported: {env_backend}",
                 config_key="OUROBOROS_AGENT_RUNTIME",

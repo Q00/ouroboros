@@ -16857,6 +16857,7 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
             targeted_resume=True,
             structured_output=True,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
 
         def __init__(self) -> None:
@@ -16962,6 +16963,7 @@ class TestParamDegradationNotice:
             targeted_resume=True,
             structured_output=True,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
         executor = _make_param_executor(caps)
 
