@@ -307,7 +307,7 @@ class TestExtractEvidence:
     def test_illustrative_fence_cannot_displace_later_evidence(
         self, example_tag: str, actual_form: str
     ) -> None:
-        example = f"```{example_tag}\n{{\"illustrative\": true}}\n```"
+        example = f'```{example_tag}\n{{"illustrative": true}}\n```'
         payload = '{"files_touched": ["real.py"], "tests_passed": ["test_real"]}'
         if actual_form == "bare":
             actual = payload
