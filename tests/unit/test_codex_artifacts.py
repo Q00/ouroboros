@@ -467,6 +467,84 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
         assert list(target_path.iterdir()) == []
         assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
 
+    def test_directory_commit_refuses_a_target_that_appears_after_the_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A prior existence check must not be trusted at publication time.
+
+        POSIX ``rename`` removes an empty destination directory, so a writer that
+        creates the target between a check and the rename would lose it silently.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        target_path.mkdir()  # the racing writer, invisible to any earlier check
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        monkeypatch.setattr(codex_artifacts.os.path, "lexists", lambda _path: False)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert list(target_path.iterdir()) == []
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_directory_commit_leaves_no_reservation_when_publication_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed publication must not leave the reserved name occupied."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        def _refuse_rename(*_args: object, **_kwargs: object) -> None:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+
+        monkeypatch.setattr(codex_artifacts.os, "rename", _refuse_rename)
+
+        with pytest.raises(OSError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert not target_path.exists()
+
+    def test_failed_staging_cleanup_does_not_report_a_failed_commit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Linking publishes the target, so later cleanup cannot fail the commit.
+
+        Raising after the link made the caller roll back a generation that was
+        already live, leaving the previous one stranded in its backup sibling.
+        """
+        codex_dir = tmp_path / ".codex"
+        rules_dir = codex_dir / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / CODEX_RULE_FILENAME).write_text("previous generation", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        real_unlink = Path.unlink
+        refused: list[Path] = []
+
+        def _refuse_first_staging_unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if not refused and self.name.startswith(".") and self.name.endswith(".tmp"):
+                refused.append(self)
+                raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(self))
+            real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "unlink", _refuse_first_staging_unlink)
+
+        installed_path = install_codex_rules(codex_dir=codex_dir)
+
+        assert refused, "the staging cleanup failure was never exercised"
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+        assert not [entry for entry in rules_dir.iterdir() if entry.name.endswith(".backup")]
+
     def test_existing_target_reported_by_renameat2_is_not_degraded(
         self,
         tmp_path: Path,

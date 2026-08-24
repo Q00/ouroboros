@@ -408,19 +408,38 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
 def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
     """Rename without replacing where no atomic no-replace primitive is available.
 
-    Files keep the atomic guarantee: ``os.link`` fails with ``EEXIST`` when the
-    target is already occupied. Directories cannot be hard-linked, so the
-    guarantee degrades from atomic to check-then-rename — a writer that creates
-    the target between the check and the rename is not detected. Filesystems that
-    reach this branch offer nothing stronger.
+    Both branches keep the no-replace guarantee atomic, because callers treat a
+    ``FileExistsError`` as "another writer owns this name" and anything else as a
+    failed commit. Directories reserve the name with ``os.mkdir`` — which fails
+    with ``EEXIST`` rather than replacing — and only then publish into the
+    reservation; a bare ``os.rename`` would silently replace a concurrently
+    created empty directory. Files publish with ``os.link``, which fails the same
+    way on an occupied target.
     """
     if source_path.is_dir() and not source_path.is_symlink():
-        if os.path.lexists(target_path):
-            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(target_path))
-        os.rename(source_path, target_path)
+        os.mkdir(target_path)
+        try:
+            # POSIX rename removes an empty destination directory, so this only
+            # consumes the reservation made above. A writer that filled it in
+            # the meantime makes the rename fail instead of losing their tree.
+            os.rename(source_path, target_path)
+        except BaseException:
+            try:
+                os.rmdir(target_path)
+            except OSError:
+                pass
+            raise
         return
+
     os.link(source_path, target_path, follow_symlinks=False)
-    source_path.unlink()
+    # The link published the target, so this is the commit boundary. Dropping the
+    # staging name is cleanup: reporting its failure would tell the caller the
+    # commit failed, and the rollback would then delete the generation that is
+    # already live and strand the previous one in its backup sibling.
+    try:
+        source_path.unlink()
+    except OSError:
+        pass
 
 
 def _rename_noreplace(source_path: Path, target_path: Path) -> None:
