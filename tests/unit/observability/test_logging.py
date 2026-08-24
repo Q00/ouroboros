@@ -1470,6 +1470,30 @@ class TestSensitiveDataMasking:
         assert json.loads(console)["event"] != secret
         assert json.loads(persistent)["event"] != secret
 
+    def test_namespace_shaped_event_credentials_masked_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Semantic credential namespaces never bypass event redaction."""
+        secrets = (
+            "api_key:opaque-provider-credential",
+            "access_token/opaque-provider-credential",
+            "credentials:opaquevalue",
+        )
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        log = get_logger()
+        for secret in secrets:
+            log.info(secret)
+
+        console = capsys.readouterr().err
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8")
+        for secret in secrets:
+            assert secret not in console
+            assert secret not in persistent
+
+
     def test_cyclic_structured_event_safe_in_console_and_file(
         self, capsys: Any, temp_log_dir: Path
     ) -> None:
@@ -1701,6 +1725,32 @@ class TestSensitiveDataMasking:
             assert "ValueError" in records[1]["exception"]
             assert "RuntimeError" in records[2]["exception"]
             assert "implicit failure" in records[2]["exception"]
+
+    def test_quoted_exception_mapping_secrets_sanitized_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Quoted sensitive mapping values in exception text are redacted."""
+        api_key = "not-shaped-sensitive-value"
+        password = "ordinary-password-value"
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        try:
+            raise ValueError({"api_key": api_key, "password": password})
+        except ValueError:
+            get_logger().exception("mapping.exception")
+
+        console = capsys.readouterr().err
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8")
+        for output in (console, persistent):
+            assert api_key not in output
+            assert password not in output
+            record = json.loads(output.strip())
+            assert record["event"] == "mapping.exception"
+            assert "api_key" in record["exception"]
+            assert "password" in record["exception"]
+            assert record["exception"].count("<REDACTED>") >= 2
 
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""

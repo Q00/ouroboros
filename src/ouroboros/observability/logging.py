@@ -56,7 +56,6 @@ import structlog
 
 from ouroboros.core.security import (
     is_credential_shaped,
-    is_opaque_credential_shaped,
     is_safe_structured_event_identifier,
     mask_sensitive_value,
     sanitize_for_logging,
@@ -194,6 +193,10 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
+_EXCEPTION_SECRET_QUOTED_ASSIGNMENT = re.compile(
+    r'''(?i)(["'])(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|'''
+    r'''authorization|credential|secret|token)\1\s*:\s*(["'])(?:\\.|(?!\3).)*\3'''
+)
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
     r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
@@ -202,6 +205,12 @@ _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
 
 def _sanitize_exception_text(text: str) -> str:
     """Mask credentials in traceback text without discarding diagnostics."""
+
+    def replace_quoted(match: re.Match[str]) -> str:
+        key_quote, key, value_quote = match.group(1), match.group(2), match.group(3)
+        return f"{key_quote}{key}{key_quote}: {value_quote}<REDACTED>{value_quote}"
+
+    text = _EXCEPTION_SECRET_QUOTED_ASSIGNMENT.sub(replace_quoted, text)
     text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
     token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{7,}")
 
@@ -260,7 +269,7 @@ def _mask_sensitive_data(
                 normalized_event
                 if is_safe_structured_event_identifier(normalized_event)
                 else mask_sensitive_value(normalized_event)
-                if is_opaque_credential_shaped(normalized_event)
+                if is_credential_shaped(normalized_event)
                 else normalized_event
             )
         else:
