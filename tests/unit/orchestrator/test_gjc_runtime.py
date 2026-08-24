@@ -11,6 +11,9 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+from ouroboros.orchestrator.runtime_param_negotiation import (
+    negotiate_execution_params,
+)
 
 
 class _FakeStream:
@@ -611,6 +614,22 @@ def test_capabilities_are_non_resumable_structured_skill_dispatch() -> None:
     assert caps.targeted_resume is False
     assert caps.structured_output is True
     assert caps.permission_mode_support is ParamSupport.IGNORED
+    assert caps.empty_tool_restriction_support is ParamSupport.IGNORED
+
+
+def test_empty_tools_negotiation_reports_gjc_degradation() -> None:
+    caps = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project").capabilities
+
+    degradations = negotiate_execution_params(
+        caps,
+        system_prompt=None,
+        tools=[],
+        permission_mode=None,
+    )
+
+    assert len(degradations) == 1
+    assert degradations[0].parameter == "tools"
+    assert degradations[0].support is ParamSupport.IGNORED
 
 
 def _envelope(event: dict[str, object], *, seq: int = 1) -> str:

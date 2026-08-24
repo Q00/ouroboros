@@ -55,6 +55,7 @@ from uuid import uuid4
 import structlog
 
 from ouroboros.core.owner_only import secure_directory, write_owner_only
+from ouroboros.orchestrator.host_dispatch import FANOUT_KIND_HOST_EXECUTION
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ouroboros.mcp.tools.subagent import SubagentPayload
@@ -77,6 +78,9 @@ _FANOUT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
 FANOUT_KIND_CODE_INVESTIGATION = "code_investigation"
 FANOUT_KIND_QUESTION_ADVISORY = "question_advisory"
+# ``FANOUT_KIND_HOST_EXECUTION`` (imported above) also routes here, but is not
+# synthesized: a complete submission wakes the parked HostDispatchRuntime
+# waiter instead (see orchestrator.host_dispatch).
 
 
 @dataclass(frozen=True, slots=True)
@@ -922,6 +926,7 @@ def prepare_fanout_results(
         FANOUT_KIND_LATERAL_PERSONA_PANEL,
         FANOUT_KIND_CODE_INVESTIGATION,
         FANOUT_KIND_QUESTION_ADVISORY,
+        FANOUT_KIND_HOST_EXECUTION,
     }:
         return {
             "status": "unknown_kind",
@@ -1004,6 +1009,21 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
                 "question_identity": record.question_identity,
             },
             "result": outcome,
+            **completion_report,
+        }
+
+    if record.kind == FANOUT_KIND_HOST_EXECUTION:
+        # Defensive identity path only: the production handler routes execution
+        # submissions to the HostDispatchBridge *before* synthesis, so this
+        # branch is reached only by direct callers of the plain function.
+        return {
+            "status": "complete",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "correlation_key": record.correlation_key,
+            "result": _fanout_identity_synthesis(
+                [{"lane_id": key, "output": provided[key]} for key in sorted(provided)]
+            ),
             **completion_report,
         }
 
