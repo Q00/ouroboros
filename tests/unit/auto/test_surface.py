@@ -51,6 +51,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "antigravity",
         "grok",
         "zcode",
+        "host",
     }
     frontdoor_enums = (
         auto.AgentRuntimeBackend,
