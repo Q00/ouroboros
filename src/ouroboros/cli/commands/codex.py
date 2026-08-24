@@ -17,6 +17,7 @@ import sys
 import tomllib
 from typing import Annotated, Any, cast
 
+from rich.markup import escape
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_success, print_warning
@@ -205,10 +206,13 @@ def doctor(
     failures = _check_auto_dispatch_surface(resolved_codex_dir, live_mcp=live_mcp)
 
     if failures:
-        print_error(
+        message = (
             "Codex ooo auto dispatch: BROKEN\n"
             + "\n".join(f"- {failure}" for failure in failures)
-            + "\n\nRun `ouroboros codex refresh` and ensure the `ouroboros` MCP server is enabled.",
+            + "\n\nRun `ouroboros codex refresh` and ensure the `ouroboros` MCP server is enabled."
+        )
+        print_error(
+            escape(message),
             title="Codex Doctor",
         )
         raise typer.Exit(1)
@@ -774,8 +778,10 @@ def _check_mcp_runtime_dependency_surface(
         )
         if check_local_import and importlib.util.find_spec("mcp") is None:
             failures.append(
-                "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
-                "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+                "current `ouroboros` environment cannot import `mcp`; replace the direct "
+                "launcher with `ouroboros setup --runtime codex --mcp-mode stdio`, or "
+                "reinstall for direct Codex MCP usage with "
+                "`uv tool install --force 'ouroboros-ai[mcp]'`"
             )
         return
 

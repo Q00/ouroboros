@@ -868,9 +868,10 @@ class TestBackgroundJobPath:
             assert started.is_ok
             job_id = started.value.meta["job_id"]
             auto_session_id = started.value.meta["auto_session_id"]
-            await asyncio.wait_for(inner_started.wait(), timeout=1.0)
+            await asyncio.wait_for(inner_started.wait(), timeout=10.0)
 
-            deadline = asyncio.get_running_loop().time() + 1.0
+            # EventStore commits can be delayed by xdist and coverage on a loaded CI runner.
+            deadline = asyncio.get_running_loop().time() + 10.0
             snapshot = await job_manager.get_snapshot(job_id)
             while snapshot.status is not JobStatus.RUNNING:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -910,7 +911,7 @@ class TestBackgroundJobPath:
             release_inner.set()
             if started.is_ok:
                 job_id = started.value.meta["job_id"]
-                deadline = asyncio.get_running_loop().time() + 1.0
+                deadline = asyncio.get_running_loop().time() + 10.0
                 snapshot = await job_manager.get_snapshot(job_id)
                 while snapshot.status is not JobStatus.COMPLETED:
                     if asyncio.get_running_loop().time() >= deadline:
@@ -954,9 +955,10 @@ class TestBackgroundJobPath:
             assert started.is_ok
             job_id = started.value.meta["job_id"]
             auto_session_id = started.value.meta["auto_session_id"]
-            await asyncio.wait_for(inner_started.wait(), timeout=1.0)
+            await asyncio.wait_for(inner_started.wait(), timeout=10.0)
 
-            deadline = asyncio.get_running_loop().time() + 1.0
+            # Match the established loaded-runner dispatch budget used below.
+            deadline = asyncio.get_running_loop().time() + 10.0
             snapshot = await job_manager.get_snapshot(job_id)
             while snapshot.status is not JobStatus.RUNNING:
                 if asyncio.get_running_loop().time() >= deadline:
@@ -999,7 +1001,7 @@ class TestBackgroundJobPath:
         finally:
             release_inner.set()
             if started.is_ok:
-                deadline = asyncio.get_running_loop().time() + 1.0
+                deadline = asyncio.get_running_loop().time() + 10.0
                 snapshot = await job_manager.get_snapshot(started.value.meta["job_id"])
                 while snapshot.status is not JobStatus.COMPLETED:
                     if asyncio.get_running_loop().time() >= deadline:

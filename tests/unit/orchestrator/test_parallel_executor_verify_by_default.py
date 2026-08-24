@@ -42,6 +42,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _missing_expected_artifacts,
     _serialize_verify_gate_outcome,
     _VerifyGateOutcome,
+    render_parallel_completion_message,
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
@@ -1264,6 +1265,427 @@ def test_retry_prompt_uses_trace_facts_without_hidden_contract_values() -> None:
 
 
 @pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("MIGRATION_COMPLETE_v2", "MIGRATION_COMPLETE_\nv2"),
+        ("MIGRATION_COMPLETE_v2", "+ MIGRATION_COMPLETE_\n+ v2"),
+        ("MIGRATION_COMPLETE_v2", "\x1b[31mMIGRATION\x1b[0m_COMPLETE_v2"),
+        ("MIGRATION_COMPLETE_v2", "migration_complete_V2"),
+        ("MIGRATION<COMPLETE>&v2", "MIGRATION&lt;COMPLETE&gt;&amp;v2"),
+        (
+            "MIGRATION_COMPLETE_v2",
+            "E   assert 'MIGRATION_COMPLETE_' +\nE       'v2'",
+        ),
+    ),
+)
+def test_retry_prompt_drops_transformed_hidden_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    executor = _make_executor()
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=transformed,
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+    assert transformed not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("<=>", "&amp;amp;amp;lt;=&amp;amp;amp;gt;"),
+        ("!!!", "!\u200b!\u200b!"),
+        ("<=>", "<\u2060=\u2060>"),
+        ("!!!", "!\ufe0f!\ufe0f!"),
+        ("<=>", "&" + "amp;" * 65 + "lt;=&" + "amp;" * 65 + "gt;"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\U0000200bSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\uFE0FSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[31mSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#27;[5DSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u0053ENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\x53ENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\UFFFFFFFFSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\u005cu0053ENTINEL"),
+        ("<=>", r"\x26lt;=\x26gt;"),
+        ("ERROR", r"E\nRROR"),
+        ("+++", r"+\n+\n+"),
+        ("café", r"b'caf\xc3\xa9'"),
+        ("PRIVATE_SENTINEL", "\x1b]0;PRIVATE_SENTINEL\x07"),
+        ("!!!", "!\x7f!!"),
+        ("PRIVATE", "＼ｘ５０＼ｘ５２＼ｘ４９＼ｘ５６＼ｘ４１＼ｘ５４＼ｘ４５"),
+        ("PRIVATE", r"\120\122\111\126\101\124\105"),
+        ("😀", r"\ud83d\ude00"),
+        ("PRIVATE_SENTINEL", "PRIVATE%5FSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE%255FSENTINEL"),
+        ("PRIVATE_SENTINEL", "%50%52%49%56%41%54%45%5F%53%45%4E%54%49%4E%45%4C"),
+        ("PRIVATE_SENTINEL", "PRIVATE&#37;5FSENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\400SENTINEL"),
+        ("SECRET", "\u202eTERCES\u202c"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#x110000;SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#xD800;SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#999999999999999999999;SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\xG0SENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_%G0SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\uZZZZSENTINEL"),
+        ("PRIVATE_SENTINEL", "PRIVATE_&#xZZ;SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\12SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\11SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\15SENTINEL"),
+        ("PRIVATE_SENTINEL", r"PRIVATE_\0SENTINEL"),
+        ("PRIVATE_SENTINEL", "safe\ud800diagnostic"),
+    ),
+)
+def test_retry_prompt_drops_deep_entities_and_invisible_formats(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (
+        ("café", "cafe\u0301"),
+        ("ＳＥＣＲＥＴ", "SECRET"),
+        ("MIGRATION<COMPLETE>", "MIGRATION&amp;lt;COMPLETE&amp;gt;"),
+        ("PRİVATE_SENTINEL", "private_sentinel"),
+    ),
+)
+def test_retry_prompt_drops_unicode_and_nested_entity_equivalents(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize("escaped_whitespace", (r"\n", r"\r", r"\t", r"\x0a", r"\u0009"))
+def test_retry_prompt_drops_pytest_escaped_whitespace(escaped_whitespace: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"E assert 'PRIVATE_{escaped_whitespace}SENTINEL'",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    "escaped_control",
+    (r"\x1b[31m", r"\u001b[31m", r"\033[31m", r"\e[31m", r"\^[31m"),
+)
+def test_retry_prompt_drops_pytest_escaped_terminal_controls(escaped_control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"E assert 'PRIVATE_{escaped_control}SENTINEL'",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize("control", ("\x9b31m", "\x1b(B", "\x1b[5D", "\b"))
+def test_retry_prompt_drops_residual_terminal_controls(control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"PRIVATE_{control}SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+    assert "Harness verification output" not in prompt
+
+
+@pytest.mark.parametrize(
+    "control",
+    ("\x1bP1;2\x1b\\", "\x90payload\x9c"),
+)
+def test_retry_prompt_drops_unsupported_terminal_control_strings(control: str) -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"PRIVATE_{control}SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_osc_split_hidden_assertion() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    osc = "\x1b]8;;https://example.invalid\x07"
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"{osc}PRIVATE_{osc}\x1b]8;;\x07SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_mixed_exact_and_transformed_hidden_copies() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"expected {assertion} but received private_ sentinel",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_preserves_safe_context_around_exact_hidden_value() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail=f"actual result; expected {assertion}",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "actual result; expected [REDACTED CONTRACT VALUE]" in prompt
+
+
+@pytest.mark.parametrize(
+    ("assertion", "transformed"),
+    (("!!!", "! ! !"), ("<=>", "&lt; = &gt;")),
+)
+def test_retry_prompt_drops_transformed_punctuation_only_assertion(
+    assertion: str,
+    transformed: str,
+) -> None:
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command="python hidden_grader.py",
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(passed=False, reason=None, output_tail=transformed)
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+
+
+def test_retry_prompt_drops_transformed_command_with_exact_assertion() -> None:
+    assertion = "PRIVATE_SENTINEL"
+    command = "python hidden_grader.py --expect PRIVATE_SENTINEL"
+    spec = AcceptanceCriterionSpec(
+        description="build the thing",
+        verify_command=command,
+        output_assertion=assertion,
+    )
+    outcome = _VerifyGateOutcome(
+        passed=False,
+        reason=None,
+        output_tail="PYTHON HIDDEN_GRADER.PY --EXPECT PRIVATE_SENTINEL",
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=spec.description,
+        success=False,
+        verify_gate_outcome=outcome,
+    )
+
+    prompt = _make_executor()._build_ac_retry_prompt(
+        result=result,
+        ac_content=spec.description,
+        is_final_attempt=False,
+        spec=spec,
+    )
+
+    assert "Harness verification output" not in prompt
+    assert "HIDDEN_GRADER" not in prompt
+
+
+@pytest.mark.parametrize(
     "render_hidden",
     [
         pytest.param(lambda value: value, id="raw"),
@@ -2190,6 +2612,39 @@ def test_report_surfaces_unverified_success() -> None:
 
     assert "Success: 1/1" in report
     assert "needs confirmation: AC 1" in report
+
+
+def test_completion_message_distinguishes_blocked_and_failure_reasons() -> None:
+    failed = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the tests",
+        success=False,
+        error="unsupported uv evidence command",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+    blocked = ACExecutionResult(
+        ac_index=1,
+        ac_content="Package the result",
+        success=False,
+        error="Skipped: dependency failed",
+        outcome=ACExecutionOutcome.BLOCKED,
+    )
+    parallel_result = ParallelExecutionResult(
+        results=(failed, blocked),
+        success_count=0,
+        failure_count=1,
+        blocked_count=1,
+        skipped_count=1,
+        total_duration_seconds=0.0,
+    )
+
+    message = render_parallel_completion_message(parallel_result, 2)
+
+    assert "Failed: 1" in message
+    assert "Blocked: 1" in message
+    assert "\nSkipped:" not in message
+    assert "[FAILED] Run the tests — unsupported uv evidence command" in message
+    assert "[BLOCKED] Package the result — Skipped: dependency failed" in message
 
 
 def test_verify_gate_outcome_roundtrips_the_quarantine_flag() -> None:

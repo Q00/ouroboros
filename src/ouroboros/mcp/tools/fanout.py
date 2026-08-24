@@ -412,17 +412,16 @@ def _advisory_synthesizer_input(
     *,
     tool_name: str | None,
     roster_repo_ids: list[str] | None,
+    phase: str | None,
 ) -> dict[str, Any]:
-    """Return the request-side state one advisory fan-out persists.
-
-    Additive by omission: a key absent means "the default", which keeps an
-    interview record identical to what it was before a second tool existed.
-    """
+    """Return the request-side state one advisory fan-out persists."""
     data: dict[str, Any] = {"lane_ids": list(expected_keys)}
     if tool_name and tool_name != "ouroboros_interview":
         data["tool_name"] = tool_name
     if roster_repo_ids is not None:
         data["roster_repo_ids"] = list(roster_repo_ids)
+    if phase:
+        data["phase"] = phase
     return data
 
 
@@ -435,6 +434,7 @@ def register_question_advisory_fanout(
     fanout_id: str | None = None,
     tool_name: str | None = None,
     roster_repo_ids: list[str] | None = None,
+    phase: str | None = None,
 ) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
@@ -504,7 +504,10 @@ def register_question_advisory_fanout(
         expected_keys=expected_keys,
         question_identity=question_identity,
         synthesizer_input=_advisory_synthesizer_input(
-            expected_keys, tool_name=tool_name, roster_repo_ids=roster_repo_ids
+            expected_keys,
+            tool_name=tool_name,
+            roster_repo_ids=roster_repo_ids,
+            phase=phase,
         ),
         fanout_id=fanout_id,
         required_keys=required_keys,
@@ -519,6 +522,7 @@ def stamp_question_advisory_fanout(
     payloads: list[SubagentPayload],
     tool_name: str | None = None,
     roster_repo_ids: list[str] | None = None,
+    phase: str | None = None,
 ) -> None:
     """Register the advisory fan-out and stamp its id, if there is one to stamp.
 
@@ -536,6 +540,7 @@ def stamp_question_advisory_fanout(
         payloads=payloads,
         tool_name=tool_name,
         roster_repo_ids=roster_repo_ids,
+        phase=phase,
     )
     if fanout_id is not None:
         meta["question_advisory_fanout_id"] = fanout_id
@@ -979,9 +984,8 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
         }
 
     if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
-        # Advisory lanes are independent advice with no gating synthesizer, so
-        # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize.
+        # Request provenance lets later interview turns identify the same-session
+        # start snapshot without trusting a child's free-form output to assert it.
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
@@ -994,6 +998,11 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             "fanout_id": fanout_id,
             "kind": record.kind,
             "correlation_key": record.correlation_key,
+            "provenance": {
+                "session_id": record.session_id,
+                "phase": str(record.synthesizer_input.get("phase") or ""),
+                "question_identity": record.question_identity,
+            },
             "result": outcome,
             **completion_report,
         }

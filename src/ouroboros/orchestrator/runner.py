@@ -73,7 +73,6 @@ from ouroboros.core.seed_contract_prompt import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
-from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
@@ -104,7 +103,6 @@ from ouroboros.orchestrator.decomposition_limits import (
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
-    create_drift_measured_event,
     create_execution_terminal_event,
     create_guidance_injected_event,
     create_mcp_tools_loaded_event,
@@ -9554,25 +9552,17 @@ class OrchestratorRunner:
                             )
                             await self._event_store.append(progress_event)
 
-                        # Measure and emit drift periodically
-                        if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
-                            # Measure and emit drift
-                            drift_measurement = DriftMeasurement()
-                            drift_metrics = drift_measurement.measure(
-                                current_output=message.content,
-                                constraint_violations=[],  # TODO: track violations
-                                current_concepts=[],  # TODO: extract concepts
-                                seed=seed,
-                            )
-                            drift_event = create_drift_measured_event(
-                                execution_id=exec_id,
-                                goal_drift=drift_metrics.goal_drift,
-                                constraint_drift=drift_metrics.constraint_drift,
-                                ontology_drift=drift_metrics.ontology_drift,
-                                combined_drift=drift_metrics.combined_drift,
-                                is_acceptable=drift_metrics.is_acceptable,
-                            )
-                            await self._event_store.append(drift_event)
+                        # NOTE: periodic drift measurement used to be emitted here
+                        # every PROGRESS_EMIT_INTERVAL messages, but the two inputs
+                        # it needs are not tracked anywhere in this loop. Passing
+                        # empty lists pinned constraint_drift to 0.0 (dropping 30%
+                        # of the weighted score) and ontology_drift to 1.0 (a fixed
+                        # +0.2 penalty), so combined_drift was always
+                        # goal_drift * 0.5 + 0.2 and is_acceptable (<= 0.3) was
+                        # effectively always False. Emitting nothing is preferable
+                        # to persisting a measurement we know is wrong; re-enable
+                        # only once constraint violations and ontology concepts are
+                        # actually tracked for the message being measured.
 
                         # Handle final message
                         if message.is_final:

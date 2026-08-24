@@ -17,14 +17,14 @@ def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> Non
     skill_path = Path(".claude-plugin") / "skills" / "interview" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
-    assert "question_advisory_subagents` is present you MUST fan out" in skill_text
-    assert "Run the advisory lanes through your runtime's native subagent mechanism" in skill_text
+    assert "question_advisory_subagents` is present you MUST process every" in skill_text
+    assert 'dispatch_mode="host_decides"' in skill_text
     assert "Task/Agent" in skill_text
-    assert "spawn one Codex subagent per payload" in skill_text
-    assert "runtimes without a parallel primitive" in skill_text
-    assert 'dispatch_mode="sequential"' in skill_text
-    assert "a reinforcing cue for host-driven runtimes" in skill_text
-    assert "as a prerequisite" in skill_text
+    assert "one native" in skill_text
+    assert "dispatch_subagents_if_supported" in skill_text
+    assert "process_payloads_sequentially" in skill_text
+    assert "host action selects the execution strategy" in skill_text
+    assert "Never reconstruct" in skill_text and "prompts from prose" in skill_text
     assert "`run_lateral_review`" in skill_text
     assert "**Milestone lateral-review dispatch**" in skill_text
     assert "meta.lateral_review_tool_args" in skill_text
@@ -32,20 +32,19 @@ def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> Non
     assert "Main-session direct-answer assistance" in skill_text
 
 
-def test_claude_plugin_unstuck_skill_includes_sequential_dispatch_contract() -> None:
+def test_claude_plugin_unstuck_skill_includes_host_capability_contract() -> None:
     skill_path = Path(".claude-plugin") / "skills" / "unstuck" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
     assert (
-        '{"dispatch_mode": "sequential", "legacy_dispatch_mode": "inline_fallback", '
-        '"persona_count": N, "payloads": [...]}'
+        '{"dispatch_mode": "host_decides", "host_action": "dispatch_subagents_if_supported"'
     ) in skill_text
-    assert (
-        'Debate response (`dispatch_mode = "sequential"`; '
-        '`legacy_dispatch_mode = "inline_fallback"` may also be present)'
-    ) in skill_text
+    assert '"execution_preference": "parallel"' in skill_text
+    assert '"fallback_strategy": "sequential"' in skill_text
+    assert "capability-neutral `host_decides`" in skill_text
     assert "##### Debate, constrained runtime without sub-agent dispatch" in skill_text
     assert 'dispatch_mode="sequential"' in skill_text
+    assert 'dispatch_mode="host_decides"' in skill_text
     assert "result_correlation_key" in skill_text
-    assert 'legacy_dispatch_mode="inline_fallback"` as compatibility' in skill_text
+    assert 'legacy_dispatch_mode="inline_fallback"' in skill_text
     assert 'Debate response (`dispatch_mode = "inline_fallback"`)' not in skill_text

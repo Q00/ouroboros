@@ -150,6 +150,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
         "OUROBOROS_RUNTIME_PROFILE",
+        "OUROBOROS_CROSS_HARNESS_REDISPATCH",
         "OUROBOROS_AGENT_PERMISSION_MODE",
         "OUROBOROS_TOOL_CAPABILITIES",
         # Execution-cost/behavior dial — must not be forced from an untrusted repo.

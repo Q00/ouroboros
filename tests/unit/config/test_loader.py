@@ -32,6 +32,7 @@ from ouroboros.config.loader import (
     get_consensus_advocate_model,
     get_consensus_models,
     get_context_compression_model,
+    get_cross_harness_redispatch_enabled,
     get_dependency_analysis_model,
     get_gemini_cli_path,
     get_gjc_cli_path,
@@ -2466,6 +2467,15 @@ class TestGetAgentReasoningEffort:
 
         with pytest.raises(pydantic.ValidationError):
             OrchestratorConfig(reasoning_effort="minimal")
+
+
+def test_cross_harness_ignores_legacy_generated_true_config() -> None:
+    config = OuroborosConfig(execution=ExecutionConfig(cross_harness_redispatch=True))
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("ouroboros.config.loader.load_config", return_value=config),
+    ):
+        assert get_cross_harness_redispatch_enabled() is False
 
 
 class TestGetExecutionModel:

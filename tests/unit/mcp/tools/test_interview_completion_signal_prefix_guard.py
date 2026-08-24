@@ -30,6 +30,7 @@ from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_sign
         "ready for seed generation",
         "[from-user] done",
         "[from-user][refined] No remaining ambiguity",
+        "[from-user][refined][closure] 지금까지의 합의로 Seed를 생성한다.",
     ],
 )
 def test_human_typed_completion_intent_still_signals(answer: str) -> None:
@@ -95,11 +96,15 @@ def test_prefix_guard_is_case_insensitive(answer: str) -> None:
     assert _is_interview_completion_signal(answer) is False
 
 
-def test_negation_still_blocks_human_completion_intent() -> None:
-    """Negations applied to a [from-user] prefix must keep completion=False.
-
-    Regression for the heuristic itself: the prefix guard widens the surface
-    that passes through to the heuristic; ensure the negation rule still wins.
-    """
-    assert _is_interview_completion_signal("[from-user] not done") is False
-    assert _is_interview_completion_signal("[from-user] don't close") is False
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "[from-user] not done",
+        "[from-user] don't close",
+        "[from-user][refined] 아직 인터뷰를 계속한다.",
+        "[from-user][refined] まだインタビューを続ける。",
+    ],
+)
+def test_negation_or_unmarked_non_english_text_does_not_signal_completion(answer: str) -> None:
+    """Negations and unmarked natural-language content remain non-terminal."""
+    assert _is_interview_completion_signal(answer) is False

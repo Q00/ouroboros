@@ -192,6 +192,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # orchestrator backend profile and therefore which backend behavior /
         # executable is used — same routing class as the selectors above.
         "OUROBOROS_RUNTIME_PROFILE",
+        # Shared-workspace provider switching is execution authority, not a
+        # repository preference. Only the real process/trusted home may opt in.
+        "OUROBOROS_CROSS_HARNESS_REDISPATCH",
         # Permission-mode overrides — must not silently disable the
         # user's approval gate from an untrusted repo.
         "OUROBOROS_AGENT_PERMISSION_MODE",

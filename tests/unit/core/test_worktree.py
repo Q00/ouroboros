@@ -15,6 +15,7 @@ from ouroboros.core.worktree import (
     WorktreeError,
     _acquire_lock,
     _branch_exists,
+    _run_git,
     _worktree_cleanup_policy,
     cleanup_task_workspace,
     maybe_prepare_task_workspace,
@@ -24,6 +25,38 @@ from ouroboros.core.worktree import (
     release_task_workspace,
     restore_task_workspace,
 )
+
+
+def test_run_git_decodes_non_ascii_paths_as_utf8(tmp_path: Path) -> None:
+    repo_path = "C:/Users/example/문서/우로보로스"
+    completed = subprocess.CompletedProcess(
+        args=["git", "rev-parse", "--show-toplevel"],
+        returncode=0,
+        stdout=f"{repo_path}\n",
+        stderr="",
+    )
+
+    with patch("ouroboros.core.worktree.subprocess.run", return_value=completed) as run:
+        assert _run_git(["rev-parse", "--show-toplevel"], tmp_path) == repo_path
+
+    assert run.call_args.kwargs["text"] is True
+    assert run.call_args.kwargs["encoding"] == "utf-8"
+    assert run.call_args.kwargs["errors"] == "replace"
+
+
+def test_run_git_round_trips_non_ascii_repository_path(tmp_path: Path) -> None:
+    repo = tmp_path / "문서" / "우로보로스"
+    repo.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+
+    resolved = Path(_run_git(["rev-parse", "--show-toplevel"], repo)).resolve()
+
+    assert resolved == repo.resolve()
 
 
 def _workspace(path_root: Path) -> TaskWorkspace:

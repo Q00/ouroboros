@@ -130,6 +130,11 @@ def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[
             cwd=cwd,
             capture_output=True,
             text=True,
+            # Git for Windows emits repository paths as UTF-8. Relying on the
+            # process ANSI code page (commonly cp949 on Korean Windows) can
+            # make subprocess' reader thread fail and leave stdout as None.
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )

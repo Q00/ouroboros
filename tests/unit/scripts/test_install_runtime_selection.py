@@ -2117,8 +2117,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -2286,6 +2286,52 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
+
+
+def test_installer_configures_omp_after_runtime_setup_source_order() -> None:
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    assert source.rfind("_ensure_omp_tool_call_timeout") > source.index(
+        "setup --runtime $RUNTIME --non-interactive"
+    )
+
+
+def test_installer_preserves_higher_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 120000; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_preserves_oversized_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 9223372036854775808; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_sets_omp_tool_call_timeout_when_omp_is_available(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nprintf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" in calls
 
 
 def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
@@ -2465,8 +2511,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
 
 
 _DSH_STUB = f"""#!/bin/sh

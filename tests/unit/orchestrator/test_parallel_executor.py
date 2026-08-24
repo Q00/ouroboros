@@ -62,6 +62,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _shell_command_mutation_targets,
     _text_needs_shell_expansion,
 )
+from ouroboros.orchestrator.evidence.shell_parsing import _looks_like_test_command
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_authority import (
     runtime_effect_capabilities_contract,
@@ -4986,6 +4987,12 @@ async def test_unmaterializable_ac_is_judged_while_valid_sibling_completes(
             "pytest tests/test_foo.py",
             id="test-invocation-pipefail-output-plumbing",
         ),
+        pytest.param(
+            '"C:\\\\Users\\\\runner\\\\pwsh.exe" -NoProfile -Command '
+            "'uv run --isolated --with pytest pytest -q tests/test_foo.py'",
+            "uv run --isolated --with pytest pytest -q tests/test_foo.py",
+            id="windows-pwsh-command-wrapper",
+        ),
     ),
 )
 def test_command_claim_supports_runtime_command_shape(runtime_command: str, claim: str) -> None:
@@ -5078,6 +5085,24 @@ def test_command_claim_supports_runtime_command_shape(runtime_command: str, clai
             "pytest tests/unit/test_foo.py",
             {},
             id="tee-redirected-run",
+        ),
+        pytest.param(
+            "pwsh.exe -Command 'pytest tests/test_foo.py' trailing",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-command-with-trailing-argv",
+        ),
+        pytest.param(
+            "pwsh.exe -EncodedCommand cAB5AHQAZQBzAHQA",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-encoded-command",
+        ),
+        pytest.param(
+            "pwsh.exe -File bootstrap.ps1 -Command 'pytest tests/test_foo.py'",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-file-before-command",
         ),
     ),
 )
@@ -10559,6 +10584,239 @@ class TestParallelACExecutor:
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 --with pytest pytest -q",
+            "uv run --fork-strategy fewest --with pytest pytest -q",
+            "uv run --no-sources-package foo pytest -q",
+            "uv run --upgrade-group foo pytest -q",
+            "uv run -qn pytest -q",
+            "uv run -p3.12 pytest -q",
+            "uv run -m pytest -q",
+            "uv run --python 3.12 --with-requirements requirements.txt "
+            "--with pytest python -m pytest -q",
+            "uvx --python 3.12 --from pytest --with-requirements requirements.txt pytest -q",
+        ),
+    )
+    def test_option_bearing_uv_pytest_is_candidate_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --no-project -s pytest",
+            "uv run --script pytest",
+            "uv run --gui-script pytest",
+        ),
+    )
+    def test_uv_script_modes_are_not_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    def test_uv_dependency_named_pytest_does_not_become_program_identity(self) -> None:
+        command = "uv run --with pytest python -c \"print('2 passed in 0.01s')\""
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize("command", ("uv run pytest -s -q", "uv run -- pytest -s -q"))
+    def test_pytest_s_argument_is_not_uv_script_mode(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --with --isolated pytest -q",
+            "uv run --color -- pytest -q",
+        ),
+    )
+    def test_uv_missing_option_values_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run -p --isolated pytest -q",
+            "uv run -w --isolated pytest -q",
+        ),
+    )
+    def test_uv_missing_short_option_values_fail_closed(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 pytest --collect-only",
+            "uv run -m pytest --setup-only",
+        ),
+    )
+    def test_uv_non_executing_pytest_modes_are_not_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is False
+
+    def test_uv_preview_features_value_is_test_evidence(self) -> None:
+        command = "uv run --preview-features target-workspace-discovery pytest -q"
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize("option", ("--color=", "--directory="))
+    def test_uv_empty_attached_option_values_fail_closed(self, option: str) -> None:
+        assert _looks_like_test_command(f"uv run {option} pytest -q") is False
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        (
+            ("uv run --preview-features target-workspace-discovery pytest -q", True),
+            ("uv run --color= pytest -q", False),
+            ("uv run --directory= pytest -q", False),
+        ),
+    )
+    def test_uv_long_option_operands_gate_end_to_end_claims(
+        self,
+        command: str,
+        expected: bool,
+    ) -> None:
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is expected
+        )
+
+    def test_compound_uv_command_cannot_back_standalone_pytest_claim(self) -> None:
+        command = "uv run --with pytest pytest -q && python scripts/postprocess.py"
+        claim = "uv run --with pytest pytest -q"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=claim,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize("shell", ("bash", "/bin/zsh"))
+    def test_wrapped_compound_uv_command_cannot_back_standalone_claim(self, shell: str) -> None:
+        inner = "uv run pytest -q && python scripts/postprocess.py"
+        command = f"{shell} -lc '{inner}'"
+        claim = "uv run pytest -q"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=claim,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        (
+            ("uv run -V pytest", False),
+            ("uv run -C foo=bar pytest -q", True),
+            ("uv run -U pytest -q", True),
+        ),
+    )
+    def test_uv_short_options_preserve_case(self, command: str, expected: bool) -> None:
+        assert _looks_like_test_command(command) is expected
+
+    def test_uv_version_mode_cannot_back_tests_passed_claim(self) -> None:
+        command = "uv run -V pytest"
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --quiet pytest -q",
+            "uv run --verbose pytest -q",
+            "uv run --system-certs pytest -q",
+        ),
+    )
+    def test_uv_current_global_flags_remain_test_evidence(self, command: str) -> None:
+        assert _looks_like_test_command(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 --with pytest pytest -q",
+            "uv run --python 3.12 --with-requirements requirements.txt "
+            "--with pytest python -m pytest -q",
+            "uvx --python 3.12 --from pytest --with-requirements requirements.txt pytest -q",
+        ),
+    )
+    def test_option_bearing_uv_command_backs_its_exact_tests_passed_claim(
+        self, command: str
+    ) -> None:
+        message = AgentMessage(
+            type="assistant",
+            content=f"Calling tool: Bash: {command}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": command},
+                "output": "2 passed in 0.01s",
+                "exit_code": 0,
+            },
+        )
+
+        assert (
+            _runtime_messages_support_test_claim(
+                value=command,
+                backed_commands=(command,),
+                messages=(message,),
+                task_cwd="/tmp",
+            )
+            is True
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("build_case", _ACCEPTED_UNITTEST_CLAIM_CASES)

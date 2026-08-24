@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.interview_driver import AutoInterviewResult
+from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import (
     PIPELINE_DEADLINE_TOOL_NAME,
     AutoPipeline,
@@ -28,6 +29,7 @@ from ouroboros.auto.state import (
     AutoPipelineState,
     AutoStore,
 )
+from ouroboros.auto.terminal_events import emit_blocked_session_event
 from ouroboros.cli.main import app as cli_app
 
 
@@ -79,6 +81,73 @@ def test_seed_generation_timeout_uses_state_default_policy() -> None:
         DEFAULT_TIMEOUT_SECONDS_BY_PHASE[AutoPhase.SEED_GENERATION.value]
     )
     assert pipeline.seed_timeout_seconds == 300.0
+
+
+@pytest.mark.asyncio
+async def test_ralph_deadline_checkpoint_projects_resumable_result_and_event(tmp_path) -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.RALPH_HANDOFF
+    state.ralph_job_id = "job_1"
+    state.mark_blocked("pipeline timeout", tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+    pipeline = AutoPipeline(_NeverInterviewDriver(), _unused_seed_generator)
+    result = pipeline._result(state, SeedDraftLedger.from_goal(state.goal))
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    async def emit(event_type: str, session_id: str, data: dict[str, object]) -> None:
+        assert session_id == state.auto_session_id
+        emitted.append((event_type, data))
+
+    await emit_blocked_session_event(emit, state, result)
+
+    assert result.resume_capability.value == "resume"
+    assert emitted == [
+        (
+            "auto.session.blocked",
+            {
+                "schema_version": 1,
+                "auto_session_id": state.auto_session_id,
+                "status": "blocked",
+                "stop_reason_code": state.last_error_code,
+                "tool_name": PIPELINE_DEADLINE_TOOL_NAME,
+                "blocker": "Auto session requires operator attention",
+                "resume_capability": "resume",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expired_ralph_deadline_resume_reconciles_terminal_job(tmp_path) -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.phase = AutoPhase.RALPH_HANDOFF
+    state.ralph_job_id = "job_1"
+    state.deadline_at = time.monotonic() - 30.0
+    state.deadline_at_epoch = time.time() - 30.0
+    state.mark_blocked("pipeline timeout", tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+    calls: list[str] = []
+
+    async def poller(*, job_id: str, max_total_seconds: float) -> dict[str, object]:
+        assert max_total_seconds > 0
+        calls.append(job_id)
+        return {
+            "terminal_status": "completed",
+            "stop_reason": "acceptance_reached",
+            "current_generation": 3,
+        }
+
+    pipeline = AutoPipeline(
+        _NeverInterviewDriver(),
+        _unused_seed_generator,
+        ralph_resumer=poller,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_job_status == "completed"
+    assert state.ralph_current_generation == 3
+    assert calls == ["job_1"]
 
 
 @pytest.mark.asyncio

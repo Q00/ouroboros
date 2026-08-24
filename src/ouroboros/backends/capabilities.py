@@ -64,24 +64,24 @@ class BackendCapability:
 
 
 class SubagentDispatchMode(StrEnum):
-    """How a handler should surface subagent fan-out for the active runtime.
+    """How a handler should surface subagent fan-out for the active consumer.
 
-    Three distinct layers, not a boolean:
+    Delivery ownership and execution capability are kept distinct:
 
-    - ``PLUGIN_PASSIVE``: a passive bridge receiver (the OpenCode plugin) auto-
-      intercepts the ``_subagents`` envelope and spawns children. The handler
-      returns the envelope and skips the real in-process work.
-    - ``HOST_DRIVEN``: there is no passive receiver, but the host *model* can
-      spawn subagents from inline payloads via its own native primitive (e.g.
-      Codex Desktop's multi-agent spawn). The handler returns the inline result
-      plus an explicit ``dispatch_mode=host_driven`` / ``host_action`` stamp so
-      the host deterministically fans out.
-    - ``SEQUENTIAL``: neither a passive receiver nor a native parallel primitive
-      is available; the handler runs the in-process / inline sequential path.
+    - ``PLUGIN_PASSIVE``: a passive bridge receiver auto-consumes the
+      ``_subagents`` envelope and spawns children.
+    - ``HOST_DRIVEN``: the external host explicitly declared a native parallel
+      subagent primitive, so the response requests deterministic fan-out.
+    - ``HOST_DECIDES``: an external host will consume inline payloads, but it
+      declared no authoritative subagent capability. The response prefers
+      parallel fan-out and states sequential processing as the fallback.
+    - ``SEQUENTIAL``: the selected execution authority explicitly cannot or
+      must not run parallel subagents.
     """
 
     PLUGIN_PASSIVE = "plugin_passive"
     HOST_DRIVEN = "host_driven"
+    HOST_DECIDES = "host_decides"
     SEQUENTIAL = "sequential"
 
 
@@ -91,6 +91,7 @@ class SubagentSpawnTriggerMechanism(StrEnum):
     PASSIVE_BRIDGE_ENVELOPE = "passive_bridge_envelope"
     CODEX_NATURAL_LANGUAGE_DELEGATION = "codex_natural_language_delegation"
     CLAUDE_TASK_AGENT_TOOL = "claude_task_agent_tool"
+    HOST_CAPABILITY_DECISION = "host_capability_decision"
     SEQUENTIAL_FALLBACK = "sequential_fallback"
 
 
@@ -737,16 +738,15 @@ def render_mcp_server_instructions() -> str:
         "exposed, call it directly — discovery is a no-op then, and an empty "
         "discovery result is expected, not a failure. Never surface this "
         "tool-discovery plumbing to the user.\n"
-        "\n"
-        "SUBAGENT FAN-OUT: when a tool result's `meta` carries "
-        "`host_action=spawn_subagents` (or `dispatch_mode=host_driven`) with a "
-        "payload array (e.g. `question_advisory_subagents`), spawn ONE subagent "
-        "per payload using your runtime's native primitive, give each the "
-        "payload `prompt`, await all, correlate results by the "
-        "`result_correlation_key` named in `meta`, then synthesize while "
-        "preserving the user-facing content. With no parallel primitive, process "
-        "the payloads sequentially. Keep any user-facing question visible before "
-        "the assistive work it triggers."
+        "SUBAGENT FAN-OUT: when a tool result carries a payload array, obey its "
+        "dispatch contract. `host_action=spawn_subagents` means the host declared "
+        "parallel support: spawn ONE child per payload, await all, correlate by "
+        "`result_correlation_key`, then synthesize. "
+        "`host_action=dispatch_subagents_if_supported` means host capability was "
+        "not declared: use the host's native parallel primitive when available, "
+        "otherwise process the same payloads sequentially. A passive plugin bridge "
+        "consumes `_subagents` itself. Preserve user-facing content while assistive "
+        "work runs."
     )
 
 
@@ -771,6 +771,7 @@ def build_runtime_subagent_orchestration_contract(
     *,
     directive_metadata: Mapping[str, Any],
     opencode_mode: str | None = None,
+    dispatch_mode: SubagentDispatchMode | None = None,
     callable_mcp_tool_capabilities: Sequence[Mapping[str, Any]] = (),
 ) -> RuntimeSubagentOrchestrationContract:
     """Build runtime-specific handling metadata for MCP subagent directives.
@@ -789,11 +790,11 @@ def build_runtime_subagent_orchestration_contract(
     if not isinstance(sequential_fallback, Mapping):
         sequential_fallback = {}
 
-    mode = resolve_subagent_dispatch(name, opencode_mode)
-    # The contract speaks the same vocabulary as the resolver: ``dispatch_mode``
-    # is exactly the ``SubagentDispatchMode`` value, so there is one source of
-    # truth for the mode string ({plugin_passive | host_driven | sequential}).
-    dispatch_mode = mode.value
+    mode = dispatch_mode or resolve_subagent_dispatch(name, opencode_mode)
+    # ``dispatch_mode`` normally comes from the backend resolver. Request-scoped
+    # MCP calls may override it with HOST_DECIDES when the external host did not
+    # advertise an authoritative subagent capability.
+    resolved_dispatch_mode = mode.value
 
     if mode is SubagentDispatchMode.PLUGIN_PASSIVE:
         spawn_trigger_mechanism = SubagentSpawnTriggerMechanism.PASSIVE_BRIDGE_ENVELOPE
@@ -824,16 +825,29 @@ def build_runtime_subagent_orchestration_contract(
             "Fall back to the MCP `sequential_fallback` contract only when no "
             "parallel primitive is available."
         )
+    elif mode is SubagentDispatchMode.HOST_DECIDES:
+        spawn_trigger_mechanism = SubagentSpawnTriggerMechanism.HOST_CAPABILITY_DECISION
+        requires_explicit_spawn_request = False
+        callable_spawn_tool_name = None
+        prohibited_spawn_tool_names = ()
+        runtime_instruction_handling = (
+            "The calling MCP host did not declare whether a native parallel "
+            "subagent primitive is available. Consume the inline `host_decides` "
+            "payloads without inferring capability from the configured worker: "
+            "dispatch one child per payload in parallel when the host supports it; "
+            "otherwise process the same payloads sequentially. Correlate every "
+            "result by the directive metadata's correlation key before synthesis."
+        )
     else:
         spawn_trigger_mechanism = SubagentSpawnTriggerMechanism.SEQUENTIAL_FALLBACK
         requires_explicit_spawn_request = False
         callable_spawn_tool_name = None
         prohibited_spawn_tool_names = ()
         runtime_instruction_handling = (
-            "This runtime has no native parallel subagent primitive. Follow the "
-            "MCP `sequential_fallback` contract and process each structured "
-            "subagent payload sequentially, preserving the response correlation "
-            "keys declared by the directive metadata."
+            "The selected execution authority has no native parallel subagent "
+            "primitive available. Follow the MCP `sequential_fallback` contract "
+            "and process each structured subagent payload sequentially, preserving "
+            "the response correlation keys declared by the directive metadata."
         )
 
     return RuntimeSubagentOrchestrationContract(
@@ -841,7 +855,7 @@ def build_runtime_subagent_orchestration_contract(
         # This boolean is the *passive bridge* axis only; ``HOST_DRIVEN`` runtimes
         # report False here and carry their capability via ``dispatch_mode``.
         supports_native_parallel_subagents=mode is SubagentDispatchMode.PLUGIN_PASSIVE,
-        dispatch_mode=dispatch_mode,
+        dispatch_mode=resolved_dispatch_mode,
         spawn_trigger_mechanism=spawn_trigger_mechanism.value,
         requires_explicit_spawn_request=requires_explicit_spawn_request,
         callable_spawn_tool_name=callable_spawn_tool_name,

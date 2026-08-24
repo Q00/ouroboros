@@ -171,16 +171,20 @@ def test_only_the_lane_that_produced_a_finding_is_offered_it(
             assert "## Recently Found Here" not in prompt, lane_id
 
 
-def test_a_lane_answering_under_a_closed_contract_is_offered_none(
+def test_a_contracted_lane_is_offered_its_findings_without_the_reporting_duty(
     roster: list[dict[str, str]], store: ArtifactStore
 ) -> None:
-    """It has nowhere to put a finding, and nowhere to say it could not fetch one.
+    """Eligibility follows what a lane produces, not the shape of its answer (#2223).
 
-    Its answer shape rejects any field it does not name, so "I could not reach
-    the tool" discards the whole answer -- and those lanes are required, so the
-    fan-out then cannot complete. Staying silent instead reports having found
-    nothing, which is the confusion this is built to prevent. The PM lanes are
-    the case that made this visible: both of theirs are closed.
+    The offer was gated on answer shape once: a contracted lane had no field in
+    which to confess a failed fetch, so it was offered nothing -- which withheld
+    the head start from exactly the lanes doing the most repeated work (both PM
+    lanes are contracted). The confession is what the shape decides, not the
+    offer: a contracted answer carries no reuse statement a reader could be
+    misled by, a failed fetch degrades to the investigation the lane would have
+    run anyway, and the server sees the fetch calls either way. So the prose
+    lane keeps the in-band duty, and the contracted lane is told to keep its
+    shape instead.
     """
     _publish(store)
 
@@ -189,15 +193,28 @@ def test_a_lane_answering_under_a_closed_contract_is_offered_none(
     interview = _lane_prompts(interview_meta)
     pm = _lane_prompts(pm_meta)
 
-    assert "## Recently Found Here" in interview["code_context"]
-    assert "## Recently Found Here" not in interview["data_context"]
-    for prompt in pm.values():
-        assert "## Recently Found Here" not in prompt
+    for prompt in (
+        interview["code_context"],
+        interview["data_context"],
+        pm["code_context"],
+        pm["data_context"],
+    ):
+        assert "## Recently Found Here" in prompt
 
-    # And the request carries no key for a lane that will never render one: a
-    # key nothing reads is a promise the schema makes and the prompt never keeps.
-    assert list(interview_meta["question_advisory_request"]["recent_findings"]) == ["code_context"]
-    assert "recent_findings" not in pm_meta["question_advisory_request"]
+    # The in-band duty exists only where the answer has a place for it.
+    assert "reporting nothing to reuse would be false" in interview["code_context"]
+    for prompt in (interview["data_context"], pm["code_context"], pm["data_context"]):
+        assert "reporting nothing to reuse would be false" not in prompt
+        assert "do not add fields about reuse" in prompt
+
+    assert sorted(interview_meta["question_advisory_request"]["recent_findings"]) == [
+        "code_context",
+        "data_context",
+    ]
+    assert sorted(pm_meta["question_advisory_request"]["recent_findings"]) == [
+        "code_context",
+        "data_context",
+    ]
 
 
 def test_the_eligible_lanes_do_not_read_each_other(store: ArtifactStore) -> None:
@@ -565,3 +582,34 @@ def test_the_request_schema_makes_a_mismatched_lane_pairing_unrepresentable(
     assert list(validator.iter_errors(request)) == []
     request["recent_findings"]["code_context"][0]["lane_id"] = "data_context"
     assert list(validator.iter_errors(request)) != []
+
+
+def test_a_lane_alone_lists_that_lane_own_recent_findings(store: ArtifactStore) -> None:
+    """A lane may ask which of its findings exist instead of being handed the ids.
+
+    Sending the list in every prompt spent a fifth of it on identifiers a child
+    has no way to choose between, and a lane wanting none of them paid for it
+    anyway. Asking is the same answer, pulled: the window, the eligible kind
+    and the cap stay the query's, so a lane cannot ask for a wider read than it
+    was ever offered — only for its own, and only from the last day.
+    """
+    contract_id = _publish_distinguishable(store)
+    handler = _fetch_handler(store)
+
+    result = asyncio.run(handler.handle({"lane_id": "code_context"}))
+
+    assert result.is_ok
+    listing = result.value.meta
+    assert listing["lane_id"] == "code_context"
+    assert [entry["contract_id"] for entry in listing["recent"]] == [contract_id]
+    assert {"contract_id", "lane_id", "published_at"} == set(listing["recent"][0])
+    # Bodies stay in the store: what is listed is what to read, never the read.
+    assert "output" not in json.dumps(listing)
+
+
+def test_neither_a_contract_nor_a_lane_is_refused(store: ArtifactStore) -> None:
+    """An empty request names both ways to ask rather than guessing one."""
+    result = asyncio.run(_fetch_handler(store).handle({}))
+
+    assert result.is_err
+    assert "contract_id" in str(result.error) and "lane_id" in str(result.error)

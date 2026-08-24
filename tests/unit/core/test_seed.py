@@ -11,6 +11,7 @@ from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
+    _PARTIAL_SEED_GENERATION_MODE,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
@@ -24,6 +25,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_texts,
+    derive_semantic_ac_key,
     expected_artifact_path_error,
     expected_artifact_workspace_path_error,
     parse_expected_artifact_list,
@@ -98,6 +100,104 @@ class TestSeedMetadata:
 
         with pytest.raises(PydanticValidationError):
             metadata.ambiguity_score = 0.20  # type: ignore[misc]
+
+
+class TestSeedMetadataRecoveryInvariants:
+    """Regression tests for the degraded-provenance invariants (#1257 / #1302).
+
+    The docstring on ``SeedMetadata`` has always documented these invariants;
+    before this suite existed no validator enforced them, so a recovery-path
+    Seed with ``degraded`` unset could pass the run gate and auto-RUN a partial
+    product.
+    """
+
+    def test_degraded_requires_non_default_generation_mode(self) -> None:
+        with pytest.raises(PydanticValidationError, match="non-default generation_mode"):
+            SeedMetadata(degraded=True)
+
+    def test_degraded_partial_mode_requires_unresolved_slots(self) -> None:
+        with pytest.raises(PydanticValidationError, match="unresolved_slots entry"):
+            SeedMetadata(
+                degraded=True,
+                generation_mode="partial_seed_from_evidence",
+                unresolved_slots=(),
+            )
+
+    def test_unresolved_slots_require_degraded(self) -> None:
+        """A partial Seed cannot hide its partiality by leaving ``degraded`` unset."""
+        with pytest.raises(PydanticValidationError, match="unresolved_slots requires degraded"):
+            SeedMetadata(
+                degraded=False,
+                generation_mode="partial_seed_from_evidence",
+                unresolved_slots=("acceptance_criteria",),
+            )
+
+    def test_degraded_partial_seed_with_slots_is_accepted(self) -> None:
+        metadata = SeedMetadata(
+            degraded=True,
+            generation_mode="partial_seed_from_evidence",
+            unresolved_slots=("outputs",),
+            recovery_reason="interview_phase_deadline",
+        )
+
+        assert metadata.unresolved_slots == ("outputs",)
+
+    def test_degraded_complete_ledger_seed_needs_no_slots(self) -> None:
+        """Case (b): deadline closure over a fully resolved ledger."""
+        metadata = SeedMetadata(
+            degraded=True,
+            generation_mode="interview_deadline_complete_ledger",
+            recovery_reason="interview_phase_deadline",
+        )
+
+        assert metadata.unresolved_slots == ()
+
+    def test_non_degraded_recovery_path_seed_is_still_accepted(self) -> None:
+        """``partial_seed_from_evidence`` over a complete ledger stays valid.
+
+        ``ledger_seed.partial_seed_from_evidence`` derives
+        ``degraded = bool(unresolved_slots)``, so a complete ledger routed
+        through the recovery helper is deliberately tagged with the partial
+        ``generation_mode`` while remaining non-degraded. The invariants are
+        scoped to ``degraded=True`` precisely so that audit trail survives.
+        """
+        metadata = SeedMetadata(
+            generation_mode="partial_seed_from_evidence",
+            recovery_reason="forced_review",
+        )
+
+        assert metadata.degraded is False
+
+    def test_partial_generation_mode_constant_matches_ledger_seed(self) -> None:
+        """Pin the duplicated constant to its ``auto.ledger_seed`` source."""
+        from ouroboros.auto.ledger_seed import PARTIAL_SEED_GENERATION_MODE
+
+        assert _PARTIAL_SEED_GENERATION_MODE == PARTIAL_SEED_GENERATION_MODE
+
+    def test_decision_provenance_is_frozen(self) -> None:
+        """The histogram is the only dict field on a ``frozen=True`` model."""
+        metadata = SeedMetadata(decision_provenance={"user_confirmed": 3})
+
+        with pytest.raises(TypeError, match="immutable"):
+            metadata.decision_provenance["user_confirmed"] = 99
+        with pytest.raises(TypeError, match="immutable"):
+            metadata.decision_provenance.update({"timeout_default": 1})
+        with pytest.raises(TypeError, match="immutable"):
+            metadata.decision_provenance.pop("user_confirmed")
+        with pytest.raises(TypeError, match="immutable"):
+            metadata.decision_provenance.clear()
+
+        assert metadata.decision_provenance == {"user_confirmed": 3}
+
+    def test_decision_provenance_round_trips_and_stays_additive(self) -> None:
+        populated = SeedMetadata(decision_provenance={"model_inferred": 2})
+        assert json.loads(populated.model_dump_json())["decision_provenance"] == {
+            "model_inferred": 2
+        }
+
+        empty = SeedMetadata()
+        assert empty.decision_provenance == {}
+        assert "decision_provenance" not in json.loads(empty.model_dump_json())
 
 
 class TestOntologyField:
@@ -1166,3 +1266,164 @@ class TestSeedImmutabilityComprehensive:
         assert isinstance(seed.constraints, tuple)
         assert not hasattr(seed.constraints, "append")
         assert not hasattr(seed.constraints, "extend")
+
+
+class TestAcceptanceCriterionDescriptionRequired:
+    """``description`` is the semantic identity of an AC, so it cannot be blank.
+
+    ``derive_semantic_ac_key`` hashes the description; a whitespace-only value
+    used to normalize to ``""`` and give every such criterion an identical
+    ``semantic_ac_key``, cross-contaminating AC-keyed retry/successor state.
+    """
+
+    @pytest.mark.parametrize("blank", ["", " ", "   ", "\t", "\n", " \t\n "])
+    def test_blank_description_rejected(self, blank: str) -> None:
+        with pytest.raises(PydanticValidationError, match="cannot be empty or whitespace-only"):
+            AcceptanceCriterionSpec(description=blank)
+
+    def test_blank_legacy_string_criterion_rejected_by_seed(self) -> None:
+        with pytest.raises(PydanticValidationError, match="cannot be empty or whitespace-only"):
+            Seed(
+                goal="Test goal",
+                acceptance_criteria=("Real criterion", "   "),
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+
+    def test_description_is_still_stripped(self) -> None:
+        criterion = AcceptanceCriterionSpec(description="  Tasks can be created  ")
+
+        assert criterion.description == "Tasks can be created"
+
+    def test_distinct_criteria_keep_distinct_semantic_keys(self) -> None:
+        first = AcceptanceCriterionSpec(description="a").with_materialized_semantic_key()
+        second = AcceptanceCriterionSpec(description="b").with_materialized_semantic_key()
+
+        assert first.semantic_ac_key != second.semantic_ac_key
+        assert first.semantic_ac_key == derive_semantic_ac_key(first)
+
+
+class TestSeedTaskType:
+    """``task_type`` is a closed set matching the execution strategy registry."""
+
+    @pytest.mark.parametrize(
+        "task_type",
+        ["code", "research", "analysis", "artifact", "document", "documentation", "presentation"],
+    )
+    def test_documented_task_types_accepted(self, task_type: str) -> None:
+        seed = Seed(
+            goal="Test goal",
+            task_type=task_type,
+            ontology_schema=OntologySchema(name="T", description="T"),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+
+        assert seed.task_type == task_type
+
+    def test_every_builtin_task_type_resolves_to_a_strategy(self) -> None:
+        """The built-in set may not drift from the strategy registry."""
+        from ouroboros.core.seed import BUILTIN_TASK_TYPES
+        from ouroboros.orchestrator.execution_strategy import get_strategy
+
+        for task_type in BUILTIN_TASK_TYPES:
+            assert get_strategy(task_type) is not None
+
+    @pytest.mark.parametrize("bad", ["cod", "Coding", "codee", "", "test"])
+    def test_typo_task_type_rejected(self, bad: str) -> None:
+        with pytest.raises(PydanticValidationError):
+            Seed(
+                goal="Test goal",
+                task_type=bad,
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+
+    def test_case_and_whitespace_tolerated_for_hand_authored_seeds(self) -> None:
+        seed = Seed(
+            goal="Test goal",
+            task_type="  Research ",
+            ontology_schema=OntologySchema(name="T", description="T"),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+
+        assert seed.task_type == "research"
+
+    def test_registered_custom_strategy_accepted_in_seed(self) -> None:
+        """A dynamically registered custom strategy passes Seed validation.
+
+        Regression for the blocker: static Literal broke register_strategy().
+        """
+        from ouroboros.orchestrator.execution_strategy import (
+            _STRATEGY_REGISTRY,
+            register_strategy,
+        )
+        from ouroboros.orchestrator.workflow_state import ActivityType
+
+        class _TestCustomStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "custom"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "custom"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        register_strategy("my_plugin_task", _TestCustomStrategy())
+        try:
+            seed = Seed(
+                goal="Custom strategy test",
+                task_type="my_plugin_task",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed.task_type == "my_plugin_task"
+        finally:
+            # Clean up to avoid polluting other tests.
+            _STRATEGY_REGISTRY.pop("my_plugin_task", None)
+
+    def test_registered_custom_strategy_case_normalized(self) -> None:
+        """Custom strategies are normalized like built-ins."""
+        from ouroboros.orchestrator.execution_strategy import (
+            _STRATEGY_REGISTRY,
+            register_strategy,
+        )
+        from ouroboros.orchestrator.workflow_state import ActivityType
+
+        class _TestCustomStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "custom"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "custom"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        register_strategy("my_plugin", _TestCustomStrategy())
+        try:
+            seed = Seed(
+                goal="Custom strategy case test",
+                task_type="  My_Plugin  ",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed.task_type == "my_plugin"
+        finally:
+            _STRATEGY_REGISTRY.pop("my_plugin", None)
+
+    def test_unregistered_custom_identifier_rejected(self) -> None:
+        """An identifier that is neither built-in nor registered is rejected."""
+        with pytest.raises(PydanticValidationError):
+            Seed(
+                goal="Test goal",
+                task_type="never_registered_xyz",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )

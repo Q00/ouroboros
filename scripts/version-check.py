@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -72,17 +73,61 @@ def get_installed_version() -> str | None:
     return None
 
 
+_VERSION_RE = re.compile(
+    r"^\s*v?(?P<release>\d+(?:\.\d+)*)"
+    r"(?:(?P<pre_kind>a|b|rc)(?P<pre_num>\d+))?"
+    r"(?:\.post(?P<post_num>\d+))?"
+    r"(?:\.dev(?P<dev_num>\d+))?"
+    r"(?:\+[0-9A-Za-z.-]+)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], int, int] | None:
+    """Return a sortable key for the version forms Ouroboros publishes.
+
+    SessionStart runs under the first host ``python3`` on PATH, so this
+    standalone hook cannot depend on the package environment containing
+    ``packaging``. Supported ordering is dev < alpha < beta < rc < final < post.
+    Local suffixes do not make a same-public-version update available.
+    """
+    match = _VERSION_RE.fullmatch(version)
+    if match is None:
+        return None
+    release_parts = [int(part) for part in match.group("release").split(".")]
+    while len(release_parts) > 1 and release_parts[-1] == 0:
+        release_parts.pop()
+    release = tuple(release_parts)
+    pre_kind = match.group("pre_kind")
+    if match.group("dev_num") is not None and (
+        pre_kind is not None or match.group("post_num") is not None
+    ):
+        return None
+    if match.group("dev_num") is not None:
+        phase, number = 0, int(match.group("dev_num"))
+    elif pre_kind is not None:
+        phase = {"a": 1, "b": 2, "rc": 3}[pre_kind.lower()]
+        number = int(match.group("pre_num") or 0)
+    elif match.group("post_num") is not None:
+        phase, number = 5, int(match.group("post_num"))
+    else:
+        phase, number = 4, 0
+    return release, phase, number
+
+
+def _compare_versions(left: str, right: str) -> int | None:
+    """Compare supported versions, returning None when either is invalid."""
+    left_key = _version_key(left)
+    right_key = _version_key(right)
+    if left_key is None or right_key is None:
+        return None
+    return (left_key > right_key) - (left_key < right_key)
+
+
 def _is_prerelease(version_str: str) -> bool:
-    """Check if a version string is a pre-release (PEP 440)."""
-    try:
-        from packaging.version import Version
-
-        return Version(version_str).is_prerelease
-    except Exception:
-        # Fallback: check for common pre-release suffixes
-        import re
-
-        return bool(re.search(r"(a|b|rc|dev)\d*", version_str))
+    """Check whether a supported Ouroboros version is a pre-release."""
+    key = _version_key(version_str)
+    return key is not None and key[1] < 4
 
 
 def _get_latest_from_pypi(
@@ -110,13 +155,14 @@ def _get_latest_from_pypi(
     if not include_prerelease:
         return data["info"]["version"]
 
-    # Scan all releases to find the latest pre-release
-    from packaging.version import Version
-
-    all_versions = [Version(v) for v in data.get("releases", {}) if data["releases"][v]]
-    if not all_versions:
+    candidates = [
+        (key, version)
+        for version, files in data.get("releases", {}).items()
+        if files and (key := _version_key(version)) is not None
+    ]
+    if not candidates:
         return data["info"]["version"]
-    return str(max(all_versions))
+    return max(candidates)[1]
 
 
 def get_latest_version(*, current: str | None = None) -> str | None:
@@ -254,23 +300,16 @@ def check_update() -> dict:
             "message": None,
         }
 
-    from packaging.version import Version
-
-    try:
-        if Version(latest) > Version(current):
-            return {
-                "update_available": True,
-                "current": current,
-                "latest": latest,
-                "message": (
-                    f"Ouroboros update available: v{current} → v{latest}. "
-                    f"Run `ooo update` to upgrade."
-                ),
-            }
-    except Exception:
-        # Version parsing failed — cannot determine ordering safely.
-        # Return False rather than risking a false positive (e.g. downgrade).
-        pass
+    comparison = _compare_versions(latest, current)
+    if comparison is not None and comparison > 0:
+        return {
+            "update_available": True,
+            "current": current,
+            "latest": latest,
+            "message": (
+                f"Ouroboros update available: v{current} → v{latest}. Run `ooo update` to upgrade."
+            ),
+        }
 
     return {
         "update_available": False,

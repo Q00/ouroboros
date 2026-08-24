@@ -32,6 +32,7 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
 from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
 
 # Re-exported: split out in #1754, still imported from here by evaluation tests.
@@ -85,7 +86,6 @@ try:  # Keep the core package importable when the optional MCP extra is absent.
 except ImportError:  # pragma: no cover - exercised by packaging smoke tests.
     _SDKMCPServer = None  # type: ignore[assignment,misc]
 
-
 if _SDKMCPServer is not None:
 
     class _OuroborosSDKServer(_SDKMCPServer):  # type: ignore[misc,valid-type]
@@ -116,10 +116,14 @@ if _SDKMCPServer is not None:
             arguments: dict[str, Any],
             context: Any = None,
         ) -> Any:
-            del context
             from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
+            return await call_sdk_tool(
+                self._ouroboros_adapter,
+                name,
+                arguments,
+                host_context=from_sdk_context(context),
+            )
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -1083,8 +1087,10 @@ class MCPServerAdapter:
         Network transports are gated here rather than at the CLI, because this
         is the one place every embedder passes through. The rule: a bind that
         other machines can reach must carry credentials. A loopback bind may
-        stay credential-free -- the client already owns this process, and the
-        SDK auto-enables DNS-rebinding protection there.
+        stay credential-free -- the client already owns this process, and
+        Ouroboros supplies explicit SDK DNS-rebinding settings there, preserving
+        the SDK-compatible Host defaults while keeping an empty Origin policy
+        fail-closed.
 
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
@@ -1131,6 +1137,7 @@ class MCPServerAdapter:
             version=self._version,
             token_verifier=wiring.token_verifier,
             auth=wiring.auth_settings,
+            extensions=subagent_capability_extensions(),
         )
 
         # Register tools with MCPServer.

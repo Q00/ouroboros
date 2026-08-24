@@ -1588,6 +1588,7 @@ class TestCodexDoctor:
             failures = _check_auto_dispatch_surface(codex_dir)
 
         assert any("cannot import `mcp`" in failure for failure in failures)
+        assert any("--mcp-mode stdio" in failure for failure in failures)
 
     def test_check_auto_dispatch_surface_accepts_direct_ouroboros_with_mcp_import(
         self,
@@ -2446,6 +2447,21 @@ class TestCodexDoctor:
         assert cli_result.exit_code == 1
         assert "Codex ooo auto dispatch: BROKEN" in cli_result.output
         assert "missing Codex rules file" in cli_result.output
+
+    def test_doctor_command_renders_optional_extra_remediation_literally(
+        self, tmp_path: Path
+    ) -> None:
+        """Rich markup must not consume package extras in actionable diagnostics."""
+        codex_dir = tmp_path / ".codex"
+
+        with patch(
+            "ouroboros.cli.commands.codex._check_auto_dispatch_surface",
+            return_value=["install ouroboros-ai[mcp]"],
+        ):
+            cli_result = runner.invoke(app, ["doctor", "--codex-dir", str(codex_dir)])
+
+        assert cli_result.exit_code == 1
+        assert "ouroboros-ai[mcp]" in cli_result.output
 
     def test_doctor_command_reports_unreadable_artifact_without_traceback(
         self,

@@ -3291,13 +3291,22 @@ class TestServeTransport:
         mock_fastmcp_cls.assert_called_once()
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
-        # The SDK builds its own DNS-rebinding settings for this bind spelling,
-        # so the adapter passes none of its own.
-        mock_instance.run_sse_async.assert_awaited_once_with(
-            host="127.0.0.1",
-            port=9000,
-            transport_security=None,
+        extensions = mock_fastmcp_cls.call_args.kwargs["extensions"]
+        assert len(extensions) == 1
+        assert extensions[0].identifier == "io.ouroboros/subagents"
+        assert extensions[0].settings()["undeclaredBehavior"] == (
+            "parallel_preferred_sequential_fallback"
         )
+        mock_instance.run_sse_async.assert_awaited_once()
+        run_args = mock_instance.run_sse_async.await_args.kwargs
+        assert run_args["host"] == "127.0.0.1"
+        assert run_args["port"] == 9000
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_stdio_serve_logs_exit(self) -> None:
@@ -3383,11 +3392,16 @@ class TestServeTransport:
         ):
             await adapter.serve(transport="sse", host="localhost", port=0)
 
-        mock_instance.run_sse_async.assert_awaited_once_with(
-            host="localhost",
-            port=0,
-            transport_security=None,
-        )
+        mock_instance.run_sse_async.assert_awaited_once()
+        run_args = mock_instance.run_sse_async.await_args.kwargs
+        assert run_args["host"] == "localhost"
+        assert run_args["port"] == 0
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_streamable_http_uses_modern_stateless_run_options(self):
@@ -3412,12 +3426,17 @@ class TestServeTransport:
         mock_fastmcp_cls.assert_called_once()
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
-        mock_instance.run_streamable_http_async.assert_awaited_once_with(
-            host="127.0.0.1",
-            port=9100,
-            stateless_http=True,
-            transport_security=None,
-        )
+        mock_instance.run_streamable_http_async.assert_awaited_once()
+        run_args = mock_instance.run_streamable_http_async.await_args.kwargs
+        assert run_args["host"] == "127.0.0.1"
+        assert run_args["port"] == 9100
+        assert run_args["stateless_http"] is True
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_streamable_http_real_mcpserver_exposes_mcp_path(self) -> None:
@@ -3672,6 +3691,52 @@ class TestServeTransport:
 
         assert capture.call_count == 3
         assert [call.kwargs["ok"] for call in capture.call_args_list] == [True, False, False]
+
+    async def test_sdk_call_preserves_normalized_host_context_for_handler(self) -> None:
+        """The SDK boundary must not discard client identity/capability facts."""
+        mcp_server_module = pytest.importorskip("mcp.server")
+        from ouroboros.mcp.host_context import current_mcp_host_context
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("ouroboros_sdk_host_context_probe")
+        observed = []
+
+        async def handle(arguments: dict[str, Any]):
+            observed.append(current_mcp_host_context())
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+                )
+            )
+
+        handler.handle_mock.side_effect = handle
+        adapter.register_tool(handler)
+        with patch.object(
+            mcp_server_module.MCPServer,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+        sdk_context = SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=SimpleNamespace(client_info=SimpleNamespace(name="claude-code")),
+                client_capabilities=SimpleNamespace(
+                    extensions={"io.ouroboros/subagents": {"mode": "parallel"}},
+                    experimental=None,
+                ),
+            )
+        )
+
+        await adapter._mcp_server.call_tool(
+            "ouroboros_sdk_host_context_probe",
+            {"input": "safe"},
+            sdk_context,
+        )
+
+        assert len(observed) == 1
+        assert observed[0].host_family.value == "claude_code"
+        assert observed[0].subagent_capability.value == "parallel"
+        assert observed[0].dispatch_authority.value == "mcp_host"
 
     async def test_sdk_failure_boundaries_are_captured_exactly_once(self) -> None:
         """Adapter, output-validation, and conversion failures are not double-counted."""

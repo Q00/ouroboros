@@ -378,22 +378,8 @@ def _ouroboros_execution_mode(name: str) -> str:
 
 
 def extract_capability_input_schema(tool: MCPToolDefinition) -> dict[str, Any]:
-    """Convert an MCP tool definition into capability input_schema metadata."""
-    schema = tool.to_input_schema()
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
-    return {
-        "type": schema.get("type", "object"),
-        "properties": {
-            str(name): dict(property_schema)
-            if isinstance(property_schema, Mapping)
-            else property_schema
-            for name, property_schema in (
-                properties.items() if isinstance(properties, Mapping) else ()
-            )
-        },
-        "required": list(required) if isinstance(required, Sequence) else [],
-    }
+    """Return a detached copy of the tool's complete JSON input schema."""
+    return tool.to_input_schema()
 
 
 def _input_schema_for_ouroboros_tool(tool: MCPToolDefinition) -> Mapping[str, Any]:

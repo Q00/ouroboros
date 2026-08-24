@@ -13,6 +13,7 @@ import structlog
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_submitted
 from ouroboros.mcp.tools.fanout import (
     FanoutRegistry,
     PreparedFanoutSynthesis,
@@ -169,9 +170,39 @@ class SubmitFanoutResultsHandler:
             results=list(raw_results),
             fanout_id=fanout_id,
         )
+        record = self._registry.load(fanout_id)
+        expected_count = len(record.expected_keys) if record is not None else 0
+        received_count = sum(
+            1
+            for item in raw_results
+            if isinstance(item, dict) and "content" in item and "undispatched" not in item
+        )
+        undispatched_count = sum(
+            1 for item in raw_results if isinstance(item, dict) and item.get("undispatched") is True
+        )
         outcome = await self._publish_or_synthesize(prepared, fanout_id=fanout_id)
+        fanout_kind = record.kind if record is not None else "unknown"
         if isinstance(outcome, MCPToolError):
+            record_subagent_dispatch_submitted(
+                fanout_kind=fanout_kind,
+                submission_status="publication_failed",
+                expected_count=expected_count,
+                received_count=received_count,
+                undispatched_count=undispatched_count,
+            )
             return Result.err(outcome)
+        submission_status = (
+            "complete"
+            if isinstance(prepared, PreparedFanoutSynthesis)
+            else str(outcome.get("status") or "unknown_kind")
+        )
+        record_subagent_dispatch_submitted(
+            fanout_kind=fanout_kind,
+            submission_status=submission_status,
+            expected_count=expected_count,
+            received_count=received_count,
+            undispatched_count=undispatched_count,
+        )
         if outcome.get("status") == "unknown_fanout_id":
             return Result.err(
                 MCPToolError(
@@ -252,8 +283,13 @@ class FetchArtifactHandler:
                 MCPToolParameter(
                     name="contract_id",
                     type=ToolInputType.STRING,
-                    description="The contract_id from a disposable artifact envelope.",
-                    required=True,
+                    description=(
+                        "The contract_id from a disposable artifact envelope. Omit it "
+                        "and pass lane_id alone to list instead: that lane's own "
+                        "recent findings in this project, newest first, as "
+                        "contract_ids to read back with this same tool."
+                    ),
+                    required=False,
                 ),
                 MCPToolParameter(
                     name="lane_id",
@@ -274,13 +310,49 @@ class FetchArtifactHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Fetch one verified body without requiring shell access."""
+        """Fetch one verified body, or list what a lane published recently."""
         contract_id = str(arguments.get("contract_id") or "").strip()
         if not contract_id:
-            return Result.err(
-                MCPToolError(
-                    "contract_id is required",
-                    tool_name="ouroboros_fetch_artifact",
+            # A lane on its own is the listing: which of its own findings exist
+            # to be read. Sending that list in every prompt spent a fifth of it
+            # on identifiers nothing could choose between, and a lane that
+            # wants none of them paid for it anyway. The window and the cap are
+            # the query's, not the caller's, so a wider read cannot be asked
+            # for (RFC Q00/ouroboros#2167).
+            lane = str(arguments.get("lane_id") or "").strip()
+            if not lane:
+                return Result.err(
+                    MCPToolError(
+                        "pass a contract_id to read one artifact, or a lane_id alone "
+                        "to list what that lane published here recently",
+                        tool_name="ouroboros_fetch_artifact",
+                    )
+                )
+            if self.disposable_memory is None:
+                return Result.err(
+                    MCPToolError(
+                        "artifact fetch requires a configured project artifact service",
+                        tool_name="ouroboros_fetch_artifact",
+                    )
+                )
+            from ouroboros.mcp.tools.recent_findings import recent_findings_by_lane
+
+            found = await asyncio.to_thread(
+                recent_findings_by_lane,
+                self.disposable_memory.artifact_store,
+                lanes={lane},
+            )
+            listing = {"lane_id": lane, "recent": found.get(lane, [])}
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=json.dumps(listing, ensure_ascii=False, sort_keys=True),
+                        ),
+                    ),
+                    is_error=False,
+                    meta=listing,
                 )
             )
         if self.disposable_memory is None:

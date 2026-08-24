@@ -9,15 +9,15 @@ would want you to judge us by.
 
 `src/ouroboros/orchestrator/contract_redaction.py`
 
-- `contract_redaction.py:10`: `hidden_contract_variants` enumerates the five
-  encodings that get masked.
-- `contract_redaction.py:42`: the substitution is literal `str.replace`.
-  That means a reshaped copy of a hidden value is not caught. We track that
-  gap in a public issue rather than claiming otherwise.
-- `retry_hints.py:76`: `build_assertion_safe_retry_hint`: retry hints are
-  assembled deterministically, no model call.
-- `retry_hints.py:102`: the retry prompt carries a tail of command output;
-  redaction on it is the same literal substitution.
+- `hidden_contract_variants` enumerates raw, quoted, and escaped forms for exact
+  masking.
+- `contains_transformed_hidden_contract_value` applies bounded, fail-closed
+  HTML/Unicode/terminal normalization before retry output crosses into a worker
+  prompt. Stateful terminal controls are rejected; harmless SGR styling may be
+  normalized away.
+- `retry_hints.py` assembles retry hints deterministically, with no model call.
+  The command-output tail passes through the shared exact and transformed-value
+  boundary before inclusion.
 
 The claim's exact scope: when an acceptance criterion defines a verify
 command or an expected-output assertion, those values are omitted from the
