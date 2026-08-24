@@ -64,6 +64,7 @@ _KIRO_CAPABILITIES = RuntimeCapabilities(
     # A full bypass must use --trust-all-tools, so any simultaneous tool
     # envelope is retained as prompt guidance instead of a native trust list.
     tool_restriction_support=ParamSupport.TRANSLATED,
+    empty_tool_restriction_support=ParamSupport.IGNORED,
 )
 
 log = get_logger(__name__)

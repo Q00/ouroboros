@@ -438,10 +438,14 @@ async def _measure_baseline_spend(
     # Lazy imports break the import cycle (parallel_executor imports this module)
     # and mirror the executor's own lazy ``create_agent_runtime`` use.
     from ouroboros.orchestrator.frugality_evidence import harvest_token_spend
-    from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+    from ouroboros.orchestrator.runtime_factory import (
+        create_agent_runtime,
+        create_agent_runtime_async,
+    )
 
     try:
-        baseline_runtime = create_agent_runtime(
+        baseline_runtime = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=backend,
             permission_mode=_runtime_context_string(executor._adapter, "permission_mode"),
             model=model,

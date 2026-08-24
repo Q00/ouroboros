@@ -272,6 +272,7 @@ class OpenCodeRuntime:
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             permission_mode_support=ParamSupport.TRANSLATED,
             session_signals=SessionSignalCapabilities(
                 inform_delivery=True,

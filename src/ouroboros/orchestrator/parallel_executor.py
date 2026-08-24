@@ -7062,10 +7062,14 @@ class ParallelACExecutor:
         from ouroboros.orchestrator.cross_harness_redispatch import (
             create_alt_harness_redispatch_event,
         )
-        from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+        from ouroboros.orchestrator.runtime_factory import (
+            create_agent_runtime,
+            create_agent_runtime_async,
+        )
 
         cwd = self._task_cwd or self._adapter.working_directory
-        alt_adapter = create_agent_runtime(
+        alt_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=backend,
             cwd=cwd,
             permission_mode="bypassPermissions",

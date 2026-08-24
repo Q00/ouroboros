@@ -345,6 +345,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Gemini-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             # Reasoning effort is advised, not enforced: the Gemini API has a
             # thinkingBudget, but no per-invocation effort flag on the Gemini CLI
             # has been verified. Declared IGNORED (also the default) until a real

@@ -34,6 +34,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.execution_semantics import CURRENT_EXECUTION_SEMANTICS_VERSION
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
@@ -545,7 +546,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 6
+    assert semantics["version"] == 7
     assert semantics["verify_shell_identity"] is None or isinstance(
         semantics["verify_shell_identity"], dict
     )
@@ -559,7 +560,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
         "max_retry_after_seconds": 86400,
     }
     assert semantics["usage_limit_pause_seconds"] == 18000
-    assert semantics["runtime_effect_capabilities"]["version"] == 1
+    assert semantics["runtime_effect_capabilities"]["version"] == 2
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
@@ -969,7 +970,7 @@ def test_v4_execution_semantics_migrate_to_unavailable_verify_shell() -> None:
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
     )
     migrated = resumed._execution_contract["execution_semantics"]
-    assert migrated["version"] == 6
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
 
 
@@ -991,7 +992,7 @@ def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
     )
     migrated = resumed._execution_contract["execution_semantics"]
-    assert migrated["version"] == 6
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
 
 
@@ -1054,6 +1055,7 @@ def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
     "field",
     [
         "targeted_resume",
+        "empty_tool_restriction_support",
         "reasoning_effort_support",
         "enforceable_reasoning_efforts",
         "model_override_support",
