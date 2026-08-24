@@ -167,10 +167,11 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     """Locate the authoritative JSON boundary.
 
     Evidence boundaries are ordered by position. The final supported top-level
-    fence (JSON-tagged or untagged) is authoritative unless a later line-level
-    JSON value exists. In that case the final eligible bare value owns the
-    output. This prevents illustrative or stale evidence from displacing the
-    terminal payload while preserving fail-closed boundary handling.
+    fence (JSON-tagged or untagged) is authoritative unless a later eligible
+    bare value or malformed evidence container exists. Within an authoritative
+    fence, the terminal value or malformed container owns the result. Applying
+    the same rule before the initial ``raw_decode`` prevents a valid stale
+    object from bypassing recovery's terminal-authority checks.
     """
     supported_fences: list[tuple[int, int]] = []
     for info, body_start, fence_end in _top_level_fence_body_starts(text):
@@ -178,33 +179,61 @@ def _find_body_start(text: str) -> tuple[int, bool]:
         if not tag or tag[0] == "json":
             supported_fences.append((body_start, fence_end))
 
-    if not supported_fences:
-        return 0, False
-
-    body_start, fence_end = supported_fences[-1]
     recovery_text = _mask_markdown_examples(text)
-    later_values = [
-        candidate
-        for candidate in _collect_top_level_values(recovery_text)
-        if candidate[0] >= fence_end
-    ]
-    terminal_start = later_values[-1][0] if later_values else -1
+    top_level_values = _collect_top_level_values(recovery_text)
 
-    # A later malformed structural boundary remains authoritative over both
-    # the fence and any earlier complete bare value.
-    for pos in range(fence_end, len(recovery_text)):
+    if supported_fences:
+        body_start, fence_end = supported_fences[-1]
+        fenced_values = [
+            candidate
+            for candidate in top_level_values
+            if body_start <= candidate[0] < fence_end
+        ]
+        fenced_start = fenced_values[-1][0] if fenced_values else body_start
+        fenced_end = fenced_values[-1][1] if fenced_values else body_start
+
+        for pos in range(fenced_end, fence_end):
+            if recovery_text[pos] not in "{[":
+                continue
+            try:
+                _DECODER.raw_decode(recovery_text[pos:])
+            except json.JSONDecodeError:
+                if _looks_like_json_container(recovery_text, pos):
+                    fenced_start = pos
+
+        later_values = [
+            candidate for candidate in top_level_values if candidate[0] >= fence_end
+        ]
+        terminal_start = later_values[-1][0] if later_values else -1
+        terminal_end = later_values[-1][1] if later_values else fence_end
+
+        for pos in range(terminal_end, len(recovery_text)):
+            if recovery_text[pos] not in "{[":
+                continue
+            try:
+                _DECODER.raw_decode(recovery_text[pos:])
+            except json.JSONDecodeError:
+                if _looks_like_json_container(recovery_text, pos):
+                    terminal_start = pos
+
+        if terminal_start >= 0:
+            return terminal_start, False
+        return _skip_json_whitespace(text, fenced_start), True
+
+    terminal_start = top_level_values[-1][0] if top_level_values else -1
+    terminal_end = top_level_values[-1][1] if top_level_values else 0
+    for pos in range(terminal_end, len(recovery_text)):
         if recovery_text[pos] not in "{[":
             continue
         try:
             _DECODER.raw_decode(recovery_text[pos:])
         except json.JSONDecodeError:
-            if _looks_like_json_container(recovery_text, pos) and pos > terminal_start:
+            if _looks_like_json_container(recovery_text, pos):
                 terminal_start = pos
 
     if terminal_start >= 0:
         return terminal_start, False
-
-    return _skip_json_whitespace(text, body_start), True
+    return 0, False
 
 
 def _mask_markdown_examples(text: str) -> str:
@@ -409,8 +438,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
             for other_start, other_end, _ in all_spans
         ):
             continue
-        line_start = text.rfind("\n", 0, start) + 1
-        if text[line_start:start].strip():
+        if not _is_evidence_container_opener(text, start):
             continue
         if any(
             malformed_start < start and end <= malformed_end

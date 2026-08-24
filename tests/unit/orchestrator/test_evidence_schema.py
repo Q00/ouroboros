@@ -312,6 +312,60 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError, match="must be a JSON object"):
             extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "{broken",
+        ],
+    )
+    def test_trusted_object_cannot_bypass_terminal_authority(
+        self, terminal_payload: str
+    ) -> None:
+        text = (
+            '{"files_touched": ["stale.py"]}\n'
+            f"Validation evidence: {terminal_payload}"
+        )
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "{broken",
+        ],
+    )
+    def test_fenced_object_cannot_bypass_terminal_payload(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = (
+            f"```{fence_tag}\n"
+            '{"files_touched": ["stale.py"]}\n'
+            f"{terminal_payload}\n"
+            "```\n"
+        )
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_valid_inline_evidence_label_is_recovered(self) -> None:
+        record = extract_evidence(
+            'Actual evidence: {"files_touched": ["actual.py"]}'
+        )
+
+        assert record.data["files_touched"] == ["actual.py"]
+
+    def test_inline_evidence_label_displaces_stale_object(self) -> None:
+        record = extract_evidence(
+            '{"files_touched": ["stale.py"]}\n'
+            'Actual evidence: {"files_touched": ["actual.py"]}'
+        )
+
+        assert record.data["files_touched"] == ["actual.py"]
+
     def test_earlier_illustrative_object_does_not_displace_final(self) -> None:
         """Recovery must prefer the terminal evidence object over earlier ones.
 
