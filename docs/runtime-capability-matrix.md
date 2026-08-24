@@ -100,12 +100,14 @@ allow-list, and `permission_mode`. Each is one of:
 > `--dangerously-skip-permissions` and `--yolo --accept-hooks`, respectively. Pi keeps the
 > requested mode in runtime metadata because its CLI does not expose an approval switch.
 > \*Pi's native `--append-system-prompt` and `--tools` flags deliver these parameters
-> directly; `--no-tools` enforces an explicit empty allow-list (all tools disabled).
-> Pi binaries without those flags fall back to user-message composition and
-> report `translated`. A binary that has `--tools` but lacks `--no-tools` reports
-> `translated` for `tool_restriction_support` and **fails closed** when `tools=[]`
-> is requested — the runtime emits a `ToolRestrictionUnenforced` error instead of
-> silently widening to unrestricted access.
+> directly when the paired path is available. Independently probed `--no-tools`
+> is published separately as `empty_tool_restriction_support`: `native` when an
+> explicit empty allow-list can be enforced, `ignored` otherwise. This keeps
+> no-tools-only and incapable Pi binaries distinct in public negotiation and
+> durable execution-semantics fingerprints. A Pi binary without `--no-tools`
+> **fails closed** when `tools=[]` is requested — the runtime emits a
+> `ToolRestrictionUnenforced` error before process creation instead of silently
+> widening to unrestricted access.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
 natively, the orchestrator surfaces a one-time notice (console + a structured

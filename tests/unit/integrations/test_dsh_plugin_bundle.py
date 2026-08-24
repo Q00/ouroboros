@@ -110,7 +110,19 @@ def test_dsh_backend_prerequisites_travel_with_the_selector() -> None:
 
     for name in FORWARDED_SELECTORS:
         assert name in env
+        if name == "OUROBOROS_AGENT_RUNTIME":
+            continue
         assert env[name] == f"process.env.{name} ?? ''"
+
+
+def test_agent_runtime_selector_defaults_to_host() -> None:
+    # dsh has no installable execution CLI of its own, so an unset selector
+    # must fall back to the one runtime that works out of the box rather than
+    # `''` (which would leave `mcp serve` to inherit whatever the operator's
+    # own `ouroboros setup` default happens to be, or nothing at all).
+    env = _mcp_row()["config"]["env"]
+
+    assert env["OUROBOROS_AGENT_RUNTIME"] == "process.env.OUROBOROS_AGENT_RUNTIME || 'host'"
 
 
 def test_startup_is_soft_and_calls_get_real_headroom() -> None:

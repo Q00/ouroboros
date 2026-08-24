@@ -108,6 +108,7 @@ class CopilotCliRuntime(CodexCliRuntime):
             structured_output=False,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             permission_mode_support=ParamSupport.NATIVE,
             # Copilot CLI enforces effort via a per-invocation --reasoning-effort
             # flag (verified via --help: none/low/medium/high/xhigh/max).

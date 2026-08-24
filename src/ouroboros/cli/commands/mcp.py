@@ -1211,7 +1211,7 @@ def serve(
                 "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
                 "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
-                "antigravity, grok, or zcode)."
+                "antigravity, grok, zcode, or host)."
             ),
             case_sensitive=False,
         ),
@@ -1386,7 +1386,7 @@ def info(
                 "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
                 "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
-                "antigravity, grok, or zcode)."
+                "antigravity, grok, zcode, or host)."
             ),
             case_sensitive=False,
         ),

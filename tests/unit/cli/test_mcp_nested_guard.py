@@ -216,6 +216,33 @@ def test_public_claude_cli_runtime_selects_cli_worker(monkeypatch):
     )
 
 
+def test_public_host_runtime_selects_host_dispatch(monkeypatch) -> None:
+    """A setup-managed ``--runtime host`` launcher must parse and reach the server."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    _set_installed_versions(monkeypatch, {"mcp": "2.0.0"})
+
+    mock_run_mcp_server = AsyncMock()
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=mock_run_mcp_server,
+    ):
+        result = runner.invoke(app, ["serve", "--runtime", "host"])
+
+    assert result.exit_code == 0, result.output
+    mock_run_mcp_server.assert_awaited_once_with(
+        "localhost",
+        8080,
+        "stdio",
+        None,
+        "host",
+        None,
+        auth_token="",
+        allowed_hosts=(),
+        allowed_origins=(),
+        workspace_roots=(),
+    )
+
+
 def test_public_codex_runtime_remains_executable(monkeypatch):
     """Separating the Claude SDK diagnostic must not gate other workers."""
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)

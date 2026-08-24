@@ -22,12 +22,16 @@
 #                             closed (`invalid_config`) unless
 #                             OUROBOROS_DSH_CONFIG_PATH names an absolute
 #                             trusted Cordis composition. See the bundle README.
-#   OUROBOROS_AGENT_RUNTIME — agent runtime backend for ouroboros_auto's
-#                             execution step (e.g. claude-cli, codex, opencode).
-#                             Required unless already set in your Ouroboros
-#                             config: an MCP subprocess cannot host the
-#                             in-process `claude` SDK runtime, so `mcp serve`
-#                             needs an executable runtime here.
+#   OUROBOROS_AGENT_RUNTIME — agent runtime backend for ooo run/ooo auto's
+#                             execution step. Defaults to `host`: dsh has no
+#                             installable execution CLI of its own, so by
+#                             default the dsh model itself does the work —
+#                             `execute_task` publishes a dispatch and dsh
+#                             spawns its own subagent to service it
+#                             (orchestrator/host_dispatch.py). Set this to an
+#                             executable runtime (claude-cli, codex,
+#                             opencode, ...) to have that CLI do the work
+#                             instead.
 #   OUROBOROS_DSH_CONFIG_PATH / OUROBOROS_DSH_CLI_PATH
 #                           — the two prerequisites of the `dsh` LLM backend
 #                             above: the absolute composition file, and the
@@ -69,10 +73,13 @@
         #
         # `?? ''` keeps every value a string (the row's schema is a string
         # dict). Ouroboros treats a blank credential as unset, so an unset host
-        # variable stays effectively unset in the child.
+        # variable stays effectively unset in the child. OUROBOROS_AGENT_RUNTIME
+        # is the one exception: it falls back to the literal `'host'` rather
+        # than `''`, because dsh has no installable execution CLI to fall back
+        # to on its own — see the comment above.
         env:
           OUROBOROS_LLM_BACKEND: !!js process.env.OUROBOROS_LLM_BACKEND ?? ''
-          OUROBOROS_AGENT_RUNTIME: !!js process.env.OUROBOROS_AGENT_RUNTIME ?? ''
+          OUROBOROS_AGENT_RUNTIME: !!js process.env.OUROBOROS_AGENT_RUNTIME || 'host'
           OUROBOROS_DSH_CONFIG_PATH: !!js process.env.OUROBOROS_DSH_CONFIG_PATH ?? ''
           OUROBOROS_DSH_CLI_PATH: !!js process.env.OUROBOROS_DSH_CLI_PATH ?? ''
           ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY ?? ''
