@@ -289,9 +289,10 @@ def export_worktree_diff(worktree_path: Path | str) -> bytes | None:
                 check=False,
                 timeout=GIT_COMMAND_TIMEOUT_SECONDS,
             )
-            # exit code 1 means differences found (expected), 0 means no diff
-            # (unlikely for /dev/null vs a real file), anything else is an error.
-            if file_diff_result.returncode > 1:
+            # Exit code 1 means differences found (expected), while 0 means no
+            # diff. Every other status, including negative signal return codes,
+            # means Git did not complete the export successfully.
+            if file_diff_result.returncode not in (0, 1):
                 log.error(
                     "n_version.export_untracked_diff_failed",
                     path=str(path),

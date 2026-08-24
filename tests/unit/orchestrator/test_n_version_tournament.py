@@ -523,3 +523,27 @@ class TestRejectRc1WithNoPatch:
             diff = nvt.export_worktree_diff(winner)
             assert diff is None
             assert call_count["n"] >= 1
+
+    def test_signal_termination_returns_none(
+        self, git_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A signal-terminated untracked diff must not become a successful no-op."""
+        real_run = subprocess.run
+
+        def _fake_no_index_signal(*args: object, **kwargs: object) -> object:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and "--no-index" in cmd:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=-9, stdout=b"", stderr=b""
+                )
+            return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+        with nvt.RunWorktreeManager(git_workspace) as manager:
+            winner = manager.create("codex")
+            (winner / "signal-lost.bin").write_bytes(b"winner data")
+            monkeypatch.setattr(nvt.subprocess, "run", _fake_no_index_signal)
+
+            diff = nvt.export_worktree_diff(winner)
+
+            assert diff is None
+            assert nvt.apply_diff_to_workspace(git_workspace, diff) is False
