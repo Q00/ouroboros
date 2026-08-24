@@ -395,9 +395,7 @@ class TestSanitizeForLogging:
 
         dict_secret = "sk-live-dict-secret"
         list_secret = "sk-live-list-secret"
-        data = HostileDict(
-            {"nested": HostileList([{"api_key": dict_secret}, list_secret, "safe"])}
-        )
+        data = HostileDict({"nested": HostileList([{"api_key": dict_secret}, list_secret, "safe"])})
 
         result = sanitize_for_logging(data)
 

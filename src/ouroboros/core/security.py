@@ -594,9 +594,7 @@ def _sanitize_logging_sequence(
             reconstructed = tuple.__new__(type(value), sanitized)
             if tuple.__len__(reconstructed) == len(sanitized) and all(
                 actual is expected
-                for actual, expected in zip(
-                    tuple.__iter__(reconstructed), sanitized, strict=True
-                )
+                for actual, expected in zip(tuple.__iter__(reconstructed), sanitized, strict=True)
             ):
                 return reconstructed
     except Exception:
