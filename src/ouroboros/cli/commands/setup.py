@@ -185,15 +185,16 @@ def _commit_runtime_activation(
     runtime_content: str,
     register_host: Callable[[], bool],
     create_defaults: Callable[[Path], object],
+    additional_host_paths: tuple[Path, ...] = (),
 ) -> bool:
     """Commit host registration and runtime files as one recoverable unit."""
     credentials_path = config_path.parent / "credentials.yaml"
     snapshots: tuple[tuple[Path, _PersistentFileState], ...] = ()
     try:
-        snapshots = (
-            (host_path, _capture_persistent_file(host_path)),
-            (config_path, _capture_persistent_file(config_path)),
-            (credentials_path, _capture_persistent_file(credentials_path)),
+        snapshot_paths = tuple(dict.fromkeys((host_path, *additional_host_paths)))
+        snapshots = tuple(
+            (path, _capture_persistent_file(path))
+            for path in (*snapshot_paths, config_path, credentials_path)
         )
         if not register_host():
             _rollback_persistent_files(snapshots)
@@ -3958,6 +3959,162 @@ def _migrate_codex_mcp_entry_to_host() -> bool:
         print_success(f"Migrated setup-managed Ouroboros MCP runtime to host in {codex_config}")
     return True
 
+def _runtime_selector_override(
+    entry: dict[str, object],
+    *,
+    command_key: str,
+    env_key: str,
+    args_key: str | None = None,
+) -> str | None:
+    """Return the first explicit non-host runtime selector in a JSON MCP entry."""
+    command = entry.get(args_key) if args_key is not None else entry.get(command_key)
+    if isinstance(command, list):
+        for index, arg in enumerate(command):
+            if not isinstance(arg, str):
+                continue
+            if arg == "--runtime" and index + 1 < len(command):
+                value = command[index + 1]
+                if isinstance(value, str) and value.strip().lower() != "host":
+                    return f"--runtime {value}"
+            elif arg.startswith("--runtime=") and arg.partition("=")[2].strip().lower() != "host":
+                return arg
+
+    env = entry.get(env_key)
+    if isinstance(env, dict):
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME"):
+            value = env.get(key)
+            if isinstance(value, str) and value.strip() and value.strip().lower() != "host":
+                return f"{key}={value}"
+    return None
+
+
+def _migrate_json_mcp_entry_to_host(
+    *,
+    config_path: Path,
+    host_name: str,
+    servers_key: str,
+    command_key: str,
+    env_key: str,
+    setup_managed: Callable[[object], bool],
+    args_key: str | None = None,
+    load_jsonc: bool = False,
+) -> bool:
+    """Migrate one setup-owned JSON MCP launcher, rejecting user-owned conflicts."""
+    if not config_path.exists():
+        return True
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+        data = json.loads(_strip_jsonc(raw) if load_jsonc else raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print_error(f"Could not inspect {config_path} before host activation: {exc}")
+        return False
+    if not isinstance(data, dict):
+        print_error(f"Could not inspect {config_path} before host activation: top-level is not an object")
+        return False
+    servers = data.get(servers_key)
+    if not isinstance(servers, dict):
+        return True
+    entry = servers.get("ouroboros")
+    if not isinstance(entry, dict):
+        return True
+
+    override = _runtime_selector_override(
+        entry,
+        command_key=command_key,
+        env_key=env_key,
+        args_key=args_key,
+    )
+    if not setup_managed(entry.get(command_key)):
+        if override is not None:
+            print_error(
+                f"Host setup cannot replace user-managed {config_path}: its Ouroboros "
+                f"MCP entry explicitly selects {override}. Remove that selector or change it "
+                "to host, then rerun setup."
+            )
+            return False
+        return True
+
+    migrated = deepcopy(entry)
+    runtime_args_key = args_key or command_key
+    command = migrated.get(runtime_args_key)
+    if isinstance(command, list):
+        migrated_command = [str(arg) for arg in command]
+        for index, arg in enumerate(migrated_command):
+            if arg == "--runtime" and index + 1 < len(migrated_command):
+                migrated_command[index + 1] = "host"
+            elif arg.startswith("--runtime="):
+                migrated_command[index] = "--runtime=host"
+        migrated[runtime_args_key] = migrated_command
+
+    env = migrated.get(env_key)
+    migrated_env = dict(env) if isinstance(env, dict) else {}
+    for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME"):
+        if key in migrated_env:
+            migrated_env[key] = "host"
+    migrated_env["OUROBOROS_AGENT_RUNTIME"] = "host"
+    migrated[env_key] = migrated_env
+    if migrated == entry:
+        return True
+
+    servers["ouroboros"] = migrated
+    _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
+    print_success(f"Migrated setup-managed {host_name} MCP runtime to host in {config_path}")
+    return True
+
+
+def _migrate_setup_managed_mcp_launchers_to_host() -> bool:
+    """Reconcile every setup-managed launcher whose env can override host config."""
+    known_commands = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
+
+    def setup_managed_string(command: object) -> bool:
+        return isinstance(command, str) and (
+            command in known_commands
+            or os.path.basename(command) in {"ouroboros", "python3", "python"}
+        )
+
+    def setup_managed_array(command: object) -> bool:
+        return (
+            isinstance(command, list)
+            and bool(command)
+            and isinstance(command[0], str)
+            and (
+                command[0] in known_commands
+                or os.path.basename(command[0]) in {"ouroboros", "python3", "python"}
+            )
+        )
+
+    migrations = (
+        _migrate_codex_mcp_entry_to_host,
+        lambda: _migrate_json_mcp_entry_to_host(
+            config_path=Path.home() / ".kiro" / "settings" / "mcp.json",
+            host_name="Kiro",
+            servers_key="mcpServers",
+            command_key="command",
+            env_key="env",
+            setup_managed=setup_managed_string,
+            args_key="args",
+        ),
+        lambda: _migrate_json_mcp_entry_to_host(
+            config_path=Path.home() / ".copilot" / "mcp-config.json",
+            host_name="Copilot",
+            servers_key="mcpServers",
+            command_key="command",
+            env_key="env",
+            setup_managed=setup_managed_string,
+            args_key="args",
+        ),
+        lambda: _migrate_json_mcp_entry_to_host(
+            config_path=_find_opencode_config(),
+            host_name="OpenCode",
+            servers_key="mcp",
+            command_key="command",
+            env_key="environment",
+            setup_managed=setup_managed_array,
+            load_jsonc=True,
+        ),
+    )
+    return all(migrate() for migrate in migrations)
+
 
 def _setup_host() -> bool:
     """Configure the CLI-less host runtime and its setup-owned MCP launcher."""
@@ -3984,10 +4141,15 @@ def _setup_host() -> bool:
     if not _commit_runtime_activation(
         runtime_name="Host",
         host_path=resolve_codex_home() / "config.toml",
+        additional_host_paths=(
+            Path.home() / ".kiro" / "settings" / "mcp.json",
+            Path.home() / ".copilot" / "mcp-config.json",
+            _find_opencode_config(),
+        ),
         config_path=config_path,
         config_was_missing=config_was_missing,
         runtime_content=yaml.safe_dump(config_dict, default_flow_style=False, sort_keys=False),
-        register_host=_migrate_codex_mcp_entry_to_host,
+        register_host=_migrate_setup_managed_mcp_launchers_to_host,
         create_defaults=create_default_config,
     ):
         return False

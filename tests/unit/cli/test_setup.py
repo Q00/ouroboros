@@ -9733,6 +9733,152 @@ class TestHostRuntimeSetup:
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert data["orchestrator"]["runtime_backend"] == "host"
 
+    def test_setup_host_migrates_all_setup_managed_launchers(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        kiro_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "uvx",
+                            "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_RUNTIME": "kiro",
+                                "OUROBOROS_LLM_BACKEND": "kiro",
+                                "KEEP": "kiro",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        copilot_path = tmp_path / ".copilot" / "mcp-config.json"
+        copilot_path.parent.mkdir(parents=True)
+        copilot_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "pipx",
+                            "args": ["run", "ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_AGENT_RUNTIME": "copilot",
+                                "OUROBOROS_LLM_BACKEND": "copilot",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        opencode_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "ouroboros": {
+                            "type": "local",
+                            "command": ["uvx", "ouroboros-ai[mcp]", "mcp", "serve"],
+                            "environment": {
+                                "OUROBOROS_AGENT_RUNTIME": "opencode",
+                                "OUROBOROS_LLM_BACKEND": "opencode",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is True
+
+        kiro_env = json.loads(kiro_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"][
+            "env"
+        ]
+        assert kiro_env == {
+            "OUROBOROS_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "kiro",
+            "KEEP": "kiro",
+            "OUROBOROS_AGENT_RUNTIME": "host",
+        }
+        copilot_env = json.loads(copilot_path.read_text(encoding="utf-8"))["mcpServers"][
+            "ouroboros"
+        ]["env"]
+        assert copilot_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "copilot",
+        }
+        opencode_env = json.loads(opencode_path.read_text(encoding="utf-8"))["mcp"]["ouroboros"][
+            "environment"
+        ]
+        assert opencode_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "opencode",
+        }
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+    def test_setup_host_rolls_back_launchers_when_later_selector_is_user_managed(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: kiro\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        original_kiro = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": "uvx",
+                        "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                        "env": {"OUROBOROS_RUNTIME": "kiro"},
+                    }
+                }
+            }
+        )
+        kiro_path.write_text(original_kiro, encoding="utf-8")
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        original_opencode = json.dumps(
+            {
+                "mcp": {
+                    "ouroboros": {
+                        "type": "local",
+                        "command": ["docker", "run", "ouroboros"],
+                        "environment": {"OUROBOROS_AGENT_RUNTIME": "opencode"},
+                    }
+                }
+            }
+        )
+        opencode_path.write_text(original_opencode, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert kiro_path.read_text(encoding="utf-8") == original_kiro
+        assert opencode_path.read_text(encoding="utf-8") == original_opencode
+
     def test_setup_host_rejects_user_managed_runtime_override(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
