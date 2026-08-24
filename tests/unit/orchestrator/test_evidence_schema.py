@@ -285,6 +285,33 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize("earlier_form", ["bare", "fenced"])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "42",
+            '"terminal evidence"',
+            "null",
+        ],
+    )
+    def test_terminal_non_object_displaces_earlier_valid_object(
+        self, earlier_form: str, terminal_payload: str
+    ) -> None:
+        """The final complete JSON value owns the evidence boundary.
+
+        Regression: recovery considered only objects, allowing an earlier
+        schema-valid record to remain authoritative when the terminal payload
+        was a prohibited list or scalar.
+        """
+        earlier = '{"files_touched": ["stale.py"]}'
+        if earlier_form == "fenced":
+            earlier = f"```json\n{earlier}\n```"
+        text = f"Summary\n{earlier}\nFinal evidence:\n{terminal_payload}\n"
+
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence(text)
+
     def test_earlier_illustrative_object_does_not_displace_final(self) -> None:
         """Recovery must prefer the terminal evidence object over earlier ones.
 

@@ -168,9 +168,9 @@ def _find_body_start(text: str) -> tuple[int, bool]:
 
     Evidence boundaries are ordered by position. The final supported top-level
     fence (JSON-tagged or untagged) is authoritative unless a later line-level
-    JSON container exists. In that case the later bare container owns the
-    output. This prevents an illustrative fence from displacing subsequently
-    emitted evidence while preserving fail-closed terminal boundary handling.
+    JSON value exists. In that case the final eligible bare value owns the
+    output. This prevents illustrative or stale evidence from displacing the
+    terminal payload while preserving fail-closed boundary handling.
     """
     supported_fences: list[tuple[int, int]] = []
     for info, body_start, fence_end in _top_level_fence_body_starts(text):
@@ -183,18 +183,26 @@ def _find_body_start(text: str) -> tuple[int, bool]:
 
     body_start, fence_end = supported_fences[-1]
     recovery_text = _mask_markdown_examples(text)
+    later_values = [
+        candidate
+        for candidate in _collect_top_level_values(recovery_text)
+        if candidate[0] >= fence_end
+    ]
+    terminal_start = later_values[-1][0] if later_values else -1
+
+    # A later malformed structural boundary remains authoritative over both
+    # the fence and any earlier complete bare value.
     for pos in range(fence_end, len(recovery_text)):
         if recovery_text[pos] not in "{[":
-            continue
-        line_start = recovery_text.rfind("\n", 0, pos) + 1
-        if recovery_text[line_start:pos].strip():
             continue
         try:
             _DECODER.raw_decode(recovery_text[pos:])
         except json.JSONDecodeError:
-            if not _looks_like_json_container(recovery_text, pos):
-                continue
-        return pos, False
+            if _looks_like_json_container(recovery_text, pos) and pos > terminal_start:
+                terminal_start = pos
+
+    if terminal_start >= 0:
+        return terminal_start, False
 
     return _skip_json_whitespace(text, body_start), True
 
@@ -334,55 +342,65 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
     return re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:", candidate) is not None
 
 
-def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
-    """Parse eligible complete JSON objects in *text*.
+def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
+    """Parse eligible complete top-level JSON values in *text*.
 
     Recovery candidates must start on their own Markdown line and outside
     literal/example contexts (which are masked before this function runs).
-    All decoded spans are still recorded so valid arrays and outer objects
-    retain structural ownership of nested objects.
+    Container scans retain structural ownership of nested values, while a
+    line-level scan also records scalar JSON values such as ``null`` or a
+    quoted string so a prohibited terminal payload cannot be skipped in favor
+    of stale earlier evidence.
     """
-    # Collect all successfully-decoded JSON values with their spans
-    all_spans: list[tuple[int, int, Any]] = []  # (start, end, value)
+    # Collect all successfully-decoded JSON containers with their spans.
+    # Nested values are discovered separately so containment can be enforced.
+    all_spans: list[tuple[int, int, Any]] = []
     # Track malformed openers with their boundary extents: (start, end).
-    # A malformed opener is a { or [ that fails raw_decode but has bracket-
-    # matching extent past the next valid candidate (indicating structural
-    # containment rather than a stray prose bracket).
     malformed_boundaries: list[tuple[int, int]] = []
     pos = 0
     while pos < len(text):
-        ch = text[pos]
-        if ch in "{[":
+        if text[pos] in "{[":
             try:
                 parsed, end_offset = _DECODER.raw_decode(text[pos:])
                 all_spans.append((pos, pos + end_offset, parsed))
-                # Don't skip ahead — we need to also record inner objects
-                # to know containment, but we advance by 1 to find them
             except json.JSONDecodeError:
                 if _looks_like_json_container(text, pos):
-                    boundary_end = _malformed_boundary_end(text, pos)
-                    malformed_boundaries.append((pos, boundary_end))
+                    malformed_boundaries.append(
+                        (pos, _malformed_boundary_end(text, pos))
+                    )
         pos += 1
 
-    # Filter to only dict values that are not contained within another span
-    # OR within a malformed structural boundary.
-    top_level_objects: list[tuple[int, int, Any]] = []
+    # Containers can begin anywhere for ownership detection, but scalars are
+    # eligible only when they occupy a Markdown line. This avoids interpreting
+    # ordinary prose tokens as terminal JSON while preserving explicit scalar
+    # payload authority.
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        leading = len(content) - len(content.lstrip(" \t"))
+        start = offset + leading
+        candidate = content[leading:]
+        if candidate and candidate[0] not in "{[":
+            try:
+                parsed, end_offset = _DECODER.raw_decode(candidate)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if not candidate[end_offset:].strip():
+                    all_spans.append((start, start + end_offset, parsed))
+        offset += len(line)
+
+    # Filter values that are nested within another decoded span or a malformed
+    # structural boundary, and require the value itself to begin its line.
+    top_level_values: list[tuple[int, int, Any]] = []
     for start, end, value in all_spans:
-        if not isinstance(value, dict):
+        if any(
+            (other_start, other_end) != (start, end)
+            and other_start <= start
+            and other_end >= end
+            for other_start, other_end, _ in all_spans
+        ):
             continue
-        # Check if this span is strictly contained within any other span
-        is_nested = False
-        for other_start, other_end, _ in all_spans:
-            if other_start == start and other_end == end:
-                continue
-            if other_start <= start and other_end >= end:
-                is_nested = True
-                break
-        if is_nested:
-            continue
-        # Check if this span falls within a malformed outer boundary.
-        # A malformed boundary at (M_start, M_end) owns all objects
-        # starting strictly after M_start and ending at or before M_end.
         line_start = text.rfind("\n", 0, start) + 1
         if text[line_start:start].strip():
             continue
@@ -391,8 +409,9 @@ def _collect_top_level_objects(text: str) -> list[tuple[int, int, Any]]:
             for malformed_start, malformed_end in malformed_boundaries
         ):
             continue
-        top_level_objects.append((start, end, value))
-    return top_level_objects
+        top_level_values.append((start, end, value))
+
+    return sorted(top_level_values, key=lambda candidate: (candidate[0], candidate[1]))
 
 
 def _has_json_attempt(text: str) -> bool:
@@ -458,31 +477,26 @@ def _has_json_attempt(text: str) -> bool:
     return False
 
 
-def _recover_json_object(
+def _recover_json_value(
     text: str, primary: int, primary_exc: json.JSONDecodeError, *, fence_found: bool
 ) -> Any:
     """Fallback for outputs whose strict parse failed: structural recovery.
 
-    Uses the JSON parser to identify all complete top-level objects in the
-    text (objects not contained within any other JSON value). Selects the
-    **last** such object, which is the authoritative terminal evidence record.
+    Uses the JSON parser to identify all complete top-level values in the text
+    (values not contained within another JSON value). The **last** eligible
+    value is authoritative, even when it is not an object and must therefore
+    be rejected by :func:`extract_evidence`. This prevents stale earlier
+    objects from substituting for terminal lists or scalar payloads.
 
     When *fence_found* is ``True``, the primary position was derived from an
     explicit Markdown code fence — the strongest structural boundary the
-    output can provide.  A fence that cannot be parsed is malformed, and
-    recovery MUST fail closed: earlier illustrative objects or valid inner
+    output can provide. A fence that cannot be parsed is malformed, and
+    recovery MUST fail closed: earlier illustrative values or valid inner
     fragments cannot override the malformed authoritative fence.
 
-    When no fence is present (*fence_found* is ``False``), recovery scans
-    the full text for top-level objects, handling prose markers and
-    non-JSON braces that precede the evidence record.
-
-    This approach:
-      - Never extracts an inner/nested object from a larger JSON structure.
-      - Never extracts objects that are elements of a top-level array.
-      - Never rescues inner candidates from a malformed outer container.
-      - Preserves fence authority: a malformed fence fails the extraction.
-      - Prefers the final evidence record over earlier illustrative objects.
+    When no fence is present (*fence_found* is ``False``), recovery scans the
+    full text for top-level values, handling prose markers and non-JSON braces
+    that precede the evidence record.
 
     Raises EvidenceError when no candidate decodes, with accurate diagnostics
     distinguishing "no JSON object present at all" from "JSON present but
@@ -500,14 +514,13 @@ def _recover_json_object(
         raise EvidenceError(msg) from primary_exc
 
     recovery_text = _mask_markdown_examples(text)
-    top_level_objects = _collect_top_level_objects(recovery_text)
+    top_level_values = _collect_top_level_values(recovery_text)
 
-    if top_level_objects:
-        # Check if a malformed structural boundary appears AFTER the last
-        # valid top-level object. If so, the malformed boundary is the
-        # intended final evidence — earlier objects cannot override it.
-        last_obj_end = max(end for _, end, _ in top_level_objects)
-        for ch_pos in range(last_obj_end, len(recovery_text)):
+    if top_level_values:
+        # A later malformed structural boundary is authoritative over every
+        # earlier valid value, including an otherwise valid evidence object.
+        last_value_end = max(end for _, end, _ in top_level_values)
+        for ch_pos in range(last_value_end, len(recovery_text)):
             if recovery_text[ch_pos] not in "{[":
                 continue
             try:
@@ -519,19 +532,20 @@ def _recover_json_object(
                     f"Evidence is not valid JSON: {primary_exc.msg} "
                     f"(line {primary_exc.lineno}, col {primary_exc.colno}). "
                     f"Malformed evidence at position {ch_pos} follows earlier "
-                    f"objects; recovery refused because the final boundary "
+                    f"values; recovery refused because the final boundary "
                     f"is authoritative."
                 )
                 raise EvidenceError(msg) from primary_exc
             else:
-                # A valid parse here means it was already captured; skip
                 break
 
-        # Return the last top-level object (authoritative terminal evidence)
-        _, _, parsed = top_level_objects[-1]
+        # Return the final complete value. extract_evidence owns the object
+        # type check so terminal non-object payloads fail with the same clear
+        # contract error as trusted-position non-objects.
+        _, _, parsed = top_level_values[-1]
         return parsed
 
-    # No top-level objects found — produce accurate error diagnostics
+    # No top-level values found — produce accurate error diagnostics
     if not _has_json_attempt(recovery_text):
         msg = "Leaf output contains no JSON object and no fenced evidence block."
         raise EvidenceError(msg)
@@ -554,13 +568,14 @@ def extract_evidence(text: str) -> EvidenceRecord:
     valid payloads.
 
     **Resilience**: If the strict fence-based or bare-JSON-from-start parse
-    fails, ``_recover_json_object`` structurally scans eligible output for
-    complete top-level objects. This handles cases where smaller models
+    fails, ``_recover_json_value`` structurally scans eligible output for
+    complete top-level JSON values. This handles cases where smaller models
     (e.g. adaptive tier) emit prose markers like ``[AC_COMPLETE: 6]`` before
-    the evidence JSON. When the strict parse
-    *succeeds*, its result is authoritative: a non-object there is an
-    error, never a cue to keep scanning (so ``[{...}]`` cannot leak its
-    inner object out as evidence).
+    the evidence JSON. The final eligible value remains authoritative even
+    when it is a prohibited non-object payload. When the strict parse
+    *succeeds*, its result is likewise authoritative: a non-object there is an
+    error, never a cue to keep scanning (so ``[{...}]`` cannot leak its inner
+    object out as evidence).
 
     Raises EvidenceError on missing / malformed payloads so the harness
     can surface a clear failure instead of silently accepting empty
@@ -574,7 +589,7 @@ def extract_evidence(text: str) -> EvidenceRecord:
     try:
         parsed, _ = _DECODER.raw_decode(text[primary:])
     except json.JSONDecodeError as exc:
-        parsed = _recover_json_object(text, primary, exc, fence_found=fence_found)
+        parsed = _recover_json_value(text, primary, exc, fence_found=fence_found)
 
     if not isinstance(parsed, dict):
         msg = f"Evidence must be a JSON object, got {type(parsed).__name__}"
