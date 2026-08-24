@@ -316,15 +316,30 @@ class HostDispatchBridge:
         """
         if not session_id:
             return []
-        rows = [
-            pending
-            for pending in self._pending.values()
-            if not pending.submitted
-            and not pending.poisoned
-            and not pending.expired
-            and pending.session_id == session_id
-            and (not announce or not pending.announced)
-        ]
+        now = time.monotonic()
+        rows = []
+        for pending in self._pending.values():
+            if (
+                not pending.submitted
+                and not pending.poisoned
+                and not pending.expired
+                and pending.deadline_at is not None
+                and now >= pending.deadline_at
+            ):
+                # Deadline enforcement belongs at the announcement boundary,
+                # not only in the parked waiter or submitter.  A host poll can
+                # be the first observer after expiry; mark and wake the waiter
+                # before deciding whether the dispatch is actionable.
+                pending.expired = True
+                pending.event.set()
+            if (
+                not pending.submitted
+                and not pending.poisoned
+                and not pending.expired
+                and pending.session_id == session_id
+                and (not announce or not pending.announced)
+            ):
+                rows.append(pending)
         rows.sort(key=lambda pending: pending.created_at)
         if announce:
             for pending in rows:

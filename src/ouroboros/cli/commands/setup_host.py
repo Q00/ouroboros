@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 import json
 import os
@@ -41,6 +41,125 @@ def _runtime_override(
     return None
 
 
+def _is_known_runtime_selector(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {
+        "agy",
+        "claude",
+        "claude-cli",
+        "claude_code",
+        "codex",
+        "copilot",
+        "gemini",
+        "gemini-cli",
+        "gjc",
+        "goose",
+        "hermes",
+        "kiro",
+        "opencode",
+        "pi",
+    }
+
+
+def _mcp_args_with_optional_selectors(args: Sequence[object], base: Sequence[str]) -> bool:
+    values = tuple(arg for arg in args if isinstance(arg, str))
+    expected = tuple(base)
+    if len(values) != len(args):
+        return False
+    if values == expected:
+        return True
+    if len(values) != len(expected) + 4 or values[: len(expected)] != expected:
+        return False
+    return (
+        values[len(expected)] == "--runtime"
+        and _is_known_runtime_selector(values[len(expected) + 1])
+        and values[len(expected) + 2] == "--llm-backend"
+        and _is_known_runtime_selector(values[len(expected) + 3])
+    )
+
+
+def _is_known_ouroboros_launcher(
+    setup: Any,
+    command: object,
+    args: object,
+) -> bool:
+    """Recognize only setup-generated Ouroboros MCP command shapes.
+
+    Executable basenames alone are not ownership evidence: ``python``, ``uv``
+    and ``uvx`` are common user launchers.  Keep this predicate fail-closed by
+    matching the complete package/entrypoint argv contract instead.
+    """
+    if not isinstance(command, str) or not isinstance(args, list):
+        return False
+    program = os.path.basename(command).lower()
+    if not all(isinstance(arg, str) for arg in args):
+        return False
+    values = tuple(args)
+    if program == "uvx":
+        known = tuple(getattr(setup, "_CODEX_LEGACY_UVX_MCP_ARGS", ()))
+        return values in known or values == ("ouroboros-ai[mcp]", "mcp", "serve")
+    if program == "pipx":
+        legacy = ("run", "ouroboros-ai[mcp]", "mcp", "serve")
+        canonical = ("run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve")
+        return values == legacy or _mcp_args_with_optional_selectors(values, canonical)
+    if program in {"ouroboros", "python", "python3"}:
+        base = (
+            ("mcp", "serve")
+            if program == "ouroboros"
+            else ("-m", "ouroboros", "mcp", "serve")
+        )
+        return _mcp_args_with_optional_selectors(values, base)
+    if program == "uv":
+        return _mcp_args_with_optional_selectors(
+            values, ("run", "ouroboros", "mcp", "serve")
+        ) or _mcp_args_with_optional_selectors(
+            values,
+            ("run", "--with", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
+        )
+    return False
+
+
+def _is_setup_managed_json_entry(
+    setup: Any,
+    entry: dict[str, object],
+    *,
+    command_key: str,
+    env_key: str,
+    args_key: str | None,
+    allowed_extra_keys: set[str],
+    expected_runtime: str,
+) -> bool:
+    command = entry.get(command_key)
+    if args_key is None:
+        args = command
+        executable = command[0] if isinstance(command, list) and command else None
+    else:
+        args = entry.get(args_key)
+        executable = command
+    if not _is_known_ouroboros_launcher(setup, executable, args):
+        return False
+    allowed_keys = {command_key, env_key, *allowed_extra_keys}
+    if args_key is not None:
+        allowed_keys.add(args_key)
+    if set(entry) - allowed_keys:
+        return False
+    env = entry.get(env_key)
+    if not isinstance(env, dict):
+        return False
+    runtime_values = [
+        env[key]
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
+        if key in env
+    ]
+    if not runtime_values or any(
+        not isinstance(value, str)
+        or value.strip().lower() not in {expected_runtime, "host"}
+        for value in runtime_values
+    ):
+        return False
+    llm_backend = env.get("OUROBOROS_LLM_BACKEND")
+    return isinstance(llm_backend, str) and llm_backend.strip().lower() == expected_runtime
+
+
 def _migrate_json_entry(
     setup: Any,
     *,
@@ -49,7 +168,7 @@ def _migrate_json_entry(
     servers_key: str,
     command_key: str,
     env_key: str,
-    setup_managed: Callable[[object], bool],
+    setup_managed: Callable[[dict[str, object]], bool],
     args_key: str | None = None,
     load_jsonc: bool = False,
 ) -> bool:
@@ -73,15 +192,17 @@ def _migrate_json_entry(
     if not isinstance(entry, dict):
         return True
     override = _runtime_override(entry, command_key, env_key, args_key)
-    if not setup_managed(entry.get(command_key)):
-        if override is not None:
-            print_error(
-                f"Host setup cannot replace user-managed {config_path}: its Ouroboros MCP "
-                f"entry explicitly selects {override}. Remove that selector or change it to host, "
-                "then rerun setup."
-            )
-            return False
-        return True
+    if not setup_managed(entry):
+        detail = (
+            f" its explicit runtime selector is {override}"
+            if override is not None
+            else " because its command signature is not a setup-generated Ouroboros launcher"
+        )
+        print_error(
+            f"Host setup cannot replace user-managed {config_path}:{detail}. "
+            "Remove the entry or restore the exact Ouroboros setup launcher, then rerun setup."
+        )
+        return False
     migrated = deepcopy(entry)
     runtime_args_key = args_key or command_key
     command = migrated.get(runtime_args_key)
@@ -162,22 +283,39 @@ def _migrate_codex_entry(setup: Any) -> bool:
 
 
 def _migrate_launchers(setup: Any) -> bool:
-    known = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
+    def managed_kiro(entry: dict[str, object]) -> bool:
+        return _is_setup_managed_json_entry(
+            setup,
+            entry,
+            command_key="command",
+            env_key="env",
+            args_key="args",
+            allowed_extra_keys={"disabled"},
+            expected_runtime="kiro",
+        ) and entry.get("disabled", False) is False
 
-    def managed_string(command: object) -> bool:
-        return isinstance(command, str) and (
-            command in known or os.path.basename(command) in {"ouroboros", "python3", "python"}
+    def managed_copilot(entry: dict[str, object]) -> bool:
+        return _is_setup_managed_json_entry(
+            setup,
+            entry,
+            command_key="command",
+            env_key="env",
+            args_key="args",
+            allowed_extra_keys=set(),
+            expected_runtime="copilot",
         )
 
-    def managed_array(command: object) -> bool:
-        return (
-            isinstance(command, list)
-            and bool(command)
-            and isinstance(command[0], str)
-            and (
-                command[0] in known
-                or os.path.basename(command[0]) in {"ouroboros", "python3", "python"}
-            )
+    def managed_opencode(entry: dict[str, object]) -> bool:
+        return _is_setup_managed_json_entry(
+            setup,
+            entry,
+            command_key="command",
+            env_key="environment",
+            args_key=None,
+            allowed_extra_keys={"type", "timeout"},
+            expected_runtime="opencode",
+        ) and entry.get("type") == "local" and (
+            "timeout" not in entry or entry.get("timeout") == 300000
         )
 
     migrations = (
@@ -189,7 +327,7 @@ def _migrate_launchers(setup: Any) -> bool:
             servers_key="mcpServers",
             command_key="command",
             env_key="env",
-            setup_managed=managed_string,
+            setup_managed=managed_kiro,
             args_key="args",
         ),
         lambda: _migrate_json_entry(
@@ -199,7 +337,7 @@ def _migrate_launchers(setup: Any) -> bool:
             servers_key="mcpServers",
             command_key="command",
             env_key="env",
-            setup_managed=managed_string,
+            setup_managed=managed_copilot,
             args_key="args",
         ),
         lambda: _migrate_json_entry(
@@ -209,11 +347,12 @@ def _migrate_launchers(setup: Any) -> bool:
             servers_key="mcp",
             command_key="command",
             env_key="environment",
-            setup_managed=managed_array,
+            setup_managed=managed_opencode,
             load_jsonc=True,
         ),
     )
     return all(migrate() for migrate in migrations)
+
 
 
 def setup_host(setup: Any) -> bool:

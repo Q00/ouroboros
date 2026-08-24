@@ -10052,6 +10052,50 @@ class TestHostRuntimeSetup:
         assert codex_config.read_text(encoding="utf-8") == original_codex
 
 
+    @pytest.mark.parametrize(
+        ("command", "args"),
+        [
+            ("python", ["/opt/custom/server.py", "--runtime", "codex"]),
+            ("uv", ["run", "/opt/custom/server.py", "--runtime", "codex"]),
+            ("uvx", ["custom-package", "serve", "--runtime", "codex"]),
+        ],
+    )
+    def test_setup_host_preserves_custom_common_launcher(
+        self,
+        tmp_path: Path,
+        command: str,
+        args: list[str],
+    ) -> None:
+        """Common executable names do not prove setup ownership."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        original = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": command,
+                        "args": args,
+                        "env": {"OUROBOROS_LLM_BACKEND": "codex"},
+                    }
+                }
+            },
+            indent=2,
+        )
+        mcp_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert mcp_path.read_text(encoding="utf-8") == original
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 

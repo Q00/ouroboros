@@ -293,6 +293,29 @@ class TestDispatchRoundTrip:
         bridge._pending[dispatch_id].created_at -= 10_000.0
         assert bridge.pending_for_session("sess_an") == []
 
+    def test_expired_dispatch_is_never_announced(
+        self,
+        bridge: HostDispatchBridge,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = [100.0]
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.host_dispatch.time.monotonic", lambda: now[0]
+        )
+        dispatch_id = bridge.park(
+            session_id="sess_expired",
+            execution_id=None,
+            payload={"prompt": "p"},
+            deadline_at=101.0,
+        )
+        assert dispatch_id is not None
+
+        now[0] = 102.0
+        assert bridge.pending_for_session("sess_expired") == []
+        pending = bridge._pending[dispatch_id]
+        assert pending.expired is True
+        assert pending.event.is_set()
+
     def test_read_only_observation_does_not_consume_announcement(
         self, bridge: HostDispatchBridge
     ) -> None:
