@@ -54,6 +54,12 @@ For alternative install methods and shell completions, see the [Codex CLI README
 
 > **Windows users:** Install and run both Codex CLI and Ouroboros inside a WSL 2 environment for full compatibility. See [Platform Support](../platform-support.md) for details.
 
+The evidence verifier also recognizes the narrow `powershell.exe`/`pwsh.exe
+-Command` transport shape used by native Windows runtimes and accepts current
+`uv run`/`uvx` pytest forms, including `python -m pytest`. This compatibility does
+not change native Windows from experimental support or make executable
+PowerShell forms such as `-File` and `-EncodedCommand` trusted evidence aliases.
+
 ## Configuration
 
 To select Codex CLI as the runtime backend, set the following in your Ouroboros configuration:
@@ -159,6 +165,11 @@ When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exac
 ### `ooo` Skill Availability on Codex
 
 After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. `resolve_packaged_codex_assets()` currently resolves and installs 22 `skills/*/SKILL.md` bundles. The table below is a **subset** — the ones most often driven from a terminal — with their CLI equivalents. See the Korean guide for the complete 22-row table.
+
+Runtime identity fingerprints continue to cover user-managed rules and skills.
+Codex Desktop's reserved `~/.codex/skills/.system` subtree is excluded because
+the app refreshes those bundled skills in place; changes to sibling user skills
+still invalidate the runtime identity as before.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|

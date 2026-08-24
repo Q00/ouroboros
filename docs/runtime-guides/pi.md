@@ -83,7 +83,8 @@ orchestrator:
 For a normal execution task, Ouroboros launches:
 
 ```text
-pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
+pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
+  [--append-system-prompt <SYSTEM>] [--tools <TOOLS>] [--no-tools] <PROMPT>
 ```
 
 | Argument | Why |
@@ -91,7 +92,16 @@ pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
 | `--mode json` | Requests Pi's headless JSONL event stream |
 | `--model` | Optional model override passed by the caller |
 | `--session` | Optional native Pi session id for targeted resume |
+| `--append-system-prompt` | Native delivery of Ouroboros' `system_prompt` parameter (appended to Pi's base coding prompt) |
+| `--tools` | Native tool allow-list: Pi's own flag enables only the listed tools. Claude-style names (`Read`, `Bash`, `Glob`, …) are mapped to Pi's lowercase built-ins (`read`, `bash`, `find`, …); unknown names pass through for extension tools |
+| `--no-tools` | Explicit tool-free mode: emitted when Ouroboros requests `tools=[]` (no tools allowed). Distinguishes "use defaults" (`tools=None`, flag omitted) from "disable all tools" |
 | `<PROMPT>` | The composed task prompt from Ouroboros |
+
+The native parameter flags are probed once via `pi --help`. Pi binaries without
+`--append-system-prompt` / `--tools` keep the previous behavior: system
+instructions and tool guidance are composed into the user message as text, and
+the runtime declares `system_prompt_support` / `tool_restriction_support` as
+`translated` instead of `native`.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal
@@ -160,6 +170,17 @@ declare an MCP dispatch target, such as `ooo help` or bare `ooo`, are returned
 to Pi with a deterministic unsupported-dispatch exit code so the normal Pi
 session can continue handling the input instead of receiving a hard bridge
 failure.
+
+The registered `/ooo` command also provides TAB argument completion through Pi's
+native `getArgumentCompletions` surface: `/ooo <TAB>` lists the dispatchable
+subcommands with one-line descriptions, and `ooo run <TAB>` lists Seed files
+from `~/.ouroboros/seeds/` as absolute store paths, so the completed value
+executes regardless of the Pi session directory (relative seed paths resolve
+against the session cwd). Completion is deterministic and offline — the
+subcommand list mirrors the skills the dispatcher itself deems eligible, and a
+unit test derives that set through `resolve_skill_dispatch` so the two cannot
+drift. Seed names containing whitespace are skipped because the dispatcher
+tokenizes the dispatched command on whitespace.
 
 For `ooo auto`, the dispatcher owns the background job lifecycle. After
 `ouroboros_start_auto` returns a `job_id`, the dispatch process polls

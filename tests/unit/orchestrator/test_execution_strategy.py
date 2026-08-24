@@ -191,6 +191,107 @@ class TestRegisterStrategy:
         assert strategy.get_tools() == ["Read"]
         assert strategy.get_system_prompt_fragment() == "Custom agent"
 
+    def test_register_with_whitespace_strips_at_registration(self) -> None:
+        """Whitespace around task_type at registration is canonicalized.
+
+        Regression: register/get used only .lower() while Seed used
+        .strip().lower(), causing a mismatch when whitespace was present
+        at registration time.
+        """
+        from ouroboros.orchestrator.execution_strategy import (
+            _STRATEGY_REGISTRY,
+            is_registered_task_type,
+        )
+
+        class _WhitespaceStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "ws"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "ws"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        # Register with leading/trailing whitespace
+        register_strategy("  whitespace_type  ", _WhitespaceStrategy())
+        try:
+            # Canonical key must be stripped
+            assert "whitespace_type" in _STRATEGY_REGISTRY
+            assert "  whitespace_type  " not in _STRATEGY_REGISTRY
+
+            # Lookup must succeed without whitespace
+            assert is_registered_task_type("whitespace_type") is True
+            assert is_registered_task_type("  whitespace_type  ") is True
+            assert is_registered_task_type("WHITESPACE_TYPE") is True
+            assert is_registered_task_type(" Whitespace_Type ") is True
+
+            # get_strategy must resolve it
+            strategy = get_strategy("whitespace_type")
+            assert strategy.get_system_prompt_fragment() == "ws"
+            strategy2 = get_strategy("  whitespace_type  ")
+            assert strategy2.get_system_prompt_fragment() == "ws"
+        finally:
+            _STRATEGY_REGISTRY.pop("whitespace_type", None)
+
+    def test_canonicalize_task_type_strips_and_lowers(self) -> None:
+        """_canonicalize_task_type applies strip then lower consistently."""
+        from ouroboros.orchestrator.execution_strategy import _canonicalize_task_type
+
+        assert _canonicalize_task_type("  Code  ") == "code"
+        assert _canonicalize_task_type("RESEARCH") == "research"
+        assert _canonicalize_task_type("\tMy_Type\n") == "my_type"
+        assert _canonicalize_task_type("already_normal") == "already_normal"
+
+    def test_whitespace_registration_compatible_with_seed_validation(self) -> None:
+        """Seed validator finds types registered with surrounding whitespace.
+
+        End-to-end regression: the Seed validator and the strategy registry
+        must agree on canonicalization so that registering with whitespace
+        still allows Seed construction without whitespace (and vice-versa).
+        """
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+        from ouroboros.orchestrator.execution_strategy import _STRATEGY_REGISTRY
+
+        class _SeedCompatStrategy:
+            def get_tools(self) -> list[str]:
+                return ["Read"]
+
+            def get_system_prompt_fragment(self) -> str:
+                return "compat"
+
+            def get_task_prompt_suffix(self) -> str:
+                return "compat"
+
+            def get_activity_map(self) -> dict[str, ActivityType]:
+                return {"Read": ActivityType.EXPLORING}
+
+        # Register WITH whitespace
+        register_strategy("  compat_task  ", _SeedCompatStrategy())
+        try:
+            # Seed uses stripped value — must resolve
+            seed = Seed(
+                goal="Compatibility test",
+                task_type="compat_task",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed.task_type == "compat_task"
+
+            # Seed with whitespace also works
+            seed2 = Seed(
+                goal="Compatibility test 2",
+                task_type="  Compat_Task  ",
+                ontology_schema=OntologySchema(name="T", description="T"),
+                metadata=SeedMetadata(ambiguity_score=0.1),
+            )
+            assert seed2.task_type == "compat_task"
+        finally:
+            _STRATEGY_REGISTRY.pop("compat_task", None)
+
 
 class TestStrategyProtocol:
     """Tests verifying ExecutionStrategy protocol compliance."""

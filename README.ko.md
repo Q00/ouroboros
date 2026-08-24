@@ -453,7 +453,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 ## 아홉 개의 사고
 
-아홉 개의 에이전트가 있고, 각자 생각하는 방식이 다릅니다. 필요할 때만 로드하고, 처음부터 다 띄워두지는 않습니다:
+아래 강조된 아홉 개의 에이전트 외에도 12개의 전문 에이전트가 더 있습니다 (총 21개). 필요할 때만 로드하고, 처음부터 다 띄워두지는 않습니다:
 
 | 에이전트 | 역할 | 핵심 질문 |
 |:------|:-----|:--------------|
@@ -478,13 +478,13 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 src/ouroboros/
 ├── bigbang/        Interview, 모호성 점수 산정, brownfield 탐색
 ├── routing/        PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
-├── execution/      Double Diamond, 계층적 AC 분해
+├── execution/      (deprecated — 로직이 orchestrator/ 및 mcp/tools/로 이동됨)
 ├── evaluation/     Mechanical → Semantic → Multi-Model Consensus
 ├── evolution/      Wonder / Reflect 순환, 수렴 감지
 ├── resilience/     4가지 정체 패턴 감지, 5가지 측면 페르소나
 ├── observability/  3요소 드리프트 측정, 자동 회고
 ├── persistence/    Event Sourcing (SQLAlchemy + aiosqlite), 체크포인트
-├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI)
+├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, GJC, Goose, Antigravity, Grok, Zcode)
 ├── core/           타입, 에러, Seed, 온톨로지, 보안
 ├── providers/      LiteLLM 어댑터 (100+ 모델)
 ├── mcp/            MCP 클라이언트/서버

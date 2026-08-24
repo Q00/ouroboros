@@ -1301,6 +1301,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=plugin_cache.GIT_CLONE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=plugin_cache.git_noninteractive_env(),
     )
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1308,6 +1311,9 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=plugin_cache.GIT_REV_PARSE_TIMEOUT_SECONDS,
+        stdin=subprocess.DEVNULL,
+        env=plugin_cache.git_noninteractive_env(),
     ).stdout.strip()
     return sha
 
@@ -1872,7 +1878,7 @@ def add_command(
             git_sha = plugin_cache.stage_url_cache_refresh(
                 lambda staging: _shallow_clone(target, staging), clone_dest
             )
-        except (subprocess.CalledProcessError, OSError) as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
             print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
             raise typer.Exit(code=1) from exc
         repo_root = clone_dest
@@ -2463,7 +2469,7 @@ def _install_named_from_url(
         git_sha = plugin_cache.stage_url_cache_refresh(
             lambda staging: _shallow_clone(repo_url, staging), clone_dest
         )
-    except (subprocess.CalledProcessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError) as exc:
         print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
         raise typer.Exit(code=1) from exc
 

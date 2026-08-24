@@ -597,5 +597,8 @@ class TestWorkflowIRCommands:
 
         result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
 
+        # The blank-AC boundary is enforced by the Seed schema itself, so the
+        # command now fails during seed load rather than in the IR adapter.
         assert result.exit_code == 1
-        assert "must be non-blank" in result.output
+        assert "Workflow IR inspection failed" in result.output
+        assert "acceptance_criteria.0.description" in result.output

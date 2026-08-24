@@ -171,13 +171,17 @@ class TestSessionEventTracking:
         result = await runner.execute_seed(sample_seed)
         assert result.is_ok
 
-        # Check for session events
-        events = await event_store.replay("session", result.value.session_id)
-        event_types = [e.type for e in events]
+        # Check that both session- and execution-scoped progress remain observable.
+        session_events = await event_store.replay("session", result.value.session_id)
+        session_event_types = [event.type for event in session_events]
+        execution_events = await event_store.replay("execution", result.value.execution_id)
+        execution_event_types = [event.type for event in execution_events]
 
-        # Should have session lifecycle events
-        assert "orchestrator.session.started" in event_types
-        assert "orchestrator.session.completed" in event_types
+        assert "orchestrator.session.started" in session_event_types
+        assert "orchestrator.progress.updated" in session_event_types
+        assert "orchestrator.session.completed" in session_event_types
+        assert "workflow.progress.updated" in execution_event_types
+        assert "observability.drift.measured" not in execution_event_types
 
     async def test_tool_called_events_emitted(
         self,

@@ -69,6 +69,7 @@ def _baseline_repo(
     soft_cap: int = 2000,
     reseed_slack: int = 200,
     excluded: frozenset[str] = frozenset({"src/ouroboros/_version.py"}),
+    trailer: str = "",
 ) -> str:
     """Build a git repo whose HEAD carries a given policy, and return its ref.
 
@@ -84,6 +85,7 @@ def _baseline_repo(
         f"RESEED_SLACK = {reseed_slack}\n"
         f"GRANDFATHERED: dict[str, int] = {{\n{entries}\n}}\n"
         f"EXCLUDED = frozenset({set(excluded)!r})\n"
+        f"{trailer}"
     )
     script = root / "scripts" / "check-module-size.py"
     script.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +336,14 @@ class TestPolicyTightening:
 
         assert module.main(["--baseline-ref", ref]) == 1
         assert "could not inspect policy candidate" in capsys.readouterr().err
+
+    def test_baseline_policy_source_is_decoded_as_utf8(self, module, monkeypatch, tmp_path):
+        ref = _baseline_repo(tmp_path, {}, trailer="# 한글 정책\n")
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        monkeypatch.setattr(module.subprocess, "_text_encoding", lambda: "ascii")
+
+        assert module.main(["--baseline-ref", ref]) == 0
 
     def test_no_baseline_ref_skips_the_comparison(self, module, monkeypatch, tmp_path):
         """A bare local run must not require a git repository."""

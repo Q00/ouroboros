@@ -78,6 +78,72 @@ def test_build_command_uses_documented_json_prompt_argument() -> None:
     ]
 
 
+def test_build_command_passes_native_system_prompt_and_tools_when_supported() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(
+        prompt="Do the task",
+        system_prompt="Be a careful test runner.",
+        tools=["Read", "Edit", "Bash", "custom_tool"],
+    )
+
+    assert command == [
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "--append-system-prompt",
+        "Be a careful test runner.",
+        "--tools",
+        "read,edit,bash,custom_tool",
+        "Do the task",
+    ]
+
+
+def test_build_command_skips_native_flags_when_unsupported() -> None:
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (False, False)
+
+    command = runtime._build_command(
+        prompt="Do the task",
+        system_prompt="Be a careful test runner.",
+        tools=["Read"],
+    )
+
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_capabilities_follow_probed_native_param_support() -> None:
+    native = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    native._native_param_flags = (True, True)
+    legacy = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    legacy._native_param_flags = (False, False)
+
+    assert native.capabilities.system_prompt_support == ParamSupport.NATIVE
+    assert native.capabilities.tool_restriction_support == ParamSupport.NATIVE
+    assert legacy.capabilities.system_prompt_support == ParamSupport.TRANSLATED
+    assert legacy.capabilities.tool_restriction_support == ParamSupport.TRANSLATED
+    # Pi has no approval gate: permission mode stays ignored either way.
+    assert native.capabilities.permission_mode_support == ParamSupport.IGNORED
+    assert legacy.capabilities.permission_mode_support == ParamSupport.IGNORED
+
+
+def test_capabilities_partial_support_has_tools_but_no_no_tools() -> None:
+    """PR #2203 blocker: partial Pi (has --tools, lacks --no-tools) must NOT
+    report NATIVE for tool_restriction_support. It can restrict to a set but
+    cannot disable all tools — reporting NATIVE would silently widen tools=[]
+    to unrestricted."""
+    partial = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    partial._native_param_flags = (True, False)  # has --tools but not --no-tools
+
+    caps = partial.capabilities
+    # system_prompt is still native (only needs --append-system-prompt)
+    assert caps.system_prompt_support == ParamSupport.NATIVE
+    # tool restriction is TRANSLATED because empty-list cannot be enforced
+    assert caps.tool_restriction_support == ParamSupport.TRANSLATED
+    assert caps.permission_mode_support == ParamSupport.IGNORED
+
+
 def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None:
     default_runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
     requested_runtime = PiRuntime(
@@ -298,6 +364,76 @@ async def test_execute_task_streams_delta_and_final_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_task_passes_params_natively_when_supported() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [
+            msg async for msg in runtime.execute_task("Do it", tools=["Read"], system_prompt="Sys")
+        ]
+
+    assert mock_exec.call_args.args == (
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "--append-system-prompt",
+        "Sys",
+        "--tools",
+        "read",
+        "Do it",
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_task_composes_params_into_prompt_when_unsupported() -> None:
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (False, False)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [
+            msg async for msg in runtime.execute_task("Do it", tools=["Read"], system_prompt="Sys")
+        ]
+
+    assert mock_exec.call_args.args == (
+        "/tmp/pi",
+        "--mode",
+        "json",
+        "## System Instructions\nSys\n\n## Tooling Guidance\nPrefer these tools:\n- Read\n\nDo it",
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_end_does_not_mask_nonzero_exit() -> None:
     process = _FakeProcess(
         stdout_lines=[
@@ -444,3 +580,342 @@ def test_runtime_handle_accepts_pi_backend() -> None:
     handle = RuntimeHandle(backend="pi_cli", native_session_id="session-1")
 
     assert handle.backend == "pi"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for PR #2203 review blockers
+# ---------------------------------------------------------------------------
+
+
+def test_build_command_emits_no_tools_for_explicit_empty_list() -> None:
+    """Blocker 1: tools=[] must emit --no-tools, not be silently dropped."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do the task", tools=[])
+
+    assert "--no-tools" in command
+    assert "--tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "--no-tools", "Do the task"]
+
+
+def test_build_command_omits_tools_flag_for_none() -> None:
+    """tools=None means 'use defaults'; neither --tools nor --no-tools should appear."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do the task", tools=None)
+
+    assert "--tools" not in command
+    assert "--no-tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_build_command_empty_tools_without_no_tools_support() -> None:
+    """When Pi lacks --no-tools, tools=[] falls through without error."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)  # has --tools but not --no-tools
+
+    command = runtime._build_command(prompt="Do the task", tools=[])
+
+    assert "--tools" not in command
+    assert "--no-tools" not in command
+    assert command == ["/tmp/pi", "--mode", "json", "Do the task"]
+
+
+def test_glob_maps_to_pi_find_builtin() -> None:
+    """Blocker 2: Glob must map to Pi's 'find', not nonexistent 'glob'."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do it", tools=["Glob"])
+
+    assert command == ["/tmp/pi", "--mode", "json", "--tools", "find", "Do it"]
+
+
+def test_command_and_execute_map_to_pi_bash_builtin() -> None:
+    """Command and Execute must map to Pi's 'bash' built-in."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command = runtime._build_command(prompt="Do it", tools=["Command", "Execute"])
+
+    assert command == ["/tmp/pi", "--mode", "json", "--tools", "bash,bash", "Do it"]
+
+
+def test_all_known_ouroboros_builtins_map_to_valid_pi_tools() -> None:
+    """Every known Ouroboros built-in must map to a documented Pi tool name."""
+    from ouroboros.orchestrator.pi_runtime import _PI_TOOL_FLAG_NAMES
+
+    # Pi's documented built-in tools
+    pi_builtins = {"read", "write", "edit", "bash", "grep", "find", "ls"}
+
+    for ouroboros_name, pi_name in _PI_TOOL_FLAG_NAMES.items():
+        assert pi_name in pi_builtins, (
+            f"Ouroboros tool {ouroboros_name!r} maps to {pi_name!r} "
+            f"which is not a documented Pi built-in: {pi_builtins}"
+        )
+
+
+def test_ls_maps_to_pi_ls_builtin() -> None:
+    """LS/Ls must map to Pi's 'ls' built-in."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    command_upper = runtime._build_command(prompt="Do it", tools=["LS"])
+    command_title = runtime._build_command(prompt="Do it", tools=["Ls"])
+
+    assert "--tools" in command_upper
+    assert command_upper[command_upper.index("--tools") + 1] == "ls"
+    assert command_title[command_title.index("--tools") + 1] == "ls"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_emits_no_tools_for_empty_list() -> None:
+    """End-to-end: execute_task with tools=[] should emit --no-tools natively."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [msg async for msg in runtime.execute_task("Do it", tools=[])]
+
+    args = mock_exec.call_args.args
+    assert "--no-tools" in args
+    assert "--tools" not in args
+
+
+@pytest.mark.asyncio
+async def test_execute_task_tools_none_omits_all_tool_flags() -> None:
+    """End-to-end: execute_task with tools=None should omit --tools and --no-tools."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        _ = [msg async for msg in runtime.execute_task("Do it", tools=None)]
+
+    args = mock_exec.call_args.args
+    assert "--no-tools" not in args
+    assert "--tools" not in args
+
+
+# ---------------------------------------------------------------------------
+# PR #2203 Round 2: Partial support negotiation + fail-closed regressions
+# ---------------------------------------------------------------------------
+
+
+def test_negotiation_partial_pi_tools_empty_reports_ignored() -> None:
+    """When Pi has --tools but not --no-tools, requesting tools=[] must surface
+    as IGNORED through the parameter negotiation layer — never silently widen."""
+    from ouroboros.orchestrator.runtime_param_negotiation import (
+        negotiate_execution_params,
+    )
+
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)  # partial support
+
+    degradations = negotiate_execution_params(
+        runtime.capabilities,
+        system_prompt=None,
+        tools=[],
+        permission_mode=None,
+    )
+
+    assert len(degradations) == 1
+    d = degradations[0]
+    assert d.parameter == "tools"
+    assert d.support == ParamSupport.IGNORED
+    assert "silently dropped" in d.detail
+
+
+def test_negotiation_partial_pi_tools_nonempty_reports_translated() -> None:
+    """Partial Pi with a non-empty tools list: TRANSLATED (can restrict, but lossily)."""
+    from ouroboros.orchestrator.runtime_param_negotiation import (
+        negotiate_execution_params,
+    )
+
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)
+
+    degradations = negotiate_execution_params(
+        runtime.capabilities,
+        system_prompt=None,
+        tools=["Read", "Edit"],
+        permission_mode=None,
+    )
+
+    assert len(degradations) == 1
+    d = degradations[0]
+    assert d.parameter == "tools"
+    assert d.support == ParamSupport.TRANSLATED
+
+
+def test_negotiation_full_pi_tools_empty_no_degradation() -> None:
+    """Full Pi support (has --tools AND --no-tools): tools=[] is NATIVE, no degradation."""
+    from ouroboros.orchestrator.runtime_param_negotiation import (
+        negotiate_execution_params,
+    )
+
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    degradations = negotiate_execution_params(
+        runtime.capabilities,
+        system_prompt=None,
+        tools=[],
+        permission_mode=None,
+    )
+
+    assert len(degradations) == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_task_fails_closed_tools_empty_partial_support() -> None:
+    """PR #2203 critical regression: tools=[] on partial Pi (has --tools, lacks
+    --no-tools) must fail closed with ToolRestrictionUnenforced error, never
+    silently widen to unrestricted tool access."""
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        messages = [msg async for msg in runtime.execute_task("Do it", tools=[])]
+
+    # Must NOT have spawned a process — fail closed means no execution.
+    mock_exec.assert_not_called()
+
+    # Must emit exactly one error result.
+    assert len(messages) == 1
+    result = messages[0]
+    assert result.type == "result"
+    assert result.is_error is True
+    assert "ToolRestrictionUnenforced" in (result.data or {}).get("error_type", "")
+    assert "cannot enforce tools=[]" in result.content
+    assert (result.data or {}).get("requested") == []
+    assert (result.data or {}).get("effective") == "unrestricted"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_succeeds_tools_empty_full_support() -> None:
+    """Full Pi (has --no-tools): tools=[] must succeed with --no-tools in command."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, True)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        messages = [msg async for msg in runtime.execute_task("Do it", tools=[])]
+
+    # Process WAS spawned with --no-tools
+    mock_exec.assert_called_once()
+    args = mock_exec.call_args.args
+    assert "--no-tools" in args
+    # Last message should be successful result
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error is not True
+
+
+@pytest.mark.asyncio
+async def test_execute_task_tools_nonempty_partial_support_proceeds() -> None:
+    """Partial Pi with a non-empty tools list should proceed (--tools works)."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        messages = [msg async for msg in runtime.execute_task("Do it", tools=["Read"])]
+
+    # Process WAS spawned with --tools (non-empty list works even without --no-tools)
+    mock_exec.assert_called_once()
+    args = mock_exec.call_args.args
+    assert "--tools" in args
+    assert "read" in args[args.index("--tools") + 1]
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error is not True
+
+
+@pytest.mark.asyncio
+async def test_execute_task_tools_none_partial_support_proceeds() -> None:
+    """Partial Pi with tools=None (default tools) should proceed without any flag."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]}
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    runtime._native_param_flags = (True, False)
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
+        messages = [msg async for msg in runtime.execute_task("Do it", tools=None)]
+
+    mock_exec.assert_called_once()
+    args = mock_exec.call_args.args
+    assert "--tools" not in args
+    assert "--no-tools" not in args
+    result = [m for m in messages if m.type == "result"][-1]
+    assert result.is_error is not True

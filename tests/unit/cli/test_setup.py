@@ -6,6 +6,8 @@ from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -41,8 +43,11 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
+from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
 def _terminate_and_reap_test_process(process: subprocess.Popen[str] | None) -> None:
@@ -525,7 +530,7 @@ class TestCodexSetup:
     def test_register_codex_mcp_server_refreshes_legacy_direct_dev_entry(
         self, tmp_path: Path
     ) -> None:
-        """Earlier setup-owned direct executable configs should not become stuck."""
+        """Earlier setup-owned base-argv executable configs should not become stuck."""
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         codex_config.write_text(
@@ -539,7 +544,7 @@ class TestCodexSetup:
                     "",
                     "[mcp_servers.ouroboros]",
                     'command = "/old/venv/bin/ouroboros"',
-                    ('args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]'),
+                    'args = ["mcp", "serve"]',
                     "",
                 ]
             ),
@@ -559,6 +564,150 @@ class TestCodexSetup:
 
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert "/old/venv/bin/ouroboros" not in contents
+
+    def test_register_codex_mcp_server_refreshes_path_selected_legacy_direct_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A canonical PATH launcher and Codex env are a safe legacy migration seam."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'command = "/home/operator/.local/bin/ouroboros"',
+                    'args = ["mcp", "serve"]',
+                    "",
+                    "[mcp_servers.ouroboros.env]",
+                    'OUROBOROS_AGENT_RUNTIME = "codex"',
+                    'OUROBOROS_LLM_BACKEND = "codex"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.51.4",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert "/home/operator/.local/bin/ouroboros" not in contents
+        assert "ouroboros-ai[mcp]" in contents
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical argv does not make a launcher with foreign env setup-owned."""
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(selected))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "claude"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_direct_not_selected_by_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical base argv stays user-managed when PATH selects another executable."""
+        configured = tmp_path / "custom" / "ouroboros"
+        selected = tmp_path / "path" / "ouroboros"
+        configured.parent.mkdir()
+        selected.parent.mkdir()
+        configured.touch()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(configured))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            if command == "ouroboros":
+                return str(selected)
+            return str(configured) if command == str(configured) else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_process_controls(
+        self, tmp_path: Path
+    ) -> None:
+        """Process controls keep an otherwise canonical direct entry user-managed."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            'command = "/home/operator/.local/bin/ouroboros"\n'
+            'args = ["mcp", "serve"]\n'
+            "tool_timeout_sec = 600\n"
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
 
     def test_register_codex_mcp_server_preserves_custom_python_module_by_default(
         self, tmp_path: Path
@@ -10616,6 +10765,189 @@ class TestCopilotSetup:
             assert setup_cmd._install_pi_ooo_bridge() is True
 
         assert bridge_path.stat().st_mtime_ns == first_mtime
+
+    def test_pi_bridge_registers_argument_completions(self) -> None:
+        """The managed bridge should TAB-complete `/ooo` arguments.
+
+        `/ooo <TAB>` lists the dispatchable subcommands and `ooo run <TAB>`
+        lists Seed files from `~/.ouroboros/seeds/` as `run <quoted-absolute-path>`
+        so Pi's full-prefix replacement preserves the subcommand and the
+        completed value executes regardless of the Pi session cwd.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+
+        assert "getArgumentCompletions: argumentCompletions" in bridge_source
+        assert "function argumentCompletions(argumentPrefix: string)" in bridge_source
+        assert 'path.join(homedir(), ".ouroboros", "seeds")' in bridge_source
+        # Seed completion values carry `run <quoted path>` — Pi replaces the
+        # entire argument prefix with the value, so `run` must be part of it.
+        assert "value: `run ${quoted}`" in bridge_source
+        assert ".sort()" in bridge_source
+        assert 'tokens[0].toLowerCase() === "run"' in bridge_source
+
+    def test_pi_bridge_completions_mirror_dispatchable_skills(self) -> None:
+        """Completion subcommands must mirror dispatcher-eligible skills.
+
+        Eligibility is derived through ``resolve_skill_dispatch`` itself —
+        frontmatter loading, ``normalize_mcp_frontmatter`` validation, and
+        template resolution — instead of a textual ``mcp_tool:`` grep, so a
+        body example or an invalid/missing ``mcp_args`` mapping cannot make
+        an undispatchable skill look dispatchable.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+        completed = set(re.findall(r'cmd: "([a-z0-9][a-z0-9_-]*)"', bridge_source))
+
+        with resolve_packaged_skills_dir(anchor_file=Path(__file__)) as skills_dir:
+            dispatchable = {
+                skill_dir.name
+                for skill_dir in skills_dir.iterdir()
+                if (skill_dir / "SKILL.md").is_file()
+                and isinstance(
+                    resolve_skill_dispatch(
+                        ResolveRequest(prompt=f"ooo {skill_dir.name}", cwd=Path.cwd())
+                    ),
+                    Resolved,
+                )
+            }
+
+        assert completed == dispatchable
+
+    async def test_pi_bridge_run_completion_value_round_trips_to_global_seed(
+        self, tmp_path: Path
+    ) -> None:
+        """Absolute Seed completion values must stay executable end to end.
+
+        The `run` dispatcher forwards ``seed_path`` unchanged and the seed
+        resolver treats relative paths as session-cwd-relative, degrading a
+        missing file to inline YAML. Completion therefore advertises
+        ``run <quoted-absolute-path>``; this test pins that contract from the
+        completed value through router resolution to seed loading.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        absolute_path = str(seeds_dir / "demo.yaml")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        # The completion value now carries `run <path>` — the full replacement
+        # that Pi will substitute for the argument prefix.
+        completed_value = f"run {absolute_path}"
+
+        resolved = resolve_skill_dispatch(
+            ResolveRequest(prompt=f"ooo {completed_value}", cwd=session_cwd)
+        )
+        assert isinstance(resolved, Resolved)
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            loaded = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": absolute_path},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+            bare_name = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": "demo.yaml"},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+
+        assert loaded.is_ok
+        assert loaded.value == "goal: demo\n"
+        # The pre-fix completion shape: a bare name never reaches the global
+        # store from a session cwd and degrades to inline YAML.
+        assert bare_name.is_ok
+        assert bare_name.value == "demo.yaml"
+
+    def test_pi_completion_value_survives_combined_autocomplete_provider_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Seed completion values remain dispatchable after Pi's full-prefix replacement.
+
+        Pi's ``CombinedAutocompleteProvider.applyCompletion`` replaces the
+        entire argument prefix with ``item.value``. For example, when a user
+        types ``/ooo run de<TAB>`` and selects a Seed completion, the argument
+        text ``run de`` is replaced wholesale with the item's ``value``.
+
+        Before the fix, ``value`` was just the absolute path, so the result
+        was ``/ooo /path/to/demo.yaml`` — which the shared dispatcher could
+        not recognize (no ``run`` subcommand). This regression test verifies
+        that the completed value, when applied as Pi does, produces a
+        dispatchable command.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+
+        # --- Simulate Pi's CombinedAutocompleteProvider semantics ---
+        # The user types: /ooo run de
+        # argumentPrefix passed to getArgumentCompletions: "run de"
+        # The rendered bridge returns: { value: "run <absolute-path>", ... }
+        # Pi applies the completion: replaces "run de" with item.value.
+        # The final command dispatched: /ooo <item.value>
+
+        # The completion value as the bridge would render it (without
+        # shell-quoting since this path has no special chars):
+        completed_item_value = f"run {absolute_path}"
+
+        # Pi replaces the full argument prefix with item.value, making the
+        # dispatched command: `ooo <completed_item_value>`
+        dispatched_text = f"ooo {completed_item_value}"
+
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Pi full-prefix replacement produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        # --- Verify the OLD (broken) behavior would fail ---
+        # Before the fix, value was just the absolute path (no 'run' prefix).
+        broken_item_value = absolute_path
+        broken_dispatched = f"ooo {broken_item_value}"
+        broken_result = resolve_skill_dispatch(
+            ResolveRequest(prompt=broken_dispatched, cwd=session_cwd)
+        )
+        # The absolute path alone is not a recognized skill subcommand
+        assert not isinstance(broken_result, Resolved), (
+            "Bare absolute path should NOT dispatch — it means Pi's replacement "
+            "lost the 'run' subcommand"
+        )
+
+    def test_pi_completion_value_with_quoted_path_survives_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Every shlex-supported pathname character survives Pi replacement.
+
+        The rendered bridge uses POSIX single-argument quoting, including the
+        standard quote break for an embedded single quote. The dispatcher's
+        ``shlex.split`` must recover the exact original path without expanding
+        dollar signs or backticks or retaining escape characters.
+        """
+        seeds_dir = tmp_path / "my $projects`archive'\\data" / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: quoted\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+        quoted_path = shlex.quote(absolute_path)
+        completed_item_value = f"run {quoted_path}"
+
+        dispatched_text = f"ooo {completed_item_value}"
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Quoted-path completion produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
 
 
 class TestRuntimeFlagDispatch:

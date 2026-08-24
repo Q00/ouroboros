@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
           enable-cache: true
@@ -43,8 +43,8 @@ jobs:
 
           assert claude_agent_sdk is not None
           assert mcp is not None
-          assert version("claude-agent-sdk") == "0.2.128"
-          assert version("anthropic") == "0.120.2"
+          assert version("claude-agent-sdk") == "0.2.139"
+          assert version("anthropic") == "0.122.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
           PY
           uv pip check
@@ -70,7 +70,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
           enable-cache: true
@@ -138,7 +138,7 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
           enable-cache: true

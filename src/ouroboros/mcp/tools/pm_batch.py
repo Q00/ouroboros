@@ -110,9 +110,7 @@ def turn_answers(
     reconnect.
     """
     if answers is not None and answer is not None:
-        return [], (
-            "'answer' and 'answers' are mutually exclusive; send exactly one answer form."
-        )
+        return [], ("'answer' and 'answers' are mutually exclusive; send exactly one answer form.")
 
     pairs: list[tuple[str, str]] = []
     if answers is not None:

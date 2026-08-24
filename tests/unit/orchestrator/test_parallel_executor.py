@@ -4987,6 +4987,12 @@ async def test_unmaterializable_ac_is_judged_while_valid_sibling_completes(
             "pytest tests/test_foo.py",
             id="test-invocation-pipefail-output-plumbing",
         ),
+        pytest.param(
+            '"C:\\\\Users\\\\runner\\\\pwsh.exe" -NoProfile -Command '
+            "'uv run --isolated --with pytest pytest -q tests/test_foo.py'",
+            "uv run --isolated --with pytest pytest -q tests/test_foo.py",
+            id="windows-pwsh-command-wrapper",
+        ),
     ),
 )
 def test_command_claim_supports_runtime_command_shape(runtime_command: str, claim: str) -> None:
@@ -5079,6 +5085,24 @@ def test_command_claim_supports_runtime_command_shape(runtime_command: str, clai
             "pytest tests/unit/test_foo.py",
             {},
             id="tee-redirected-run",
+        ),
+        pytest.param(
+            "pwsh.exe -Command 'pytest tests/test_foo.py' trailing",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-command-with-trailing-argv",
+        ),
+        pytest.param(
+            "pwsh.exe -EncodedCommand cAB5AHQAZQBzAHQA",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-encoded-command",
+        ),
+        pytest.param(
+            "pwsh.exe -File bootstrap.ps1 -Command 'pytest tests/test_foo.py'",
+            "pytest tests/test_foo.py",
+            {},
+            id="powershell-file-before-command",
         ),
     ),
 )
@@ -10571,6 +10595,9 @@ class TestParallelACExecutor:
             "uv run -qn pytest -q",
             "uv run -p3.12 pytest -q",
             "uv run -m pytest -q",
+            "uv run --python 3.12 --with-requirements requirements.txt "
+            "--with pytest python -m pytest -q",
+            "uvx --python 3.12 --from pytest --with-requirements requirements.txt pytest -q",
         ),
     )
     def test_option_bearing_uv_pytest_is_candidate_evidence(self, command: str) -> None:
@@ -10758,8 +10785,18 @@ class TestParallelACExecutor:
     def test_uv_current_global_flags_remain_test_evidence(self, command: str) -> None:
         assert _looks_like_test_command(command) is True
 
-    def test_option_bearing_uv_command_backs_its_exact_tests_passed_claim(self) -> None:
-        command = "uv run --python 3.12 --with pytest pytest -q"
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "uv run --python 3.12 --with pytest pytest -q",
+            "uv run --python 3.12 --with-requirements requirements.txt "
+            "--with pytest python -m pytest -q",
+            "uvx --python 3.12 --from pytest --with-requirements requirements.txt pytest -q",
+        ),
+    )
+    def test_option_bearing_uv_command_backs_its_exact_tests_passed_claim(
+        self, command: str
+    ) -> None:
         message = AgentMessage(
             type="assistant",
             content=f"Calling tool: Bash: {command}",
