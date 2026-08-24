@@ -41,12 +41,12 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from enum import StrEnum
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
+import re
 import sys
 from threading import RLock
 from typing import Any
@@ -192,9 +192,7 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
-_STRUCTURED_EVENT_IDENTIFIER = re.compile(
-    r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$"
-)
+_STRUCTURED_EVENT_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
     r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
@@ -390,7 +388,6 @@ def _get_file_processors() -> list[Any]:
         List of structlog processors for file logging.
     """
     processors = _get_shared_processors()
-
 
     # Always use JSON for file output (for log aggregation tools)
     processors.append(structlog.processors.JSONRenderer())
