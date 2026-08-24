@@ -9875,7 +9875,26 @@ class TestHostRuntimeSetup:
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert data["orchestrator"]["runtime_backend"] == "host"
 
-    def test_setup_host_migrates_all_setup_managed_launchers(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "opencode_command",
+        [
+            ["uvx", "ouroboros-ai[mcp]", "mcp", "serve"],
+            ["uvx", *setup_cmd._CODEX_UVX_MCP_ARGS],
+            [
+                "pipx",
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ],
+        ],
+        ids=["legacy-uvx", "isolated-uvx", "isolated-pipx"],
+    )
+    def test_setup_host_migrates_all_setup_managed_launchers(
+        self, tmp_path: Path, opencode_command: list[str]
+    ) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text(
@@ -9928,7 +9947,7 @@ class TestHostRuntimeSetup:
                     "mcp": {
                         "ouroboros": {
                             "type": "local",
-                            "command": ["uvx", "ouroboros-ai[mcp]", "mcp", "serve"],
+                            "command": opencode_command,
                             "environment": {
                                 "OUROBOROS_AGENT_RUNTIME": "opencode",
                                 "OUROBOROS_LLM_BACKEND": "opencode",

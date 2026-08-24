@@ -126,8 +126,8 @@ def _is_setup_managed_json_entry(
 ) -> bool:
     command = entry.get(command_key)
     if args_key is None:
-        args = command
         executable = command[0] if isinstance(command, list) and command else None
+        args = command[1:] if isinstance(command, list) else None
     else:
         args = entry.get(args_key)
         executable = command
