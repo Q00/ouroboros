@@ -593,15 +593,23 @@ class TestIPv6Binds:
         The MCP SDK's Pydantic URL parser rejects zone identifiers in both raw
         and percent-encoded forms. Rather than crashing inside AuthSettings
         construction, ``resolve_network_security`` rejects scoped IPv6 network
-        binds with a clear, actionable error message.
+        binds without advertising an allowlist override that cannot bypass the
+        unsupported bind-address gate.
         """
-        with pytest.raises(ValueError, match="Cannot serve on scoped IPv6 address"):
+        with pytest.raises(ValueError) as exc_info:
             resolve_network_security(
                 transport="streamable-http",
                 host="fe80::1%lo",
                 port=8080,
                 security=SecurityLayer(auth_config=_auth_config()),
+                allowed_hosts=("node.example:8080",),
             )
+
+        message = str(exc_info.value)
+        assert "Cannot serve on scoped IPv6 address" in message
+        assert "Use the address without a zone ID" in message
+        assert "bind to a non-link-local address" in message
+        assert "--allowed-host" not in message
 
     def test_scoped_ipv6_bracketed_link_local_bind_is_rejected(self) -> None:
         """Bracketed scoped IPv6 bind also fails early."""
