@@ -2091,12 +2091,9 @@ _SESSION_SIGNAL_CAPABILITY_KEYS = frozenset(
 
 def valid_runtime_effect_capabilities_contract(value: object) -> bool:
     """Validate every declared runtime capability that can change a live effect."""
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS
-        or value.get("version") != 2
-        or type(value.get("version")) is not int
-    ):
+    if not isinstance(value, Mapping) or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS:
+        return False
+    if value.get("version") != 2 or type(value.get("version")) is not int:
         return False
     if any(
         type(value.get(key)) is not bool

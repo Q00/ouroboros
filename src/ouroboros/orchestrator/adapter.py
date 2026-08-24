@@ -913,20 +913,14 @@ class RuntimeCapabilities:
             plain-text stdout lines only.
         system_prompt_support: How the runtime honors the ``system_prompt``
             execution parameter (see :class:`ParamSupport`).
-        tool_restriction_support: How the runtime honors a non-empty ``tools``
-            allow-list passed to ``execute_task``.
-        empty_tool_restriction_support: How the runtime honors an explicit empty
-            ``tools=[]`` allow-list. This is independent because a runtime may
-            expose disable-all authority without a positive allow-list, or vice
-            versa.
+        tool_restriction_support: Support for non-empty ``tools`` allow-lists.
+        empty_tool_restriction_support: Independent support for ``tools=[]``.
         permission_mode_support: How the runtime honors ``permission_mode``.
         session_signals: Ouroboros Synapse capabilities. Every field defaults to
             unsupported; resumability never implies live signal delivery.
 
-    The four execution-parameter ``*_support`` fields default to
-    :attr:`ParamSupport.NATIVE` so existing first-class runtimes and
-    ``FULL_CAPABILITIES`` are unchanged; a runtime opts in to a non-native value
-    only when its handling is demonstrably lossy.
+    Execution-parameter supports default to :attr:`ParamSupport.NATIVE`; runtimes
+    opt out only when handling is demonstrably lossy.
     """
 
     skill_dispatch: bool

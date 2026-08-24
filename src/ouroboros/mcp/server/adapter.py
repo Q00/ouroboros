@@ -1621,14 +1621,9 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
-    from ouroboros.orchestrator import (
-        create_agent_runtime,
-        create_agent_runtime_async,
-        resolve_agent_runtime_backend,
-    )
-    from ouroboros.orchestrator.runner import (
-        OrchestratorRunner,
-    )
+    from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
+    from ouroboros.orchestrator.runner import OrchestratorRunner
+    from ouroboros.orchestrator.runtime_factory import create_agent_runtime_async
     from ouroboros.orchestrator.synapse import (
         EventStoreSessionSignalTargetResolver,
         SessionSignalHub,
