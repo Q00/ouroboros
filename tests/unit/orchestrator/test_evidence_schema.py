@@ -302,6 +302,28 @@ class TestExtractEvidence:
         assert record.data["pass"] is True
         assert "illustrative" not in record.data
 
+    @pytest.mark.parametrize("example_tag", ["json", ""])
+    @pytest.mark.parametrize("actual_form", ["bare", "json_fence", "untagged_fence"])
+    def test_illustrative_fence_cannot_displace_later_evidence(
+        self, example_tag: str, actual_form: str
+    ) -> None:
+        example = f"```{example_tag}\n{{\"illustrative\": true}}\n```"
+        payload = '{"files_touched": ["real.py"], "tests_passed": ["test_real"]}'
+        if actual_form == "bare":
+            actual = payload
+        elif actual_form == "json_fence":
+            actual = f"```json\n{payload}\n```"
+        else:
+            actual = f"```\n{payload}\n```"
+        text = f"Example:\n{example}\nActual evidence:\n{actual}\n"
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["real.py"],
+            "tests_passed": ["test_real"],
+        }
+
     def test_quoted_brace_inside_string_value(self) -> None:
         # Regression: old regex stopped at the first `}` even inside a
         # JSON string value, truncating the payload (bot finding #1 on

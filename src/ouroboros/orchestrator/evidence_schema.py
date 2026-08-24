@@ -129,8 +129,8 @@ class EvidenceRecord:
         return self.data.get(name, default)
 
 
-def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
-    """Yield (info, body_start) for Markdown fences outside other fences."""
+def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int, int]]:
+    """Yield ``(info, body_start, fence_end)`` for top-level Markdown fences."""
     search_pos = 0
     while True:
         opener = _FENCE_LINE_RE.search(text, search_pos)
@@ -143,16 +143,17 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
         if body_start < len(text) and text[body_start] == "\n":
             body_start += 1
 
-        yield info, body_start
-
         marker = re.escape(opener.group("fence")[0])
         closing_fence_re = re.compile(
             rf"^[ \t]{{0,3}}{marker}{{{fence_len},}}[ \t]*\r?$", re.MULTILINE
         )
         closer = closing_fence_re.search(text, body_start)
+        fence_end = len(text) if closer is None else closer.end()
+        yield info, body_start, fence_end
+
         if closer is None:
             return
-        search_pos = closer.end()
+        search_pos = fence_end
 
 
 def _skip_json_whitespace(text: str, start: int) -> int:
@@ -163,35 +164,39 @@ def _skip_json_whitespace(text: str, start: int) -> int:
 
 
 def _find_body_start(text: str) -> tuple[int, bool]:
-    """Locate where the JSON body begins.
+    """Locate the authoritative JSON boundary.
 
-    Returns a tuple of (body_start_offset, fence_found).  *fence_found* is
-    ``True`` when the body start was located via a Markdown code fence that
-    is a supported evidence boundary (JSON-tagged or untagged); ``False``
-    when no such fence was detected and the entire input is treated as a
-    bare JSON body.  Explicitly non-JSON fences (e.g. ```python) are NOT
-    considered evidence fences — they are code samples.
-
-    Prefer the first explicit top-level JSON fence (```json / ```JSON),
-    even if an earlier prose/code fence exists. Fence detection is itself
-    fence-aware: a literal ````json`` token printed inside an earlier
-    non-JSON code block is not treated as the evidence opener. If no
-    explicit JSON fence is found, use the first top-level untagged fence.
-    If no fence is found, treat the whole input as a bare JSON body — the
-    JSON decoder will skip leading whitespace itself.
+    Evidence boundaries are ordered by position. The final supported top-level
+    fence (JSON-tagged or untagged) is authoritative unless a later line-level
+    JSON container exists. In that case the later bare container owns the
+    output. This prevents an illustrative fence from displacing subsequently
+    emitted evidence while preserving fail-closed terminal boundary handling.
     """
-    first_fence_body_start: int | None = None
-
-    for info, body_start in _top_level_fence_body_starts(text):
+    supported_fences: list[tuple[int, int]] = []
+    for info, body_start, fence_end in _top_level_fence_body_starts(text):
         tag = info.split(maxsplit=1)[0:1]
-        if tag and tag[0] == "json":
-            return _skip_json_whitespace(text, body_start), True
-        if not tag and first_fence_body_start is None:
-            first_fence_body_start = body_start
+        if not tag or tag[0] == "json":
+            supported_fences.append((body_start, fence_end))
 
-    if first_fence_body_start is not None:
-        return _skip_json_whitespace(text, first_fence_body_start), True
-    return 0, False
+    if not supported_fences:
+        return 0, False
+
+    body_start, fence_end = supported_fences[-1]
+    recovery_text = _mask_markdown_examples(text)
+    for pos in range(fence_end, len(recovery_text)):
+        if recovery_text[pos] not in "{[":
+            continue
+        line_start = recovery_text.rfind("\n", 0, pos) + 1
+        if recovery_text[line_start:pos].strip():
+            continue
+        try:
+            _DECODER.raw_decode(recovery_text[pos:])
+        except json.JSONDecodeError:
+            if not _looks_like_json_container(recovery_text, pos):
+                continue
+        return pos, False
+
+    return _skip_json_whitespace(text, body_start), True
 
 
 def _mask_markdown_examples(text: str) -> str:
@@ -415,7 +420,7 @@ def _has_json_attempt(text: str) -> bool:
     JSON delimiters at all.
     """
     # Check for fenced blocks that could be JSON evidence (json-tagged or untagged)
-    for info, body_start in _top_level_fence_body_starts(text):
+    for info, body_start, _ in _top_level_fence_body_starts(text):
         body = text[body_start:].strip()
         if not body:
             continue
