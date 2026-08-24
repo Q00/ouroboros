@@ -185,9 +185,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
     if supported_fences:
         body_start, fence_end = supported_fences[-1]
         fenced_values = [
-            candidate
-            for candidate in top_level_values
-            if body_start <= candidate[0] < fence_end
+            candidate for candidate in top_level_values if body_start <= candidate[0] < fence_end
         ]
         fenced_start = fenced_values[-1][0] if fenced_values else body_start
         fenced_end = fenced_values[-1][1] if fenced_values else body_start
@@ -201,9 +199,7 @@ def _find_body_start(text: str) -> tuple[int, bool]:
                 if _looks_like_json_container(recovery_text, pos):
                     fenced_start = pos
 
-        later_values = [
-            candidate for candidate in top_level_values if candidate[0] >= fence_end
-        ]
+        later_values = [candidate for candidate in top_level_values if candidate[0] >= fence_end]
         terminal_start = later_values[-1][0] if later_values else -1
         terminal_end = later_values[-1][1] if later_values else fence_end
 
@@ -341,7 +337,7 @@ def _malformed_boundary_end(text: str, opener_pos: int) -> int:
 
 
 _INLINE_EVIDENCE_LABEL_RE = re.compile(
-    r"(?:actual\s+)?evidence(?:\s+follows)?\s*:\s*$",
+    r"(?:(?:actual|validation)\s+)?evidence(?:\s+follows)?\s*:\s*$",
     re.IGNORECASE,
 )
 
@@ -364,6 +360,8 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
         return False
 
     boundary_end = _malformed_boundary_end(text, opener_pos)
+    if text[opener_pos] == "{" and boundary_end == len(text):
+        return True
     candidate = text[opener_pos + 1 : boundary_end - 1].lstrip()
     if not candidate:
         return True
