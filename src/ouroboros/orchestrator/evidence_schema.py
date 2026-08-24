@@ -365,9 +365,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
                 all_spans.append((pos, pos + end_offset, parsed))
             except json.JSONDecodeError:
                 if _looks_like_json_container(text, pos):
-                    malformed_boundaries.append(
-                        (pos, _malformed_boundary_end(text, pos))
-                    )
+                    malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
         pos += 1
 
     # Containers can begin anywhere for ownership detection, but scalars are
@@ -395,9 +393,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     top_level_values: list[tuple[int, int, Any]] = []
     for start, end, value in all_spans:
         if any(
-            (other_start, other_end) != (start, end)
-            and other_start <= start
-            and other_end >= end
+            (other_start, other_end) != (start, end) and other_start <= start and other_end >= end
             for other_start, other_end, _ in all_spans
         ):
             continue
