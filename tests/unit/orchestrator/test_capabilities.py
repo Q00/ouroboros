@@ -1288,13 +1288,9 @@ def test_owned_tool_registry_input_schemas_are_extracted_from_definitions() -> N
 
 
 def test_pm_answer_forms_are_mutually_exclusive_in_capability_registry() -> None:
-    definitions = {
-        handler.definition.name: handler.definition for handler in get_ouroboros_tools()
-    }
+    definitions = {handler.definition.name: handler.definition for handler in get_ouroboros_tools()}
     definition_schema = definitions["ouroboros_pm_interview"].to_input_schema()
-    registry_schema = ouroboros_tool_capability_registry()[
-        "ouroboros_pm_interview"
-    ].input_schema
+    registry_schema = ouroboros_tool_capability_registry()["ouroboros_pm_interview"].input_schema
     singular = {"session_id": "pm-session", "answer": "One answer."}
     batch = {
         "session_id": "pm-session",
