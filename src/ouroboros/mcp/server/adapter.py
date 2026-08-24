@@ -2362,12 +2362,9 @@ def create_ouroboros_server(
     # ``ouroboros_submit_fanout_results``, so both sides must observe the same
     # directory. Until #1754 this composition root injected no registry and
     # registered no submit handler, so on the shipped stdio server no
-    #
     # Built at its FINAL directory (``state_dir_path``, resolved above), not a
-    # mutable path re-rooted later: a producer registering before the first
-    # interview turn would otherwise have its record moved out from under an
-    # already-issued fan-out id, whose valid submission then returns
-    # ``unknown_fanout_id``.
+    # mutable path: moving a producer record after issuing its fan-out id makes
+    # valid submissions return ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
     host_dispatch_bridge = host_dispatch.compose_host_dispatch_bridge(
         default_execute_runtime, fanout_registry
