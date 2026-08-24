@@ -641,3 +641,20 @@ class TestSanitizeForLoggingSecurityRegressions:
         assert original_secret not in str(result["items"])
         # Must degrade to plain tuple when _make() result is unverified.
         assert isinstance(result["items"], tuple)
+
+    def test_spoofed_namedtuple_iteration_degrades_to_plain_tuple(self) -> None:
+        """A spoofed ``_fields`` marker cannot preserve hostile renderer hooks."""
+
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+
+        class SpoofedNamedTuple(tuple):
+            _fields = ("left", "right")
+
+            def __iter__(self):
+                return iter((secret, "renderer-controlled"))
+
+        result = sanitize_for_logging({"items": SpoofedNamedTuple(("safe-left", "safe-right"))})
+
+        assert type(result["items"]) is tuple
+        assert result["items"] == ("safe-left", "safe-right")
+        assert secret not in str(result)

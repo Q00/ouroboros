@@ -1573,6 +1573,34 @@ class TestSensitiveDataMasking:
         assert data["<REDACTED>"] == "<REDACTED>"
         assert data["scalar"] == "<REDACTED>"
 
+    def test_spoofed_namedtuple_cannot_leak_to_console_or_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Tuple subclasses become plain tuples before either JSON renderer runs."""
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+
+        class SpoofedNamedTuple(tuple):
+            _fields = ("left", "right")
+
+            def __iter__(self):
+                return iter((secret, "renderer-controlled"))
+
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        get_logger().info(
+            "tuple.test",
+            data=SpoofedNamedTuple(("safe-left", "safe-right")),
+        )
+
+        console = capsys.readouterr().err.strip()
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert secret not in console
+        assert secret not in persistent
+        assert json.loads(console)["data"] == ["safe-left", "safe-right"]
+        assert json.loads(persistent)["data"] == ["safe-left", "safe-right"]
+
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""
 
