@@ -102,11 +102,7 @@ def _is_known_ouroboros_launcher(
         canonical = ("run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve")
         return values == legacy or _mcp_args_with_optional_selectors(values, canonical)
     if program in {"ouroboros", "python", "python3"}:
-        base = (
-            ("mcp", "serve")
-            if program == "ouroboros"
-            else ("-m", "ouroboros", "mcp", "serve")
-        )
+        base = ("mcp", "serve") if program == "ouroboros" else ("-m", "ouroboros", "mcp", "serve")
         return _mcp_args_with_optional_selectors(values, base)
     if program == "uv":
         return _mcp_args_with_optional_selectors(
@@ -146,13 +142,10 @@ def _is_setup_managed_json_entry(
     if not isinstance(env, dict):
         return False
     runtime_values = [
-        env[key]
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
-        if key in env
+        env[key] for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME") if key in env
     ]
     if not runtime_values or any(
-        not isinstance(value, str)
-        or value.strip().lower() not in {expected_runtime, "host"}
+        not isinstance(value, str) or value.strip().lower() not in {expected_runtime, "host"}
         for value in runtime_values
     ):
         return False
@@ -284,15 +277,18 @@ def _migrate_codex_entry(setup: Any) -> bool:
 
 def _migrate_launchers(setup: Any) -> bool:
     def managed_kiro(entry: dict[str, object]) -> bool:
-        return _is_setup_managed_json_entry(
-            setup,
-            entry,
-            command_key="command",
-            env_key="env",
-            args_key="args",
-            allowed_extra_keys={"disabled"},
-            expected_runtime="kiro",
-        ) and entry.get("disabled", False) is False
+        return (
+            _is_setup_managed_json_entry(
+                setup,
+                entry,
+                command_key="command",
+                env_key="env",
+                args_key="args",
+                allowed_extra_keys={"disabled"},
+                expected_runtime="kiro",
+            )
+            and entry.get("disabled", False) is False
+        )
 
     def managed_copilot(entry: dict[str, object]) -> bool:
         return _is_setup_managed_json_entry(
@@ -306,16 +302,18 @@ def _migrate_launchers(setup: Any) -> bool:
         )
 
     def managed_opencode(entry: dict[str, object]) -> bool:
-        return _is_setup_managed_json_entry(
-            setup,
-            entry,
-            command_key="command",
-            env_key="environment",
-            args_key=None,
-            allowed_extra_keys={"type", "timeout"},
-            expected_runtime="opencode",
-        ) and entry.get("type") == "local" and (
-            "timeout" not in entry or entry.get("timeout") == 300000
+        return (
+            _is_setup_managed_json_entry(
+                setup,
+                entry,
+                command_key="command",
+                env_key="environment",
+                args_key=None,
+                allowed_extra_keys={"type", "timeout"},
+                expected_runtime="opencode",
+            )
+            and entry.get("type") == "local"
+            and ("timeout" not in entry or entry.get("timeout") == 300000)
         )
 
     migrations = (
@@ -352,7 +350,6 @@ def _migrate_launchers(setup: Any) -> bool:
         ),
     )
     return all(migrate() for migrate in migrations)
-
 
 
 def setup_host(setup: Any) -> bool:

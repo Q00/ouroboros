@@ -10051,7 +10051,6 @@ class TestHostRuntimeSetup:
         assert config_path.read_text(encoding="utf-8") == original_config
         assert codex_config.read_text(encoding="utf-8") == original_codex
 
-
     @pytest.mark.parametrize(
         ("command", "args"),
         [
@@ -10095,6 +10094,7 @@ class TestHostRuntimeSetup:
             assert setup_cmd._setup_host() is False
 
         assert mcp_path.read_text(encoding="utf-8") == original
+
 
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""

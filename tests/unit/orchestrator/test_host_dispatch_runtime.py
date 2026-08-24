@@ -299,9 +299,7 @@ class TestDispatchRoundTrip:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         now = [100.0]
-        monkeypatch.setattr(
-            "ouroboros.orchestrator.host_dispatch.time.monotonic", lambda: now[0]
-        )
+        monkeypatch.setattr("ouroboros.orchestrator.host_dispatch.time.monotonic", lambda: now[0])
         dispatch_id = bridge.park(
             session_id="sess_expired",
             execution_id=None,
