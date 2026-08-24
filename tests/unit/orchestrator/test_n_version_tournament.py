@@ -533,9 +533,7 @@ class TestRejectRc1WithNoPatch:
         def _fake_no_index_signal(*args: object, **kwargs: object) -> object:
             cmd = args[0] if args else kwargs.get("args", [])
             if isinstance(cmd, list) and "--no-index" in cmd:
-                return subprocess.CompletedProcess(
-                    args=cmd, returncode=-9, stdout=b"", stderr=b""
-                )
+                return subprocess.CompletedProcess(args=cmd, returncode=-9, stdout=b"", stderr=b"")
             return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
         with nvt.RunWorktreeManager(git_workspace) as manager:
