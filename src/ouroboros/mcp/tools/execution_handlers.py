@@ -72,7 +72,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator import create_agent_runtime
+from ouroboros.orchestrator import create_agent_runtime, create_agent_runtime_async
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_CWD_ARG,
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -1544,7 +1544,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         if inherited_runtime_handle and inherited_runtime_handle.approval_mode
                         else None
                     )
-                    agent_adapter = create_agent_runtime(
+                    agent_adapter = await create_agent_runtime_async(
+                        create_agent_runtime,
                         backend=self.agent_runtime_backend,
                         model=resolve_execution_model(self.agent_runtime_backend),
                         cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,

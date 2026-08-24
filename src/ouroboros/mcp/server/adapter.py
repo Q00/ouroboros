@@ -1614,7 +1614,11 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
-    from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
+    from ouroboros.orchestrator import (
+        create_agent_runtime,
+        create_agent_runtime_async,
+        resolve_agent_runtime_backend,
+    )
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
@@ -1873,7 +1877,8 @@ def create_ouroboros_server(
     ) -> Any:
         await _ensure_evolution_store_initialized()
         task_cwd = evolutionary_loop.get_project_dir()
-        runner_adapter = create_agent_runtime(
+        runner_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=execution_model,
             cwd=task_cwd or effective_cwd,
@@ -2138,7 +2143,8 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
-        validation_adapter = create_agent_runtime(
+        validation_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,

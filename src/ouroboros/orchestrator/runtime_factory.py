@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -322,4 +324,17 @@ def create_agent_runtime(
     )
 
 
-__all__ = ["create_agent_runtime", "resolve_agent_runtime_backend"]
+async def create_agent_runtime_async(
+    runtime_factory: Callable[..., AgentRuntime] = create_agent_runtime,
+    **kwargs: object,
+) -> AgentRuntime:
+    """Construct a runtime on a worker thread for active async paths."""
+    return await asyncio.to_thread(runtime_factory, **kwargs)
+
+
+__all__ = [
+    "create_agent_runtime",
+    "create_agent_runtime_async",
+    "resolve_agent_runtime_backend",
+]
+

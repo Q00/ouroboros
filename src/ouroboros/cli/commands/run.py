@@ -622,6 +622,7 @@ async def _run_orchestrator(
     from ouroboros.orchestrator import (
         OrchestratorRunner,
         create_agent_runtime,
+        create_agent_runtime_async,
         resolve_agent_runtime_backend,
     )
     from ouroboros.orchestrator.session import SessionRepository
@@ -731,7 +732,8 @@ async def _run_orchestrator(
 
     execution_model = resolve_execution_model(resolved_runtime_backend)
     print_info(_execution_model_status(resolved_runtime_backend, execution_model))
-    adapter = create_agent_runtime(
+    adapter = await create_agent_runtime_async(
+        create_agent_runtime,
         backend=resolved_runtime_backend,
         model=execution_model,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
