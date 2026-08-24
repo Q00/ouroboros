@@ -1,5 +1,7 @@
 """Unit tests for packaged Codex artifact installation."""
 
+import ctypes
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -336,6 +338,167 @@ class TestInstallCodexRules:
         assert installed_content.count(_SKILL_CAPABILITY_GUIDE_MARKER) == 1
         assert "## stale generated guide" not in installed_content
         assert "## Ouroboros Skill Capability Guide: Codex" in installed_content
+
+
+class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
+    """Setup must still install when the kernel or filesystem rejects RENAME_NOREPLACE.
+
+    NFS answers ``renameat2(..., RENAME_NOREPLACE)`` with ``EINVAL`` and renames
+    nothing, so a home directory on NFS fails every Codex artifact install — and
+    the rollback, which renames the same way, leaves the previous generation
+    deleted. These tests pin the requirement: an unsupported flag degrades to the
+    portable path, and the no-replace guarantee itself still holds.
+    """
+
+    @staticmethod
+    def _force_renameat2_errno(
+        monkeypatch: pytest.MonkeyPatch,
+        error_number: int,
+    ) -> list[int]:
+        """Make ``renameat2`` fail with ``error_number`` without renaming anything."""
+        calls: list[int] = []
+
+        class _FailingRenameat2:
+            argtypes: object = None
+            restype: object = None
+
+            def __call__(self, *_args: object) -> int:
+                calls.append(error_number)
+                ctypes.set_errno(error_number)
+                return -1
+
+        class _FakeLibc:
+            renameat2 = _FailingRenameat2()
+
+        monkeypatch.setattr(codex_artifacts.os, "name", "posix")
+        monkeypatch.setattr(codex_artifacts.sys, "platform", "linux")
+        monkeypatch.setattr(codex_artifacts.ctypes, "CDLL", lambda *_a, **_kw: _FakeLibc())
+        return calls
+
+    def test_installs_file_artifact_when_the_flag_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A rules file must install on a filesystem without RENAME_NOREPLACE."""
+        calls = self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_path = install_codex_rules(codex_dir=tmp_path / ".codex")
+
+        assert calls, "the rejected renameat2 path was never exercised"
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+
+    def test_installs_directory_artifact_when_the_flag_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Skills install as directories, which the hard-link fallback cannot handle."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        skill_dir = source_skills_dir / "run"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: run\n---\n", encoding="utf-8")
+        calls = self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_paths = install_codex_skills(
+            codex_dir=tmp_path / ".codex",
+            skills_dir=source_skills_dir,
+        )
+
+        assert calls, "the rejected renameat2 path was never exercised"
+        assert installed_paths == (tmp_path / ".codex" / "skills" / f"{CODEX_SKILL_NAMESPACE}run",)
+        assert installed_paths[0].joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "---\nname: run\n---\n"
+        )
+
+    def test_refresh_over_an_existing_generation_keeps_the_rule_installed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed commit used to strand the previous rule in a hidden backup sibling."""
+        codex_dir = tmp_path / ".codex"
+        rules_dir = codex_dir / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / CODEX_RULE_FILENAME).write_text("previous generation", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_path = install_codex_rules(codex_dir=codex_dir)
+
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+        assert [entry.name for entry in rules_dir.iterdir()] == [CODEX_RULE_FILENAME]
+
+    @pytest.mark.parametrize("error_number", [errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP])
+    def test_fallback_still_refuses_an_occupied_file_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error_number: int,
+    ) -> None:
+        """Degrading the primitive must not degrade the no-replace guarantee."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        target_path.write_text("another writer", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, error_number)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert target_path.read_text(encoding="utf-8") == "another writer"
+        assert source_path.read_text(encoding="utf-8") == "staged"
+
+    def test_fallback_still_refuses_an_occupied_directory_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty directory target would be silently replaced by a bare ``os.rename``."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        target_path.mkdir()
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert list(target_path.iterdir()) == []
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_existing_target_reported_by_renameat2_is_not_degraded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``EEXIST`` is the guarantee working, not a missing capability."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EEXIST)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert not target_path.exists()
+
+    def test_unrelated_rename_failure_still_propagates(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only capability errnos may fall through to the portable path."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EACCES)
+
+        with pytest.raises(OSError) as rename_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert rename_error.value.errno == errno.EACCES
+        assert not target_path.exists()
 
 
 class TestLoadPackagedCodexSkills:

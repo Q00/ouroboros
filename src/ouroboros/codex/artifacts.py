@@ -30,6 +30,13 @@ CODEX_SKILL_NAMESPACE = "ouroboros-"
 _SKILL_CAPABILITY_GUIDE_MARKER = "<!-- ouroboros:skill-capability-guide -->"
 _RULE_NAMESPACE = Path(CODEX_RULE_FILENAME).stem
 _RULE_SUFFIX = Path(CODEX_RULE_FILENAME).suffix
+# Errnos that mean "this kernel or filesystem does not implement the no-replace
+# rename flag" rather than "the rename failed". ``ENOSYS`` is a kernel older than
+# renameat2 (< 3.15); ``EINVAL`` and ``EOPNOTSUPP`` are filesystems whose rename
+# implementation rejects the flag — NFS does this, as do some FUSE and overlay
+# mounts. Nothing else may be swallowed: ``EEXIST`` in particular is the
+# no-replace guarantee doing its job and must reach the caller.
+_RENAME_FLAG_UNSUPPORTED_ERRNOS = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})
 
 
 def _render_codex_rules(source: str) -> str:
@@ -398,6 +405,24 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
     )
 
 
+def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
+    """Rename without replacing where no atomic no-replace primitive is available.
+
+    Files keep the atomic guarantee: ``os.link`` fails with ``EEXIST`` when the
+    target is already occupied. Directories cannot be hard-linked, so the
+    guarantee degrades from atomic to check-then-rename — a writer that creates
+    the target between the check and the rename is not detected. Filesystems that
+    reach this branch offer nothing stronger.
+    """
+    if source_path.is_dir() and not source_path.is_symlink():
+        if os.path.lexists(target_path):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(target_path))
+        os.rename(source_path, target_path)
+        return
+    os.link(source_path, target_path, follow_symlinks=False)
+    source_path.unlink()
+
+
 def _rename_noreplace(source_path: Path, target_path: Path) -> None:
     """Atomically rename without replacing a target created by another writer."""
     if os.name == "nt":
@@ -426,15 +451,14 @@ def _rename_noreplace(source_path: Path, target_path: Path) -> None:
             ctypes.c_uint,
         )
         rename_exclusive.restype = ctypes.c_int
-        if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) != 0:
+        if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) == 0:
+            return
+        if ctypes.get_errno() not in _RENAME_FLAG_UNSUPPORTED_ERRNOS:
             _raise_rename_error(source_path, target_path)
-        return
+        # The kernel or the filesystem rejected RENAME_NOREPLACE itself, so no
+        # rename was attempted. Degrade instead of failing the install.
 
-    if source_path.is_dir() and not source_path.is_symlink():
-        msg = f"Atomic no-replace directory rename is unavailable on {sys.platform}"
-        raise OSError(errno.ENOTSUP, msg, str(target_path))
-    os.link(source_path, target_path, follow_symlinks=False)
-    source_path.unlink()
+    _rename_noreplace_fallback(source_path, target_path)
 
 
 def _artifact_fingerprint(path: Path) -> str:
