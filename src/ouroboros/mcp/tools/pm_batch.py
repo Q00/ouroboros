@@ -33,6 +33,7 @@ from ouroboros.bigbang.pm_interview import (
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 
 log = structlog.get_logger()
 
@@ -88,45 +89,78 @@ def turn_answers(
     answers: Any,
     answer: str | None,
     last_question: str | None,
+    *,
+    planned_questions: list[str] | None = None,
 ) -> tuple[list[tuple[str, str]], str | None]:
-    """Normalize one call's answers into ``(question, answer)`` pairs.
+    """Validate and normalize one call's answers into question/answer pairs.
 
-    A turn's answers arrive together (RFC #2222 decision 2), so this is the
-    only shape the recorder ever sees: each pair carries its own question and
-    nothing is matched against anything the server remembered. ``answers`` is
-    the batch spelling — a list of ``{question, answer}`` — and
-    ``answer``/``last_question`` is the single-question one.
+    ``answers`` is the batched spelling and accepts one to three strict
+    ``{question: str, answer: str}`` objects. Question identity is normalized
+    before duplicate checks, matching the producer's identity semantics.
 
-    An answer without its question is refused rather than filed against
-    whatever round happens to be last. Nothing is persisted when a turn is
-    asked, so there is no remembered question to fall back on, and guessing
-    would write a decision under a question nobody was looking at.
+    Most atomic turns intentionally are not persisted while they are on the
+    wire, so their identities cannot be authenticated server-side. When a
+    persisted question-only round does exist (for example, a legacy or plugin
+    handoff), ``planned_questions`` closes that gap: the caller must answer
+    exactly those identities and cannot substitute a question it invented.
 
-    Returns ``(pairs, error)``; an empty pair list with no error means this
-    call carries no answers, which is a reconnect and plans a fresh turn.
+    The singular and batched forms are mutually exclusive so neither can be
+    silently discarded. An omitted ``answers`` and ``answer`` means reconnect.
+    An explicitly malformed or empty batch is rejected rather than treated as
+    reconnect.
     """
-    if isinstance(answers, list) and answers:
-        pairs: list[tuple[str, str]] = []
+    if answers is not None and answer is not None:
+        return [], ("'answer' and 'answers' are mutually exclusive; send exactly one answer form.")
+
+    pairs: list[tuple[str, str]] = []
+    if answers is not None:
+        if not isinstance(answers, list):
+            return [], "'answers' must be an array of one to three answer objects."
+        if not 1 <= len(answers) <= 3:
+            return [], "'answers' must contain between one and three answer objects."
+
+        seen: set[str] = set()
         for entry in answers:
             if not isinstance(entry, dict):
                 return [], "Each item of 'answers' must be an object with 'question' and 'answer'."
-            question = str(entry.get("question") or "").strip()
-            text = entry.get("answer")
-            if not question or not isinstance(text, str) or not text.strip():
+            if set(entry) != {"question", "answer"}:
+                return [], ("Each item of 'answers' must contain only 'question' and 'answer'.")
+            question = entry["question"]
+            text = entry["answer"]
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
                 return [], (
-                    "Each item of 'answers' needs a non-empty 'question' and 'answer'. "
+                    "Each item of 'answers' needs a non-empty string 'question' and 'answer'. "
                     "Every answer names the question it belongs to."
                 )
-            pairs.append((question, text))
-        return pairs, None
-    if answer:
-        if not last_question:
+            identity = normalize_question_text(question)
+            if identity in seen:
+                return [], "'answers' contains a duplicate question identity."
+            seen.add(identity)
+            pairs.append((question.strip(), text))
+    elif answer is not None:
+        if not isinstance(answer, str) or not answer.strip():
+            return [], "'answer' must be a non-empty string."
+        if not isinstance(last_question, str) or not last_question.strip():
             return [], (
                 "Pass the question this answer belongs to as 'last_question', or send the "
                 "turn's answers together as 'answers': [{question, answer}]."
             )
-        return [(last_question, answer)], None
-    return [], None
+        pairs = [(last_question.strip(), answer)]
+
+    if pairs and planned_questions is not None:
+        planned_identities = {normalize_question_text(question) for question in planned_questions}
+        supplied_identities = {normalize_question_text(question) for question, _ in pairs}
+        if supplied_identities != planned_identities:
+            return [], (
+                "Answer question identities must exactly match the persisted planned questions; "
+                "caller-invented or missing questions are not accepted."
+            )
+    return pairs, None
 
 
 async def record_turn_answers(engine: Any | None, state: Any, pairs: list[tuple[str, str]]) -> Any:

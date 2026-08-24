@@ -530,7 +530,7 @@ class TestCodexSetup:
     def test_register_codex_mcp_server_refreshes_legacy_direct_dev_entry(
         self, tmp_path: Path
     ) -> None:
-        """Earlier setup-owned direct executable configs should not become stuck."""
+        """Earlier setup-owned base-argv executable configs should not become stuck."""
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         codex_config.write_text(
@@ -544,7 +544,7 @@ class TestCodexSetup:
                     "",
                     "[mcp_servers.ouroboros]",
                     'command = "/old/venv/bin/ouroboros"',
-                    ('args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]'),
+                    'args = ["mcp", "serve"]',
                     "",
                 ]
             ),
@@ -564,6 +564,150 @@ class TestCodexSetup:
 
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert "/old/venv/bin/ouroboros" not in contents
+
+    def test_register_codex_mcp_server_refreshes_path_selected_legacy_direct_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A canonical PATH launcher and Codex env are a safe legacy migration seam."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'command = "/home/operator/.local/bin/ouroboros"',
+                    'args = ["mcp", "serve"]',
+                    "",
+                    "[mcp_servers.ouroboros.env]",
+                    'OUROBOROS_AGENT_RUNTIME = "codex"',
+                    'OUROBOROS_LLM_BACKEND = "codex"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.51.4",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert "/home/operator/.local/bin/ouroboros" not in contents
+        assert "ouroboros-ai[mcp]" in contents
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical argv does not make a launcher with foreign env setup-owned."""
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(selected))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "claude"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_direct_not_selected_by_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical base argv stays user-managed when PATH selects another executable."""
+        configured = tmp_path / "custom" / "ouroboros"
+        selected = tmp_path / "path" / "ouroboros"
+        configured.parent.mkdir()
+        selected.parent.mkdir()
+        configured.touch()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(configured))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            if command == "ouroboros":
+                return str(selected)
+            return str(configured) if command == str(configured) else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_process_controls(
+        self, tmp_path: Path
+    ) -> None:
+        """Process controls keep an otherwise canonical direct entry user-managed."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            'command = "/home/operator/.local/bin/ouroboros"\n'
+            'args = ["mcp", "serve"]\n'
+            "tool_timeout_sec = 600\n"
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
 
     def test_register_codex_mcp_server_preserves_custom_python_module_by_default(
         self, tmp_path: Path
@@ -9715,9 +9859,7 @@ class TestHostRuntimeSetup:
         ):
             assert setup_cmd._setup_host() is True
 
-        entry = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"][
-            "ouroboros"
-        ]
+        entry = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"]["ouroboros"]
         assert entry["args"] == [
             "mcp",
             "serve",

@@ -239,6 +239,8 @@ def test_frugality_attention_respects_persisted_assurance() -> None:
     ("event_type", "expected_trigger"),
     [
         ("auto.seed_qa.blocked", "seed_qa_blocked"),
+        ("auto.seed_preflight.blocked", "seed_preflight_blocked"),
+        ("auto.session.blocked", "auto_session_blocked"),
         ("lineage.stagnated", "lineage_stagnated"),
         ("control.session.signal.delivery_uncertain", "session_signal_delivery_uncertain"),
     ],
@@ -249,6 +251,62 @@ def test_direct_attention_triggers(event_type: str, expected_trigger: str) -> No
     relays = classify_relay_events([event], job_id="job_1")
 
     assert any(relay.get("trigger") == expected_trigger for relay in relays)
+
+
+def test_auto_blocked_events_wake_attention_waiters() -> None:
+    """Silent-block regression: a blocked auto session must be able to wake a
+    ``wait_for="attention_or_ac_change"`` observer, which filters on
+    ``RELAY_SOURCE_EVENT_TYPES`` membership before classification runs."""
+    from ouroboros.mcp.tools.attention_relay import RELAY_SOURCE_EVENT_TYPES
+
+    assert "auto.seed_qa.blocked" in RELAY_SOURCE_EVENT_TYPES
+    assert "auto.seed_preflight.blocked" in RELAY_SOURCE_EVENT_TYPES
+    assert "auto.session.blocked" in RELAY_SOURCE_EVENT_TYPES
+
+
+def test_auto_session_blocked_relays_blocker_evidence() -> None:
+    event = _event(
+        1,
+        "auto.session.blocked",
+        {
+            "status": "blocked",
+            "stop_reason_code": "seed_preflight_unexecutable",
+            "tool_name": "seed_preflight",
+            "blocker": "Seed preflight found 3 unexecutable contract claim(s); …",
+            "resume_capability": "none",
+        },
+    )
+
+    relays = cast(list[Relay], classify_relay_events([event], job_id="job_1"))
+    relay = next(item for item in relays if item.get("trigger") == "auto_session_blocked")
+
+    assert relay["evidence"]["stop_reason_code"] == "seed_preflight_unexecutable"
+    assert relay["evidence"]["blocker"].startswith("Seed preflight found")
+    assert relay["evidence"]["resume_capability"] == "none"
+
+
+def test_seed_preflight_blocked_relays_open_questions() -> None:
+    event = _event(
+        1,
+        "auto.seed_preflight.blocked",
+        {
+            "seed_id": "seed_2be2907edc07",
+            "codes": ["unbound_env_var", "context_reference_unresolved"],
+            "open_questions": [
+                "What concrete value must $VAULT_PATH hold when the verify command runs?",
+                "What is the real, absolute path for the referenced context 'Obsidian Vault'?",
+            ],
+        },
+    )
+
+    relays = cast(list[Relay], classify_relay_events([event], job_id="job_1"))
+    relay = next(item for item in relays if item.get("trigger") == "seed_preflight_blocked")
+
+    assert relay["evidence"]["codes"] == [
+        "unbound_env_var",
+        "context_reference_unresolved",
+    ]
+    assert relay["evidence"]["open_questions"][0].startswith("What concrete value")
 
 
 def test_seed_qa_advisory_reports_without_claiming_ownership() -> None:

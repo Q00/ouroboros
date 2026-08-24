@@ -3297,13 +3297,16 @@ class TestServeTransport:
         assert extensions[0].settings()["undeclaredBehavior"] == (
             "parallel_preferred_sequential_fallback"
         )
-        # The SDK builds its own DNS-rebinding settings for this bind spelling,
-        # so the adapter passes none of its own.
-        mock_instance.run_sse_async.assert_awaited_once_with(
-            host="127.0.0.1",
-            port=9000,
-            transport_security=None,
-        )
+        mock_instance.run_sse_async.assert_awaited_once()
+        run_args = mock_instance.run_sse_async.await_args.kwargs
+        assert run_args["host"] == "127.0.0.1"
+        assert run_args["port"] == 9000
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_stdio_serve_logs_exit(self) -> None:
@@ -3389,11 +3392,16 @@ class TestServeTransport:
         ):
             await adapter.serve(transport="sse", host="localhost", port=0)
 
-        mock_instance.run_sse_async.assert_awaited_once_with(
-            host="localhost",
-            port=0,
-            transport_security=None,
-        )
+        mock_instance.run_sse_async.assert_awaited_once()
+        run_args = mock_instance.run_sse_async.await_args.kwargs
+        assert run_args["host"] == "localhost"
+        assert run_args["port"] == 0
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_streamable_http_uses_modern_stateless_run_options(self):
@@ -3418,12 +3426,17 @@ class TestServeTransport:
         mock_fastmcp_cls.assert_called_once()
         assert mock_fastmcp_cls.call_args.args == (adapter,)
         assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
-        mock_instance.run_streamable_http_async.assert_awaited_once_with(
-            host="127.0.0.1",
-            port=9100,
-            stateless_http=True,
-            transport_security=None,
-        )
+        mock_instance.run_streamable_http_async.assert_awaited_once()
+        run_args = mock_instance.run_streamable_http_async.await_args.kwargs
+        assert run_args["host"] == "127.0.0.1"
+        assert run_args["port"] == 9100
+        assert run_args["stateless_http"] is True
+        assert run_args["transport_security"].allowed_hosts == [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+        ]
+        assert run_args["transport_security"].allowed_origins == []
 
     @pytest.mark.asyncio
     async def test_streamable_http_real_mcpserver_exposes_mcp_path(self) -> None:

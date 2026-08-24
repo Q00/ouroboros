@@ -31,7 +31,7 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
 )
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.pm_batch import record_turn_answers
+from ouroboros.mcp.tools.pm_batch import record_turn_answers, turn_answers
 from ouroboros.mcp.tools.pm_handler import (
     PMInterviewHandler,
     _meta_path,
@@ -329,6 +329,149 @@ async def test_a_turn_is_recorded_whole(tmp_path: Path) -> None:
     # The turn resolved, so the next one was planned.
     engine.plan_next_turns.assert_awaited_once()
     assert "pending_batch" not in _load_meta(state.interview_id, tmp_path)
+
+
+def test_batch_answer_schema_is_closed_and_bounded() -> None:
+    schema = PMInterviewHandler().definition.to_input_schema()["properties"]["answers"]
+
+    assert schema["minItems"] == 1
+    assert schema["maxItems"] == 3
+    assert schema["items"] == {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "minLength": 1},
+            "answer": {"type": "string", "minLength": 1},
+        },
+        "required": ["question", "answer"],
+        "additionalProperties": False,
+    }
+
+
+def test_answer_schema_makes_singular_and_batch_forms_mutually_exclusive() -> None:
+    schema = PMInterviewHandler().definition.to_input_schema()
+
+    assert schema["not"] == {"required": ["answer", "answers"]}
+
+
+@pytest.mark.parametrize(
+    ("answers", "error_fragment"),
+    [
+        (
+            [{"question": f"Question {index}?", "answer": "A"} for index in range(4)],
+            "between one and three",
+        ),
+        ([], "between one and three"),
+        ([{"question": Q_PRIMARY, "answer": "A", "identity": "invented"}], "only"),
+        ([{"question": 42, "answer": "A"}], "non-empty string"),
+        ([{"question": Q_PRIMARY, "answer": 42}], "non-empty string"),
+        (
+            [
+                {"question": Q_PRIMARY, "answer": "A"},
+                {"question": f"  {Q_PRIMARY}  ", "answer": "B"},
+            ],
+            "duplicate question identity",
+        ),
+    ],
+)
+def test_malformed_and_duplicate_batch_answers_are_rejected(
+    answers: object,
+    error_fragment: str,
+) -> None:
+    pairs, error = turn_answers(answers, None, None)
+
+    assert pairs == []
+    assert error is not None
+    assert error_fragment in error
+
+
+def test_singular_and_batch_answer_forms_are_rejected_together() -> None:
+    pairs, error = turn_answers(
+        [{"question": Q_PRIMARY, "answer": "The review workflow."}],
+        "A singular answer that must not be discarded.",
+        Q_PRIMARY,
+    )
+
+    assert pairs == []
+    assert error is not None
+    assert "mutually exclusive" in error
+
+
+def test_valid_batch_answers_preserve_the_producer_attention_budget() -> None:
+    answers = [
+        {"question": Q_PRIMARY, "answer": "The review workflow."},
+        {"question": Q_SECOND, "answer": "Retention is 90 days."},
+        {"question": Q_THIRD, "answer": "After launch."},
+    ]
+
+    pairs, error = turn_answers(answers, None, None)
+
+    assert error is None
+    assert pairs == [(entry["question"], entry["answer"]) for entry in answers]
+
+
+@pytest.mark.asyncio
+async def test_persisted_planned_question_rejects_a_caller_invented_identity(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_batch_identity", pending=Q_PRIMARY)
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
+    engine.plan_next_turns = AsyncMock()
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answers": [{"question": "A different question?", "answer": "A"}],
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_err
+    assert "persisted planned questions" in str(result.error)
+    engine.plan_next_turns.assert_not_called()
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.rounds[-1].question == Q_PRIMARY
+    assert reloaded.rounds[-1].user_response is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_single_answer_may_replace_a_stale_pending_question(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    state = _answered_state("pm_legacy_question_repair", pending="Stale placeholder?")
+    assert (await engine.save_state(state)).is_ok
+    _save_pm_meta(state.interview_id, engine, cwd=str(tmp_path), data_dir=tmp_path)
+    engine.plan_next_turns = AsyncMock(return_value=Result.ok([_plan("Next question?")]))
+    handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+    result = await handler.handle(
+        {
+            "session_id": state.interview_id,
+            "answer": "The review workflow.",
+            "last_question": Q_PRIMARY,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    assert result.is_ok
+    reloaded = (await engine.load_state(state.interview_id)).value
+    assert reloaded.rounds[-1].question == Q_PRIMARY
+    assert reloaded.rounds[-1].user_response == "The review workflow."
+
+
+def test_persisted_planned_question_accepts_its_normalized_identity() -> None:
+    pairs, error = turn_answers(
+        [{"question": f"  {Q_PRIMARY}  ", "answer": "The review workflow."}],
+        None,
+        None,
+        planned_questions=[Q_PRIMARY],
+    )
+
+    assert error is None
+    assert pairs == [(Q_PRIMARY, "The review workflow.")]
 
 
 @pytest.mark.asyncio

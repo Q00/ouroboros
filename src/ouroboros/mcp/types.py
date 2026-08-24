@@ -289,6 +289,8 @@ class MCPToolParameter:
         default: Default value if not provided.
         enum: Allowed values if restricted.
         items: JSON Schema for array items (e.g. ``{"type": "string"}``).
+        min_items: Minimum array length, when the parameter is an array.
+        max_items: Maximum array length, when the parameter is an array.
     """
 
     name: str
@@ -298,6 +300,8 @@ class MCPToolParameter:
     default: JSONValue = None
     enum: tuple[str, ...] | None = None
     items: JSONSchema | None = None
+    min_items: int | None = None
+    max_items: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +352,10 @@ class MCPToolDefinition:
                 prop["enum"] = list(param.enum)
             if param.items is not None:
                 prop["items"] = _mutable_json_copy(param.items)
+            if param.min_items is not None:
+                prop["minItems"] = param.min_items
+            if param.max_items is not None:
+                prop["maxItems"] = param.max_items
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)

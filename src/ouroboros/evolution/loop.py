@@ -1456,14 +1456,6 @@ class EvolutionaryLoop:
                 enabled=execution_policy.focused_evolution,
             )
 
-            await loop_support.emit_generation_started_once(
-                self.event_store,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=GenerationPhase.WONDERING.value,
-                seed=current_seed,
-            )
-
             if self.wonder_engine and not _should_skip("wondering"):
                 wonder_kwargs: dict[str, Any] = {
                     "current_ontology": current_seed.ontology_schema,
@@ -1485,6 +1477,24 @@ class EvolutionaryLoop:
                         and not wonder_output.should_continue
                         and not wonder_output.questions
                     ):
+                        generation_focus = focus.select_evolution_focus(
+                            generation_parent_seed,
+                            current_seed,
+                            prev_gen.evaluation_summary,
+                            wonder=wonder_output,
+                            regression_report=regression_report,
+                            enabled=execution_policy.focused_evolution,
+                        )
+                        if checkpoint_focus is not None:
+                            generation_focus = checkpoint_focus
+                        await loop_support.emit_generation_started_once(
+                            self.event_store,
+                            lineage_id=lineage.lineage_id,
+                            generation_number=generation_number,
+                            phase=GenerationPhase.WONDERING.value,
+                            seed=current_seed,
+                            focus=generation_focus,
+                        )
                         # Question-bearing output still requires Reflect; only an empty stop returns.
                         await frugality.record_wonder_stop(
                             self,
@@ -1720,12 +1730,12 @@ class EvolutionaryLoop:
 
         else:
             # Gen 1, or a Gen 2+ ontology-stable verification handoff.
-            await loop_support.emit_generation_started_once(
+            await loop_support.emit_execution_started_once(
                 self.event_store,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=GenerationPhase.EXECUTING.value,
-                seed=current_seed,
+                lineage.lineage_id,
+                generation_number,
+                current_seed,
+                generation_focus,
             )
 
         if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
@@ -1740,6 +1750,13 @@ class EvolutionaryLoop:
             if checkpoint_focus is not None:
                 generation_focus = checkpoint_focus
             generation_focus.log_selection(generation_number)
+            await loop_support.emit_execution_started_once(
+                self.event_store,
+                lineage.lineage_id,
+                generation_number,
+                current_seed,
+                generation_focus,
+            )
 
         # Check for graceful shutdown before executing.
         # Derive the actual last completed phase from what ran:

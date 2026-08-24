@@ -50,7 +50,6 @@ from ouroboros.backends.capabilities import (
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 
-# Advisory prompt text moved to ``mcp.tools.advisory_prompts`` in #1754;
 # re-exported for importers that already reach for these names here.
 from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _GENERIC_ADVISORY_OUTPUT_SECTION,
@@ -76,6 +75,7 @@ from ouroboros.mcp.tools.fanout import (  # noqa: F401
     stamp_question_advisory_fanout,
     submit_fanout_results,
 )
+from ouroboros.mcp.tools.interview_prompt import bounded_system_prompt
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -1180,7 +1180,7 @@ def build_interview_subagent(
     """
     from ouroboros.agents.loader import load_agent_prompt
 
-    system_prompt = load_agent_prompt("socratic-interviewer")
+    system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
 ## Question-first Advisory Fanout

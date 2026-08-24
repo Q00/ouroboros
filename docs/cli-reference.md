@@ -305,7 +305,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
-- For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
+- For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
@@ -1213,7 +1213,7 @@ MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The str
 
 Reaching an Ouroboros MCP port is enough to call `ouroboros_execute_seed`, which runs caller-supplied seed YAML through a real agent runtime with that runtime's full file and shell authority. The port is therefore as privileged as a shell on the host, and `mcp serve` treats it that way.
 
-The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and the SDK enables DNS-rebinding protection for loopback binds automatically.
+The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and Ouroboros supplies explicit DNS-rebinding protection settings for loopback binds (keeping an empty Origin policy fail-closed rather than inheriting the SDK's permissive browser-origin defaults).
 
 A bind that other machines can reach is refused unless all of the following are supplied:
 
@@ -1224,6 +1224,8 @@ A bind that other machines can reach is refused unless all of the following are 
 `--workspace-root` is not required but should be treated as such for any shared deployment: without it a caller may name any existing directory on the host as an agent's working tree.
 
 Rate limiting (`RateLimitConfig`) is available once an auth method is configured, because the token supplies the per-client identity it buckets by. Without authentication it is refused rather than silently sharing one bucket across all callers.
+
+Scoped IPv6 addresses (those with a zone identifier such as `fe80::1%eth0`) cannot be used as network bind addresses when authentication is configured. The MCP SDK's Pydantic URL parser does not accept zone identifiers in URL authorities — neither raw nor percent-encoded — so authentication metadata (issuer and resource server URLs) cannot be constructed. Ouroboros rejects scoped IPv6 binds at startup with a clear error. This applies both to non-loopback scoped addresses (where auth is mandatory) and to scoped loopback addresses (e.g. `::1%lo`) when an auth token is explicitly passed or inherited from environment configuration. Unauthenticated scoped loopback addresses remain usable since they do not require AuthSettings construction. To resolve: use the address without a zone ID (e.g. `::1` instead of `::1%lo`), bind to a non-link-local address, or remove the auth token for loopback use.
 
 **Startup behavior:**
 
