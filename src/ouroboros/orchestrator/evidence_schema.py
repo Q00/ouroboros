@@ -311,18 +311,27 @@ def _malformed_boundary_end(text: str, opener_pos: int) -> int:
     return len(text)
 
 
-def _looks_like_json_container(text: str, opener_pos: int) -> bool:
-    """Return whether a failed line-level opener is a JSON payload attempt.
+_INLINE_EVIDENCE_LABEL_RE = re.compile(
+    r"(?:actual\s+)?evidence(?:\s+follows)?\s*:\s*$",
+    re.IGNORECASE,
+)
 
-    Recovery must fail closed for malformed evidence containers, but ordinary
-    prose delimiters such as ``[done]`` and ``{ config.host }`` are not JSON
-    boundaries. A malformed candidate is authoritative only when it starts a
-    Markdown line and its first token has JSON container shape. Unquoted object
-    keys followed by ``:`` remain malformed attempts so broken evidence cannot
-    expose a valid nested object.
-    """
+
+def _is_evidence_container_opener(text: str, opener_pos: int) -> bool:
+    """Accept line-level openers and explicit inline evidence labels."""
     line_start = text.rfind("\n", 0, opener_pos) + 1
-    if text[line_start:opener_pos].strip():
+    prefix = text[line_start:opener_pos]
+    return not prefix.strip() or _INLINE_EVIDENCE_LABEL_RE.search(prefix) is not None
+
+
+def _looks_like_json_container(text: str, opener_pos: int) -> bool:
+    """Return whether a failed evidence opener is a JSON payload attempt.
+
+    Recovery fails closed for line-level containers and containers introduced
+    by an explicit inline evidence label. Ordinary prose delimiters remain
+    ineligible boundaries.
+    """
+    if not _is_evidence_container_opener(text, opener_pos):
         return False
 
     boundary_end = _malformed_boundary_end(text, opener_pos)
@@ -367,8 +376,7 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
                 parsed, end_offset = _DECODER.raw_decode(text[pos:])
                 all_spans.append((pos, pos + end_offset, parsed))
             except json.JSONDecodeError:
-                line_start = text.rfind("\n", 0, pos) + 1
-                if not text[line_start:pos].strip():
+                if _is_evidence_container_opener(text, pos):
                     malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
         pos += 1
 

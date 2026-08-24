@@ -528,6 +528,17 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError, match="not valid JSON"):
             extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'Actual evidence: [broken,\n{"files_touched": ["rescued.py"]}\n]',
+            'Earlier: {"files_touched": ["stale.py"]}\nActual evidence: {broken',
+        ],
+    )
+    def test_inline_malformed_evidence_label_is_authoritative(self, text: str) -> None:
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
     def test_earlier_example_cannot_override_malformed_final_evidence(self) -> None:
         """When the final structural evidence is malformed, earlier objects
         in prose must not become authoritative.
