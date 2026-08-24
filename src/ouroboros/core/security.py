@@ -364,6 +364,22 @@ def _is_opaque_credential_shape(normalized: str) -> bool:
     return False
 
 
+_STRUCTURED_EVENT_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+
+
+def is_safe_structured_event_identifier(value: str) -> bool:
+    """Return whether an event name is structured and contains no opaque token."""
+    normalized, fail_closed = _normalize_credential_shape(value)
+    if fail_closed or not normalized or not _STRUCTURED_EVENT_IDENTIFIER_RE.fullmatch(normalized):
+        return False
+    candidates = (normalized, *(part for part in normalized.split(".") if part))
+    return not any(
+        pattern.match(candidate)
+        for candidate in candidates
+        for pattern in _CREDENTIAL_SHAPE_PATTERNS
+    )
+
+
 def is_opaque_credential_shaped(value: str) -> bool:
     """Return whether a string has an opaque credential shape.
 
@@ -611,15 +627,11 @@ def _sanitize_logging_sequence(
     active_containers.add(identity)
     try:
         try:
-            items = list(
-                list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value)
-            )
+            items = list(list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value))
         except Exception:
             return [] if isinstance(value, list) else ()
 
-        sanitized = [
-            _sanitize_logging_value(item, active_containers, depth + 1) for item in items
-        ]
+        sanitized = [_sanitize_logging_value(item, active_containers, depth + 1) for item in items]
         if isinstance(value, list):
             return sanitized
 

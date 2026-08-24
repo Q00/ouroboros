@@ -57,6 +57,7 @@ import structlog
 from ouroboros.core.security import (
     is_credential_shaped,
     is_opaque_credential_shaped,
+    is_safe_structured_event_identifier,
     mask_sensitive_value,
     sanitize_for_logging,
 )
@@ -256,7 +257,9 @@ def _mask_sensitive_data(
             except Exception:
                 normalized_event = "<REDACTED>"
             sanitized["event"] = (
-                mask_sensitive_value(normalized_event)
+                normalized_event
+                if is_safe_structured_event_identifier(normalized_event)
+                else mask_sensitive_value(normalized_event)
                 if is_opaque_credential_shaped(normalized_event)
                 else normalized_event
             )
