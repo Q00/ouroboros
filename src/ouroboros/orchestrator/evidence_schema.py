@@ -355,7 +355,10 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
     # Collect all successfully-decoded JSON containers with their spans.
     # Nested values are discovered separately so containment can be enforced.
     all_spans: list[tuple[int, int, Any]] = []
-    # Track malformed openers with their boundary extents: (start, end).
+    # Every failed line-level opener owns its structural extent, regardless of
+    # the first invalid token. Token-shape heuristics are suitable for deciding
+    # whether trailing prose is authoritative, but not for containment: an
+    # uncommon invalid key or array token must not expose a valid inner object.
     malformed_boundaries: list[tuple[int, int]] = []
     pos = 0
     while pos < len(text):
@@ -364,7 +367,8 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
                 parsed, end_offset = _DECODER.raw_decode(text[pos:])
                 all_spans.append((pos, pos + end_offset, parsed))
             except json.JSONDecodeError:
-                if _looks_like_json_container(text, pos):
+                line_start = text.rfind("\n", 0, pos) + 1
+                if not text[line_start:pos].strip():
                     malformed_boundaries.append((pos, _malformed_boundary_end(text, pos)))
         pos += 1
 

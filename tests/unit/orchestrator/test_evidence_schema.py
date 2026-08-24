@@ -512,6 +512,22 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'Summary\n{foo-bar:\n{"files_touched": ["wrong.py"]}\n}',
+            'Summary\n{1invalid:\n{"files_touched": ["wrong.py"]}\n}',
+            'Summary\n[tru,\n{"files_touched": ["wrong.py"]}\n]',
+            'Summary\n[undefined,\n{"files_touched": ["wrong.py"]}\n]',
+        ],
+    )
+    def test_uncommon_malformed_container_tokens_cannot_expose_inner_object(
+        self, text: str
+    ) -> None:
+        """Containment must not depend on recognizing the invalid first token."""
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
     def test_earlier_example_cannot_override_malformed_final_evidence(self) -> None:
         """When the final structural evidence is malformed, earlier objects
         in prose must not become authoritative.
