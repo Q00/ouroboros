@@ -19,7 +19,7 @@ ambiguity scoring.  User controls when to stop.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -420,7 +420,7 @@ class PMInterviewHandler:
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition with flat optional parameters."""
-        return MCPToolDefinition(
+        definition = MCPToolDefinition(
             name="ouroboros_pm_interview",
             description=(
                 "PM interview for product requirements gathering. "
@@ -448,7 +448,8 @@ class PMInterviewHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "PM's response to a single-question turn. Pass the question it "
-                        "answers as 'last_question'. For a turn that asked more than one "
+                        "answers as 'last_question'. This singular form is mutually "
+                        "exclusive with 'answers'; for a turn that asked more than one "
                         "question, use 'answers' instead."
                     ),
                     required=False,
@@ -458,19 +459,23 @@ class PMInterviewHandler:
                     type=ToolInputType.ARRAY,
                     description=(
                         "A turn's answers, sent together: [{question, answer}, ...], one "
-                        "entry per question the turn asked. A turn is recorded whole, so "
-                        "collect every answer before calling. Each entry names its own "
-                        "question; nothing is matched against server-side state."
+                        "entry per question the turn asked. This batch form is mutually "
+                        "exclusive with 'answer'. A turn is recorded whole, so collect "
+                        "every answer before calling. Each entry names its own question "
+                        "and the batch accepts one to three entries."
                     ),
                     required=False,
                     items={
                         "type": "object",
                         "properties": {
-                            "question": {"type": "string"},
-                            "answer": {"type": "string"},
+                            "question": {"type": "string", "minLength": 1},
+                            "answer": {"type": "string", "minLength": 1},
                         },
                         "required": ["question", "answer"],
+                        "additionalProperties": False,
                     },
+                    min_items=1,
+                    max_items=3,
                 ),
                 MCPToolParameter(
                     name="action",
@@ -519,6 +524,9 @@ class PMInterviewHandler:
                 ),
             ),
         )
+        input_schema = definition.to_input_schema()
+        input_schema["not"] = {"required": ["answer", "answers"]}
+        return replace(definition, input_schema=input_schema)
 
     def _get_engine(self) -> PMInterviewEngine:
         """Return the injected engine or create a new one using the server's configured backend."""
@@ -801,7 +809,24 @@ class PMInterviewHandler:
                 # the parent LLM sees the child's response (which contains the
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
-                pairs, pair_error = turn_answers(answers, answer, last_question)
+                # A singular legacy/plugin resume may intentionally replace a
+                # stale placeholder through ``last_question``. Only the batch
+                # transport claims the persisted pending round is the turn it
+                # is answering, so only that shape makes the stored identity
+                # authoritative enough to validate.
+                planned_questions = (
+                    [state.rounds[-1].question]
+                    if answers is not None
+                    and state.rounds
+                    and state.rounds[-1].user_response is None
+                    else None
+                )
+                pairs, pair_error = turn_answers(
+                    answers,
+                    answer,
+                    last_question,
+                    planned_questions=planned_questions,
+                )
                 if pair_error:
                     return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
                 if pairs:
@@ -1362,7 +1387,21 @@ class PMInterviewHandler:
             engine.restore_meta(meta)
 
         # ── This turn's answers, each holding its question (RFC #2222 r4) ──
-        pairs, pair_error = turn_answers(answers, answer, last_question)
+        # ``last_question`` is also the legacy repair path for a stale pending
+        # question. A batched answer has no such override semantics: when a
+        # pending round exists, choosing ``answers`` proves that stored plan is
+        # the identity boundary this call is answering.
+        planned_questions = (
+            [state.rounds[-1].question]
+            if answers is not None and state.rounds and state.rounds[-1].user_response is None
+            else None
+        )
+        pairs, pair_error = turn_answers(
+            answers,
+            answer,
+            last_question,
+            planned_questions=planned_questions,
+        )
         if pair_error:
             return Result.err(MCPToolError(pair_error, tool_name="ouroboros_pm_interview"))
 
