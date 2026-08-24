@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 from typing import Annotated
 
+from rich.console import Console
 from rich.markup import escape as _rich_escape
 import typer
 
@@ -590,6 +591,8 @@ async def _run_auto(
                 opencode_mode=demote_plugin_opencode_mode(runtime_plan.reflect.opencode_mode),
             )
         )
+    watchdog_event_store = EventStore()
+    await watchdog_event_store.initialize()
     # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
     # goal-specific ones so interview ambiguity actually converges. Best-effort —
     # any construction failure leaves the deterministic answerer untouched.
@@ -601,9 +604,8 @@ async def _run_auto(
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
+        event_store=watchdog_event_store,
     )
-    watchdog_event_store = EventStore()
-    await watchdog_event_store.initialize()
     # Auto does not have an execution id until interview/Seed handoff finishes.
     # Publish the picker now; it polls until the eventual run appears, and the
     # selected row supplies the pinned ?run=<execution_id> detail URL.
@@ -1319,7 +1321,59 @@ def _print_detached_guidance(result: AutoPipelineResult) -> None:
         console.print(f'Retrieve job (MCP): ouroboros_job_result(job_id="{result.ralph_job_id}")')
 
 
-def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
+def _render_blocked_panel(
+    console: Console,
+    state: AutoPipelineState | None,
+    result: AutoPipelineResult,
+) -> None:
+    """Print the stop reason, answerable gaps, and authoritative resume action."""
+    stage = (state.last_tool_name if state is not None else None) or "unknown"
+    reason_code = result.stop_reason_code or "-"
+    blocker_text = " ".join((result.blocker or "").split())[:400]
+    open_items: list[str] = []
+    if reason_code == "seed_preflight_unexecutable" and result.blocker:
+        marker = (
+            "start a new session: " if "start a new session: " in result.blocker else "resume: "
+        )
+        _, _, tail = result.blocker.rpartition(marker)
+        if tail:
+            open_items = [item.strip() for item in tail.split(" | ") if item.strip()]
+    elif (result.last_qa_differences or result.last_qa_suggestions) and (
+        state is None or state.last_tool_name == "seed_qa"
+    ):
+        open_items = [*result.last_qa_differences, *result.last_qa_suggestions][:5]
+
+    resume_lines = render_resume_lines(
+        result.resume_capability, result.auto_session_id, goal=None, use_markup=False
+    )
+    resume_note: str | None = None
+    if not resume_lines:
+        resume_line = "not resumable — start a new session"
+    else:
+        _, _, resume_line = resume_lines[0].partition(": ")
+        if len(resume_lines) > 1:
+            resume_note = resume_lines[1].strip()
+
+    console.print("── auto blocked ────────────────────────────────")
+    console.print(f" stage      : {stage}")
+    console.print(f" reason code: {reason_code}")
+    console.print(f" blocker    : {blocker_text}")
+    if open_items:
+        console.print(" open items :")
+        for item in open_items:
+            console.print(f"   - {item}")
+    console.print(f" resume     : {resume_line}")
+    if resume_note:
+        console.print(f"              {resume_note}")
+    console.print("────────────────────────────────────────────────")
+
+
+def _print_result(
+    result: AutoPipelineResult,
+    *,
+    show_ledger: bool,
+    state: AutoPipelineState | None = None,
+) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
     external_ralph_plugin = _is_external_ralph_plugin_completion(result)
@@ -1338,6 +1392,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     console.print(f"Status: [bold]{displayed_status}[/]")
     if result.artifact_state:
         console.print(f"Artifact state: [bold]{result.artifact_state}[/]")
+    if result.status == "blocked":
+        _render_blocked_panel(console, state, result)
     if handoff_only:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"

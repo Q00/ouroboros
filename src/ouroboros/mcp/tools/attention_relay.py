@@ -14,6 +14,8 @@ ATTENTION_SOURCE_EVENT_TYPES = frozenset(
         "execution.ac.deliver_verdict",
         "execution.frugality_proof.evaluated",
         "auto.seed_qa.blocked",
+        "auto.seed_preflight.blocked",
+        "auto.session.blocked",
         "lineage.stagnated",
         "control.session.signal.rejected",
         "control.session.signal.delivery_uncertain",
@@ -861,6 +863,40 @@ def classify_relay_events(
                         "differences": _strings(data.get("differences"), limit=5),
                         "suggestions": _strings(data.get("suggestions"), limit=5),
                         "reason": data.get("reason"),
+                    },
+                    evidence_event_ids=[event.id],
+                    available_tools=registered,
+                )
+            )
+        elif event.type == "auto.seed_preflight.blocked":
+            relays.append(
+                _attention(
+                    event,
+                    trigger="seed_preflight_blocked",
+                    job_id=job_id,
+                    ownership_state="closed",
+                    evidence={
+                        "seed_id": _text(data.get("seed_id"), limit=80),
+                        "codes": _strings(data.get("codes"), limit=8),
+                        "open_questions": _strings(data.get("open_questions"), limit=8),
+                    },
+                    evidence_event_ids=[event.id],
+                    available_tools=registered,
+                )
+            )
+        elif event.type == "auto.session.blocked":
+            relays.append(
+                _attention(
+                    event,
+                    trigger="auto_session_blocked",
+                    job_id=job_id,
+                    ownership_state="closed",
+                    evidence={
+                        "status": _text(data.get("status"), limit=40),
+                        "stop_reason_code": _text(data.get("stop_reason_code"), limit=80),
+                        "tool_name": _text(data.get("tool_name"), limit=80),
+                        "blocker": _text(data.get("blocker")),
+                        "resume_capability": _text(data.get("resume_capability"), limit=40),
                     },
                     evidence_event_ids=[event.id],
                     available_tools=registered,

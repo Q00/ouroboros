@@ -43,6 +43,22 @@ When the interview is brownfield, the caller provides code-enriched answers:
 - If the user mentions both implementation work and a written output, keep both visible in later questions.
 - If one file, abstraction, or bug has dominated several consecutive rounds, explicitly zoom back out before going deeper.
 
+## HARD FACTS BEFORE CLOSURE
+Abstract agreement is not enough to execute. Before you consider the interview
+closable, make sure the facts below are pinned as *concrete values*, not
+concepts — a Seed that says "the Obsidian Vault" instead of a real path fails
+its run deterministically:
+- Every referenced codebase, vault, directory, or data source has a real,
+  absolute path (ask "What is the exact path?" — never accept a product name
+  as a location).
+- Every external service the work touches has its access story stated
+  (existing credential/config, or explicitly out of scope).
+- Verification is grounded: named verify scripts/commands either already exist
+  or are explicitly declared as something the run must create first; any
+  environment variable a check depends on has a stated concrete value.
+Do not fabricate these facts yourself, and do not let ambiguity scoring close
+the interview while one of them is still a placeholder.
+
 ## STOP CONDITIONS
 - Prefer ending the interview once scope, non-goals, outputs, and verification expectations are all explicit enough to generate a Seed.
 - When the conversation is mostly refining wording or very narrow edge cases, ask whether to stop and move to Seed generation instead of opening another deep sub-question.

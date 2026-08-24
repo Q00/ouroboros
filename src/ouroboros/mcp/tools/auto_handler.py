@@ -19,6 +19,7 @@ import structlog
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
     HandlerLateralThinker,
+    HandlerRalphPoller,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -79,6 +80,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_runtime import initialized_runtime_event_store
 from ouroboros.mcp.tools.auto_start_lease_store import (
     CORRUPT_START_LEASE,
 )
@@ -544,6 +546,7 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
+        runtime_event_store = await initialized_runtime_event_store(self.event_store)
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -554,6 +557,7 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            event_store=runtime_event_store,
         )
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
@@ -573,12 +577,18 @@ class AutoHandler:
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        watchdog_event_store = self.event_store or EventStore()
-        await watchdog_event_store.initialize()
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
-            event_appender=watchdog_event_store,
+            event_appender=runtime_event_store,
         )
+        ralph_resumer = None
+        if state.ralph_job_id is not None and self.ralph_handler_factory is not None:
+            ralph_resumer = HandlerRalphPoller(
+                self.ralph_handler_factory(
+                    runtime_plan.execute.runtime_backend,
+                    runtime_plan.execute.opencode_mode,
+                )
+            )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -601,6 +611,7 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            ralph_resumer=ralph_resumer,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
@@ -615,7 +626,7 @@ class AutoHandler:
                 cleanup=auto_worktree_cleanup_eligible(result),
             )
             if self.event_store is None:
-                await watchdog_event_store.close()
+                await runtime_event_store.close()
 
 
 @dataclass

@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from ouroboros.auto import interview_recovery
 from ouroboros.auto.adapters import EvaluateResult, LateralResult, PartialInterviewStartError
 from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
@@ -5207,15 +5208,17 @@ async def test_pipeline_forwards_force_to_seed_generator_on_safe_default_closure
 
 @pytest.mark.asyncio
 async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
     """PR-β review #2 BLOCKER: transcript-sync gap on resume.
 
     Scenario the bot called out (paraphrased): the auto driver answers a
     round, applies the answer to the in-memory ledger, and then calls
     ``backend.answer`` to push the answer into the interview transcript.
-    If ``backend.answer`` raises or times out, the driver returns ``blocked``
-    and the next ``ooo auto`` resume re-enters the driver.
+    If ``backend.answer`` raises or times out on every bounded transient
+    retry attempt (see ``_INTERVIEW_TRANSIENT_ATTEMPTS``), the driver
+    returns ``blocked`` and the next ``ooo auto`` resume re-enters the
+    driver.
 
     Under the buggy ordering (ledger persisted *before* ``backend.answer``
     succeeded), the persisted ledger would be structurally complete while
@@ -5233,6 +5236,7 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
     persisted ``state.ledger`` is the *pre-answer* ledger (so resume
     cannot short-circuit close on stale evidence).
     """
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     apply_calls = 0
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
@@ -5253,9 +5257,10 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
     ) -> InterviewTurn:  # noqa: ARG001
         nonlocal apply_calls
         apply_calls += 1
-        # Simulate transient backend failure on the first attempt — the
-        # exact failure mode the bot warned about (timeout/raise mid-round
-        # after the in-memory ledger has been mutated).
+        # Simulate a persistently failing backend — the exact failure mode
+        # the bot warned about (timeout/raise mid-round after the in-memory
+        # ledger has been mutated), now exercised across every bounded
+        # transient retry attempt.
         raise RuntimeError("simulated transient backend failure")
 
     # Start the run from a fresh, *incomplete* ledger so the answerer has
@@ -5275,10 +5280,13 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
 
     result = await driver.run(state, ledger)
 
-    # The driver MUST surface the backend failure as a blocker; the round
-    # never completed.
+    # The driver MUST surface the backend failure as a blocker without
+    # replaying a possibly committed answer; the round never completed.
     assert result.status == "blocked"
+    # Reconciliation is unavailable on this backend, so the replay-safe
+    # contract fails closed after the first possibly-committed attempt.
     assert apply_calls == 1
+    assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: ``state.ledger`` on disk is still the
     # pre-answer snapshot. The in-memory ``ledger`` parameter may have the
     # unsynced answer applied (the answerer mutated it before the backend
@@ -5303,7 +5311,7 @@ async def test_resume_after_backend_answer_failure_keeps_ledger_unsynced_on_disk
 
 @pytest.mark.asyncio
 async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
     """Companion to the deferral-persistence test: resume replays the round.
 
@@ -5314,7 +5322,13 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     subsequent iteration with the transcript actually mirroring the
     ledger. Pins the end-to-end recovery contract that the bot review #2
     BLOCKER demanded coverage for.
+
+    The backend fails on every call across the first run's bounded
+    transient retry budget (``_INTERVIEW_TRANSIENT_ATTEMPTS``) so the round
+    genuinely blocks — a backend that only fails once would now be silently
+    absorbed by the in-process retry and never reach ``blocked`` at all.
     """
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     answer_attempts = 0
     answers_seen: list[str] = []
 
@@ -5336,13 +5350,26 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
         nonlocal answer_attempts
         answer_attempts += 1
         answers_seen.append(text)
-        if answer_attempts == 1:
-            raise RuntimeError("transient backend failure on first attempt")
-        # Second attempt acknowledges the round. Returning ambiguity ~0.40
+        if answer_attempts <= interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS:
+            raise RuntimeError("transient backend failure")
+        # First call past the exhausted retry budget (i.e. the replayed
+        # resume attempt) acknowledges the round. Returning ambiguity ~0.40
         # keeps the backend "saturated" so closure must come from the
         # ledger-primary gate, not from mutual agreement.
         return InterviewTurn(
             "What edge cases should we handle?",
+            session_id,
+            seed_ready=False,
+            completed=False,
+            ambiguity_score=0.40,
+        )
+
+    async def resume(session_id: str) -> InterviewTurn:
+        # Explicitly confirm that the same question is still pending.  This
+        # is the only evidence that makes retrying a possibly-committed
+        # answer safe under the replay-guarded contract.
+        return InterviewTurn(
+            "What is the primary goal of the CLI?",
             session_id,
             seed_ready=False,
             completed=False,
@@ -5361,16 +5388,17 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     pre_answer_ledger_snapshot = ledger.to_dict()
 
     driver = AutoInterviewDriver(
-        FunctionInterviewBackend(start, answer),
+        FunctionInterviewBackend(start, answer, resume),
         store=AutoStore(tmp_path),
         max_rounds=4,
         timeout_seconds=5,
     )
 
-    # ---------- First run: backend.answer raises mid-round ----------
+    # ---------- First run: backend.answer raises on every retry attempt ----------
     first = await driver.run(state, ledger)
     assert first.status == "blocked"
     assert answer_attempts == 1
+    assert state.last_error_code == "interview_round_transient_exhausted"
     # Deferred-persistence contract: persisted ``state.ledger`` is the
     # pre-answer snapshot even though the in-memory ledger has the
     # unsynced answer applied.
@@ -5392,14 +5420,13 @@ async def test_resume_after_backend_answer_failure_replays_and_closes_cleanly(
     state.transition(AutoPhase.INTERVIEW, "resuming interview after backend.answer failure")
     second = await driver.run(state, resumed_ledger)
 
-    # The driver advanced past the previously-failed round. Final status
-    # is either ``seed_ready`` (if the answerer's deterministic re-apply
-    # completed the ledger) or ``blocked`` with a non-stale terminal —
-    # the contract under test is the **replay** behavior, not which
-    # terminal the ledger ends up in.
-    assert answer_attempts >= 2, "resume must replay backend.answer with the same payload"
-    # The replayed payload must equal the original first-attempt payload —
-    # the answerer is deterministic given the same ledger + answer_context.
+    # An operator-triggered resume is a new explicit attempt, but the driver
+    # still fails closed within that run rather than replaying transiently.
+    assert answer_attempts == 2
+    # The explicitly resumed payload must equal the original first-attempt
+    # payload (index 0). The
+    # answerer is deterministic given the same pre-answer ledger + context,
+    # regardless of how many further rounds it then takes to reach closure.
     assert answers_seen[0] == answers_seen[1]
     # End-to-end transcript-sync correctness:
     #   - If closure happened, it must be ``ledger_only`` (no mutual
@@ -6247,7 +6274,7 @@ async def test_invalid_reconcile_on_complete_does_not_poison_future_resume(tmp_p
 
 @pytest.mark.asyncio
 async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
     """Driver retains the pre-allocated id only when persistence is verifiable.
 
@@ -6255,8 +6282,13 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     cancels the backend mid-flight, but the engine has already persisted
     the interview state.  The driver must consult ``is_session_persisted``
     to confirm before saving the id on auto state.
-    """
 
+    ``backend.start`` times out on every bounded transient retry attempt
+    (same 0.5s sleep vs. 0.001s timeout each time), so it is called
+    ``_INTERVIEW_TRANSIENT_ATTEMPTS`` times with the SAME pre-allocated id
+    before the driver falls through to the safe-default closure.
+    """
+    monkeypatch.setattr(interview_recovery, "_INTERVIEW_TRANSIENT_BACKOFF_SECONDS", (0.0,))
     received_ids: list[str | None] = []
     persisted_ids: set[str] = set()
 
@@ -6288,9 +6320,12 @@ async def test_interview_driver_keeps_session_id_when_probe_confirms_persistence
     assert result.status == "seed_ready"
     assert state.interview_session_id, "probe-confirmed id must be saved on auto state"
     assert state.interview_closure_mode == "safe_default_no_backend"
-    assert received_ids == [state.interview_session_id], (
-        "backend.start must receive the pre-allocated interview_id so the "
-        "persisted interview file matches auto state"
+    assert (
+        received_ids
+        == [state.interview_session_id] * interview_recovery._INTERVIEW_TRANSIENT_ATTEMPTS
+    ), (
+        "backend.start must receive the pre-allocated interview_id on every "
+        "retry attempt so the persisted interview file matches auto state"
     )
 
     reloaded = store.load(state.auto_session_id)
