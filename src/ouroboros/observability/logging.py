@@ -41,6 +41,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from enum import StrEnum
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -53,7 +54,11 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
-from ouroboros.core.security import sanitize_for_logging
+from ouroboros.core.security import (
+    is_credential_shaped,
+    mask_sensitive_value,
+    sanitize_for_logging,
+)
 
 
 class LogMode(StrEnum):
@@ -187,6 +192,47 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
+_STRUCTURED_EVENT_IDENTIFIER = re.compile(
+    r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$"
+)
+_EXCEPTION_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
+    r"authorization|credential|secret|token)\b\s*[:=]\s*([^\s,;]+)"
+)
+
+
+def _sanitize_exception_text(text: str) -> str:
+    """Mask credentials in traceback text without discarding diagnostics."""
+    text = _EXCEPTION_SECRET_ASSIGNMENT.sub(r"\1=<REDACTED>", text)
+    token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{7,}")
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if is_credential_shaped(token):
+            return mask_sensitive_value(token)
+        return token
+
+    return token_pattern.sub(replace, text)
+
+
+def _format_exc_info_safely(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Render reserved ``exc_info`` data, then sanitize its text output."""
+    try:
+        event_dict = structlog.processors.format_exc_info(_logger, _method_name, event_dict)
+    except Exception:
+        event_dict.pop("exc_info", None)
+        event_dict["exception"] = "<REDACTED>"
+        return event_dict
+    exception = event_dict.get("exception")
+    if isinstance(exception, str):
+        event_dict["exception"] = _sanitize_exception_text(exception)
+    return event_dict
+
+
 def _mask_sensitive_data(
     _logger: Any,
     _method_name: str,
@@ -194,14 +240,35 @@ def _mask_sensitive_data(
 ) -> dict[str, Any]:
     """Return a renderer-safe event dictionary with nested secrets masked.
 
-    The application callsite marker is trusted internal state consumed by a
-    later processor. Every caller-controlled key and value otherwise crosses
-    the shared sanitizer, including top-level credential-shaped keys and
-    arbitrary objects that a JSON renderer would serialize via ``repr()``.
+    ``event`` is structlog's structured event identifier, so ordinary event
+    names must not be passed through the generic namespace heuristic. Reserved
+    ``exc_info`` is retained for the exception formatter and sanitized after
+    rendering by ``_format_exc_info_safely``.
     """
     marker = object()
     callsite = dict.pop(event_dict, _CALLSITE_EVENT_KEY, marker)
+    event = dict.pop(event_dict, "event", marker)
+    exc_info = dict.pop(event_dict, "exc_info", marker)
     sanitized = sanitize_for_logging(event_dict)
+
+    if event is not marker:
+        if isinstance(event, str):
+            try:
+                normalized_event = str.__str__(event)
+            except Exception:
+                normalized_event = "<REDACTED>"
+            if _STRUCTURED_EVENT_IDENTIFIER.fullmatch(normalized_event):
+                sanitized["event"] = normalized_event
+            else:
+                sanitized["event"] = (
+                    mask_sensitive_value(normalized_event)
+                    if is_credential_shaped(normalized_event)
+                    else normalized_event
+                )
+        else:
+            sanitized["event"] = sanitize_for_logging({"value": event})["value"]
+    if exc_info is not marker:
+        sanitized["exc_info"] = exc_info
     if callsite is not marker:
         sanitized[_CALLSITE_EVENT_KEY] = callsite
     return sanitized
@@ -282,6 +349,9 @@ def _get_shared_processors() -> list[Any]:
         structlog.processors.StackInfoRenderer(),
         # Add caller info (file, line, function) - useful for debugging
         _ApplicationCallsiteParameterAdder(),
+        # Preserve saved/implicit exception diagnostics, then mask secrets in
+        # the generated traceback before any console or file renderer sees it.
+        _format_exc_info_safely,
     ]
 
 
@@ -298,13 +368,14 @@ def _get_console_processors(mode: LogMode) -> list[Any]:
 
     # Add final renderer based on mode
     if mode == LogMode.DEV:
-        # Human-readable console output for development.
-        # ConsoleRenderer handles exc_info itself and warns if format_exc_info
-        # is also present in the processor chain.
-        processors.append(structlog.dev.ConsoleRenderer(colors=True))
+        # Exception data is rendered and sanitized before this final renderer.
+        processors.append(
+            structlog.dev.ConsoleRenderer(
+                colors=True,
+                exception_formatter=structlog.dev.plain_traceback,
+            )
+        )
     else:
-        # JSON output for production
-        processors.append(structlog.processors.format_exc_info)
         processors.append(structlog.processors.JSONRenderer())
 
     return processors
@@ -320,8 +391,6 @@ def _get_file_processors() -> list[Any]:
     """
     processors = _get_shared_processors()
 
-    # Format exceptions for file
-    processors.append(structlog.processors.format_exc_info)
 
     # Always use JSON for file output (for log aggregation tools)
     processors.append(structlog.processors.JSONRenderer())

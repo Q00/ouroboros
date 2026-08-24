@@ -1601,6 +1601,72 @@ class TestSensitiveDataMasking:
         assert json.loads(console)["data"] == ["safe-left", "safe-right"]
         assert json.loads(persistent)["data"] == ["safe-left", "safe-right"]
 
+    def test_event_identifiers_remain_exact_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Credential-like event namespaces remain stable query contracts."""
+        events = (
+            "mcp.auth.invalid_api_key",
+            "mcp.auth.token_valid",
+            "context.token_count.failed",
+        )
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+
+        log = get_logger()
+        for event in events:
+            log.info(event)
+
+        console_events = [
+            json.loads(line)["event"] for line in capsys.readouterr().err.splitlines()
+        ]
+        file_events = [
+            json.loads(line)["event"]
+            for line in (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8").splitlines()
+        ]
+        assert console_events == list(events)
+        assert file_events == list(events)
+
+    def test_saved_and_implicit_exceptions_are_sanitized_in_console_and_file(
+        self, capsys: Any, temp_log_dir: Path
+    ) -> None:
+        """Every supported exc_info form keeps diagnostics without leaking messages."""
+        secret = "sk-live-exception-secret-abc123"
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
+        )
+        log = get_logger()
+
+        try:
+            raise ValueError(f"saved object failed: {secret}")
+        except ValueError as exc:
+            saved_exception = exc
+            saved_tuple = (type(exc), exc, exc.__traceback__)
+
+        log.error("saved.exception.object", exc_info=saved_exception)
+        log.error("saved.exception.tuple", exc_info=saved_tuple)
+        try:
+            raise RuntimeError(f"implicit failure: {secret}")
+        except RuntimeError:
+            log.exception("implicit.exception")
+
+        console = capsys.readouterr().err
+        persistent = (temp_log_dir / "ouroboros.log").read_text(encoding="utf-8")
+        for output in (console, persistent):
+            assert secret not in output
+            records = [json.loads(line) for line in output.splitlines()]
+            assert [record["event"] for record in records] == [
+                "saved.exception.object",
+                "saved.exception.tuple",
+                "implicit.exception",
+            ]
+            assert "ValueError" in records[0]["exception"]
+            assert "saved object failed" in records[0]["exception"]
+            assert "ValueError" in records[1]["exception"]
+            assert "RuntimeError" in records[2]["exception"]
+            assert "implicit failure" in records[2]["exception"]
+
     def test_custom_tuple_subclass_make_failure_does_not_crash(self, capsys: Any) -> None:
         """A custom tuple subclass with a broken _make() degrades gracefully."""
 

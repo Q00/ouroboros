@@ -77,6 +77,16 @@ class TestScalarEventStrEnumFailOpen:
         result = _mask_sensitive_data(_FakeLogger(), "info", event_dict)
         assert result["event"] == "ac.execution.started"
 
+    def test_existing_auth_token_event_names_remain_exact(self) -> None:
+        """Structured event identifiers are contracts, not credential values."""
+        for event in (
+            "mcp.auth.invalid_api_key",
+            "mcp.auth.token_valid",
+            "context.token_count.failed",
+        ):
+            result = _mask_sensitive_data(_FakeLogger(), "info", {"event": event})
+            assert result["event"] == event
+
 
 class TestMaskSequenceTupleMakeValidation:
     """_mask_sequence_sensitive_data must validate _make() result."""
