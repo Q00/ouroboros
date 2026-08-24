@@ -496,13 +496,18 @@ async def test_cancellation_seal_failure_is_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_effort_event_store_failure_does_not_abort_ac() -> None:
+async def test_effort_event_store_failure_does_not_abort_ac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A degraded event store degrades the proof event to a warning, not an AC failure.
 
     The routing event is auxiliary proof telemetry — it is emitted through
     ``_safe_emit_event``, so a persistently failing ``event_store.append`` must NOT
     propagate out of ``_execute_atomic_ac`` and abort the AC before runtime dispatch.
     """
+    # The append retry ladder backs off for real seconds; keep the retries,
+    # drop the waiting.
+    monkeypatch.setattr("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock())
     store = AsyncMock()
     effort_append_attempts = 0
 

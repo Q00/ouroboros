@@ -6,7 +6,7 @@ by scanning project files with regex patterns. T3/T4 are skipped.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import glob
 import logging
 import os
@@ -34,6 +34,7 @@ MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
+MAX_OCCURRENCES_PER_FILE = 64  # Bound the agreement scan over an untrusted pattern
 
 # Whether a pattern can match the empty string is decided by *reading* it, never
 # by running it. Running it is what a hostile pattern is waiting for: `(?:)
@@ -628,7 +629,20 @@ def _skip_inline_space(text: str, index: int) -> int:
 
 
 def _scan_scalar(text: str, index: int) -> tuple[str, int] | None:
-    """Read one bounded scalar without truncating quoted source values."""
+    """Read one bounded scalar without truncating quoted source values.
+
+    An unquoted scan stops at a bracket it did not open, and now also at one it
+    would have to: a scalar is a value written whole, and `(` or `[` is the
+    start of something whose end is somewhere this does not look. Without that,
+    a value wrapped across lines the way a formatter wraps one --
+
+        WARMUP_FRAMES = (
+            10
+        )
+
+    -- scanned to the line end and returned `(`, which then reached the
+    comparison as what the file says the constant is.
+    """
     index = _skip_inline_space(text, index)
     if index >= len(text) or text[index] in "\r\n":
         return None
@@ -664,7 +678,7 @@ def _scan_scalar(text: str, index: int) -> tuple[str, int] | None:
     while (
         index < len(text)
         and index - start <= MAX_SCALAR_LENGTH
-        and text[index] not in "\"'\r\n\t ,;)]}{"
+        and text[index] not in "\"'\r\n\t ,;([)]}{\\="
     ):
         index += 1
     if index == start or index - start > MAX_SCALAR_LENGTH:
@@ -691,31 +705,149 @@ def _has_complete_scalar_terminator(text: str, index: int, operator: str | None)
     return text[index] in ",;)]}"
 
 
-def _extract_following_scalar(content: str, index: int) -> str:
-    """Extract a direct, assigned, or parenthesized scalar at index."""
+class _UnreadBinding:
+    """An occurrence that binds a value the scanner could not read.
+
+    Distinct from ``None``, which is an occurrence that binds nothing at all.
+    Both are failures to read, but only one of them is a place where the file
+    says what the constant is: `X: int = 3`, `X = int("3")`, `X = 3 if c else 4`
+    and `X = ""` are declarations, and the scanner reading none of them does not
+    make them prose. Spelling them the same way is what let a declaration go
+    missing from the comparison rather than unsettle it.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        return "<unread binding>"
+
+
+UNREAD_BINDING = _UnreadBinding()
+
+Reading = str | _UnreadBinding | None
+
+
+def _binds_at(content: str, index: int) -> bool:
+    """Whether a value is written at index, readable or not.
+
+    The three shapes are the ones the scanner itself looks for: an assignment or
+    mapping operator after the match, a parenthesized argument after it, and an
+    operator the pattern consumed and left behind it — `NAME\\s*=\\s*` is one of
+    the shapes the extractor's own prompt asks the model for.
+
+    One closing quote may stand between the match and the operator, because a
+    quoted key is a binding written the way JSON, YAML and every settings dict
+    write one. A quote with no operator after it is still nothing bound: prose
+    that names the constant in quotes reaches the same place and stops here.
+
+    Failing all three, an operator anywhere later on the same physical line is
+    taken as one too, because a declaration is free to put a type, a modifier or
+    a default between the name and the operator — `NAME int = 10`, `NAME ?= 10`,
+    `NAME: int = 10` — and requiring adjacency read every one of them as prose.
+    Prose that happens to carry an operator is then called a binding it cannot
+    read, which costs the criterion its verdict and never its soundness; a
+    declaration read as prose costs the opposite, and vanishes from the very
+    agreement this scanner exists to compute.
+    """
+    at = _skip_inline_space(content, index)
+    if at < len(content) and content[at] in "\"'":
+        at = _skip_inline_space(content, at + 1)
+    if at < len(content) and content[at] in "=:(":
+        return True
+    if _preceding_assignment_operator(content, index) is not None:
+        return True
+    line_end = content.find("\n", index)
+    rest = content[index:] if line_end == -1 else content[index:line_end]
+    return "=" in rest or ":" in rest
+
+
+def _extract_following_scalar(content: str, index: int) -> Reading:
+    """Extract a direct, assigned, or parenthesized scalar at index.
+
+    Three outcomes, because there are three things that can be at an occurrence
+    and only one of them is a value. A string is what was read. ``None`` is
+    prose — a mention with nothing bound to it, which settles nothing and has to
+    settle nothing. ``UNREAD_BINDING`` is a declaration this scanner cannot
+    parse, which settles nothing either but is not free of consequence: the file
+    says what the constant is there, so no reading taken elsewhere can be called
+    what the candidates agree on.
+
+    A scalar scanned as blank is one of those declarations. `X = ""` and
+    `X = " "` reach the scanner and the strings they yield are the one thing
+    every file holds anyway, so reading one settles no criterion — but the
+    binding is still written, so it counts as one that went unread rather than
+    as prose.
+    """
+    scanned = _scan_following_scalar(content, index)
+    if scanned is not None and scanned.strip():
+        return scanned
+    return UNREAD_BINDING if _binds_at(content, index) else None
+
+
+def _scan_following_scalar(content: str, index: int) -> str | None:
+    """Scan a direct, assigned, or parenthesized scalar at index, blanks and all."""
     index = _skip_inline_space(content, index)
     if index < len(content) and content[index] in "=:":
         operator = content[index]
         scanned = _scan_scalar(content, index + 1)
         if scanned is None:
-            return ""
+            return None
         value, end = scanned
-        return value if _has_complete_scalar_terminator(content, end, operator) else ""
+        return value if _has_complete_scalar_terminator(content, end, operator) else None
     if index < len(content) and content[index] == "(":
         scanned = _scan_scalar(content, index + 1)
         if scanned is None:
-            return ""
+            return None
         value, end = scanned
         end = _skip_inline_space(content, end)
         if end >= len(content) or content[end] != ")":
-            return ""
-        return value if _has_complete_scalar_terminator(content, end + 1, None) else ""
+            return None
+        return value if _has_complete_scalar_terminator(content, end + 1, None) else None
     scanned = _scan_scalar(content, index)
     if scanned is None:
-        return ""
+        return None
     value, end = scanned
     operator = _preceding_assignment_operator(content, index)
-    return value if _has_complete_scalar_terminator(content, end, operator) else ""
+    return value if _has_complete_scalar_terminator(content, end, operator) else None
+
+
+@dataclass
+class _Readings:
+    """What a pattern found at its occurrences, and the file each was found in.
+
+    Distinctness is judged on the stripped value, because that is what the
+    comparison judges equality on. Occurrences that read the same value are one
+    reading however many there are; two that read different values are a
+    disagreement however far apart they sit.
+
+    An occurrence that binds a value the scanner could not read is kept too, as
+    the file it was written in. It contributes no value to compare and it cannot
+    be made to agree with one, so a single one of them decides the outcome on
+    its own — which is why it is recorded rather than dropped.
+
+    Both of those settle the outcome, and nothing read afterwards can unsettle
+    it, so collection stops there.
+    """
+
+    values: list[tuple[str, str]] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+    unread_in: str | None = None
+
+    @property
+    def settled(self) -> bool:
+        """Whether no further occurrence could change the outcome."""
+        return self.unread_in is not None or len(self.values) > 1
+
+    def add(self, reading: Reading, file_path: str) -> None:
+        if reading is None or self.settled:
+            return
+        if isinstance(reading, _UnreadBinding):
+            self.unread_in = file_path
+            return
+        if reading.strip() in self.seen:
+            return
+        self.seen.add(reading.strip())
+        self.values.append((reading, file_path))
 
 
 @dataclass
@@ -764,7 +896,10 @@ class SpecVerifier:
 
             results: list[SpecVerificationResult] = []
             for assertion in ac_assertions:
-                results.append(self._verify_one(assertion))
+                result = self._verify_one(assertion)
+                if agent_pass is False:
+                    result = self._demoted_from_overturning(result)
+                results.append(result)
 
             reports.append(
                 ACVerificationReport(
@@ -834,6 +969,50 @@ class SpecVerifier:
             return None
         return compiled
 
+    def _demoted_from_overturning(self, result: SpecVerificationResult) -> SpecVerificationResult:
+        """Refuse a VERIFIED as grounds to overturn an agent-reported FAIL.
+
+        This scanner exists to check whether an agent's *claimed PASS* survives
+        contact with the source. Overturning a FAIL is the opposite direction,
+        and it is the direction with no safe stopping point: what a regex match
+        proves about a criterion depends on whether the pattern is really about
+        that criterion, and nothing available here can settle that. A rule that
+        reads the criterion's wording admits `class\\s+\\w+` for "a
+        CameraProvider class" through the shared word `class`; tightening it to
+        read named targets from their spelling admits `MUST` through ordinary
+        requirement prose. Each repair moves the hole rather than closing it,
+        because the question — does this text name this criterion's subject —
+        is not one a finite reading of prose answers.
+
+        So the authority is withdrawn rather than qualified. An agent that
+        reported FAIL keeps its FAIL, whatever the pattern matched. No property
+        of the pattern can restore the override, which is what makes this
+        closed rather than merely narrower: there is nothing left to bypass.
+
+        Only this direction. A VERIFIED that agrees with the agent's own PASS
+        claims no authority the agent had not already claimed, and is passed
+        through untouched — the false-PASS check that is this scanner's actual
+        job.
+
+        The demotion is to UNVERIFIABLE, not DISCREPANCY: the evidence is not
+        usable *here*, which is different from evidence that the criterion is
+        unmet.
+        """
+        if result.outcome is not VerificationOutcome.VERIFIED:
+            return result
+        logger.warning(
+            "Refusing regex evidence as grounds to overturn an agent FAIL: %r",
+            result.assertion.pattern,
+        )
+        return SpecVerificationResult(
+            assertion=result.assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            file_path=result.file_path,
+            detail=(
+                "Pattern matched, but source-scan evidence cannot overturn an agent-reported FAIL"
+            ),
+        )
+
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify one assertion, including tiers this scanner deliberately skips."""
         if assertion.tier == VerificationTier.T1_CONSTANT:
@@ -848,6 +1027,91 @@ class SpecVerifier:
             assertion=assertion,
             outcome=VerificationOutcome.SKIPPED,
             detail=detail,
+        )
+
+    def _verdict_from_readings(
+        self,
+        assertion: SpecAssertion,
+        readings: _Readings,
+        first_match_in: str,
+    ) -> SpecVerificationResult:
+        """Compare the expected value against what the candidates read as.
+
+        Every occurrence of the pattern is read, in every candidate file, rather
+        than the first match in the first file that had one. Taking the first
+        was a choice among readings that nothing here gives grounds for: a
+        constant is routinely written twice, once in a comment above the
+        declaration and once in the declaration itself, and which of the two
+        `search` returns is decided by line order. Whichever way that fell, the
+        verdict was reported as what the source says — a decoy comment above a
+        contradicting declaration minted a PASS, and one above an agreeing
+        declaration minted a DISCREPANCY. The same held between files: a
+        mention in the first file the glob happened to yield settled a criterion
+        about a constant bound differently in the file that declares it.
+
+        So the readings have to agree. Where they do, the candidates say one
+        thing and the comparison is about that thing. Where they disagree there
+        is no single value they can be said to hold, and that is missing
+        evidence rather than counter-evidence: UNVERIFIABLE, not DISCREPANCY.
+
+        An occurrence that binds a value this scanner cannot read has the same
+        effect for the same reason. It is a place the file states the constant,
+        so a reading taken anywhere else is not what the candidates agree on —
+        it is only what was legible. Dropping such an occurrence would put the
+        conflation this method exists to remove back one level up, with an
+        unread declaration and a bare mention spelled the same way.
+
+        This does not make a comment unreadable — nothing here can tell source
+        from prose in a file whose language it does not know. It removes the
+        silent preference between them, so a disagreeing comment costs the
+        verdict its authority instead of deciding it.
+        """
+        if readings.unread_in is not None:
+            return SpecVerificationResult(
+                assertion=assertion,
+                file_path=readings.unread_in,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=(
+                    f"Pattern matched a binding in {os.path.basename(readings.unread_in)} "
+                    "whose value could not be read; nothing read elsewhere can stand for it"
+                ),
+            )
+        if not readings.values:
+            # Every occurrence landed on prose, a comment, or a bare mention —
+            # somewhere no value follows it. Nothing was read, so there is
+            # nothing here that agrees with the expected value or contradicts it.
+            return SpecVerificationResult(
+                assertion=assertion,
+                file_path=first_match_in,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=(
+                    f"Pattern matched in {os.path.basename(first_match_in)} "
+                    "but no value follows the match to compare"
+                ),
+            )
+        if len(readings.values) > 1:
+            (first, first_in), (second, second_in) = readings.values[0], readings.values[1]
+            return SpecVerificationResult(
+                assertion=assertion,
+                file_path=first_in,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=(
+                    f"Pattern reads '{first}' in {os.path.basename(first_in)} and "
+                    f"'{second}' in {os.path.basename(second_in)}; no single value to compare"
+                ),
+            )
+
+        actual, found_in = readings.values[0]
+        verified = assertion.expected_value.strip() == actual.strip()
+        return SpecVerificationResult(
+            assertion=assertion,
+            outcome=(VerificationOutcome.VERIFIED if verified else VerificationOutcome.DISCREPANCY),
+            actual_value=actual,
+            file_path=found_in,
+            detail=(
+                f"Expected '{assertion.expected_value}', found '{actual}' "
+                f"in {os.path.basename(found_in)}"
+            ),
         )
 
     def _verify_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
@@ -878,41 +1142,55 @@ class SpecVerifier:
             )
 
         readable_files = 0
+        first_match_in: str | None = None
+        readings = _Readings()
         for file_path in files:
             content = self._read_file(file_path)
             if content is None:
                 continue
             readable_files += 1
 
-            match = pattern.search(content)
-            if match:
-                # Extract the value after the pattern
-                actual = self._extract_value_after_match(content, match)
-                if assertion.expected_value:
-                    verified = assertion.expected_value.strip() == actual.strip()
-                    return SpecVerificationResult(
-                        assertion=assertion,
-                        outcome=(
-                            VerificationOutcome.VERIFIED
-                            if verified
-                            else VerificationOutcome.DISCREPANCY
-                        ),
-                        actual_value=actual,
-                        file_path=file_path,
-                        detail=(
-                            f"Expected '{assertion.expected_value}', "
-                            f"found '{actual}' in {os.path.basename(file_path)}"
-                        ),
-                    )
-                else:
-                    # Pattern found, no expected value to check
-                    return SpecVerificationResult(
-                        assertion=assertion,
-                        outcome=VerificationOutcome.VERIFIED,
-                        actual_value=actual,
-                        file_path=file_path,
-                        detail=f"Pattern found in {os.path.basename(file_path)}",
-                    )
+            # Lazily, and no further than the outcome depends on: the pattern is
+            # untrusted model output, so every byte scanned after the answer is
+            # settled is work an author of the pattern chose.
+            occurrences = pattern.finditer(content)
+            first_occurrence = next(occurrences, None)
+            if first_occurrence is None:
+                continue
+            if not assertion.expected_value:
+                # Pattern found, no expected value to check
+                first_reading = self._extract_value_after_match(content, first_occurrence)
+                return SpecVerificationResult(
+                    assertion=assertion,
+                    outcome=VerificationOutcome.VERIFIED,
+                    actual_value=first_reading if isinstance(first_reading, str) else "",
+                    file_path=file_path,
+                    detail=f"Pattern found in {os.path.basename(file_path)}",
+                )
+            if first_match_in is None:
+                first_match_in = file_path
+            readings.add(self._extract_value_after_match(content, first_occurrence), file_path)
+            read_here = 1
+            while not readings.settled:
+                if read_here >= MAX_OCCURRENCES_PER_FILE:
+                    # The cap was reached with the readings still agreeing. What
+                    # the rest of the file says is unknown, and unknown cannot be
+                    # part of an agreement, so it counts as a binding gone unread.
+                    readings.add(UNREAD_BINDING, file_path)
+                    break
+                occurrence = next(occurrences, None)
+                if occurrence is None:
+                    break
+                readings.add(self._extract_value_after_match(content, occurrence), file_path)
+                read_here += 1
+            if readings.settled:
+                # Readings that differ, or a binding that could not be read, already
+                # settle it, and stopping here keeps both the work and the reported
+                # detail bounded.
+                break
+
+        if first_match_in is not None:
+            return self._verdict_from_readings(assertion, readings, first_match_in)
 
         if readable_files == 0:
             return SpecVerificationResult(
@@ -1035,7 +1313,7 @@ class SpecVerifier:
         except (OSError, PermissionError):
             return None
 
-    def _extract_value_after_match(self, content: str, match: re.Match) -> str:
+    def _extract_value_after_match(self, content: str, match: re.Match) -> Reading:
         """Extract the value immediately following a regex match.
 
         Handles common patterns:
@@ -1043,5 +1321,8 @@ class SpecVerifier:
         - VAR: 10
         - VAR(10)
         - "value"
+
+        Returns ``None`` when nothing is bound at the match, and
+        ``UNREAD_BINDING`` when something is bound there that this cannot read.
         """
         return _extract_following_scalar(content, match.end())

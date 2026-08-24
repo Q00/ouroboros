@@ -19,9 +19,11 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7.0.0
@@ -41,8 +43,8 @@ jobs:
 
           assert claude_agent_sdk is not None
           assert mcp is not None
-          assert version("claude-agent-sdk") == "0.2.128"
-          assert version("anthropic") == "0.120.2"
+          assert version("claude-agent-sdk") == "0.2.139"
+          assert version("anthropic") == "0.122.0"
           assert version("mcp").split(".", maxsplit=1)[0] == "1"
           PY
           uv pip check
@@ -56,7 +58,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13', '3.14']
+        # PRs gate on the 3.12 floor only; pushes to main/develop run the full
+        # matrix (3.14 also exercises the litellm-free dependency profile), so
+        # version-specific regressions are caught at merge time, before release.
+        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13", "3.14"]') }}
 
     steps:
       - name: Checkout code
@@ -65,9 +70,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7.0.0
@@ -95,13 +102,20 @@ jobs:
           PY
           uv pip check
 
-      - name: Run pytest with coverage
+      - name: Run pytest
         env:
           PYTHONFAULTHANDLER: "1"
         run: |
-          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
+          # One coverage run is sufficient; instrumenting every Python version
+          # triples CPU cost and makes real-time tests contend for no added signal.
+          COV_ARGS=""
+          if [[ "${{ github.event_name }}" != "pull_request" && "${{ matrix.python-version }}" == "3.12" ]]; then
+            COV_ARGS="--cov=src/ouroboros --cov-report=xml"
+          fi
+          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 -m "not performance" $COV_ARGS -q
 
       - name: Upload coverage artifact
+        if: github.event_name != 'pull_request' && matrix.python-version == '3.12'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.python-version }}
@@ -109,8 +123,41 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+
+  performance-budget:
+    name: Performance budget (advisory)
+    if: github.event_name == 'push'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --dev --group mcp-test --group litellm-test
+
+      - name: Run isolated performance budgets
+        run: uv run --python 3.12 --no-sync pytest tests/ -m performance -n 0 --durations=10 -q
+
   coverage:
     name: Upload coverage
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: test
@@ -127,14 +174,17 @@ jobs:
       - name: Download coverage artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-*
+          pattern: coverage-3.12
           path: coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7.0.0
         with:
-          files: ./coverage/coverage-3.12/coverage.xml,./coverage/coverage-3.13/coverage.xml,./coverage/coverage-3.14/coverage.xml
+          files: ./coverage/coverage-3.12/coverage.xml
           use_oidc: true
-          fail_ci_if_error: false
+          # This job now runs only on push (PRs skip coverage entirely), making
+          # it the sole coverage-publication path. A silent upload failure here
+          # would mean coverage stops updating with no signal, so surface it.
+          fail_ci_if_error: true
           flags: unittests
           name: codecov

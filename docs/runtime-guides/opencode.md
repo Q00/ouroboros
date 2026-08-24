@@ -246,6 +246,22 @@ opencode --version
 ouroboros --help
 ```
 
+### First command
+
+Configure the OpenCode integration once before opening the first workflow:
+
+```bash
+ouroboros setup --runtime opencode
+```
+
+Then start a new OpenCode session and run:
+
+```
+ooo interview "Build a task management CLI"
+```
+
+The `ooo` command is available after setup registers the Ouroboros MCP server.
+
 ## OpenCode-Specific Strengths
 
 - **Multi-provider support** -- use Anthropic, OpenAI, Google, or other providers through a single runtime

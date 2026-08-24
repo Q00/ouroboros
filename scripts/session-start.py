@@ -26,9 +26,15 @@ def main() -> None:
         checker = _load_version_checker()
         result = checker.check_update() or {}
         if result.get("update_available") and result.get("message"):
-            # SessionStart stdout is consumed as Claude context, so keep the
-            # success path silent and send notices to stderr instead.
-            print(result["message"], file=sys.stderr)
+            consume = getattr(checker, "consume_update_notice", None)
+            if consume is not None and not consume(current=result.get("current")):
+                return
+            # SessionStart stdout on exit 0 is the one documented channel
+            # that reaches the user: it enters Claude context and the agent
+            # relays it. stderr on exit 0 goes to the debug log only, so the
+            # notice was invisible there (#2066). A separate durable
+            # consumption stamp bounds delivery, not only network fetches.
+            print(result["message"])
             return
     except Exception as e:
         print(f"ouroboros: update check failed: {e}", file=sys.stderr)

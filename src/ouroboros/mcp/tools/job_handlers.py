@@ -1109,6 +1109,25 @@ async def _render_job_snapshot_inner(
             ]
         )
 
+    if snapshot.is_terminal:
+        next_step = snapshot.result_meta.get("next_step")
+        reason_code = snapshot.result_meta.get("failure_reason_code")
+        recovery_action = snapshot.result_meta.get("recovery_action")
+        if (
+            isinstance(next_step, str)
+            and isinstance(reason_code, str)
+            and isinstance(recovery_action, str)
+        ):
+            lines.extend(
+                [
+                    "",
+                    "### Recovery",
+                    f"**Failure reason**: {reason_code}",
+                    f"**Recommended action**: {recovery_action}",
+                    f"**Next step**: {next_step}",
+                ]
+            )
+
     if snapshot.error:
         lines.extend(["", f"**Error**: {snapshot.error}"])
 

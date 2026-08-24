@@ -54,6 +54,12 @@ For alternative install methods and shell completions, see the [Codex CLI README
 
 > **Windows users:** Install and run both Codex CLI and Ouroboros inside a WSL 2 environment for full compatibility. See [Platform Support](../platform-support.md) for details.
 
+The evidence verifier also recognizes the narrow `powershell.exe`/`pwsh.exe
+-Command` transport shape used by native Windows runtimes and accepts current
+`uv run`/`uvx` pytest forms, including `python -m pytest`. This compatibility does
+not change native Windows from experimental support or make executable
+PowerShell forms such as `-File` and `-EncodedCommand` trusted evidence aliases.
+
 ## Configuration
 
 To select Codex CLI as the runtime backend, set the following in your Ouroboros configuration:
@@ -120,13 +126,13 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
-- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default. On native Windows, default setup creates no stdio child; use explicit `--mcp-mode http` and run the printed loopback server command before opening Codex Desktop. The server is not installed as background persistence.
 - Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
 Setup also creates artifacts outside `~/.codex/`: `ensure_config_dir()` creates `~/.ouroboros/data/` and `~/.ouroboros/logs/` (`cli/commands/setup.py:2632`), and a fresh configuration gets a new `~/.ouroboros/credentials.yaml` written at mode `0600` (`:2771`).
 
-`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; setup preserves it by default. Use `--mcp-mode stdio` only on supported hosts when you intentionally want a managed command-spawned server. Native Windows refuses that crash-prone topology and offers explicit operator-owned `--mcp-mode http` instead.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 
@@ -159,6 +165,11 @@ When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exac
 ### `ooo` Skill Availability on Codex
 
 After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/ouroboros-*` and the routing rules into `~/.codex/rules/`. To refresh only those artifacts after upgrading Ouroboros, run `ouroboros codex refresh`; it does not modify `~/.codex/config.toml` or `~/.ouroboros/config.yaml`. `resolve_packaged_codex_assets()` currently resolves and installs 22 `skills/*/SKILL.md` bundles. The table below is a **subset** — the ones most often driven from a terminal — with their CLI equivalents. See the Korean guide for the complete 22-row table.
+
+Runtime identity fingerprints continue to cover user-managed rules and skills.
+Codex Desktop's reserved `~/.codex/skills/.system` subtree is excluded because
+the app refreshes those bundled skills in place; changes to sibling user skills
+still invalidate the runtime identity as before.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|
@@ -215,6 +226,24 @@ codex --version
 > (`cli/commands/config.py:696-701`). The string `codex_cli_path` does not appear
 > in the output, so do not grep for it. On the plugin path, and for anyone who
 > put `codex` on `PATH`, `codex --version` is the right check.
+
+### First command
+
+For the marketplace-plugin path, start a new Codex session and run the setup
+and first workflow command explicitly:
+
+```
+ooo setup
+ooo interview "Build a task management CLI"
+```
+
+For the standalone CLI path, run setup once from a terminal, then start the
+interview:
+
+```bash
+ouroboros setup --runtime codex
+ouroboros init start "Build a task management CLI"
+```
 
 ## How It Works
 

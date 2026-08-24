@@ -179,6 +179,7 @@ class TestOptOut:
             "OUROBOROS_TELEMETRY",
             "OUROBOROS_POSTHOG_HOST",
             "OUROBOROS_POSTHOG_API_KEY",
+            "OUROBOROS_FIRST_COMMAND_SURFACE",
         ):
             env.pop(key, None)
         env["HOME"] = str(tmp_path / "home")
@@ -604,6 +605,63 @@ class TestCapture:
         assert sent[0]["properties"]["phase"] == "completion"
         assert sent[0]["properties"]["ok"] is False
 
+    def test_subagent_dispatch_event_keeps_only_closed_values(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_subagent_dispatch(
+            {
+                "phase": "emitted",
+                "fanout_kind": "lateral_persona_panel",
+                "payload_count": 5,
+                "invocation_surface": "mcp_host",
+                "dispatch_authority": "mcp_host",
+                "host_family": "claude_code",
+                "host_identity_status": "known",
+                "host_capability": "undeclared",
+                "capability_source": "none",
+                "delivery_mode": "inline_host",
+                "execution_preference": "parallel",
+                "fallback_strategy": "sequential",
+                "configured_worker_backend": "gemini",
+                "host_worker_mismatch": True,
+                "decision_reason": "host_capability_undeclared",
+                "contract_version": "v2",
+                "fanout_reentry_available": True,
+                "fanout_id": "fanout_private",
+                "prompt": "/private/repo/secret",
+            }
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        event = sent[0]
+        assert event["event"] == "subagent_dispatch"
+        props = event["properties"]
+        assert props["host_family"] == "claude_code"
+        assert props["configured_worker_backend"] == "gemini"
+        assert props["host_worker_mismatch"] is True
+        assert "fanout_id" not in props
+        assert "prompt" not in props
+        assert "private" not in str(props)
+
+    def test_subagent_dispatch_folds_custom_backend_and_rejects_open_enums(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_subagent_dispatch(
+            {
+                "phase": "emitted",
+                "fanout_kind": "private_customer_fanout",
+                "host_family": "private-client-name",
+                "configured_worker_backend": "private-backend",
+            }
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["configured_worker_backend"] == "other"
+        assert "fanout_kind" not in props
+        assert "host_family" not in props
+
     def test_non_ouroboros_tool_skipped(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_tool_call("some_other_tool", ok=True)
         telemetry.flush(timeout=2.0)
@@ -803,6 +861,59 @@ class TestCapture:
         assert sent[0]["properties"]["command"] == "extension_job"
 
     @pytest.mark.parametrize(
+        ("terminal_status", "meta", "reason", "action"),
+        (
+            ("cancelled", {}, "cancelled", "retry"),
+            ("interrupted", {"interrupted_from_shutdown": True}, "cancelled", "retry"),
+            ("failed", {"failed_from_progress_accounting_stall": True}, "timeout", "retry"),
+            ("failed", {"failure_reason_code": "config"}, "config", "setup"),
+            ("failed", {"failure_reason_code": "auth"}, "auth", "login"),
+            ("failed", {"failure_reason_code": "validation"}, "validation", "inspect_logs"),
+            ("failed", {}, "unknown", "inspect_logs"),
+        ),
+    )
+    def test_failed_outcome_emits_closed_reason_and_action(
+        self,
+        sent: list[dict[str, Any]],
+        terminal_status: str,
+        meta: dict[str, Any],
+        reason: str,
+        action: str,
+    ) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status=terminal_status,
+            result_meta=meta,
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == reason
+        assert props["recovery_action"] == action
+        assert "job-private-id" not in json.dumps(sent[0])
+
+    def test_failed_outcome_does_not_forward_raw_error_or_unknown_metadata(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "error": "secret prompt /Users/private/project",
+                "failure_reason_code": "not-a-real-code",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "unknown"
+        assert props["recovery_action"] == "inspect_logs"
+        assert "secret prompt" not in json.dumps(sent[0])
+        assert "/Users/private/project" not in json.dumps(sent[0])
+
+    @pytest.mark.parametrize(
         ("job_type", "expected_command"),
         (
             ("execute_seed", "run"),
@@ -988,6 +1099,7 @@ class TestExactPropertySets:
             "execute_runtime_backend",
             "interview_llm_backend",
             "evaluate_llm_backend",
+            "first_command_surface",
             "app_version",
             "os",
             "python_version",
@@ -1013,6 +1125,7 @@ class TestExactPropertySets:
             "is_funnel",
             "phase",
             "accepted",
+            "first_command_surface",
             "app_version",
             "os",
             "python_version",
@@ -1112,7 +1225,13 @@ class TestExactPropertySets:
         keys = set(props)
 
         assert keys <= telemetry._MCP_SERVE_STARTED_KEYS
-        assert keys == {"transport", "tool_count", "app_version", "os"}
+        assert keys == {
+            "transport",
+            "tool_count",
+            "first_command_surface",
+            "app_version",
+            "os",
+        }
         assert "python_version" not in props
         for backend_key in telemetry._CONTEXT_ALLOWLIST:
             assert backend_key not in props
@@ -1181,6 +1300,43 @@ class TestFrontdoor:
         monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
         monkeypatch.delenv("CODEX_SANDBOX_NETWORK_DISABLED", raising=False)
         assert telemetry._detect_frontdoor() is None
+
+
+class TestFirstCommandSurface:
+    @pytest.mark.parametrize(
+        "surface", ("setup_complete", "readme_quickstart", "getting_started", "unknown")
+    )
+    def test_explicit_fixed_enum_wins(self, monkeypatch: pytest.MonkeyPatch, surface: str) -> None:
+        monkeypatch.setenv("OUROBOROS_FIRST_COMMAND_SURFACE", surface)
+        (Path.home() / ".ouroboros").mkdir()
+        (Path.home() / ".ouroboros" / "first_command_surface").write_text(
+            "readme_quickstart\n", encoding="utf-8"
+        )
+        (Path.home() / ".ouroboros" / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+        assert telemetry._detect_first_command_surface() == surface
+
+    def test_install_hint_survives_setup(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir()
+        (state_dir / "first_command_surface").write_text("readme_quickstart\n", encoding="utf-8")
+        (state_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+        assert telemetry._detect_first_command_surface() == "readme_quickstart"
+
+    def test_config_is_fallback_when_hint_is_absent(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir()
+        (state_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+        assert telemetry._detect_first_command_surface() == "setup_complete"
+
+    def test_invalid_hint_without_config_is_unknown(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir()
+        (state_dir / "first_command_surface").write_text("private-url\n", encoding="utf-8")
+
+        assert telemetry._detect_first_command_surface() == "unknown"
 
 
 class TestNotice:

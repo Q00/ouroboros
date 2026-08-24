@@ -29,6 +29,7 @@ from ouroboros.bigbang.seed_generator import (
     _parse_context_references,
     _parse_evaluation_principles,
     _parse_exit_conditions,
+    _parse_extracted_acceptance_criteria,
     _parse_ontology_fields,
     _parse_string_array_values,
     load_seed,
@@ -3781,3 +3782,91 @@ class TestObjectArrayExtractionContract:
         assert result.is_ok
         assert mock_adapter.complete.await_count == 2
         assert result.value.evaluation_principles[0].name == "completeness"
+
+
+class TestVerifyExemptionParsing:
+    """Optional `exempt` key — the verify-command gate's per-AC escape hatch."""
+
+    def test_exempt_reason_is_carried_into_the_spec(self) -> None:
+        criteria = _parse_extracted_acceptance_criteria(
+            json.dumps(
+                [
+                    {
+                        "description": "The onboarding copy reads naturally",
+                        "verify": "NONE",
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                        "exempt": "Prose quality has no deterministic command",
+                    }
+                ]
+            )
+        )
+
+        assert len(criteria) == 1
+        assert criteria[0].verify_command is None
+        assert criteria[0].verify_exemption_reason == "Prose quality has no deterministic command"
+
+    def test_none_sentinel_exempt_is_dropped(self) -> None:
+        criteria = _parse_extracted_acceptance_criteria(
+            json.dumps(
+                [
+                    {
+                        "description": "Tests pass",
+                        "verify": "pytest -q",
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                        "exempt": "NONE",
+                    }
+                ]
+            )
+        )
+
+        assert criteria[0].verify_exemption_reason is None
+
+    def test_exempt_reason_cannot_accompany_verify_command(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _parse_extracted_acceptance_criteria(
+                json.dumps(
+                    [
+                        {
+                            "description": "Tests pass",
+                            "verify": "pytest -q",
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                            "exempt": "Browser-only check",
+                        }
+                    ]
+                )
+            )
+
+    def test_criteria_without_the_key_stay_valid(self) -> None:
+        criteria = _parse_extracted_acceptance_criteria(
+            json.dumps(
+                [
+                    {
+                        "description": "Tests pass",
+                        "verify": "pytest -q",
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                ]
+            )
+        )
+
+        assert criteria[0].verify_exemption_reason is None
+
+    def test_non_string_exempt_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="exempt must be a string"):
+            _parse_extracted_acceptance_criteria(
+                json.dumps(
+                    [
+                        {
+                            "description": "Tests pass",
+                            "verify": "NONE",
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                            "exempt": 3,
+                        }
+                    ]
+                )
+            )

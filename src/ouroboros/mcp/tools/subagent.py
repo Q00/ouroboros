@@ -50,7 +50,6 @@ from ouroboros.backends.capabilities import (
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 
-# Advisory prompt text moved to ``mcp.tools.advisory_prompts`` in #1754;
 # re-exported for importers that already reach for these names here.
 from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _GENERIC_ADVISORY_OUTPUT_SECTION,
@@ -76,6 +75,7 @@ from ouroboros.mcp.tools.fanout import (  # noqa: F401
     stamp_question_advisory_fanout,
     submit_fanout_results,
 )
+from ouroboros.mcp.tools.interview_prompt import bounded_system_prompt
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -1180,7 +1180,7 @@ def build_interview_subagent(
     """
     from ouroboros.agents.loader import load_agent_prompt
 
-    system_prompt = load_agent_prompt("socratic-interviewer")
+    system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
@@ -1706,6 +1706,10 @@ def build_pm_interview_subagent(
     if transcript:
         transcript_section = f"\n## Conversation History\n{transcript}\n"
 
+    # A turn's answers arrive under ``answers``, leaving the singular
+    # ``answer`` empty for exactly the turns carrying the most history. The
+    # history is the transcript; ``answer`` only adds one round beneath it.
+    answer_section = f"\n## User's Latest Answer\n{answer}\n" if answer else ""
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
 
@@ -1725,7 +1729,7 @@ constraints.
 
 Begin the PM interview. Ask your first question about product requirements."""
 
-    elif (action == "answer" or action == "resume") and answer:
+    elif (action == "answer" or action == "resume") and (answer or transcript):
         prompt = f"""{system_prompt}
 
 ---
@@ -1737,10 +1741,7 @@ Analyze their answer, classify requirements, and ask the next question.
 
 ## Session ID
 {session_id}
-{transcript_section}
-## User's Latest Answer
-{answer}
-{repos_section}
+{transcript_section}{answer_section}{repos_section}
 Continue the PM interview."""
 
     elif action == "generate":
@@ -2360,11 +2361,10 @@ do not enqueue another background Ralph job."""
 # served by ``FanoutRegistry`` + ``submit_fanout_results`` and the
 # ``ouroboros_submit_fanout_results`` MCP tool.
 
-# host_action cue keyed by inline dispatch mode. PLUGIN_PASSIVE is intentionally
-# absent: that surface consumes the ``_subagents`` bridge envelope built by
-# ``build_multi_subagent_result`` and stamps no host-action cue here.
+# Host-action cue for inline modes; HOST_DECIDES carries an explicit fallback.
 _FANOUT_HOST_ACTION_BY_MODE: dict[SubagentDispatchMode, str] = {
     SubagentDispatchMode.HOST_DRIVEN: "spawn_subagents",
+    SubagentDispatchMode.HOST_DECIDES: "dispatch_subagents_if_supported",
     SubagentDispatchMode.SEQUENTIAL: "process_payloads_sequentially",
 }
 
@@ -2436,20 +2436,15 @@ def stamp_fanout_meta(
     payloads: list[SubagentPayload],
     correlation_key: str,
 ) -> None:
-    """Stamp the standardized 3-mode fan-out dispatch contract onto ``meta``.
+    """Stamp the standardized fan-out dispatch contract onto ``meta``.
 
-    Single source of truth for the dispatch-mode stamping PR-C standardized and
-    that the two legacy producers (interview question advisory + lateral persona
-    panel) previously copy-pasted:
+    ``HOST_DRIVEN`` requests parallel spawn, ``HOST_DECIDES`` asks the host to
+    choose native parallel dispatch or sequential fallback, and ``SEQUENTIAL``
+    requires ordered processing. ``PLUGIN_PASSIVE`` stamps no host cue because
+    its bridge consumes the ``_subagents`` envelope.
 
-    * ``HOST_DRIVEN``    → ``host_action = "spawn_subagents"``
-    * ``SEQUENTIAL``     → ``host_action = "process_payloads_sequentially"``
-    * ``PLUGIN_PASSIVE`` → no host-action cue (the bridge consumes the
-      ``_subagents`` envelope from :func:`build_multi_subagent_result`).
-
-    ``{prefix}_result_correlation_key`` is written on all three: it names how a
-    submission is keyed, which the cue does not own. The other two keys are the
-    cue's, so ``PLUGIN_PASSIVE`` gets neither.
+    ``{prefix}_result_correlation_key`` is written on all modes. The cue itself
+    is host-only, so PLUGIN_PASSIVE gets no dispatch mode or host action.
 
     Args:
         meta: Response meta dict, mutated in place.
@@ -2468,6 +2463,11 @@ def stamp_fanout_meta(
         return  # PLUGIN_PASSIVE: no cue, and no dispatch mode to announce with it.
     meta[_fanout_meta_key(prefix, "dispatch_mode")] = dispatch_mode.value
     meta[_fanout_meta_key(prefix, "host_action")] = host_action
+    if dispatch_mode is SubagentDispatchMode.HOST_DECIDES:
+        meta[_fanout_meta_key(prefix, "delivery_mode")] = "inline_host"
+        meta[_fanout_meta_key(prefix, "execution_preference")] = "parallel"
+        meta[_fanout_meta_key(prefix, "fallback_strategy")] = "sequential"
+        meta[_fanout_meta_key(prefix, "host_capability")] = "undeclared"
 
 
 # ---------------------------------------------------------------------------

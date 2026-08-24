@@ -509,12 +509,11 @@ class AutoPipelineState:
     ralph_last_event_at: float | None = None
     ralph_stop_reason: str | None = None
     ralph_current_generation: int | None = None
-    # Q00/ouroboros#773: persisted intent for ``--complete-product`` /
-    # ``complete_product=True``. The flag is durable session state — not a
-    # per-invocation argument — so a session originally started with
-    # ``--complete-product`` keeps chaining RUN → RALPH_HANDOFF on resume even
-    # when the operator forgets to re-pass the flag. Defaults to False so
-    # legacy state files load unchanged.
+    # Compatibility-only persisted intent for the retired
+    # ``--complete-product`` path. New sessions do not use this flag: the run
+    # job owns the run/evaluate/Ralph chain. It remains durable so legacy
+    # sessions parked in RUN or a retired successor phase can fail closed with
+    # explicit migration guidance instead of falsely reporting completion.
     complete_product: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
@@ -881,9 +880,10 @@ class AutoPipelineState:
           will transition the state back to ``REVIEW``, so the capability
           is :attr:`AutoResumeCapability.RESUME`.
         * Other non-terminal phases also classify as ``RESUME``.
-        * :attr:`AutoPhase.BLOCKED` / :attr:`AutoPhase.FAILED` consult
-          ``_recoverable_phase_for_tool`` first; an unmapped or missing
-          ``last_tool_name`` yields ``NONE``.
+        * :attr:`AutoPhase.BLOCKED` / :attr:`AutoPhase.FAILED` normally
+          consult ``_recoverable_phase_for_tool``; an unmapped or missing
+          ``last_tool_name`` yields ``NONE``. A pipeline deadline remains
+          resumable when a durable Ralph job or plugin handoff exists.
         * The hot ``#688`` cell: ``BLOCKED`` + ``last_tool_name ==
           "interview.start"`` + ``interview_session_id is None``
           classifies as :attr:`AutoResumeCapability.RETRY` because
@@ -917,6 +917,10 @@ class AutoPipelineState:
             return AutoResumeCapability.RESUME
 
         # --- BLOCKED or FAILED ---
+        if self.last_tool_name == "pipeline_deadline" and (
+            self.ralph_job_id is not None or self.ralph_dispatch_mode == "plugin"
+        ):
+            return AutoResumeCapability.RESUME
         recoverable = _recoverable_phase_for_tool(self.last_tool_name)
         if recoverable is None:
             return AutoResumeCapability.NONE

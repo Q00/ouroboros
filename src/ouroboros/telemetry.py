@@ -34,6 +34,7 @@ import urllib.request
 import uuid
 
 from ouroboros import __version__
+from ouroboros.mcp.failure_taxonomy import classify_failure
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
@@ -122,7 +123,7 @@ _CLI_FUNNEL = {"init": "interview"}
 # way the actual `ooo` entrypoint does, and `.commands.keys()` is the
 # statically-registered set -- `_PluginAwareGroup`'s dynamic fallback only
 # triggers for names NOT in that dict, so this enumeration inherently
-# excludes plugin dispatch. 27 names: every `app.command(name=...)` /
+# excludes plugin dispatch. 28 names: every `app.command(name=...)` /
 # `app.add_typer(..., name=...)` registration plus two hidden top-level
 # aliases (`monitor`, `dispatch`).
 _CANONICAL_CLI_COMMANDS = frozenset(
@@ -134,6 +135,7 @@ _CANONICAL_CLI_COMMANDS = frozenset(
         "codex",
         "config",
         "detect",
+        "doctor",
         "dispatch",
         "harness",
         "init",
@@ -322,6 +324,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "interview_llm_backend",
         "evaluate_llm_backend",
         "frontdoor",
+        "first_command_surface",
         "app_version",
         "os",
         "python_version",
@@ -348,6 +351,8 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "ok",
         "verified",
         "final_approved",
+        "failure_reason_code",
+        "recovery_action",
         "$insert_id",
         "runtime_backend",
         "execute_runtime_backend",
@@ -361,7 +366,88 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
     }
 )
 _MCP_SERVE_STARTED_KEYS = frozenset(
-    {"transport", "tool_count", "frontdoor", "app_version", "os", "ci"}
+    {
+        "transport",
+        "tool_count",
+        "frontdoor",
+        "first_command_surface",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_SUBAGENT_DISPATCH_KEYS = frozenset(
+    {
+        "phase",
+        "fanout_kind",
+        "payload_count",
+        "invocation_surface",
+        "dispatch_authority",
+        "host_family",
+        "host_identity_status",
+        "host_capability",
+        "capability_source",
+        "delivery_mode",
+        "execution_preference",
+        "fallback_strategy",
+        "configured_worker_backend",
+        "host_worker_mismatch",
+        "decision_reason",
+        "contract_version",
+        "fanout_reentry_available",
+        "submission_status",
+        "expected_count",
+        "received_count",
+        "undispatched_count",
+        "frontdoor",
+        "first_command_surface",
+        "app_version",
+        "os",
+        "python_version",
+        "ci",
+    }
+)
+
+_SUBAGENT_DISPATCH_ENUMS: dict[str, frozenset[str]] = {
+    "phase": frozenset({"emitted", "submitted"}),
+    "fanout_kind": frozenset(
+        {"lateral_persona_panel", "question_advisory", "code_investigation", "unknown"}
+    ),
+    "invocation_surface": frozenset({"mcp_host", "internal_runtime"}),
+    "dispatch_authority": frozenset({"mcp_host", "internal_runtime", "passive_bridge"}),
+    "host_family": frozenset({"claude_code", "codex", "opencode", "other_known", "unknown"}),
+    "host_identity_status": frozenset({"known", "unknown"}),
+    "host_capability": frozenset({"parallel", "sequential", "unavailable", "undeclared"}),
+    "capability_source": frozenset(
+        {"mcp_extension", "trusted_server_option", "passive_bridge", "none"}
+    ),
+    "delivery_mode": frozenset({"passive_bridge", "inline_host", "inline_runtime"}),
+    "execution_preference": frozenset({"parallel", "sequential"}),
+    "fallback_strategy": frozenset({"sequential", "none"}),
+    "decision_reason": frozenset(
+        {
+            "passive_bridge_detected",
+            "declared_parallel",
+            "declared_sequential",
+            "host_capability_undeclared",
+            "configured_internal_runtime",
+        }
+    ),
+    "contract_version": frozenset({"v2"}),
+    "submission_status": frozenset(
+        {
+            "complete",
+            "partial",
+            "invalid_result_entry",
+            "unknown_fanout_id",
+            "correlation_mismatch",
+            "unknown_kind",
+            "publication_failed",
+        }
+    ),
+}
+_FIRST_COMMAND_SURFACES = frozenset(
+    {"setup_complete", "readme_quickstart", "getting_started", "unknown"}
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
@@ -820,6 +906,35 @@ def _detect_frontdoor() -> str | None:
     return None
 
 
+def _detect_first_command_surface() -> str:
+    """Return the privacy-safe onboarding surface attribution.
+
+    The value is deliberately a fixed enum. A trusted setup/config file wins
+    only when no install-time hint exists. The hint identifies the surface
+    that brought the user to installation, so it must survive the subsequent
+    setup step; otherwise every README cohort would be relabeled
+    ``setup_complete`` before its first command. ``setup_complete`` is the
+    fallback for users who configured Ouroboros without a known install
+    surface.
+    """
+    candidate = os.environ.get("OUROBOROS_FIRST_COMMAND_SURFACE", "").strip().lower()
+    if candidate in _FIRST_COMMAND_SURFACES:
+        return candidate
+
+    hint_path = Path.home() / ".ouroboros" / "first_command_surface"
+    try:
+        candidate = hint_path.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        candidate = ""
+    if candidate in _FIRST_COMMAND_SURFACES:
+        return candidate
+
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    if config_path.is_file():
+        return "setup_complete"
+    return "unknown"
+
+
 def _base_properties() -> dict[str, Any]:
     props: dict[str, Any] = {
         "app_version": __version__,
@@ -829,6 +944,7 @@ def _base_properties() -> dict[str, Any]:
     frontdoor = _detect_frontdoor()
     if frontdoor:
         props["frontdoor"] = frontdoor
+    props["first_command_surface"] = _detect_first_command_surface()
     # CI runs are excluded from the published counting rule (TELEMETRY.md);
     # stamping them lets every insight filter ci != true.
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
@@ -930,6 +1046,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _WORKFLOW_OUTCOME_KEYS
     if event == "mcp_serve_started":
         return _MCP_SERVE_STARTED_KEYS
+    if event == "subagent_dispatch":
+        return _SUBAGENT_DISPATCH_KEYS
     return None
 
 
@@ -1033,6 +1151,44 @@ def capture_tool_call(
         pass
 
 
+def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
+    """Capture one privacy-safe fan-out contract or re-entry boundary.
+
+    Values are closed enums and bounded counts. Unknown/custom strings are
+    folded before ``capture`` so raw client names, backend names, identifiers,
+    prompts, and outputs can never reach PostHog through this event.
+    """
+    try:
+        safe: dict[str, Any] = {}
+        for key, value in properties.items():
+            allowed = _SUBAGENT_DISPATCH_ENUMS.get(key)
+            if allowed is not None:
+                if isinstance(value, str) and value in allowed:
+                    safe[key] = value
+                continue
+            if key in {
+                "payload_count",
+                "expected_count",
+                "received_count",
+                "undispatched_count",
+            }:
+                if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 64:
+                    safe[key] = value
+                continue
+            if key in {"host_worker_mismatch", "fanout_reentry_available"}:
+                if isinstance(value, bool):
+                    safe[key] = value
+                continue
+            if key == "configured_worker_backend":
+                from ouroboros.backends.capabilities import get_backend_capability
+
+                capability = get_backend_capability(str(value))
+                safe[key] = capability.name if capability is not None else "other"
+        capture("subagent_dispatch", safe)
+    except Exception:
+        pass
+
+
 def capture_job_outcome(
     job_id: str,
     job_type: str,
@@ -1065,24 +1221,31 @@ def capture_job_outcome(
         verified = (
             normalized_status == "completed" and job_type == "evaluate" and final_approved is True
         )
+        resolution = classify_failure(normalized_status, meta)
         command = (
             _JOB_FUNNEL.get(job_type, job_type)
             if job_type in _CANONICAL_JOB_TYPES
             else _EXTENSION_JOB_COMMAND
         )
+        properties: dict[str, Any] = {
+            "command": command,
+            "phase": "terminal",
+            "terminal_status": normalized_status,
+            "ok": normalized_status == "completed",
+            "verified": verified,
+            "final_approved": (final_approved if isinstance(final_approved, bool) else None),
+            "$insert_id": hashlib.sha256(f"ouroboros-job-outcome\0{job_id}".encode()).hexdigest(),
+        }
+        if resolution is not None:
+            properties.update(
+                {
+                    "failure_reason_code": resolution.reason_code.value,
+                    "recovery_action": resolution.recovery_action.value,
+                }
+            )
         capture(
             "workflow_outcome",
-            {
-                "command": command,
-                "phase": "terminal",
-                "terminal_status": normalized_status,
-                "ok": normalized_status == "completed",
-                "verified": verified,
-                "final_approved": (final_approved if isinstance(final_approved, bool) else None),
-                "$insert_id": hashlib.sha256(
-                    f"ouroboros-job-outcome\0{job_id}".encode()
-                ).hexdigest(),
-            },
+            properties,
         )
     except Exception:
         pass
@@ -1244,5 +1407,6 @@ __all__ = [
     "flush",
     "is_enabled",
     "set_context",
+    "capture_subagent_dispatch",
     "show_first_run_notice",
 ]

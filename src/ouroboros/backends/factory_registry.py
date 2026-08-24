@@ -121,6 +121,11 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
         llm_adapter_factory="_create_ourocode_adapter",
     ),
     BackendFactorySpec(
+        name="dsh",
+        llm_backend="dsh",
+        llm_adapter_factory="_create_dsh_adapter",
+    ),
+    BackendFactorySpec(
         name="litellm",
         llm_backend="litellm",
         llm_adapter_factory="_create_litellm_adapter",

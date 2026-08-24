@@ -1,8 +1,13 @@
 # Ouroboros
 
-> Specification-first workflow engine for AI coding agents
+> Pins an acceptance spec and omits any verify command or expected output from the worker's contract
 
 Ouroboros transforms vague ideas into verified, working codebases by replacing ad-hoc prompting with a structured workflow: interview, crystallize, execute, evaluate, evolve. It sits between the user and their AI runtime (Claude Code, Codex CLI, or others).
+
+Note: this is `github.com/Q00/ouroboros`. A separate, unaffiliated open-source
+project also named "Ouroboros" (`github.com/razzant/ouroboros`, by Anton
+Razzhigaev) is a self-modifying, autonomous-memory agent that rewrites its own
+architecture -- a different project with a different design, no shared code.
 
 ## Core Concepts
 
