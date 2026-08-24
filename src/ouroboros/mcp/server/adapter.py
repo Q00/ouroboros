@@ -1087,8 +1087,10 @@ class MCPServerAdapter:
         Network transports are gated here rather than at the CLI, because this
         is the one place every embedder passes through. The rule: a bind that
         other machines can reach must carry credentials. A loopback bind may
-        stay credential-free -- the client already owns this process, and the
-        SDK auto-enables DNS-rebinding protection there.
+        stay credential-free -- the client already owns this process, and
+        Ouroboros supplies explicit SDK DNS-rebinding settings there, preserving
+        the SDK-compatible Host defaults while keeping an empty Origin policy
+        fail-closed.
 
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
