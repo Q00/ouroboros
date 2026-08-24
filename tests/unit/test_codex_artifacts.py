@@ -577,6 +577,39 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
         assert target_path.is_dir(), "cleanup deleted a directory it did not reserve"
         assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
 
+    def test_failed_publication_never_removes_a_renamed_reservation_replacement(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live descriptor does not prove that the target still names its directory."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        held_reservation_path = tmp_path / "held-reservation"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_rename = os.rename
+
+        def _rename_reservation_away_then_fail(*_args: object, **_kwargs: object) -> None:
+            real_rename(target_path, held_reservation_path)
+            target_path.mkdir()  # a different writer now owns this pathname
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        monkeypatch.setattr(
+            codex_artifacts.os,
+            "rename",
+            _rename_reservation_away_then_fail,
+        )
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EIO
+        assert target_path.is_dir(), "cleanup deleted a directory it did not reserve"
+        assert held_reservation_path.is_dir(), "the original reservation was not preserved"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
     def test_directory_commit_never_destroys_a_racing_writer_with_content(
         self,
         tmp_path: Path,

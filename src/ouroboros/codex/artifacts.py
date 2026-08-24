@@ -408,20 +408,27 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
 def _release_directory_reservation(reservation_fd: int, target_path: Path) -> None:
     """Remove a failed publication's reservation, and nothing else.
 
-    A writer that removed the reservation and put their own directory at the
-    same path must not have it deleted by our cleanup, so the reservation is
-    removed only while the descriptor opened on it still refers to a live
-    directory. A removed directory reports zero links locally and ``ESTALE`` on
-    NFS; an inode comparison cannot stand in for this, because a recreated
-    directory routinely reuses the same inode number. Anything that leaves
-    ownership unproven — including an unexpected ``fstat`` failure — is treated
-    as not ours and left alone.
+    A writer may remove or rename the reservation and put their own directory at
+    the same path before publication fails. Descriptor liveness alone cannot
+    prove pathname ownership: a renamed reservation remains linked. Cleanup
+    therefore requires both a live descriptor and a current target pathname
+    with the same device/inode identity. A removed reservation reports zero
+    links locally (or ``ESTALE`` on NFS), while a renamed reservation and its
+    replacement have different identities because the original inode is still
+    live. Anything that leaves ownership unproven is treated as not ours and
+    left alone.
     """
     try:
-        reservation_is_live = os.fstat(reservation_fd).st_nlink > 0
+        reservation_stat = os.fstat(reservation_fd)
+        target_stat = os.stat(target_path, follow_symlinks=False)
     except OSError:
         return
-    if not reservation_is_live:
+    if reservation_stat.st_nlink <= 0:
+        return
+    if (reservation_stat.st_dev, reservation_stat.st_ino) != (
+        target_stat.st_dev,
+        target_stat.st_ino,
+    ):
         return
     try:
         os.rmdir(target_path)
@@ -441,9 +448,10 @@ def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
 
     Directories cannot be hard-linked. ``os.mkdir`` reserves the name atomically —
     it fails with ``EEXIST`` rather than replacing — and POSIX ``rename`` then
-    consumes that reservation. Failure cleanup proves ownership before removing
-    anything, so a writer who took the name over never has their directory
-    deleted by this call.
+    consumes that reservation. Failure cleanup removes the pathname only while
+    the live reservation descriptor and the current target still identify the
+    same directory, so a writer who removed or renamed the reservation and took
+    the name over is left alone.
 
     One gap on the success path is not closable here: a writer who removes the
     reservation and recreates an empty directory at the same path before the
