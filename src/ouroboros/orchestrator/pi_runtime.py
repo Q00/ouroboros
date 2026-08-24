@@ -135,7 +135,12 @@ class PiRuntime:
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
-        self._native_param_flags: tuple[bool, bool, bool] | None = None
+        # Capability discovery is deliberately completed during synchronous
+        # runtime construction.  execute_task() runs on the orchestration
+        # event loop and must never invoke blocking subprocess APIs there.
+        self._native_param_flags: tuple[bool, bool, bool] | None = (
+            _probe_pi_native_param_flags(self._cli_path)
+        )
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
@@ -226,21 +231,18 @@ class PiRuntime:
 
     def _supports_native_param_flags(self) -> bool:
         """Return whether the paired system-prompt and tools flags are available."""
-        if self._native_param_flags is None:
-            self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags[0] and self._native_param_flags[1]
+        flags = self._native_param_flags
+        return flags is not None and flags[0] and flags[1]
 
     def _supports_tools_flag(self) -> bool:
         """Return whether the Pi CLI supports a non-empty tools allow-list."""
-        if self._native_param_flags is None:
-            self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags[1]
+        flags = self._native_param_flags
+        return flags is not None and flags[1]
 
     def _supports_no_tools_flag(self) -> bool:
         """Return whether the Pi CLI supports ``--no-tools``."""
-        if self._native_param_flags is None:
-            self._native_param_flags = _probe_pi_native_param_flags(self._cli_path)
-        return self._native_param_flags[2]
+        flags = self._native_param_flags
+        return flags is not None and flags[2]
 
     # -- CLI resolution ----------------------------------------------------
 

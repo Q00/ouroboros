@@ -127,6 +127,7 @@ def test_empty_strings_count_as_absent_but_empty_tools_is_requested() -> None:
         _caps(
             system_prompt_support=ParamSupport.IGNORED,
             tool_restriction_support=ParamSupport.IGNORED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         ),
         system_prompt="",
         tools=[],

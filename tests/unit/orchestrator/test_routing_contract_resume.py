@@ -34,6 +34,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.execution_semantics import CURRENT_EXECUTION_SEMANTICS_VERSION
 from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
@@ -969,7 +970,7 @@ def test_v4_execution_semantics_migrate_to_unavailable_verify_shell() -> None:
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
     )
     migrated = resumed._execution_contract["execution_semantics"]
-    assert migrated["version"] == 6
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
 
 
@@ -991,7 +992,7 @@ def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
     )
     migrated = resumed._execution_contract["execution_semantics"]
-    assert migrated["version"] == 6
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
 
 

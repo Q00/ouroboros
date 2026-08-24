@@ -127,12 +127,11 @@ def test_build_command_falls_back_when_probe_finds_only_one_native_param_flag(
     help_text: str,
     expected_flags: tuple[bool, bool, bool],
 ) -> None:
-    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-
     with patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = help_text
         mock_run.return_value.stderr = ""
+        runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
         command = runtime._build_command(
             prompt="Do the task",
             system_prompt="Be a careful test runner.",
@@ -147,6 +146,44 @@ def test_build_command_falls_back_when_probe_finds_only_one_native_param_flag(
         text=True,
         timeout=10.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_task_does_not_probe_blocking_help_on_event_loop() -> None:
+    """Capability probing completes before async execution begins."""
+    process = _FakeProcess(
+        stdout_lines=[
+            _jsonl_event({"type": "session", "id": "session-1"}),
+            _jsonl_event(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Done."}],
+                        },
+                    ],
+                }
+            ),
+        ],
+        stderr_lines=[],
+        returncode=0,
+    )
+    with patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_probe:
+        mock_probe.return_value.returncode = 0
+        mock_probe.return_value.stdout = "Usage: pi [options]\\n"
+        mock_probe.return_value.stderr = ""
+        runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.orchestrator.pi_runtime.subprocess.run", side_effect=AssertionError),
+        patch("asyncio.create_subprocess_exec", return_value=process),
+    ):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    assert mock_probe.call_count == 1
+    result = [message for message in messages if message.type == "result"][-1]
+    assert result.is_error is not True
 
 
 def test_capabilities_follow_probed_native_param_support() -> None:
@@ -680,7 +717,7 @@ def test_build_command_omits_tools_flag_for_none() -> None:
 
 
 def test_build_command_empty_tools_without_no_tools_support() -> None:
-    """When Pi lacks --no-tools, tools=[] falls through without error."""
+    """Command assembly omits unsafe flags; execute_task rejects before spawn."""
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
     runtime._native_param_flags = (True, True, False)  # has --tools but not --no-tools
 
@@ -929,15 +966,13 @@ async def test_execute_task_fails_closed_tools_empty_without_no_tools_support(
 
 @pytest.mark.asyncio
 async def test_execute_task_fails_closed_tools_empty_from_tools_only_help_probe() -> None:
-    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-
-    with (
-        patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_probe,
-        patch("asyncio.create_subprocess_exec") as mock_exec,
-    ):
+    with patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_probe:
         mock_probe.return_value.returncode = 0
         mock_probe.return_value.stdout = "Usage: pi [options]\n  --tools <tools>\n"
         mock_probe.return_value.stderr = ""
+        runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
         messages = [msg async for msg in runtime.execute_task("Do it", tools=[])]
 
     assert runtime._native_param_flags == (False, True, False)
@@ -968,15 +1003,13 @@ async def test_execute_task_translates_nonempty_tools_from_tools_only_help_probe
         stderr_lines=[],
         returncode=0,
     )
-    runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
-
-    with (
-        patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_probe,
-        patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec,
-    ):
+    with patch("ouroboros.orchestrator.pi_runtime.subprocess.run") as mock_probe:
         mock_probe.return_value.returncode = 0
         mock_probe.return_value.stdout = "Usage: pi [options]\n  --tools <tools>\n"
         mock_probe.return_value.stderr = ""
+        runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    with patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec:
         messages = [msg async for msg in runtime.execute_task("Do it", tools=["Read"])]
 
     assert runtime._native_param_flags == (False, True, False)
