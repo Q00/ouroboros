@@ -543,7 +543,39 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
 
         assert refused, "the staging cleanup failure was never exercised"
         assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
-        assert not [entry for entry in rules_dir.iterdir() if entry.name.endswith(".backup")]
+        # No stranded previous generation, and no staging hard link left aliasing
+        # the live rule.
+        assert [entry.name for entry in rules_dir.iterdir()] == [CODEX_RULE_FILENAME]
+
+    def test_failed_publication_never_removes_a_reservation_taken_over(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup must prove ownership: a failed publication is not a licence to delete.
+
+        A writer that removes the reservation and puts their own directory at the
+        same path keeps it, even though publication fails afterwards.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        def _take_over_the_reservation_then_fail(*_args: object, **_kwargs: object) -> None:
+            os.rmdir(target_path)
+            target_path.mkdir()  # a different writer now owns this pathname
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+
+        monkeypatch.setattr(codex_artifacts.os, "rename", _take_over_the_reservation_then_fail)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EXDEV
+        assert target_path.is_dir(), "cleanup deleted a directory it did not reserve"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
 
     def test_directory_commit_never_destroys_a_racing_writer_with_content(
         self,

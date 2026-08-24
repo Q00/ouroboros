@@ -405,6 +405,30 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
     )
 
 
+def _release_directory_reservation(reservation_fd: int, target_path: Path) -> None:
+    """Remove a failed publication's reservation, and nothing else.
+
+    A writer that removed the reservation and put their own directory at the
+    same path must not have it deleted by our cleanup, so the reservation is
+    removed only while the descriptor opened on it still refers to a live
+    directory. A removed directory reports zero links locally and ``ESTALE`` on
+    NFS; an inode comparison cannot stand in for this, because a recreated
+    directory routinely reuses the same inode number. Anything that leaves
+    ownership unproven — including an unexpected ``fstat`` failure — is treated
+    as not ours and left alone.
+    """
+    try:
+        reservation_is_live = os.fstat(reservation_fd).st_nlink > 0
+    except OSError:
+        return
+    if not reservation_is_live:
+        return
+    try:
+        os.rmdir(target_path)
+    except OSError:
+        pass
+
+
 def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
     """Rename without replacing where no atomic no-replace primitive is available.
 
@@ -417,29 +441,32 @@ def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
 
     Directories cannot be hard-linked. ``os.mkdir`` reserves the name atomically —
     it fails with ``EEXIST`` rather than replacing — and POSIX ``rename`` then
-    consumes that reservation. One gap remains and is not closable here: a writer
-    that removes the reservation and recreates an empty directory at the same path
-    before the rename has its directory replaced. ``mkdir`` returns no handle, so
-    the reservation cannot be pinned, and comparing inodes does not help because
-    the recreated directory routinely reuses the same inode number. The exposure
-    is bounded to an empty directory created inside that window: a racing writer
-    with any content in it makes the rename fail with ``ENOTEMPTY`` and keeps
-    their tree. Closing it completely needs ``RENAME_NOREPLACE``, which by
-    definition this branch does not have.
+    consumes that reservation. Failure cleanup proves ownership before removing
+    anything, so a writer who took the name over never has their directory
+    deleted by this call.
+
+    One gap on the success path is not closable here: a writer who removes the
+    reservation and recreates an empty directory at the same path before the
+    rename has it replaced. ``mkdir`` returns no handle, so the reservation
+    cannot be pinned at creation, and comparing inodes does not help because a
+    recreated directory routinely reuses the same inode number. The exposure is
+    bounded to an empty directory: a racing writer with any content in it makes
+    the rename fail with ``ENOTEMPTY`` and keeps their tree. Closing it fully
+    needs ``RENAME_NOREPLACE``, which by definition this branch does not have.
     """
     if source_path.is_dir() and not source_path.is_symlink():
         os.mkdir(target_path)
+        reservation = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             # POSIX rename removes an empty destination directory, so this only
             # consumes the reservation made above. A writer that filled it in
             # the meantime makes the rename fail instead of losing their tree.
             os.rename(source_path, target_path)
         except BaseException:
-            try:
-                os.rmdir(target_path)
-            except OSError:
-                pass
+            _release_directory_reservation(reservation, target_path)
             raise
+        finally:
+            os.close(reservation)
         return
 
     os.link(source_path, target_path, follow_symlinks=False)
@@ -857,6 +884,15 @@ def _commit_staged_artifact(
             prepared_generation = True
         _rename_noreplace(staging_path, target_path)
         staged_generation_active = True
+        if _installed_artifact_exists(staging_path):
+            # A fallback publication that could not drop its staging name leaves
+            # a hard link aliasing the generation now live at the target. The
+            # commit already succeeded, so this is only tidy-up — but the alias
+            # must not survive, or refreshes accumulate pinned old inodes.
+            try:
+                _remove_installed_artifact(staging_path)
+            except OSError:
+                pass
 
         if transaction is not None:
             transaction.record_install(
