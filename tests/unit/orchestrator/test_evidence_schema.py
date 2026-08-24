@@ -319,13 +319,8 @@ class TestExtractEvidence:
             "{broken",
         ],
     )
-    def test_trusted_object_cannot_bypass_terminal_authority(
-        self, terminal_payload: str
-    ) -> None:
-        text = (
-            '{"files_touched": ["stale.py"]}\n'
-            f"Validation evidence: {terminal_payload}"
-        )
+    def test_trusted_object_cannot_bypass_terminal_authority(self, terminal_payload: str) -> None:
+        text = f'{{"files_touched": ["stale.py"]}}\nValidation evidence: {terminal_payload}'
 
         with pytest.raises(EvidenceError):
             extract_evidence(text)
@@ -341,27 +336,19 @@ class TestExtractEvidence:
     def test_fenced_object_cannot_bypass_terminal_payload(
         self, fence_tag: str, terminal_payload: str
     ) -> None:
-        text = (
-            f"```{fence_tag}\n"
-            '{"files_touched": ["stale.py"]}\n'
-            f"{terminal_payload}\n"
-            "```\n"
-        )
+        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```\n'
 
         with pytest.raises(EvidenceError):
             extract_evidence(text)
 
     def test_valid_inline_evidence_label_is_recovered(self) -> None:
-        record = extract_evidence(
-            'Actual evidence: {"files_touched": ["actual.py"]}'
-        )
+        record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')
 
         assert record.data["files_touched"] == ["actual.py"]
 
     def test_inline_evidence_label_displaces_stale_object(self) -> None:
         record = extract_evidence(
-            '{"files_touched": ["stale.py"]}\n'
-            'Actual evidence: {"files_touched": ["actual.py"]}'
+            '{"files_touched": ["stale.py"]}\nActual evidence: {"files_touched": ["actual.py"]}'
         )
 
         assert record.data["files_touched"] == ["actual.py"]
