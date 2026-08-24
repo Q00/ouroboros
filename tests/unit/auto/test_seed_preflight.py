@@ -1300,9 +1300,7 @@ def test_command_execution_option_still_exposes_missing_program(tmp_path: Path) 
         workspace_root=tmp_path,
     )
 
-    assert [finding.code for finding in report.blocking_findings] == [
-        "verify_program_missing"
-    ]
+    assert [finding.code for finding in report.blocking_findings] == ["verify_program_missing"]
 
 
 @pytest.mark.parametrize(
