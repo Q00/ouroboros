@@ -249,10 +249,7 @@ def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None
     assert requested_runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
     assert requested_runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
     assert requested_runtime.capabilities.session_signals.after_turn_delivery is True
-    assert (
-        requested_runtime.capabilities.empty_tool_restriction_support
-        is ParamSupport.IGNORED
-    )
+    assert requested_runtime.capabilities.empty_tool_restriction_support is ParamSupport.IGNORED
 
 
 def test_build_command_rejects_unsafe_resume_session_id() -> None:
@@ -921,12 +918,15 @@ def test_negotiation_no_tools_only_pi_empty_has_no_degradation() -> None:
     runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
     runtime._native_param_flags = (False, False, True)
 
-    assert negotiate_execution_params(
-        runtime.capabilities,
-        system_prompt=None,
-        tools=[],
-        permission_mode=None,
-    ) == ()
+    assert (
+        negotiate_execution_params(
+            runtime.capabilities,
+            system_prompt=None,
+            tools=[],
+            permission_mode=None,
+        )
+        == ()
+    )
 
 
 @pytest.mark.parametrize(

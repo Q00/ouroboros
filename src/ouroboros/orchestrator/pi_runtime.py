@@ -138,8 +138,8 @@ class PiRuntime:
         # Capability discovery is deliberately completed during synchronous
         # runtime construction.  execute_task() runs on the orchestration
         # event loop and must never invoke blocking subprocess APIs there.
-        self._native_param_flags: tuple[bool, bool, bool] | None = (
-            _probe_pi_native_param_flags(self._cli_path)
+        self._native_param_flags: tuple[bool, bool, bool] | None = _probe_pi_native_param_flags(
+            self._cli_path
         )
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
@@ -217,9 +217,7 @@ class PiRuntime:
                 ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
             ),
             empty_tool_restriction_support=(
-                ParamSupport.NATIVE
-                if self._supports_no_tools_flag()
-                else ParamSupport.IGNORED
+                ParamSupport.NATIVE if self._supports_no_tools_flag() else ParamSupport.IGNORED
             ),
             permission_mode_support=ParamSupport.IGNORED,
             session_signals=SessionSignalCapabilities(

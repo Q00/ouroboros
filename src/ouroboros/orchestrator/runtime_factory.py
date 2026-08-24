@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -337,4 +336,3 @@ __all__ = [
     "create_agent_runtime_async",
     "resolve_agent_runtime_backend",
 ]
-
