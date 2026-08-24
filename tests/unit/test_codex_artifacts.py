@@ -545,6 +545,39 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
         assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
         assert not [entry for entry in rules_dir.iterdir() if entry.name.endswith(".backup")]
 
+    def test_directory_commit_never_destroys_a_racing_writer_with_content(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The reservation window cannot cost another writer their tree.
+
+        Publication consumes the reserved name with a POSIX rename, which refuses
+        a destination that is not empty. This bounds the residual reservation race
+        documented on ``_rename_noreplace_fallback``: a racing writer that put
+        anything in the path keeps it.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        real_mkdir = os.mkdir
+
+        def _fill_the_reservation(path: object, *args: object, **kwargs: object) -> None:
+            real_mkdir(path, *args, **kwargs)  # type: ignore[arg-type]
+            Path(str(path)).joinpath("operator.txt").write_text("theirs", encoding="utf-8")
+
+        monkeypatch.setattr(codex_artifacts.os, "mkdir", _fill_the_reservation)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.ENOTEMPTY
+        assert target_path.joinpath("operator.txt").read_text(encoding="utf-8") == "theirs"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
     def test_existing_target_reported_by_renameat2_is_not_degraded(
         self,
         tmp_path: Path,

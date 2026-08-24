@@ -408,13 +408,24 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
 def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
     """Rename without replacing where no atomic no-replace primitive is available.
 
-    Both branches keep the no-replace guarantee atomic, because callers treat a
-    ``FileExistsError`` as "another writer owns this name" and anything else as a
-    failed commit. Directories reserve the name with ``os.mkdir`` — which fails
-    with ``EEXIST`` rather than replacing — and only then publish into the
-    reservation; a bare ``os.rename`` would silently replace a concurrently
-    created empty directory. Files publish with ``os.link``, which fails the same
-    way on an occupied target.
+    Callers treat a ``FileExistsError`` as "another writer owns this name" and
+    anything else as a failed commit, so publication must never consume a name it
+    did not reserve.
+
+    Files publish with ``os.link``, which fails with ``EEXIST`` on an occupied
+    target: fully atomic, no weaker than ``RENAME_NOREPLACE``.
+
+    Directories cannot be hard-linked. ``os.mkdir`` reserves the name atomically —
+    it fails with ``EEXIST`` rather than replacing — and POSIX ``rename`` then
+    consumes that reservation. One gap remains and is not closable here: a writer
+    that removes the reservation and recreates an empty directory at the same path
+    before the rename has its directory replaced. ``mkdir`` returns no handle, so
+    the reservation cannot be pinned, and comparing inodes does not help because
+    the recreated directory routinely reuses the same inode number. The exposure
+    is bounded to an empty directory created inside that window: a racing writer
+    with any content in it makes the rename fail with ``ENOTEMPTY`` and keeps
+    their tree. Closing it completely needs ``RENAME_NOREPLACE``, which by
+    definition this branch does not have.
     """
     if source_path.is_dir() and not source_path.is_symlink():
         os.mkdir(target_path)
