@@ -508,9 +508,8 @@ def resolve_network_security(
             f"authority that the MCP SDK accepts — neither raw "
             f"(e.g. [fe80::1%eth0]) nor percent-encoded "
             f"(e.g. [fe80::1%25eth0]) forms pass Pydantic URL validation. "
-            f"Use the address without a zone ID, bind to a non-link-local "
-            f"address, or use --allowed-host to specify the authority "
-            f"clients will connect to."
+            f"Use the address without a zone ID or bind to a non-link-local "
+            f"address."
         )
         raise ValueError(msg)
 
