@@ -14,8 +14,8 @@ import tempfile
 
 import yaml
 
-from ouroboros.gjc.fs import claim_and_remove_setup_owned
-from ouroboros.gjc.fs import remove_path as _remove_path
+from ouroboros.core.fs_ownership import claim_and_remove_owned, restore_claimed
+from ouroboros.core.fs_ownership import remove_path as _remove_path
 from ouroboros.skills.artifacts import collect_skill_bundle_dirs, resolve_packaged_skills_dir
 
 GJC_SKILL_NAMESPACE = "ouroboros-"
@@ -193,14 +193,14 @@ def _publish_skill(source_dir: Path, target_path: Path) -> None:
             backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
             os.replace(target_path, backup)
             if backup.is_symlink() or not _is_managed_skill(backup):
-                os.replace(backup, target_path)
+                restore_claimed(backup, target_path)
                 backup = None
                 raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}")
         os.replace(staging, target_path)
     except BaseException:
         _remove_path(staging)
-        if backup is not None and backup.exists() and not target_path.exists():
-            os.replace(backup, target_path)
+        if backup is not None and os.path.lexists(backup):
+            restore_claimed(backup, target_path)
         raise
     if backup is not None:
         _remove_path(backup)
@@ -242,7 +242,7 @@ def install_gjc_skills(
                 and candidate.name not in expected_names
                 and not candidate.is_symlink()
             ):
-                claim_and_remove_setup_owned(candidate, is_owned=_is_managed_skill)
+                claim_and_remove_owned(candidate, is_owned=_is_managed_skill)
     return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
 
 
@@ -298,9 +298,7 @@ def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[
     if dry_run:
         return targets
     return tuple(
-        target
-        for target in targets
-        if claim_and_remove_setup_owned(target, is_owned=_is_managed_skill)
+        target for target in targets if claim_and_remove_owned(target, is_owned=_is_managed_skill)
     )
 
 

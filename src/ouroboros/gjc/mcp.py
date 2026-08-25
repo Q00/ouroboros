@@ -9,6 +9,7 @@ invocations live in :mod:`ouroboros.cli.gjc_setup`.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 import json
 import os
 from pathlib import Path
@@ -149,6 +150,17 @@ def _atomic_replace_json(path: Path, payload: dict[str, object], expected_raw: s
         raise
 
 
+def gjc_mcp_registration_lock() -> AbstractContextManager[None]:
+    """Cross-process lock serializing Ouroboros mutations of the durable registration.
+
+    Every Ouroboros code path that creates or removes the ``ouroboros`` entry
+    in GJC's durable MCP config must run under this lock, so one invocation's
+    failure cleanup can never be attributed to a registration another
+    invocation created concurrently.
+    """
+    return file_lock(gjc_mcp_config_path())
+
+
 def remove_persisted_gjc_mcp_server(path: Path | None = None) -> bool:
     """Atomically remove only the setup-owned generation, preserving concurrent state."""
     config_path = path or gjc_mcp_config_path()
@@ -156,19 +168,28 @@ def remove_persisted_gjc_mcp_server(path: Path | None = None) -> bool:
         return False
     try:
         with file_lock(config_path):
-            if config_path.is_symlink():
-                return False
-            raw = config_path.read_text(encoding="utf-8")
-            payload = json.loads(raw)
-            servers = payload.get("mcpServers") if isinstance(payload, dict) else None
-            entry = servers.get("ouroboros") if isinstance(servers, dict) else None
-            disabled = payload.get("disabledServers", []) if isinstance(payload, dict) else []
-            if not isinstance(disabled, list) or "ouroboros" in disabled:
-                return False
-            if not is_setup_managed_gjc_mcp_entry(entry):
-                return False
-            del servers["ouroboros"]
-            _atomic_replace_json(config_path, payload, raw)
+            return remove_persisted_gjc_mcp_server_locked(config_path)
+    except OSError:
+        return False
+
+
+def remove_persisted_gjc_mcp_server_locked(path: Path | None = None) -> bool:
+    """Remove the setup-owned generation; the caller must hold the registration lock."""
+    config_path = path or gjc_mcp_config_path()
+    try:
+        if config_path.is_symlink():
+            return False
+        raw = config_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+        entry = servers.get("ouroboros") if isinstance(servers, dict) else None
+        disabled = payload.get("disabledServers", []) if isinstance(payload, dict) else []
+        if not isinstance(disabled, list) or "ouroboros" in disabled:
+            return False
+        if not is_setup_managed_gjc_mcp_entry(entry):
+            return False
+        del servers["ouroboros"]
+        _atomic_replace_json(config_path, payload, raw)
     except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
         return False
     return True

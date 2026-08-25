@@ -207,3 +207,36 @@ def test_prune_preserves_operator_skill_swapped_in_after_validation(
     install_gjc_skills(agent_dir=agent_dir, skills_dir=source, prune=True)
 
     assert (stale_named / "SKILL.md").read_text(encoding="utf-8") == "operator content\n"
+
+
+def test_publish_preserves_generation_recreated_while_backup_claim_was_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusal restoration must not clobber a canonical skill recreated after the claim."""
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    target = agent_dir / "skills" / "ouroboros-interview"
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("first operator generation\n", encoding="utf-8")
+    real = gjc_artifacts._is_managed_skill
+
+    def stale_then_recreate(candidate: Path) -> bool:
+        if candidate == target:
+            return True
+        if candidate.name.startswith(f".{target.name}."):
+            recreated = target / "SKILL.md"
+            recreated.parent.mkdir(parents=True, exist_ok=True)
+            recreated.write_text("second operator generation\n", encoding="utf-8")
+            return False
+        return real(candidate)
+
+    monkeypatch.setattr(gjc_artifacts, "_is_managed_skill", stale_then_recreate)
+
+    with pytest.raises(OSError, match="non-Ouroboros GJC skill"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == "second operator generation\n"
+    preserved = sorted(target.parent.glob(f".{target.name}.*.old"))
+    assert len(preserved) == 1
+    assert (preserved[0] / "SKILL.md").read_text(encoding="utf-8") == "first operator generation\n"

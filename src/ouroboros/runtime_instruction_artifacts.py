@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
@@ -168,6 +167,7 @@ def install_gjc_instruction_artifact(
     environ: dict[str, str] | None = None,
 ) -> RuntimeInstructionArtifact:
     """Install GJC routing without replacing an operator-owned rules file."""
+    from ouroboros.core.fs_ownership import UnownedArtifactError, publish_owned_file
     from ouroboros.gjc import (
         gjc_instruction_path,
         is_setup_managed_gjc_instruction,
@@ -175,12 +175,15 @@ def install_gjc_instruction_artifact(
     )
 
     path = gjc_instruction_path(home=home, environ=environ)
-    if os.path.lexists(path) and not is_setup_managed_gjc_instruction(path):
-        raise OSError(f"preserved user-managed GJC instruction guide at {path}")
-    return RuntimeInstructionArtifact(
-        backend="gjc",
-        path=_write_exact_guide(path, "gjc", content=render_gjc_guide()),
-    )
+    try:
+        publish_owned_file(
+            path,
+            render_gjc_guide(),
+            is_owned=is_setup_managed_gjc_instruction,
+        )
+    except UnownedArtifactError as exc:
+        raise OSError(f"preserved user-managed GJC instruction guide at {path}") from exc
+    return RuntimeInstructionArtifact(backend="gjc", path=path)
 
 
 __all__ = [

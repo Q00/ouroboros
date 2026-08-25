@@ -31,11 +31,13 @@ from ouroboros.gjc.mcp import (
     MCP_SHARING,
     MCP_TIMEOUT,
     gjc_mcp_entry_config,
+    gjc_mcp_registration_lock,
     is_active_gjc_mcp_entry,
     is_setup_managed_gjc_mcp_bridge_config,
     is_setup_managed_gjc_mcp_entry,
     persisted_gjc_mcp_entry,
     remove_persisted_gjc_mcp_server,
+    remove_persisted_gjc_mcp_server_locked,
 )
 from ouroboros.gjc.paths import (
     gjc_agent_dir,
@@ -57,6 +59,7 @@ __all__ = [
     "gjc_mcp_bridge_config_path",
     "gjc_mcp_config_path",
     "gjc_mcp_entry_config",
+    "gjc_mcp_registration_lock",
     "gjc_ooo_bridge_source_text",
     "gjc_skills_root",
     "has_setup_owned_gjc_skills",
@@ -70,6 +73,7 @@ __all__ = [
     "persisted_gjc_mcp_entry",
     "remove_gjc_skills",
     "remove_persisted_gjc_mcp_server",
+    "remove_persisted_gjc_mcp_server_locked",
     "render_gjc_guide",
     "setup_owned_gjc_skill_paths",
 ]

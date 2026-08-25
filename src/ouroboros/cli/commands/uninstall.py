@@ -329,10 +329,10 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
 
 def _claim_remove_owned_file(path: Path, is_owned: Callable[[Path], bool]) -> bool:
     """Claim, re-validate, and remove one setup-owned file; prune its directory."""
-    from ouroboros.gjc.fs import claim_and_remove_setup_owned
+    from ouroboros.core.fs_ownership import claim_and_remove_owned
 
     try:
-        if not claim_and_remove_setup_owned(path, is_owned=is_owned):
+        if not claim_and_remove_owned(path, is_owned=is_owned):
             return False
     except OSError:
         return False

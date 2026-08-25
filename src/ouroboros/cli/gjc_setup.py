@@ -25,6 +25,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.core.fs_ownership import UnownedArtifactError, publish_owned_file
 from ouroboros.gjc import (
     MCP_BRIDGE_CONFIG_CONTENT,
     MCP_SHARING,
@@ -34,6 +35,7 @@ from ouroboros.gjc import (
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
     gjc_mcp_entry_config,
+    gjc_mcp_registration_lock,
     gjc_ooo_bridge_source_text,
     install_gjc_skills,
     is_active_gjc_mcp_entry,
@@ -42,6 +44,7 @@ from ouroboros.gjc import (
     is_setup_managed_gjc_mcp_entry,
     persisted_gjc_mcp_entry,
     remove_persisted_gjc_mcp_server,
+    remove_persisted_gjc_mcp_server_locked,
     setup_owned_gjc_skill_paths,
 )
 
@@ -72,19 +75,22 @@ def install_gjc_skills_step() -> bool:
     return True
 
 
-def install_gjc_mcp_bridge_config(
-    atomic_write_text: Callable[..., object],
-) -> bool:
+def install_gjc_mcp_bridge_config() -> bool:
     """Install the isolated config only when setup owns the target path."""
     path = gjc_mcp_bridge_config_path()
-    if path.is_symlink() or (path.exists() and not is_setup_managed_gjc_mcp_bridge_config(path)):
+    try:
+        publish_owned_file(
+            path,
+            MCP_BRIDGE_CONFIG_CONTENT,
+            is_owned=is_setup_managed_gjc_mcp_bridge_config,
+            mode=0o600,
+        )
+    except UnownedArtifactError:
         print_error(
             f"Preserved user-managed GJC MCP bridge config at {path}; "
             "native activation requires an isolated setup-owned configuration."
         )
         return False
-    try:
-        atomic_write_text(path, MCP_BRIDGE_CONFIG_CONTENT, mode=0o600)
     except OSError as exc:
         print_warning(f"Could not install GJC MCP bridge config: {exc}")
         return False
@@ -252,6 +258,35 @@ def register_gjc_mcp_server(
     ):
         print_warning("Detected Ouroboros MCP launcher is invalid; GJC registration skipped.")
         return False
+    try:
+        with gjc_mcp_registration_lock():
+            return _add_gjc_mcp_server_locked(
+                gjc_path,
+                command=command,
+                raw_args=raw_args,
+                run_command=run_command,
+                registration_state=registration_state,
+            )
+    except OSError as exc:
+        print_warning(f"Could not serialize the GJC MCP registration transaction: {exc}")
+        return False
+
+
+def _add_gjc_mcp_server_locked(
+    gjc_path: str,
+    *,
+    command: str,
+    raw_args: list[str],
+    run_command: Callable[..., subprocess.CompletedProcess[str]],
+    registration_state: dict[str, bool] | None,
+) -> bool:
+    """Add and validate a new registration; runs under the registration lock.
+
+    The lock serializes every Ouroboros add/validate/cleanup transaction, so
+    a setup-shaped durable entry observed during this window either predates
+    the add (``pre_add_owned``) or was created by this invocation's ``gjc
+    mcp add`` — never by a concurrent Ouroboros invocation.
+    """
     # Attribute cleanup to this invocation: a setup-shaped durable entry that
     # already exists before the add (even when `mcp list` omits it) was not
     # created here and must never be removed by a failed add.
@@ -261,7 +296,7 @@ def register_gjc_mcp_server(
         if pre_add_owned:
             return
         if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
-            remove_persisted_gjc_mcp_server()
+            remove_persisted_gjc_mcp_server_locked()
 
     server_args = [*raw_args, "--runtime", "gjc"]
     add_command = [
@@ -313,7 +348,7 @@ def register_gjc_mcp_server(
         and add_payload.get("name") == "ouroboros"
     )
     if not receipt_matches_request:
-        if created_here and remove_persisted_gjc_mcp_server():
+        if created_here and remove_persisted_gjc_mcp_server_locked():
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
         print_warning("GJC did not report adding the requested Ouroboros MCP registration.")
@@ -335,7 +370,7 @@ def register_gjc_mcp_server(
     )
     if not activation_valid:
         if created_here:
-            if remove_persisted_gjc_mcp_server():
+            if remove_persisted_gjc_mcp_server_locked():
                 if registration_state is not None:
                     registration_state.update(created=False, changed=False)
             else:
@@ -345,17 +380,14 @@ def register_gjc_mcp_server(
     return True
 
 
-def install_gjc_compatibility_bridge(
-    content: str,
-    atomic_write_text: Callable[..., object],
-) -> bool:
+def install_gjc_compatibility_bridge(content: str) -> bool:
     """Install the owned bridge when the host cannot autoload native MCP entries."""
     bridge = gjc_bridge_path()
-    if bridge.is_symlink() or (bridge.exists() and not is_setup_managed_gjc_bridge(bridge)):
+    try:
+        publish_owned_file(bridge, content, is_owned=is_setup_managed_gjc_bridge)
+    except UnownedArtifactError:
         print_error(f"Preserved custom GJC extension at {bridge}; compatibility activation failed.")
         return False
-    try:
-        atomic_write_text(bridge, content)
     except OSError as exc:
         print_warning(f"Could not install GJC compatibility bridge: {exc}")
         return False
@@ -365,13 +397,13 @@ def install_gjc_compatibility_bridge(
 
 def remove_legacy_gjc_bridge() -> bool:
     """Remove the obsolete setup-owned input bridge without touching custom files."""
-    from ouroboros.gjc.fs import claim_and_remove_setup_owned
+    from ouroboros.core.fs_ownership import claim_and_remove_owned
 
     bridge = gjc_bridge_path()
     if not os.path.lexists(bridge):
         return True
     try:
-        removed = claim_and_remove_setup_owned(bridge, is_owned=is_setup_managed_gjc_bridge)
+        removed = claim_and_remove_owned(bridge, is_owned=is_setup_managed_gjc_bridge)
     except OSError as exc:
         print_warning(f"Could not remove legacy GJC bridge: {exc}")
         return False
@@ -410,13 +442,11 @@ def install_gjc_runtime_artifacts(
         native_support = gjc_native_mcp_autoload_support(gjc_path, run_command=subprocess.run)
         if native_support is not None and not native_support:
             command, args = host.bridge_dispatch_entry()
-            succeeded = install_gjc_compatibility_bridge(
-                gjc_ooo_bridge_source_text(command, args), host.atomic_write_text
-            )
+            succeeded = install_gjc_compatibility_bridge(gjc_ooo_bridge_source_text(command, args))
             expected = _snapshot_gjc_paths(paths, host)
         elif native_support:
             installed = (
-                install_gjc_mcp_bridge_config(host.atomic_write_text)
+                install_gjc_mcp_bridge_config()
                 and install_gjc_skills_step()
                 and install_gjc_instruction_step()
             )

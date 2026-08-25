@@ -10365,8 +10365,9 @@ class TestGjcSetup:
 
     @pytest.mark.parametrize("receipt_status", ["created", "added"])
     def test_register_gjc_mcp_uses_public_cli_and_binds_gjc_backends(
-        self, receipt_status: str
+        self, receipt_status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(tmp_path / "gjc-agent"))
         listed = subprocess.CompletedProcess(
             ["gjc", "mcp", "list", "--json"],
             0,
@@ -10439,7 +10440,10 @@ class TestGjcSetup:
         expected_bridge_config = gjc_mcp_bridge_config_path()
         assert f"--env=OUROBOROS_MCP_CONFIG={expected_bridge_config}" in add_args
 
-    def test_register_gjc_mcp_rolls_back_unvalidated_new_entry(self) -> None:
+    def test_register_gjc_mcp_rolls_back_unvalidated_new_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(tmp_path / "gjc-agent"))
         empty = subprocess.CompletedProcess(
             ["gjc", "mcp", "list", "--json"],
             0,
@@ -10478,7 +10482,10 @@ class TestGjcSetup:
 
         assert len(run.call_args_list) == 3
 
-    def test_register_gjc_mcp_rolls_back_after_noncanonical_receipt(self) -> None:
+    def test_register_gjc_mcp_rolls_back_after_noncanonical_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(tmp_path / "gjc-agent"))
         empty = subprocess.CompletedProcess(
             ["gjc", "mcp", "list", "--json"],
             0,
@@ -10517,7 +10524,7 @@ class TestGjcSetup:
                 side_effect=[None, managed],
             ),
             patch(
-                "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server",
+                "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server_locked",
                 return_value=True,
             ) as remove,
             patch(
@@ -10534,9 +10541,12 @@ class TestGjcSetup:
         remove.assert_called_once_with()
         assert state == {"created": False, "changed": False}
 
-    def test_failed_add_preserves_preexisting_durable_registration(self) -> None:
+    def test_failed_add_preserves_preexisting_durable_registration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A setup-shaped durable entry that predates the add is not this
         invocation's to clean up, even when `mcp list` omitted it."""
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(tmp_path / "gjc-agent"))
         empty = subprocess.CompletedProcess(
             ["gjc", "mcp", "list", "--json"],
             0,
@@ -10573,7 +10583,7 @@ class TestGjcSetup:
                 "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
                 return_value=preexisting,
             ),
-            patch("ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server") as remove,
+            patch("ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server_locked") as remove,
             patch(
                 "ouroboros.cli.commands.setup.subprocess.run",
                 side_effect=[empty, failed_add],
@@ -10585,6 +10595,88 @@ class TestGjcSetup:
             )
 
         remove.assert_not_called()
+
+    def test_add_transaction_holds_the_registration_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A concurrent invocation cannot interleave with add/validate/cleanup."""
+        from ouroboros.core.file_lock import file_lock
+        from ouroboros.gjc import gjc_mcp_config_path
+
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(tmp_path / "gjc-agent"))
+        empty = subprocess.CompletedProcess(
+            ["gjc", "mcp", "list", "--json"],
+            0,
+            stdout=json.dumps({"servers": []}),
+            stderr="",
+        )
+        failed_add = subprocess.CompletedProcess(["gjc", "mcp", "add"], 1, stdout="", stderr="down")
+        lock_states: list[bool] = []
+
+        def run_side_effect(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            if command[1:3] == ["mcp", "add"]:
+                try:
+                    with file_lock(gjc_mcp_config_path(), blocking=False):
+                        lock_states.append(False)
+                except BlockingIOError:
+                    lock_states.append(True)
+                return failed_add
+            return empty
+
+        with (
+            patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=None),
+            patch("ouroboros.cli.commands.setup.subprocess.run", side_effect=run_side_effect),
+        ):
+            assert not register_gjc_mcp_server(
+                "/opt/bin/gjc",
+                detected={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp]"]},
+            )
+
+        assert lock_states == [True]
+
+    def test_bridge_config_publication_never_writes_through_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.cli.gjc_setup import install_gjc_mcp_bridge_config
+        from ouroboros.gjc import gjc_mcp_bridge_config_path
+
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        external = tmp_path / "operator-config.yaml"
+        external.write_text("mcp_servers:\n  - operator\n", encoding="utf-8")
+        target = gjc_mcp_bridge_config_path()
+        target.parent.mkdir(parents=True)
+        try:
+            target.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        assert not install_gjc_mcp_bridge_config()
+
+        assert external.read_text(encoding="utf-8") == "mcp_servers:\n  - operator\n"
+        assert target.is_symlink()
+
+    def test_compatibility_bridge_publication_never_writes_through_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.cli.gjc_setup import install_gjc_compatibility_bridge
+        from ouroboros.gjc import gjc_bridge_path
+
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        external = tmp_path / "operator-extension.ts"
+        external.write_text("// operator extension\n", encoding="utf-8")
+        target = gjc_bridge_path()
+        target.parent.mkdir(parents=True)
+        try:
+            target.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        assert not install_gjc_compatibility_bridge(gjc_ooo_bridge_source_text("ouroboros", []))
+
+        assert external.read_text(encoding="utf-8") == "// operator extension\n"
+        assert target.is_symlink()
 
     def test_register_gjc_mcp_rejects_conflicting_user_managed_entry(self) -> None:
         listed = subprocess.CompletedProcess(

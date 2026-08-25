@@ -130,6 +130,24 @@ def test_gjc_preserves_operator_owned_routing_guide(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "operator routing rules\n"
 
 
+def test_gjc_guide_publication_never_writes_through_symlink(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    external = tmp_path / "operator-rules.md"
+    external.write_text("operator routing rules\n", encoding="utf-8")
+    path = gjc_instruction_path(environ=env)
+    path.parent.mkdir(parents=True)
+    try:
+        path.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="preserved user-managed GJC instruction guide"):
+        install_gjc_instruction_artifact(environ=env)
+
+    assert external.read_text(encoding="utf-8") == "operator routing rules\n"
+    assert path.is_symlink()
+
+
 def test_gjc_rejects_modified_setup_owned_routing_guide(tmp_path: Path) -> None:
     env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
     path = install_gjc_instruction_artifact(environ=env).path
