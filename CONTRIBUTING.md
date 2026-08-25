@@ -43,6 +43,13 @@ uv run ouroboros --version   # verify
 uv run pytest tests/unit/ -q # run tests
 ```
 
+> **`uv sync` is not the whole loop.** The checked-in `.mcp.json` points at the
+> **published PyPI package**, so a clone that you edit is not the code your
+> client runs. Before your first change, read
+> [The Development Loop](./docs/contributing/developing.md) — it covers pointing
+> the tooling at your working tree, where config and state live, and the fastest
+> way to verify each kind of change.
+
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
 This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Core and non-LiteLLM contributor environments support Python 3.12-3.14. LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
@@ -150,6 +157,13 @@ Four checks are required to merge (`Ruff Lint`, `MyPy Type Check`,
 on the paths you touched. Every gate, its local reproduction command, and its
 legitimate escape hatch are documented in
 [CI Gates and Branch Protection](./docs/contributing/ci-gates.md).
+
+`ouroboros-agent[bot]` ties each review verdict to the commit it checked. It
+grades your PR against the linked issue's requirements and reproduces the
+defects it reports. Confirm the applicable verdict belongs to the current head,
+then read
+[Review Conventions](./docs/contributing/review-conventions.md) before your first
+push — most review rounds are lost to objections you can preempt.
 
 ### Release Maintenance
 
@@ -826,6 +840,8 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 
 - [Architecture Overview](./docs/contributing/architecture-overview.md) - How the system fits together
 - [Testing Guide](./docs/contributing/testing-guide.md) - How to write and run tests
+- [The Development Loop](./docs/contributing/developing.md) - Run your own code: local MCP, config, state, per-change verification
+- [Review Conventions](./docs/contributing/review-conventions.md) - What the review bot demands, and how to preempt a round
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
 - [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
 

@@ -44,6 +44,11 @@ Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent
 
 ## Shipping a change (read before you commit)
 
+**The code you edit is not the code that runs, by default.** The checked-in
+`.mcp.json` points at the published PyPI package, so edits to this working tree
+have no effect on a client until you repoint it at local source. See
+[docs/contributing/developing.md](docs/contributing/developing.md).
+
 `main` is protected: direct pushes are rejected with `GH006`, for everyone,
 including the owner. Every change lands through a squash-merged PR, so a
 release tag must be created on the merged `main` commit — not before.
