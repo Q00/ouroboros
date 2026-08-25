@@ -237,15 +237,15 @@ def test_remove_restores_claim_on_transient_failure_and_supports_retry(
     path, and a retry after the transient fault succeeds."""
     target = tmp_path / "artifact.txt"
     target.write_text("owned generation\n", encoding="utf-8")
-    real_remove = fs_ownership.remove_path
+    real_remove = fs_ownership._PinnedParent.remove_entry
     failures = iter([True])
 
-    def flaky_remove(path: Path) -> None:
+    def flaky_remove(self: object, name: str) -> None:
         if next(failures, False):
             raise OSError("simulated transient removal failure")
-        real_remove(path)
+        real_remove(self, name)
 
-    monkeypatch.setattr(fs_ownership, "remove_path", flaky_remove)
+    monkeypatch.setattr(fs_ownership._PinnedParent, "remove_entry", flaky_remove)
 
     with pytest.raises(OSError, match="simulated transient removal failure"):
         claim_and_remove_owned(target, is_owned=lambda _p: True)
@@ -255,3 +255,82 @@ def test_remove_restores_claim_on_transient_failure_and_supports_retry(
 
     assert claim_and_remove_owned(target, is_owned=lambda _p: True)
     assert not target.exists()
+
+
+def test_remove_aborts_when_parent_swapped_after_claim(tmp_path: Path) -> None:
+    """A parent renamed away after the claim fails identity revalidation; the
+    claimed generation is restored through the held descriptor."""
+    parent = tmp_path / "profile"
+    parent.mkdir()
+    target = parent / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+    moved = tmp_path / "profile-moved"
+
+    def swap_parent_then_approve(claimed: Path) -> bool:
+        parent.rename(moved)
+        return True
+
+    with pytest.raises(OSError, match="parent directory changed"):
+        claim_and_remove_owned(target, is_owned=swap_parent_then_approve)
+
+    assert (moved / "artifact.txt").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_remove_never_deletes_through_a_symlinked_replacement_parent(
+    tmp_path: Path,
+) -> None:
+    """The review probe: rename the parent, plant a symlink at its canonical
+    path pointing at an external directory seeded with the claim name. The
+    external file must survive and the managed generation must be restored."""
+    parent = tmp_path / "profile"
+    parent.mkdir()
+    target = parent / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+    moved = tmp_path / "profile-moved"
+    external = tmp_path / "external"
+    external.mkdir()
+
+    def swap_in_symlinked_parent(claimed: Path) -> bool:
+        parent.rename(moved)
+        try:
+            parent.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        (external / claimed.name).write_text("external operator file\n", encoding="utf-8")
+        return True
+
+    with pytest.raises(OSError, match="parent directory changed"):
+        claim_and_remove_owned(target, is_owned=swap_in_symlinked_parent)
+
+    external_files = sorted(item.name for item in external.iterdir())
+    assert len(external_files) == 1
+    assert (external / external_files[0]).read_text(encoding="utf-8") == (
+        "external operator file\n"
+    )
+    assert (moved / "artifact.txt").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_tree_publish_aborts_when_parent_swapped_during_build(tmp_path: Path) -> None:
+    parent = tmp_path / "profile"
+    parent.mkdir()
+    target = parent / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    moved = tmp_path / "profile-moved"
+    external = tmp_path / "external"
+    external.mkdir()
+
+    def swap_parent_during_build(staging: Path) -> None:
+        parent.rename(moved)
+        try:
+            parent.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="parent directory changed"):
+        publish_owned_tree(target, swap_parent_during_build, is_owned=lambda _p: True)
+
+    assert list(external.iterdir()) == []
+    assert (moved / "artifact-dir" / "content.txt").read_text(encoding="utf-8") == (
+        "owned generation\n"
+    )

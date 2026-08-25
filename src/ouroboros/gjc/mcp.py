@@ -11,10 +11,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 import json
-import os
 from pathlib import Path
 import stat
-import tempfile
 
 from ouroboros.core.file_lock import file_lock
 from ouroboros.gjc.paths import gjc_mcp_bridge_config_path, gjc_mcp_config_path
@@ -124,30 +122,40 @@ def persisted_gjc_mcp_entry(path: Path | None = None) -> dict[str, object] | Non
     return entry if isinstance(entry, dict) else None
 
 
-def _atomic_replace_json(path: Path, payload: dict[str, object], expected_raw: str) -> None:
-    """Publish one JSON generation without following a config symlink."""
-    mode = stat.S_IMODE(path.lstat().st_mode)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+def _generation_matches(claimed: Path, expected_raw: str) -> bool:
+    """Return whether the claimed config is exactly the generation that was read."""
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(json.dumps(payload, indent=2) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.is_symlink() or path.read_text(encoding="utf-8") != expected_raw:
-            raise OSError("GJC MCP config changed concurrently")
-        os.replace(temp_name, path)
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            Path(temp_name).unlink()
-        except OSError:
-            pass
-        raise
+        return claimed.read_text(encoding="utf-8") == expected_raw
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _atomic_replace_json(path: Path, payload: dict[str, object], expected_raw: str) -> None:
+    """Publish one JSON generation bound to the exact generation that was read.
+
+    The rewrite runs as a claim-and-verify compare-and-swap: the live config
+    is claimed, re-validated against *expected_raw*, and the new document is
+    published with a no-replace rename — a write by GJC itself or an operator
+    between the read and the publication is preserved and this mutation fails
+    with "changed concurrently" instead of overwriting it.
+    """
+    from ouroboros.core.fs_ownership import UnownedArtifactError, publish_owned_file
+
+    try:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+    except OSError as exc:
+        raise OSError("GJC MCP config changed concurrently") from exc
+    try:
+        publish_owned_file(
+            path,
+            json.dumps(payload, indent=2) + "\n",
+            is_owned=lambda claimed: _generation_matches(claimed, expected_raw),
+            mode=mode,
+            trusted_ancestor=path.parent,
+            require_existing=True,
+        )
+    except UnownedArtifactError as exc:
+        raise OSError("GJC MCP config changed concurrently") from exc
 
 
 def gjc_mcp_registration_lock() -> AbstractContextManager[None]:

@@ -597,6 +597,54 @@ class TestRemoveGjcArtifacts:
         assert not remove_persisted_gjc_mcp_server(mcp_path)
         assert external.read_text(encoding="utf-8") == before
 
+    def test_persistent_cleanup_preserves_write_landing_after_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A config generation written by GJC or an operator after the
+        compare-read must never be overwritten by the removal rewrite."""
+        from ouroboros.gjc import mcp as gjc_mcp
+
+        mcp_path = tmp_path / "mcp.json"
+        managed = {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": "<redacted>"},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"ouroboros": managed}}),
+            encoding="utf-8",
+        )
+        concurrent = json.dumps({"mcpServers": {"operator": {"command": "keep"}}}) + "\n"
+        real_matches = gjc_mcp._generation_matches
+
+        def validate_then_concurrent_write(claimed: Path, expected_raw: str) -> bool:
+            outcome = real_matches(claimed, expected_raw)
+            mcp_path.write_text(concurrent, encoding="utf-8")
+            return outcome
+
+        monkeypatch.setattr(gjc_mcp, "_generation_matches", validate_then_concurrent_write)
+        monkeypatch.setattr(
+            gjc_mcp, "is_setup_managed_gjc_mcp_entry", lambda _entry, **_kwargs: True
+        )
+
+        assert not gjc_mcp.remove_persisted_gjc_mcp_server(mcp_path)
+
+        assert mcp_path.read_text(encoding="utf-8") == concurrent
+
     def test_persistent_cleanup_rejects_changed_generation(self, tmp_path: Path) -> None:
         from ouroboros.gjc import mcp as gjc_mcp
 

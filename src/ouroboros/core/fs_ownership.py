@@ -123,6 +123,67 @@ class _PinnedParent:
         self.path = path
         self.fd = fd
 
+    def revalidate(self) -> None:
+        """Fail closed if the canonical parent path no longer names the pinned inode.
+
+        Ownership predicates and tree builds read through the canonical
+        pathname; this check brackets those reads so a parent renamed away and
+        replaced by a symlink or substitute directory cannot redirect them.
+        """
+        if self.fd is None:
+            return
+        try:
+            opened = os.fstat(self.fd)
+            current = os.stat(self.path)
+        except OSError as exc:
+            raise OSError(
+                getattr(errno, "ESTALE", errno.EIO),
+                "artifact parent directory changed during mutation",
+                str(self.path),
+            ) from exc
+        if not stat_module.S_ISDIR(current.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (current.st_dev, current.st_ino):
+            raise OSError(
+                getattr(errno, "ESTALE", errno.EIO),
+                "artifact parent directory changed during mutation",
+                str(self.path),
+            )
+
+    def is_symlink(self, name: str) -> bool:
+        if self.fd is None:
+            return (self.path / name).is_symlink()
+        try:
+            return stat_module.S_ISLNK(
+                os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode
+            )
+        except OSError:
+            return False
+
+    def remove_entry(self, name: str) -> None:
+        """Delete one held entry relative to the pinned descriptor."""
+        if self.fd is None:
+            remove_path(self.path / name)
+            return
+        try:
+            entry = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat_module.S_ISDIR(entry.st_mode):
+            shutil.rmtree(name, dir_fd=self.fd)
+        else:
+            os.unlink(name, dir_fd=self.fd)
+
+    def make_staging_dir(self, prefix: str) -> str:
+        if self.fd is None:
+            return Path(
+                tempfile.mkdtemp(prefix=prefix, suffix=".tmp", dir=str(self.path))
+            ).name
+        name = f"{prefix}{os.urandom(8).hex()}.tmp"
+        os.mkdir(name, mode=0o700, dir_fd=self.fd)
+        return name
+
     def lexists(self, name: str) -> bool:
         if self.fd is None:
             return os.path.lexists(self.path / name)
@@ -334,7 +395,9 @@ def claim_and_remove_owned(
             except FileNotFoundError:
                 return False
             try:
-                owned = not claimed.is_symlink() and is_owned(claimed)
+                parent.revalidate()
+                owned = not parent.is_symlink(claimed_name) and is_owned(claimed)
+                parent.revalidate()
             except BaseException:
                 _restore_claimed(parent, claimed_name, path.name)
                 raise
@@ -342,7 +405,7 @@ def claim_and_remove_owned(
                 _restore_claimed(parent, claimed_name, path.name)
                 return False
             try:
-                remove_path(claimed)
+                parent.remove_entry(claimed_name)
             except OSError:
                 # A transient removal failure must not strand the generation
                 # under an undiscoverable claim name: restore the canonical
@@ -362,6 +425,7 @@ def publish_owned_file(
     is_owned: Callable[[Path], bool],
     mode: int | None = None,
     trusted_ancestor: Path | None = None,
+    require_existing: bool = False,
 ) -> None:
     """Atomically publish one owned file generation.
 
@@ -388,7 +452,13 @@ def publish_owned_file(
             raise
         return temp_name
 
-    _publish_owned(path, _build, is_owned=is_owned, trusted_ancestor=trusted_ancestor)
+    _publish_owned(
+        path,
+        _build,
+        is_owned=is_owned,
+        trusted_ancestor=trusted_ancestor,
+        require_existing=require_existing,
+    )
 
 
 def publish_owned_tree(
@@ -407,15 +477,13 @@ def publish_owned_tree(
     """
 
     def _build(parent: _PinnedParent, target_name: str) -> str:
-        staging = Path(
-            tempfile.mkdtemp(prefix=f".{target_name}.", suffix=".tmp", dir=str(parent.path))
-        )
+        staging_name = parent.make_staging_dir(prefix=f".{target_name}.")
         try:
-            build(staging)
+            build(parent.path / staging_name)
         except BaseException:
-            remove_path(staging)
+            parent.remove_entry(staging_name)
             raise
-        return staging.name
+        return staging_name
 
     _publish_owned(path, _build, is_owned=is_owned, trusted_ancestor=trusted_ancestor)
 
@@ -426,6 +494,7 @@ def _publish_owned(
     *,
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None,
+    require_existing: bool = False,
 ) -> None:
     with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=True) as parent:
         claimed_name: str | None = None
@@ -434,13 +503,17 @@ def _publish_owned(
             claimed = path.with_name(claimed_name)
             parent.replace(path.name, claimed_name)
             try:
-                owned = not claimed.is_symlink() and is_owned(claimed)
+                parent.revalidate()
+                owned = not parent.is_symlink(claimed_name) and is_owned(claimed)
+                parent.revalidate()
             except BaseException:
                 _restore_claimed(parent, claimed_name, path.name)
                 raise
             if not owned:
                 _restore_claimed(parent, claimed_name, path.name)
                 raise UnownedArtifactError(f"preserved user-managed file at {path}")
+        elif require_existing:
+            raise UnownedArtifactError(f"artifact disappeared before publication: {path}")
         try:
             staged_name = build(parent, path.name)
         except BaseException:
@@ -448,19 +521,20 @@ def _publish_owned(
                 _restore_claimed(parent, claimed_name, path.name)
             raise
         try:
+            parent.revalidate()
             parent.rename_no_replace(staged_name, path.name)
         except FileExistsError as exc:
-            remove_path(path.with_name(staged_name))
+            parent.remove_entry(staged_name)
             if claimed_name is not None:
                 _restore_claimed(parent, claimed_name, path.name)
             raise UnownedArtifactError(
                 f"canonical path was recreated during publication: {path}"
             ) from exc
         except BaseException:
-            remove_path(path.with_name(staged_name))
+            parent.remove_entry(staged_name)
             if claimed_name is not None:
                 _restore_claimed(parent, claimed_name, path.name)
             raise
         if claimed_name is not None:
-            remove_path(path.with_name(claimed_name))
+            parent.remove_entry(claimed_name)
         parent.fsync()
