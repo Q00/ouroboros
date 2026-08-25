@@ -22,6 +22,17 @@ def _claim_siblings(path: Path, suffix: str) -> list[Path]:
     return sorted(path.parent.glob(f".{path.name}.*.{suffix}"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_transaction_ledger(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Keep the writer-owned transaction ledger out of the real home directory
+    (and out of the shared-parent ``tmp_path`` the tests inspect)."""
+    ledger = tmp_path_factory.mktemp("txn-ledger")
+    monkeypatch.setenv(fs_ownership._TRANSACTION_LEDGER_ENV, str(ledger))
+    return ledger
+
+
 def test_remove_deletes_only_an_owned_claimed_generation(tmp_path: Path) -> None:
     target = tmp_path / "artifact.txt"
     target.write_text("owned\n", encoding="utf-8")
@@ -963,12 +974,17 @@ def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
     tmp_path: Path,
 ) -> None:
     """The reviewer's crash probe: a process exit during a cross-filesystem
-    import leaves an intent-marked container; the next transaction on the
-    same path reconciles it. A container without a matching intent marker is
-    a forgery and stays untouched."""
+    import leaves a container whose transaction was recorded in the
+    writer-owned ledger before the container appeared; the next transaction
+    on the same path replays the discard and retires the record. A container
+    the ledger does not vouch for is operator state and stays untouched."""
     target = tmp_path / "artifact-dir"
     staged_shape = f".{target.name}.{os.urandom(8).hex()}.tmp"
-    crashed = tmp_path / f".{staged_shape}.{os.urandom(8).hex()}.importing"
+    nonce = os.urandom(8).hex()
+    crashed = tmp_path / f".{staged_shape}.{nonce}.importing"
+    fs_ownership._ledger_record(
+        nonce, canonical=target, container=crashed.name, operation="importing"
+    )
     crashed.mkdir(mode=0o700)
     (crashed / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
     (crashed / "entry").mkdir()
@@ -985,5 +1001,60 @@ def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
     publish_owned_tree(target, build, is_owned=lambda _p: True)
 
     assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
-    assert not crashed.exists()  # reconciled: authenticated by its intent marker
+    assert not crashed.exists()  # reconciled: the ledger vouched for it
+    assert fs_ownership._ledger_read(nonce) is None  # record retired with the replay
     assert (forged / "entry" / "operator.txt").exists()  # forgery left untouched
+
+
+def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
+    tmp_path: Path,
+) -> None:
+    """A crash can die between the container mkdir and the intent-marker
+    write. The ledger record — written before the container ever existed —
+    is the recovery authority, so the marker-less residue is still replayed
+    and the record retired."""
+    target = tmp_path / "artifact-dir"
+    nonce = os.urandom(8).hex()
+    crashed = tmp_path / f".{target.name}.{nonce}.importing"
+    fs_ownership._ledger_record(
+        nonce, canonical=target, container=crashed.name, operation="importing"
+    )
+    crashed.mkdir(mode=0o700)  # crash: no marker, no entry yet
+
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert not crashed.exists()
+    assert fs_ownership._ledger_read(nonce) is None
+
+
+def test_recovery_never_destroys_a_forged_container_with_a_matching_marker(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's forged-marker probe: a same-user writer creates a
+    container matching the ``.{name}.{nonce}.importing`` shape, writes the
+    target basename into ``.ouroboros-intent``, and stores operator data
+    under ``entry``. Name shape and marker are forgeable discovery metadata;
+    without a writer-owned ledger record no recovery path — direct recovery,
+    publication, or removal — may destroy the container."""
+    target = tmp_path / "artifact-dir"
+    forged = tmp_path / f".{target.name}.0123456789abcdef.importing"
+    forged.mkdir(mode=0o700)
+    (forged / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
+    (forged / "entry").mkdir()
+    (forged / "entry" / "operator.txt").write_text("operator data\n", encoding="utf-8")
+
+    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    publish_owned_tree(target, build, is_owned=lambda _p: True)
+    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
+
+    claim_and_remove_owned(target, is_owned=lambda _p: True)
+    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
+
+    forged_discarding = tmp_path / f".{target.name}.fedcba9876543210.discarding"
+    forged.rename(forged_discarding)
+    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert (forged_discarding / "entry" / "operator.txt").exists()

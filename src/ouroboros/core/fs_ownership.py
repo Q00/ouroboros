@@ -75,13 +75,19 @@ Threat model and defenses:
   an intent-marked ``.{canonical}.{nonce}.discarding`` tombstone and the
   removal raises instead of claiming a finished cleanup.
   Cross-filesystem imports follow the same discipline: they assemble
-  inside an intent-marked ``*.importing`` container whose marker names
-  the canonical artifact from the first destination write, and commit
-  with one atomic rename. Every later transaction on the same path
-  reconciles interrupted ``*.importing``/``*.discarding`` containers
-  whose marker names it — completing the discard is the correct replay of
-  an interrupted transaction — while a container without a matching
-  marker is a forgery or another artifact's and is left untouched.
+  inside an intent-marked ``*.importing`` container and commit with one
+  atomic rename. Container names and intent markers live in the shared
+  parent and are therefore forgeable — they are discovery metadata, not
+  recovery authority. That authority is a *transaction ledger* record in
+  an exclusively writer-owned state root, written before the container
+  ever becomes discoverable and binding the canonical path, operation,
+  and exact container name. Every later transaction on the same path
+  reconciles interrupted ``*.importing``/``*.discarding`` containers the
+  ledger vouches for (and whose marker, when present, agrees) — completing
+  the discard
+  is the correct replay of an interrupted transaction, retiring the
+  record with it — while any container the ledger does not vouch for,
+  marker-bearing or not, is operator state and is left untouched.
 * **Builder redirection.** Tree and entry builders never write through a
   pathname under the shared parent: they build in a private workspace, and
   the finished generation is imported beside the canonical path through
@@ -129,6 +135,7 @@ from contextlib import contextmanager, suppress
 import ctypes
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -233,6 +240,73 @@ def _read_intent_marker(container_fd: int) -> str | None:
         return None
     finally:
         os.close(fd)
+
+
+_TRANSACTION_LEDGER_ENV = "OUROBOROS_FS_TRANSACTION_DIR"
+_CONTAINER_PATTERN = re.compile(r"^\..+\.([0-9a-f]{16})\.(importing|discarding)$")
+
+
+def _transaction_ledger_root() -> Path:
+    """The exclusively writer-owned root holding durable transaction records.
+
+    Import/discard containers live in the operator-shared parent, where any
+    same-user writer can forge their name shape and intent marker. The
+    authority to reconcile one *destructively* therefore lives outside that
+    namespace: a ledger record written here — before the container ever
+    becomes discoverable — binds the canonical path, operation, and exact
+    container name. Recovery deletes only containers this ledger vouches for.
+    """
+    override = os.environ.get(_TRANSACTION_LEDGER_ENV)
+    if override:
+        return Path(override)
+    return Path.home() / ".ouroboros" / "fs-transactions"
+
+
+def _container_nonce(container: str) -> str | None:
+    match = _CONTAINER_PATTERN.match(container)
+    return match.group(1) if match else None
+
+
+def _ledger_canonical(path: Path) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
+def _ledger_record(nonce: str, *, canonical: Path, container: str, operation: str) -> None:
+    """Durably record a transaction before its container becomes discoverable."""
+    root = _transaction_ledger_root()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(
+        {
+            "canonical": _ledger_canonical(canonical),
+            "container": container,
+            "operation": operation,
+        }
+    ).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(root / f"{nonce}.json", flags, 0o600)
+    try:
+        os.write(fd, payload)
+        with suppress(OSError):
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ledger_read(nonce: str) -> dict[str, object] | None:
+    try:
+        raw = (_transaction_ledger_root() / f"{nonce}.json").read_bytes()
+    except OSError:
+        return None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _ledger_retire(nonce: str) -> None:
+    with suppress(OSError):
+        os.unlink(_transaction_ledger_root() / f"{nonce}.json")
 
 
 def _digest_into(digest: hashlib._Hash, path: Path, relative: bytes) -> bool:
@@ -480,11 +554,23 @@ class _PinnedParent:
                 raise
         # Cross-filesystem: assemble inside a self-describing 0700 intent
         # container, then commit with one atomic fd-relative rename. The
-        # intent marker written first names the canonical artifact, so an
-        # import interrupted even by a process crash is discoverable and
-        # reconciled by the next transaction on the same path.
-        container = f".{name}.{os.urandom(8).hex()}.importing"
-        os.mkdir(container, mode=0o700, dir_fd=self.fd)
+        # ledger record written first — in the writer-owned transaction root,
+        # not the shared parent — is what authorizes recovery to reconcile
+        # this container after a crash; the in-container intent marker is
+        # discovery metadata only.
+        nonce = os.urandom(8).hex()
+        container = f".{name}.{nonce}.importing"
+        _ledger_record(
+            nonce,
+            canonical=self.path / (canonical_name or name),
+            container=container,
+            operation="importing",
+        )
+        try:
+            os.mkdir(container, mode=0o700, dir_fd=self.fd)
+        except OSError:
+            _ledger_retire(nonce)
+            raise
         container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         container_fd = os.open(container, container_flags, dir_fd=self.fd)
         try:
@@ -501,8 +587,12 @@ class _PinnedParent:
             os.unlink(_INTENT_MARKER, dir_fd=container_fd)
         finally:
             os.close(container_fd)
-        with suppress(OSError):
+        try:
             os.rmdir(container, dir_fd=self.fd)
+        except OSError:
+            pass
+        else:
+            _ledger_retire(nonce)
 
     def _discard_container_entry(
         self, container: str, container_fd: int, *, canonical_name: str
@@ -564,14 +654,45 @@ class _PinnedParent:
         shutil.rmtree(private_root, ignore_errors=True)
         with suppress(OSError):
             os.unlink(_INTENT_MARKER, dir_fd=container_fd)
-        with suppress(OSError):
+        try:
             os.rmdir(container, dir_fd=self.fd)
+        except OSError:
+            pass
+        else:
+            retired = _container_nonce(container)
+            if retired is not None:
+                _ledger_retire(retired)
 
     def _retain_tombstone(self, container: str, canonical_name: str) -> None:
-        """Rename a container holding residue to the recognized tombstone shape."""
-        tombstone = f".{canonical_name}.{os.urandom(8).hex()}.discarding"
-        with suppress(OSError):
+        """Rename a container holding residue to the recognized tombstone shape.
+
+        The tombstone's ledger record is written *before* the rename, so the
+        residue stays reconcilable even if the process dies immediately after
+        the rename; the superseded container's record is retired once the
+        rename lands.
+        """
+        nonce = os.urandom(8).hex()
+        tombstone = f".{canonical_name}.{nonce}.discarding"
+        try:
+            _ledger_record(
+                nonce,
+                canonical=self.path / canonical_name,
+                container=tombstone,
+                operation="discarding",
+            )
+        except OSError:
+            # Without a record the tombstone could never be reconciled; keep
+            # the container under its current name, which retains whatever
+            # still-live record it already has.
+            return
+        try:
             os.rename(container, tombstone, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        except OSError:
+            _ledger_retire(nonce)
+            return
+        superseded = _container_nonce(container)
+        if superseded is not None:
+            _ledger_retire(superseded)
 
     def quarantined_remove(
         self,
@@ -969,20 +1090,24 @@ def _claim_siblings(parent: _PinnedParent, name: str) -> list[str]:
     return sorted(entry for entry in entries if pattern.match(entry))
 
 
-_STALE_CONTAINER_PATTERN = re.compile(r"^\..+\.[0-9a-f]{16}\.(?:importing|discarding)$")
-
-
 def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
-    """Reconcile interrupted import/discard containers that name *path*.
+    """Reconcile interrupted import/discard containers that belong to *path*.
 
     A process crash during a cross-filesystem import, or a destruction whose
-    cleanup could not complete, leaves an intent-marked ``*.importing`` /
-    ``*.discarding`` container. Only a container whose intent marker names
-    this canonical artifact is reconciled — its contents were authored (or
-    already approved for destruction) by an interrupted transaction on the
-    same path, so completing the discard is the correct replay. A
-    container without a matching marker is a forgery or belongs to another
-    artifact and is left untouched.
+    cleanup could not complete, leaves a ``*.importing`` / ``*.discarding``
+    container in the shared parent. Container names and in-container intent
+    markers are *forgeable* by any same-user writer, so neither is ownership
+    evidence: a container is reconciled only when the writer-owned
+    transaction ledger holds a record — written before the container ever
+    became discoverable — binding this canonical path, the operation, and the
+    exact container name, and the container's own marker — discovery
+    metadata that a crash may not have written yet — does not name a
+    different artifact. Completing
+    the discard is then the correct replay of an interrupted transaction, and
+    the record is retired with it. Any container the ledger does not vouch
+    for — marker or no marker — is operator state and is left untouched.
+    Ledger records whose container no longer exists (a crash between cleanup
+    and retirement) are retired here as well.
     """
     if parent.fd is None:
         return False
@@ -990,23 +1115,54 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
         entries = os.listdir(parent.fd)
     except OSError:
         return False
+    canonical = _ledger_canonical(path)
     changed = False
     container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     for entry in sorted(entries):
-        if not _STALE_CONTAINER_PATTERN.match(entry):
+        match = _CONTAINER_PATTERN.match(entry)
+        if match is None:
+            continue
+        record = _ledger_read(match.group(1))
+        if (
+            record is None
+            or record.get("container") != entry
+            or record.get("canonical") != canonical
+            or record.get("operation") != match.group(2)
+        ):
             continue
         try:
             container_fd = os.open(entry, container_flags, dir_fd=parent.fd)
         except OSError:
             continue
         try:
-            if _read_intent_marker(container_fd) != path.name:
+            # The ledger alone is the authority: a crash can die between the
+            # container mkdir and the marker write, so a missing marker does
+            # not block the replay — only a marker naming a *different*
+            # artifact does (the container then belongs to another path).
+            marker = _read_intent_marker(container_fd)
+            if marker is not None and marker != path.name:
                 continue
             with suppress(OSError):
                 parent._discard_container_entry(entry, container_fd, canonical_name=path.name)
                 changed = True
         finally:
             os.close(container_fd)
+    # Retire records orphaned by a crash after cleanup but before retirement.
+    # A record whose transaction is still live sits in a brief window between
+    # the ledger write and the container mkdir; retiring it early can only
+    # strand that transaction's residue (never delete operator state).
+    with suppress(OSError):
+        for record_name in os.listdir(_transaction_ledger_root()):
+            if not record_name.endswith(".json"):
+                continue
+            nonce = record_name[: -len(".json")]
+            record = _ledger_read(nonce)
+            if (
+                record is not None
+                and record.get("canonical") == canonical
+                and record.get("container") not in entries
+            ):
+                _ledger_retire(nonce)
     return changed
 
 
