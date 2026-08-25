@@ -757,11 +757,8 @@ async def _run_mcp_server(
 
         tool_count = len(server.info.tools)
 
-        # One event per host session attach (Claude/Codex spawn `mcp serve`
-        # per session) — the denominator for agent-side usage ratios.
-        usage_telemetry.capture(
-            "mcp_serve_started", {"transport": transport, "tool_count": tool_count}
-        )
+        # Deduplicated server-side by user/day/backend for service DAU.
+        usage_telemetry.capture_service_active()
 
         # Detect Codex seatbelt sandbox and warn about network restrictions.
         _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"

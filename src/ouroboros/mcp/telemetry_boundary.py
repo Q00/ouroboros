@@ -199,6 +199,7 @@ async def observe_adapter_tool_call[T, E](
         ok=result.is_ok and not logical_error,
         duration_ms=_duration_ms(started_at),
         error_type=_safe_error_type(result.error) if result.is_err else None,
+        blocked=logical_error,
     )
     return result
 
@@ -305,7 +306,10 @@ async def call_sdk_tool(
         raise
     logical_error = _is_logical_error(value)
     usage_telemetry.capture_tool_call(
-        safe_name, ok=not logical_error, duration_ms=_duration_ms(started_at)
+        safe_name,
+        ok=not logical_error,
+        duration_ms=_duration_ms(started_at),
+        blocked=logical_error,
     )
     return response
 
@@ -334,19 +338,11 @@ def record_direct_evaluation_outcome(
         )
         properties: dict[str, Any] = {
             "command": "evaluate",
-            "phase": "terminal",
             "terminal_status": status,
-            "ok": not failed,
             "verified": (not failed) and final_approved is True,
-            "final_approved": final_approved if isinstance(final_approved, bool) else None,
         }
         if resolution is not None:
-            properties.update(
-                {
-                    "failure_reason_code": resolution.reason_code.value,
-                    "recovery_action": resolution.recovery_action.value,
-                }
-            )
+            properties["failure_reason_code"] = resolution.reason_code.value
         usage_telemetry.capture(
             "workflow_outcome",
             properties,
@@ -445,18 +441,9 @@ def stamp_backend_context(
     interview_llm_backend: str | None,
     evaluate_llm_backend: str | None,
 ) -> None:
-    """Stamp resolved provider backends onto every subsequent telemetry event.
-
-    Lives here rather than in the (grandfathered, size-capped) adapter module:
-    the adapter's composition root only supplies the resolved values, and the
-    context keys stay next to the other telemetry-boundary vocabulary.
-    """
-    usage_telemetry.set_context(
-        runtime_backend=runtime_backend,
-        execute_runtime_backend=execute_runtime_backend,
-        interview_llm_backend=interview_llm_backend,
-        evaluate_llm_backend=evaluate_llm_backend,
-    )
+    """Stamp only the retained runtime-backend dimension."""
+    del execute_runtime_backend, interview_llm_backend, evaluate_llm_backend
+    usage_telemetry.set_context(runtime_backend=runtime_backend)
 
 
 class JobTelemetryBoundary:

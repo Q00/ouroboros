@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 import platform
 import queue
-import random
 import re
 import ssl
 import threading
@@ -48,39 +47,8 @@ _QUEUE_MAX = 256
 _BATCH_MAX = 25
 _HTTP_TIMEOUT_SECONDS = 4.0
 
-# Tools that skills poll in loops (job status, HUDs, projections). Captured
-# at 1/_POLL_SAMPLE_RATE via an independent per-call random draw (not a
-# per-process counter) with a ``sample_rate`` property so absolute counts
-# can be re-weighted in PostHog without flooding ingestion. A per-process
-# counter would always capture call #1, so short-lived processes (a fresh
-# MCP session that polls once or twice before exiting) would be captured at
-# ~1:1 instead of 1/50 -- an up-to-50x over-count skewed toward exactly the
-# processes least representative of steady-state usage. A per-call draw
-# keeps the probability 1/50 regardless of how long the process lives.
-_POLLING_TOOLS = frozenset(
-    {
-        "ouroboros_job_status",
-        "ouroboros_job_wait",
-        "ouroboros_job_result",
-        "ouroboros_session_status",
-        "ouroboros_query_events",
-        "ouroboros_query_projection",
-        "ouroboros_ac_dashboard",
-        "ouroboros_ac_tree_hud",
-        "ouroboros_session_signal_targets",
-        "ouroboros_lineage_status",
-        "ouroboros_project_status",
-    }
-)
-_POLL_SAMPLE_RATE = 50
-# Module-level so a test can seed it for a deterministic capture/skip
-# pattern (telemetry._poll_rng.seed(...)); a fresh Random() per call would
-# make sampling untestable, and reusing threading._lock's RNG would couple
-# unrelated concerns. random.Random() is not cryptographically secure, which
-# is fine here -- this is a sampling coin flip, not a security boundary.
-_poll_rng = random.Random()
 
-# Funnel step per MCP tool. Everything else is still captured (tool property)
+# Funnel step per retained MCP lifecycle command.
 # but these get a stable ``command`` value so the interview -> seed -> run ->
 # evaluate -> evolve funnel can be built without knowing tool names.
 _TOOL_FUNNEL: dict[str, str] = {
@@ -102,10 +70,8 @@ _TOOL_FUNNEL: dict[str, str] = {
     "ouroboros_lateral_think": "unstuck",
 }
 
-# CLI subcommand -> funnel command normalization; None means "do not capture".
-# "mcp" is excluded because hosts (Claude Code, Codex) spawn `ouroboros mcp
-# serve` automatically per session — counting it as a terminal command would
-# inflate direct-CLI usage. Serve boots emit `mcp_serve_started` instead.
+# Internal CLI plumbing is excluded. MCP service activity is emitted separately
+# as a daily-deduplicated `service_active` event.
 _CLI_SKIP = frozenset({"dispatch", "job", "mcp"})
 _CLI_FUNNEL = {"init": "interview"}
 
@@ -174,18 +140,9 @@ _ASYNC_SUBMISSION_TOOLS = frozenset(
     }
 )
 
-# Backstop for capture_tool_call: every registered MCP tool name is
-# lowercase snake-case after the "ouroboros_" prefix (verified against
-# _TOOL_FUNNEL/_POLLING_TOOLS/_ASYNC_SUBMISSION_TOOLS above), so a `name`
-# that fails this fullmatch cannot be a real tool -- it's caller-controlled
-# input (the "ouroboros_" startswith gate alone lets anything after that
-# prefix through unchanged). The property allowlist constrains which keys
-# reach a batch, not the string semantics of a value that IS an allowed key
-# (`tool`/`command` are plain caller strings), so this is the backstop that
-# constrains the one caller-controlled value that becomes a property --
-# a path, an identifier, or anything else must never ride through `tool`
-# or `command`, even if the real boundary (the MCP tool registry lookup)
-# has a bug.
+# Backstop for capture_tool_call: shipped tool names are lowercase snake-case
+# after the `ouroboros_` prefix. Unknown or extension names are folded to fixed
+# literals before the command dimension is emitted.
 _TOOL_NAME_PATTERN = re.compile(r"^ouroboros_[a-z0-9_]{1,64}$")
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
@@ -207,8 +164,7 @@ _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 #    composition path (used for a different runtime mode) that additionally
 #    registers `ouroboros_checklist_verify`, a genuine top-level tool absent
 #    from (1)'s default composition.
-# _TOOL_FUNNEL/_POLLING_TOOLS/_ASYNC_SUBMISSION_TOOLS keys are all subsets
-# of this set (test_telemetry.py asserts it, so the sets can't drift apart).
+# _TOOL_FUNNEL and _ASYNC_SUBMISSION_TOOLS must remain subsets of this set.
 _CANONICAL_TOOL_NAMES = frozenset(
     {
         "ouroboros_ac_dashboard",
@@ -285,169 +241,54 @@ _INTERNAL_SHIPPED_JOB_TYPES = frozenset({"detached_probe", "detached_nested_prob
 _CANONICAL_JOB_TYPES = frozenset(_JOB_FUNNEL) | _INTERNAL_SHIPPED_JOB_TYPES
 _EXTENSION_JOB_COMMAND = "extension_job"
 
-# Executable form of the TELEMETRY.md event table. Auditing call sites for
-# compliance is not the same as enforcing it: capture() and set_context()
-# below drop anything outside these sets before it reaches the queue, so a
-# call site cannot accidentally (or maliciously) smuggle an unlisted event
-# name or property -- e.g. prompt text or a file path -- into an outgoing
-# batch, even if a future edit passes one in.
-#
-# TELEMETRY.md's "What is sent" table and the sets below are one contract in
-# two places (SSOT pairing) -- edit both together, or the doc lies. Sets are
-# literal per (event, variant), not composed from a shared base + context
-# pool: variants deliberately differ in what they carry (e.g.
-# mcp_serve_started omits python_version; the cli command_run variant omits
-# every backend/provider context key entirely), so a generic union would
-# either under- or over-grant for at least one variant.
-_CONTEXT_ALLOWLIST = frozenset(
-    {
-        "runtime_backend",
-        "execute_runtime_backend",
-        "interview_llm_backend",
-        "evaluate_llm_backend",
-    }
-)
+# Exact minimal contract paired with TELEMETRY.md. Anything else is dropped.
+_CONTEXT_ALLOWLIST = frozenset({"runtime_backend"})
 _COMMAND_RUN_MCP_KEYS = frozenset(
     {
         "command",
-        "tool",
-        "source",
-        "is_funnel",
-        "phase",
-        "accepted",
-        "ok",
-        "duration_ms",
+        "service",
+        "status",
         "error_type",
-        "sample_rate",
+        "$insert_id",
         "runtime_backend",
-        "execute_runtime_backend",
-        "interview_llm_backend",
-        "evaluate_llm_backend",
-        "frontdoor",
-        "first_command_surface",
         "app_version",
         "os",
-        "python_version",
         "ci",
     }
 )
 _COMMAND_RUN_CLI_KEYS = frozenset(
     {
         "command",
-        "source",
-        "is_funnel",
+        "service",
+        "status",
+        "$insert_id",
         "app_version",
         "os",
-        "python_version",
-        "frontdoor",
         "ci",
     }
 )
 _WORKFLOW_OUTCOME_KEYS = frozenset(
     {
         "command",
-        "phase",
         "terminal_status",
-        "ok",
         "verified",
-        "final_approved",
         "failure_reason_code",
-        "recovery_action",
         "$insert_id",
         "runtime_backend",
-        "execute_runtime_backend",
-        "interview_llm_backend",
-        "evaluate_llm_backend",
         "app_version",
         "os",
-        "python_version",
-        "frontdoor",
         "ci",
     }
 )
-_MCP_SERVE_STARTED_KEYS = frozenset(
+_SERVICE_ACTIVE_KEYS = frozenset(
     {
-        "transport",
-        "tool_count",
-        "frontdoor",
-        "first_command_surface",
+        "service",
+        "$insert_id",
+        "runtime_backend",
         "app_version",
         "os",
         "ci",
     }
-)
-_SUBAGENT_DISPATCH_KEYS = frozenset(
-    {
-        "phase",
-        "fanout_kind",
-        "payload_count",
-        "invocation_surface",
-        "dispatch_authority",
-        "host_family",
-        "host_identity_status",
-        "host_capability",
-        "capability_source",
-        "delivery_mode",
-        "execution_preference",
-        "fallback_strategy",
-        "configured_worker_backend",
-        "host_worker_mismatch",
-        "decision_reason",
-        "contract_version",
-        "fanout_reentry_available",
-        "submission_status",
-        "expected_count",
-        "received_count",
-        "undispatched_count",
-        "frontdoor",
-        "first_command_surface",
-        "app_version",
-        "os",
-        "python_version",
-        "ci",
-    }
-)
-
-_SUBAGENT_DISPATCH_ENUMS: dict[str, frozenset[str]] = {
-    "phase": frozenset({"emitted", "submitted"}),
-    "fanout_kind": frozenset(
-        {"lateral_persona_panel", "question_advisory", "code_investigation", "unknown"}
-    ),
-    "invocation_surface": frozenset({"mcp_host", "internal_runtime"}),
-    "dispatch_authority": frozenset({"mcp_host", "internal_runtime", "passive_bridge"}),
-    "host_family": frozenset({"claude_code", "codex", "opencode", "other_known", "unknown"}),
-    "host_identity_status": frozenset({"known", "unknown"}),
-    "host_capability": frozenset({"parallel", "sequential", "unavailable", "undeclared"}),
-    "capability_source": frozenset(
-        {"mcp_extension", "trusted_server_option", "passive_bridge", "none"}
-    ),
-    "delivery_mode": frozenset({"passive_bridge", "inline_host", "inline_runtime"}),
-    "execution_preference": frozenset({"parallel", "sequential"}),
-    "fallback_strategy": frozenset({"sequential", "none"}),
-    "decision_reason": frozenset(
-        {
-            "passive_bridge_detected",
-            "declared_parallel",
-            "declared_sequential",
-            "host_capability_undeclared",
-            "configured_internal_runtime",
-        }
-    ),
-    "contract_version": frozenset({"v2"}),
-    "submission_status": frozenset(
-        {
-            "complete",
-            "partial",
-            "invalid_result_entry",
-            "unknown_fanout_id",
-            "correlation_mismatch",
-            "unknown_kind",
-            "publication_failed",
-        }
-    ),
-}
-_FIRST_COMMAND_SURFACES = frozenset(
-    {"setup_complete", "readme_quickstart", "getting_started", "unknown"}
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
@@ -884,69 +725,18 @@ def _sanitize_properties(props: dict[str, Any], allowed_keys: frozenset[str]) ->
 
 
 def set_context(**props: Any) -> None:
-    """Merge properties (e.g. runtime_backend) into every subsequent event.
-
-    Only keys in _CONTEXT_ALLOWLIST are accepted: this is a global sink read
-    by _base_properties() on every capture() call, so an unvetted key here
-    would leak into every event, not just one call site's.
-    """
+    """Merge allowlisted runtime context into subsequent events."""
     with _lock:
         for key, value in props.items():
             if key in _CONTEXT_ALLOWLIST and _is_allowed_scalar(value):
                 _context[key] = value
 
 
-def _detect_frontdoor() -> str | None:
-    """Best-effort detection of the host CLI that spawned this process."""
-    env = os.environ
-    if env.get("CLAUDECODE"):
-        return "claude"
-    if env.get("CODEX_THREAD_ID") or env.get("CODEX_SANDBOX_NETWORK_DISABLED"):
-        return "codex"
-    return None
-
-
-def _detect_first_command_surface() -> str:
-    """Return the privacy-safe onboarding surface attribution.
-
-    The value is deliberately a fixed enum. A trusted setup/config file wins
-    only when no install-time hint exists. The hint identifies the surface
-    that brought the user to installation, so it must survive the subsequent
-    setup step; otherwise every README cohort would be relabeled
-    ``setup_complete`` before its first command. ``setup_complete`` is the
-    fallback for users who configured Ouroboros without a known install
-    surface.
-    """
-    candidate = os.environ.get("OUROBOROS_FIRST_COMMAND_SURFACE", "").strip().lower()
-    if candidate in _FIRST_COMMAND_SURFACES:
-        return candidate
-
-    hint_path = Path.home() / ".ouroboros" / "first_command_surface"
-    try:
-        candidate = hint_path.read_text(encoding="utf-8").strip().lower()
-    except Exception:
-        candidate = ""
-    if candidate in _FIRST_COMMAND_SURFACES:
-        return candidate
-
-    config_path = Path.home() / ".ouroboros" / "config.yaml"
-    if config_path.is_file():
-        return "setup_complete"
-    return "unknown"
-
-
 def _base_properties() -> dict[str, Any]:
     props: dict[str, Any] = {
         "app_version": __version__,
         "os": platform.system().lower(),
-        "python_version": platform.python_version(),
     }
-    frontdoor = _detect_frontdoor()
-    if frontdoor:
-        props["frontdoor"] = frontdoor
-    props["first_command_surface"] = _detect_first_command_surface()
-    # CI runs are excluded from the published counting rule (TELEMETRY.md);
-    # stamping them lets every insight filter ci != true.
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         props["ci"] = True
     with _lock:
@@ -1031,24 +821,32 @@ def flush(timeout: float = 1.5) -> None:
 
 
 def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> frozenset[str] | None:
-    """Look up the exact per-event(-variant) property set for `event`.
-
-    None means the event is not on the disclosed table at all -- capture()
-    drops it. `command_run` has two variants selected by the
-    caller-provided `source` property (`"cli"` vs. everything else,
-    including absent, which is `"mcp"`); every other event's set is fixed
-    by its name alone.
-    """
     if event == "command_run":
-        source = (properties or {}).get("source")
-        return _COMMAND_RUN_CLI_KEYS if source == "cli" else _COMMAND_RUN_MCP_KEYS
+        service = (properties or {}).get("service")
+        return _COMMAND_RUN_CLI_KEYS if service == "cli" else _COMMAND_RUN_MCP_KEYS
     if event == "workflow_outcome":
         return _WORKFLOW_OUTCOME_KEYS
-    if event == "mcp_serve_started":
-        return _MCP_SERVE_STARTED_KEYS
-    if event == "subagent_dispatch":
-        return _SUBAGENT_DISPATCH_KEYS
+    if event == "service_active":
+        return _SERVICE_ACTIVE_KEYS
     return None
+
+
+def _daily_insert_id(
+    event: str,
+    distinct_id_value: str,
+    properties: dict[str, Any],
+) -> str:
+    """Deduplicate DAU rows to one user/day/dimension tuple."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    dimensions = (
+        properties.get("service"),
+        properties.get("command"),
+        properties.get("status"),
+        properties.get("error_type"),
+        properties.get("runtime_backend"),
+    )
+    material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def capture(event: str, properties: dict[str, Any] | None = None) -> None:
@@ -1077,6 +875,8 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
+        if event in {"command_run", "service_active"} and "$insert_id" not in props:
+            props["$insert_id"] = _daily_insert_id(event, resolved_id, props)
         props = _sanitize_properties(props, allowed_keys)
         _queue.put_nowait(
             {
@@ -1097,96 +897,47 @@ def capture_tool_call(
     ok: bool,
     duration_ms: float | None = None,
     error_type: str | None = None,
+    blocked: bool = False,
 ) -> None:
-    """Capture one MCP tool invocation (the single funnel chokepoint).
-
-    `name` is caller-controlled and only loosely gated by the
-    "ouroboros_" prefix check below -- see _TOOL_NAME_PATTERN for the
-    strict charset backstop, and _CANONICAL_TOOL_NAMES for the audited
-    allowlist that follows it: a name that doesn't look like a real tool,
-    or looks right but isn't one this project ships, is replaced with a
-    fixed literal before it can become the `tool`/`command` property
-    values, rather than dropped or forwarded verbatim.
-    """
+    """Capture retained lifecycle commands and every failed MCP call."""
+    del duration_ms
     try:
         if not name.startswith("ouroboros_"):
             return
         if not _TOOL_NAME_PATTERN.fullmatch(name):
-            # Defense in depth: the real boundary (an MCP tool registry
-            # lookup) belongs upstream of this function and should already
-            # normalize unknown names, but this call site must not depend
-            # on that holding forever. Replace, don't drop -- unknown-tool
-            # failures are deliberately counted, just never under a caller
-            # string that could be a path, an identifier, or anything else.
             name = _UNKNOWN_TOOL_NAME
         elif name != _UNKNOWN_TOOL_NAME and name not in _CANONICAL_TOOL_NAMES:
-            # Charset-valid but not an audited built-in name: a real
-            # registered extension/custom tool (register_tool() accepts
-            # anything), not a lookup failure -- keep the two literals
-            # distinct rather than collapsing both into "unknown". Still
-            # counted, never under the caller's identifying name.
             name = _EXTENSION_TOOL_NAME
-        sample_rate = 1
-        if name in _POLLING_TOOLS:
-            if _poll_rng.random() >= 1.0 / _POLL_SAMPLE_RATE:
-                return  # independent per-call draw -- see _POLLING_TOOLS comment
-            sample_rate = _POLL_SAMPLE_RATE
-        funnel = _TOOL_FUNNEL.get(name)
-        properties: dict[str, Any] = {
-            "command": funnel or name.removeprefix("ouroboros_"),
-            "tool": name,
-            "source": "mcp",
-            "is_funnel": funnel is not None,
-            "phase": "submission" if name in _ASYNC_SUBMISSION_TOOLS else "completion",
-            "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
-            "error_type": error_type,
-            "sample_rate": sample_rate if sample_rate > 1 else None,
-        }
-        if name in _ASYNC_SUBMISSION_TOOLS:
-            properties["accepted"] = ok
+        command = _TOOL_FUNNEL.get(name)
+        if ok and not blocked and command is None:
+            return
+        if blocked:
+            status = "blocked"
+        elif name in _ASYNC_SUBMISSION_TOOLS:
+            status = "accepted" if ok else "rejected"
         else:
-            properties["ok"] = ok
-        capture("command_run", properties)
+            status = "succeeded" if ok else "failed"
+        capture(
+            "command_run",
+            {
+                "command": command or name.removeprefix("ouroboros_"),
+                "service": "mcp",
+                "status": status,
+                "error_type": error_type,
+            },
+        )
     except Exception:
         pass
+
+
+def capture_service_active() -> None:
+    """Record at most one service-active row per user/day/backend."""
+    capture("service_active", {"service": "mcp"})
 
 
 def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
-    """Capture one privacy-safe fan-out contract or re-entry boundary.
-
-    Values are closed enums and bounded counts. Unknown/custom strings are
-    folded before ``capture`` so raw client names, backend names, identifiers,
-    prompts, and outputs can never reach PostHog through this event.
-    """
-    try:
-        safe: dict[str, Any] = {}
-        for key, value in properties.items():
-            allowed = _SUBAGENT_DISPATCH_ENUMS.get(key)
-            if allowed is not None:
-                if isinstance(value, str) and value in allowed:
-                    safe[key] = value
-                continue
-            if key in {
-                "payload_count",
-                "expected_count",
-                "received_count",
-                "undispatched_count",
-            }:
-                if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 64:
-                    safe[key] = value
-                continue
-            if key in {"host_worker_mismatch", "fanout_reentry_available"}:
-                if isinstance(value, bool):
-                    safe[key] = value
-                continue
-            if key == "configured_worker_backend":
-                from ouroboros.backends.capabilities import get_backend_capability
-
-                capability = get_backend_capability(str(value))
-                safe[key] = capability.name if capability is not None else "other"
-        capture("subagent_dispatch", safe)
-    except Exception:
-        pass
+    """Compatibility no-op: subagent dispatch telemetry is no longer collected."""
+    del properties
 
 
 def capture_job_outcome(
@@ -1229,20 +980,12 @@ def capture_job_outcome(
         )
         properties: dict[str, Any] = {
             "command": command,
-            "phase": "terminal",
             "terminal_status": normalized_status,
-            "ok": normalized_status == "completed",
             "verified": verified,
-            "final_approved": (final_approved if isinstance(final_approved, bool) else None),
             "$insert_id": hashlib.sha256(f"ouroboros-job-outcome\0{job_id}".encode()).hexdigest(),
         }
         if resolution is not None:
-            properties.update(
-                {
-                    "failure_reason_code": resolution.reason_code.value,
-                    "recovery_action": resolution.recovery_action.value,
-                }
-            )
+            properties["failure_reason_code"] = resolution.reason_code.value
         capture(
             "workflow_outcome",
             properties,
@@ -1272,8 +1015,8 @@ def capture_cli_command(subcommand: str | None) -> None:
             "command_run",
             {
                 "command": command,
-                "source": "cli",
-                "is_funnel": subcommand in ("auto", "init", "interview", "seed", "run", "qa", "pm"),
+                "service": "cli",
+                "status": "invoked",
             },
         )
     except Exception:
@@ -1392,16 +1135,13 @@ def _reset_for_tests() -> None:
     with _lock:
         _state_cache = None
         _context.clear()
-        # Reseed from OS entropy so a test that seeded _poll_rng for a
-        # deterministic capture/skip pattern can't leak that determinism
-        # into an unrelated later test.
-        _poll_rng.seed()
 
 
 __all__ = [
     "capture",
     "capture_cli_command",
     "capture_job_outcome",
+    "capture_service_active",
     "capture_tool_call",
     "distinct_id",
     "flush",
