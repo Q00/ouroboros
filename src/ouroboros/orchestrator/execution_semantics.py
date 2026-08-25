@@ -11,7 +11,7 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 6
+CURRENT_EXECUTION_SEMANTICS_VERSION = 7
 PRE_VERIFY_SHELL_EXECUTION_SEMANTICS_VERSION = 4
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
 

@@ -58,6 +58,7 @@ class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
     ZCODE = "zcode"
+    HOST = "host"
 
 
 def _installed_major(distribution: str) -> int | None:
