@@ -3,8 +3,9 @@
 Privacy contract — see TELEMETRY.md at the repository root:
 
 - Never collects code, prompts, seed content, file paths, or arguments.
-  Only event names and coarse properties (command, backend, version, os,
-  duration, success) are sent.
+  Only closed command/status dimensions, runtime backend, version, OS, and
+  failure reason codes are sent. Daily activity uses deterministic insert IDs.
+  Country is derived by PostHog from the request, not sent by Ouroboros.
 - Identity is a random UUID stored in ``~/.ouroboros/telemetry.json``.
   No PII, no machine fingerprinting.
 - Opt out any time: ``DO_NOT_TRACK=1``, ``OUROBOROS_TELEMETRY=0``, or
@@ -299,6 +300,7 @@ _queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAX)
 _worker: threading.Thread | None = None
 _context: dict[str, Any] = {}
 _state_cache: dict[str, Any] | None = None
+_activity_cache: set[str] = set()
 
 
 def _api_key() -> str:
@@ -878,14 +880,21 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
         if event in {"command_run", "service_active"} and "$insert_id" not in props:
             props["$insert_id"] = _daily_insert_id(event, resolved_id, props)
         props = _sanitize_properties(props, allowed_keys)
-        _queue.put_nowait(
-            {
-                "event": event,
-                "distinct_id": resolved_id,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "properties": props,
-            }
-        )
+        event_payload = {
+            "event": event,
+            "distinct_id": resolved_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "properties": props,
+        }
+        if event == "service_active":
+            insert_id = str(props["$insert_id"])
+            with _lock:
+                if insert_id in _activity_cache:
+                    return
+                _queue.put_nowait(event_payload)
+                _activity_cache.add(insert_id)
+        else:
+            _queue.put_nowait(event_payload)
         _ensure_worker()
     except Exception:
         pass
@@ -909,6 +918,7 @@ def capture_tool_call(
         elif name != _UNKNOWN_TOOL_NAME and name not in _CANONICAL_TOOL_NAMES:
             name = _EXTENSION_TOOL_NAME
         command = _TOOL_FUNNEL.get(name)
+        capture_service_active()
         if ok and not blocked and command is None:
             return
         if blocked:
@@ -965,10 +975,6 @@ def capture_job_outcome(
         normalized_status = terminal_status.strip().lower()
         meta = result_meta if isinstance(result_meta, dict) else {}
         final_approved = meta.get("final_approved")
-        # Compares the RAW job_type, never the folded/audited `command`
-        # below: an extension job must not earn verified=true just because
-        # its job_type happens not to be "evaluate" either way. Folding
-        # only ever affects the `command` property, never this check.
         verified = (
             normalized_status == "completed" and job_type == "evaluate" and final_approved is True
         )
@@ -986,10 +992,7 @@ def capture_job_outcome(
         }
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
-        capture(
-            "workflow_outcome",
-            properties,
-        )
+        capture("workflow_outcome", properties)
     except Exception:
         pass
 
@@ -1135,6 +1138,7 @@ def _reset_for_tests() -> None:
     with _lock:
         _state_cache = None
         _context.clear()
+        _activity_cache.clear()
 
 
 __all__ = [

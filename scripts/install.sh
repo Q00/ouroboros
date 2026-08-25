@@ -871,14 +871,14 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
-# Optional install-channel attribution. A docs page or listing can prepend
-# OUROBOROS_INSTALL_REF=<channel> to the install command so install_started /
-# install_completed carry which surface the install came from. Same privacy
-# contract as every other property here: a short opaque token chosen by us,
-# never derived from the machine. Token-constrained like os/arch above so a
-# hostile value cannot ride into the payload; anything else becomes "direct".
-INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
-[[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
+# Closed install-channel vocabulary. Unknown values may contain private slugs,
+# customer names, or account identifiers, so they always fold to `direct`.
+case "${OUROBOROS_INSTALL_REF:-direct}" in
+  direct|readme|readme-hero|readme-ko|readme-hero-ko|readme-zh|readme-hero-zh|docs-getting-started)
+    INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+    ;;
+  *) INSTALL_REF="direct" ;;
+esac
 
 _banner
 

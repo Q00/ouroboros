@@ -1540,14 +1540,10 @@ def test_installer_ping_ref_defaults_to_direct_when_unset(tmp_path: Path) -> Non
     assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
-def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
-    """A well-formed `OUROBOROS_INSTALL_REF` (matches `^[A-Za-z0-9._-]{1,32}$`)
-    is carried through to both events verbatim -- this is the actual
-    attribution path a docs page or listing is meant to use.
-    """
+def test_installer_ping_ref_carries_approved_channel_token(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "hellogithub"},
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "readme-hero"},
         fake_commands={
             **_telemetry_fake_commands(),
             "curl": _capture_dashd_curl(),
@@ -1563,17 +1559,28 @@ def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_completed"]["properties"]["ref"] == "hellogithub"
+    assert events["install_completed"]["properties"]["ref"] == "readme-hero"
+
+
+def test_installer_ping_ref_folds_valid_shaped_unknown_to_direct(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "private-project-2278"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    payload = json.loads(next(line for line in captures.splitlines() if line))
+    assert payload["properties"]["ref"] == "direct"
+    assert "private-project-2278" not in captures
 
 
 def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> None:
-    """A value outside `^[A-Za-z0-9._-]{1,32}$` (shell metacharacters, spaces,
-    or over-length) must never reach the telemetry payload -- it degrades to
-    `direct` exactly like an unset value. `[[ =~ ]]` never executes its
-    operand, so this is a payload-shape guarantee, not a shell-injection
-    probe; the point is that a hostile value chosen by whoever writes the
-    install command cannot ride into what we record.
-    """
+    """Invalid shell-shaped values also fold to the closed `direct` token."""
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "evil; rm -rf /"},

@@ -20,7 +20,8 @@ tool arguments, environment variables, account data, or project identifiers.
 - command DAU = distinct anonymous IDs with `command_run` and `ci!=true` that day;
 - service DAU = distinct anonymous IDs with `service_active` and `ci!=true` that day;
 - verified weekly active = distinct anonymous IDs with `workflow_outcome`,
-  `command=evaluate`, `verified=true`, and `ci!=true` that week.
+  `command=evaluate`, `verified=true`, and `ci!=true` that week. Evaluations
+  delegated to an external plugin bridge are excluded because no terminal evidence is available.
 
 `command_run` and `service_active` carry deterministic daily `$insert_id` values.
 PostHog therefore stores at most one row per anonymous user/day/dimension tuple
@@ -82,17 +83,21 @@ use. Each row below is the exact property set accepted by the serializer.
 | Event | When | Properties (exact set) |
 |---|---|---|
 | `install_completed` | `install.sh` finishes successfully | os, runtime, version, ref |
-| `service_active` | An MCP service starts | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
+| `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
 
 Notes:
-
-- `ref` is a short install-channel token such as `readme` or `hellogithub`.
-  Invalid or absent values become `direct`.
+- `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
+  `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
+  Every other value folds to `direct` before serialization.
 - Successful polling and internal helper tools are not collected. Failures are
   retained so broken status, artifact, fan-out, and control paths remain visible.
+- `service_active` is emitted from the tool-request boundary, not process startup.
+  A bind, SDK startup, or PID-file failure therefore cannot count as service DAU.
+- User lifecycle is derived by PostHog's lifecycle query over the stable random
+  identity and daily `service_active` rows; no extra lifecycle-state property is sent.
 - A logical tool result with `is_error=true` is recorded as `status=blocked`.
   This makes seed blocks and other validation stops distinct from exceptions.
 - `error_type` is only an audited exception class name, never a message or

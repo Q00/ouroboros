@@ -573,13 +573,18 @@ class TestIdentityFailClosed:
 
 
 class TestCapture:
-    def test_lifecycle_command_shape(self, sent: list[dict[str, Any]]) -> None:
+    def test_lifecycle_command_shape(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
         telemetry.set_context(runtime_backend="codex")
         telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
         telemetry.flush(timeout=2.0)
 
-        assert len(sent) == 1
-        event = sent[0]
+        assert len(sent) == 2
+        service_event, event = sent
+        assert service_event["event"] == "service_active"
         assert event["event"] == "command_run"
         assert event["distinct_id"] == telemetry.distinct_id()
         assert event["properties"] == {
@@ -590,7 +595,6 @@ class TestCapture:
             "runtime_backend": "codex",
             "app_version": telemetry.__version__,
             "os": platform.system().lower(),
-            "ci": True,
         }
 
     def test_failed_internal_command_is_retained(self, sent: list[dict[str, Any]]) -> None:
@@ -599,7 +603,7 @@ class TestCapture:
         )
         telemetry.flush(timeout=2.0)
 
-        props = sent[0]["properties"]
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
         assert props["command"] == "checklist_verify"
         assert props["status"] == "failed"
         assert props["error_type"] == "MCPToolError"
@@ -610,9 +614,10 @@ class TestCapture:
         telemetry.capture_tool_call("ouroboros_generate_seed", ok=False, blocked=True)
         telemetry.flush(timeout=2.0)
 
-        assert sent[0]["properties"]["command"] == "seed"
-        assert sent[0]["properties"]["status"] == "blocked"
-        assert "error_type" not in sent[0]["properties"]
+        command = next(event for event in sent if event["event"] == "command_run")
+        assert command["properties"]["command"] == "seed"
+        assert command["properties"]["status"] == "blocked"
+        assert "error_type" not in command["properties"]
 
     def test_successful_internal_and_polling_commands_are_dropped(
         self, sent: list[dict[str, Any]]
@@ -621,7 +626,7 @@ class TestCapture:
         telemetry.capture_tool_call("ouroboros_job_status", ok=True)
         telemetry.capture_tool_call("some_other_tool", ok=True)
         telemetry.flush(timeout=2.0)
-        assert sent == []
+        assert [event["event"] for event in sent] == ["service_active"]
 
     def test_subagent_dispatch_is_not_collected(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_subagent_dispatch({"phase": "emitted", "payload_count": 5})
@@ -634,9 +639,10 @@ class TestCapture:
         telemetry.capture_tool_call("ouroboros_interview", ok=False, error_type="TimeoutError")
         telemetry.flush(timeout=2.0)
 
-        assert len(sent) == 3
-        assert sent[0]["properties"]["$insert_id"] == sent[1]["properties"]["$insert_id"]
-        assert sent[0]["properties"]["$insert_id"] != sent[2]["properties"]["$insert_id"]
+        commands = [event for event in sent if event["event"] == "command_run"]
+        assert len(commands) == 3
+        assert commands[0]["properties"]["$insert_id"] == commands[1]["properties"]["$insert_id"]
+        assert commands[0]["properties"]["$insert_id"] != commands[2]["properties"]["$insert_id"]
 
     def test_durable_job_outcome_keeps_only_terminal_fields(
         self, sent: list[dict[str, Any]]
@@ -784,8 +790,7 @@ class TestExactPropertySets:
         telemetry.set_context(runtime_backend="claude", execute_runtime_backend="ignored")
         telemetry.capture_tool_call("ouroboros_evaluate", ok=False, error_type="TimeoutError")
         telemetry.flush(timeout=2.0)
-
-        props = sent[0]["properties"]
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
         assert set(props) == {
             "command",
             "service",

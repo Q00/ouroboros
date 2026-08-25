@@ -23,7 +23,6 @@ from rich.text import Text
 import structlog
 import typer
 
-from ouroboros import telemetry as usage_telemetry
 from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
@@ -754,11 +753,7 @@ async def _run_mcp_server(
         from ouroboros.mcp.update_notice import maybe_schedule_cache_refresh
 
         maybe_schedule_cache_refresh()
-
         tool_count = len(server.info.tools)
-
-        # Deduplicated server-side by user/day/backend for service DAU.
-        usage_telemetry.capture_service_active()
 
         # Detect Codex seatbelt sandbox and warn about network restrictions.
         _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
