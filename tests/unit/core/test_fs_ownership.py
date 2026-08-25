@@ -1205,6 +1205,72 @@ def test_recursive_descendant_swap_is_never_deleted_through_stale_names(
     )
 
 
+def test_private_cleanup_restore_failure_retains_ledger_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's stranded-residue probe: private erasure is a no-op and
+    the reinsertion rename fails. The removal must not report success — it
+    raises — and the residue never leaves durable authority: its private
+    quarantine was ledger-recorded before the entry moved in, so a later
+    transaction replays the erasure and retires the record only after
+    verified absence."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    real_rename = fs_ownership.os.rename
+    real_rmtree = fs_ownership.shutil.rmtree
+
+    def skip_private_erasure(path: object, *args: object, **kwargs: object) -> None:
+        if "ouroboros-discard-" in str(path):
+            return  # simulated erasure failure: the residue stays put
+        real_rmtree(path, *args, **kwargs)
+
+    def deny_reinsertion(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if isinstance(src, str) and "ouroboros-discard-" in src and dst == "entry":
+            raise OSError(errno.EIO, "simulated reinsertion failure")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", skip_private_erasure)
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_reinsertion)
+
+    with pytest.raises(OSError, match="ledger-backed private quarantine"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    # The removal committed (the canonical artifact is gone) but was NOT
+    # reported successful, and the residue is still under a ledger record.
+    assert not target.exists()
+    with fs_ownership._ledger_authority() as ledger:
+        erasing = [
+            ledger.read(nonce)
+            for nonce in ledger.nonces()
+            if (ledger.read(nonce) or {}).get("operation") == "erasing"
+        ]
+    assert len(erasing) == 1
+    location = erasing[0]["container"]
+    assert isinstance(location, str)
+    assert (Path(location) / "entry" / "content.txt").read_text(encoding="utf-8") == (
+        "owned generation\n"
+    )
+
+    # A later transaction on the same path replays the private erasure and
+    # retires the record only once the location is verifiably gone.
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
+    monkeypatch.setattr(fs_ownership.os, "rename", real_rename)
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert not Path(location).exists()
+    with fs_ownership._ledger_authority() as ledger:
+        assert all(
+            (ledger.read(nonce) or {}).get("operation") != "erasing" for nonce in ledger.nonces()
+        )
+
+
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
     tmp_path: Path,
 ) -> None:
