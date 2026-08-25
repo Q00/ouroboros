@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -251,6 +252,17 @@ def register_gjc_mcp_server(
     ):
         print_warning("Detected Ouroboros MCP launcher is invalid; GJC registration skipped.")
         return False
+    # Attribute cleanup to this invocation: a setup-shaped durable entry that
+    # already exists before the add (even when `mcp list` omits it) was not
+    # created here and must never be removed by a failed add.
+    pre_add_owned = is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
+
+    def _cleanup_failed_add() -> None:
+        if pre_add_owned:
+            return
+        if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
+            remove_persisted_gjc_mcp_server()
+
     server_args = [*raw_args, "--runtime", "gjc"]
     add_command = [
         gjc_path,
@@ -276,26 +288,24 @@ def register_gjc_mcp_server(
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
-            remove_persisted_gjc_mcp_server()
+        _cleanup_failed_add()
         print_warning(f"Could not register Ouroboros MCP server in GJC: {exc}")
         return False
     if added.returncode != 0:
-        if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
-            remove_persisted_gjc_mcp_server()
+        _cleanup_failed_add()
         print_warning(f"Could not register Ouroboros MCP server in GJC: {added.stderr.strip()}")
         return False
     try:
         add_payload = json.loads(added.stdout)
     except json.JSONDecodeError:
-        if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
-            remove_persisted_gjc_mcp_server()
+        _cleanup_failed_add()
         print_warning("GJC MCP add returned malformed JSON; activation cannot be owned safely.")
         return False
 
     persisted = persisted_gjc_mcp_entry()
     persisted_by_setup = is_setup_managed_gjc_mcp_entry(persisted)
-    if persisted_by_setup and registration_state is not None:
+    created_here = persisted_by_setup and not pre_add_owned
+    if created_here and registration_state is not None:
         registration_state.update(created=True, changed=True)
     receipt_matches_request = (
         isinstance(add_payload, dict)
@@ -303,7 +313,7 @@ def register_gjc_mcp_server(
         and add_payload.get("name") == "ouroboros"
     )
     if not receipt_matches_request:
-        if persisted_by_setup and remove_persisted_gjc_mcp_server():
+        if created_here and remove_persisted_gjc_mcp_server():
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
         print_warning("GJC did not report adding the requested Ouroboros MCP registration.")
@@ -324,7 +334,7 @@ def register_gjc_mcp_server(
         and verify_gjc_mcp_endpoint(command, args)
     )
     if not activation_valid:
-        if existing is None and persisted_by_setup:
+        if created_here:
             if remove_persisted_gjc_mcp_server():
                 if registration_state is not None:
                     registration_state.update(created=False, changed=False)
@@ -355,17 +365,19 @@ def install_gjc_compatibility_bridge(
 
 def remove_legacy_gjc_bridge() -> bool:
     """Remove the obsolete setup-owned input bridge without touching custom files."""
+    from ouroboros.gjc.fs import claim_and_remove_setup_owned
+
     bridge = gjc_bridge_path()
-    if not bridge.exists():
-        return True
-    if not is_setup_managed_gjc_bridge(bridge):
-        print_info(f"Preserved custom GJC extension at {bridge}")
+    if not os.path.lexists(bridge):
         return True
     try:
-        bridge.unlink()
+        removed = claim_and_remove_setup_owned(bridge, is_owned=is_setup_managed_gjc_bridge)
     except OSError as exc:
         print_warning(f"Could not remove legacy GJC bridge: {exc}")
         return False
+    if not removed:
+        print_info(f"Preserved custom GJC extension at {bridge}")
+        return True
     try:
         bridge.parent.rmdir()
     except OSError:

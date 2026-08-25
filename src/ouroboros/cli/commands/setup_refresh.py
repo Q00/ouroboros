@@ -14,6 +14,8 @@ from ouroboros.gjc import (
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
     has_setup_owned_gjc_skills,
+    is_setup_managed_gjc_bridge,
+    is_setup_managed_gjc_instruction,
     is_setup_managed_gjc_mcp_bridge_config,
     is_setup_managed_gjc_mcp_entry,
     persisted_gjc_mcp_entry,
@@ -98,9 +100,9 @@ def refresh_runtime_artifacts() -> None:
 
     gjc_succeeded = True
     gjc_expected = (
-        gjc_bridge_path().exists()
+        is_setup_managed_gjc_bridge(gjc_bridge_path())
         or has_setup_owned_gjc_skills(agent_dir=gjc_agent_dir())
-        or gjc_instruction_path().exists()
+        or is_setup_managed_gjc_instruction(gjc_instruction_path())
         or is_setup_managed_gjc_mcp_bridge_config(gjc_mcp_bridge_config_path())
         or is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
     )

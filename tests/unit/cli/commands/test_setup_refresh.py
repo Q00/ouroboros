@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.setup import app
 from ouroboros.codex import CodexArtifactInstallResult
-from ouroboros.gjc import install_gjc_skills
+from ouroboros.gjc import gjc_ooo_bridge_source_text, install_gjc_skills
 from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.runtime_instruction_artifacts import (
     _SECTION_END,
@@ -263,7 +263,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_legacy_gjc_bridge_registers_mcp_before_removal(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
-        bridge.write_text("legacy bridge", encoding="utf-8")
+        bridge.write_text(gjc_ooo_bridge_source_text("ouroboros", []), encoding="utf-8")
         calls: list[str] = []
 
         with (
@@ -301,7 +301,8 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
     def test_legacy_gjc_bridge_survives_failed_mcp_registration(self, tmp_path: Path) -> None:
         bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
         bridge.parent.mkdir(parents=True)
-        bridge.write_text("legacy bridge", encoding="utf-8")
+        legacy_source = gjc_ooo_bridge_source_text("ouroboros", [])
+        bridge.write_text(legacy_source, encoding="utf-8")
 
         with (
             patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
@@ -315,8 +316,23 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
             result = _invoke_refresh(tmp_path)
 
         assert result.exit_code == 1
-        assert bridge.read_text(encoding="utf-8") == "legacy bridge"
+        assert bridge.read_text(encoding="utf-8") == legacy_source
         remove_legacy.assert_not_called()
+
+    def test_custom_extension_at_bridge_path_does_not_trigger_gjc_refresh(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = tmp_path / ".gjc" / "agent" / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("// operator extension\n", encoding="utf-8")
+
+        with patch("ouroboros.cli.commands.setup._install_gjc_runtime_artifacts") as install:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "No installed runtime artifacts found to refresh." in result.output
+        install.assert_not_called()
+        assert bridge.read_text(encoding="utf-8") == "// operator extension\n"
 
     def test_codex_refreshes_when_codex_dir_exists(self, tmp_path: Path) -> None:
         codex_dir = tmp_path / ".codex"

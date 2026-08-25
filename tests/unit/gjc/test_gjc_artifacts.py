@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from ouroboros.gjc import artifacts as gjc_artifacts
 from ouroboros.gjc import install_gjc_skills, remove_gjc_skills
 
 
@@ -140,3 +141,69 @@ def test_install_refuses_to_replace_user_owned_namespaced_skill(
         assert "non-Ouroboros GJC skill" in str(exc)
     else:
         raise AssertionError("expected user-owned skill collision to fail closed")
+
+
+def _stale_true_for(path: Path):
+    """Ownership predicate whose observation of *path* is stale (always True).
+
+    Any other path — in particular the claimed generation, which lives under a
+    different name — is judged by the real check. This deterministically
+    simulates an operator replacing the artifact between the initial
+    ownership check and the destructive filesystem operation.
+    """
+    real = gjc_artifacts._is_managed_skill
+
+    def _check(candidate: Path) -> bool:
+        if candidate == path:
+            return True
+        return real(candidate)
+
+    return _check
+
+
+def test_publish_preserves_operator_skill_swapped_in_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    target = agent_dir / "skills" / "ouroboros-interview"
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("operator content\n", encoding="utf-8")
+    monkeypatch.setattr(gjc_artifacts, "_is_managed_skill", _stale_true_for(target))
+
+    with pytest.raises(OSError, match="non-Ouroboros GJC skill"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == "operator content\n"
+
+
+def test_remove_preserves_operator_skill_swapped_in_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_dir = tmp_path / "agent"
+    operator = agent_dir / "skills" / "ouroboros-custom"
+    operator.mkdir(parents=True)
+    (operator / "SKILL.md").write_text("operator content\n", encoding="utf-8")
+    monkeypatch.setattr(gjc_artifacts, "_is_managed_skill", _stale_true_for(operator))
+
+    removed = remove_gjc_skills(agent_dir=agent_dir)
+
+    assert removed == ()
+    assert (operator / "SKILL.md").read_text(encoding="utf-8") == "operator content\n"
+
+
+def test_prune_preserves_operator_skill_swapped_in_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    stale_named = agent_dir / "skills" / "ouroboros-stale"
+    stale_named.mkdir(parents=True)
+    (stale_named / "SKILL.md").write_text("operator content\n", encoding="utf-8")
+    monkeypatch.setattr(gjc_artifacts, "_is_managed_skill", _stale_true_for(stale_named))
+
+    install_gjc_skills(agent_dir=agent_dir, skills_dir=source, prune=True)
+
+    assert (stale_named / "SKILL.md").read_text(encoding="utf-8") == "operator content\n"

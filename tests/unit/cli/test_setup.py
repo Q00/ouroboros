@@ -10512,7 +10512,10 @@ class TestGjcSetup:
         }
         state: dict[str, bool] = {}
         with (
-            patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=managed),
+            patch(
+                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                side_effect=[None, managed],
+            ),
             patch(
                 "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server",
                 return_value=True,
@@ -10530,6 +10533,58 @@ class TestGjcSetup:
 
         remove.assert_called_once_with()
         assert state == {"created": False, "changed": False}
+
+    def test_failed_add_preserves_preexisting_durable_registration(self) -> None:
+        """A setup-shaped durable entry that predates the add is not this
+        invocation's to clean up, even when `mcp list` omitted it."""
+        empty = subprocess.CompletedProcess(
+            ["gjc", "mcp", "list", "--json"],
+            0,
+            stdout=json.dumps({"servers": []}),
+            stderr="",
+        )
+        failed_add = subprocess.CompletedProcess(
+            ["gjc", "mcp", "add"],
+            1,
+            stdout="",
+            stderr="registration backend unavailable",
+        )
+        preexisting = {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+        with (
+            patch(
+                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                return_value=preexisting,
+            ),
+            patch("ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server") as remove,
+            patch(
+                "ouroboros.cli.commands.setup.subprocess.run",
+                side_effect=[empty, failed_add],
+            ),
+        ):
+            assert not register_gjc_mcp_server(
+                "/opt/bin/gjc",
+                detected={"command": "uvx", "args": preexisting["args"][:-2]},
+            )
+
+        remove.assert_not_called()
 
     def test_register_gjc_mcp_rejects_conflicting_user_managed_entry(self) -> None:
         listed = subprocess.CompletedProcess(

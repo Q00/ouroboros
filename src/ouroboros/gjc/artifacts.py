@@ -14,6 +14,8 @@ import tempfile
 
 import yaml
 
+from ouroboros.gjc.fs import claim_and_remove_setup_owned
+from ouroboros.gjc.fs import remove_path as _remove_path
 from ouroboros.skills.artifacts import collect_skill_bundle_dirs, resolve_packaged_skills_dir
 
 GJC_SKILL_NAMESPACE = "ouroboros-"
@@ -105,13 +107,6 @@ def _render_gjc_skill(source_dir: Path) -> str:
     return f"---\n{rendered_frontmatter}\n---\n{projected_body}"
 
 
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.exists():
-        shutil.rmtree(path)
-
-
 def _normalized_skill_bytes(source: str, expected_digest: str) -> bytes | None:
     pattern = re.compile(
         rf"(?m)^{re.escape(_MANAGED_DIGEST_FIELD)}: (sha256-(?:[0-9a-f]{{64}}|x{{64}}))$"
@@ -191,9 +186,16 @@ def _publish_skill(source_dir: Path, target_path: Path) -> None:
             1,
         )
         (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
-        if target_path.exists():
+        if os.path.lexists(target_path):
+            # Claim the current target atomically, then re-validate the claimed
+            # generation: the pre-staging ownership check above may be stale by
+            # the time the destructive replacement happens.
             backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
             os.replace(target_path, backup)
+            if backup.is_symlink() or not _is_managed_skill(backup):
+                os.replace(backup, target_path)
+                backup = None
+                raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}")
         os.replace(staging, target_path)
     except BaseException:
         _remove_path(staging)
@@ -238,9 +240,9 @@ def install_gjc_skills(
             if (
                 candidate.name.startswith(GJC_SKILL_NAMESPACE)
                 and candidate.name not in expected_names
-                and _is_managed_skill(candidate)
+                and not candidate.is_symlink()
             ):
-                _remove_path(candidate)
+                claim_and_remove_setup_owned(candidate, is_owned=_is_managed_skill)
     return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
 
 
@@ -293,10 +295,13 @@ def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[
         and not candidate.is_symlink()
         and _is_managed_skill(candidate)
     )
-    if not dry_run:
-        for target in targets:
-            _remove_path(target)
-    return targets
+    if dry_run:
+        return targets
+    return tuple(
+        target
+        for target in targets
+        if claim_and_remove_setup_owned(target, is_owned=_is_managed_skill)
+    )
 
 
 __all__ = [

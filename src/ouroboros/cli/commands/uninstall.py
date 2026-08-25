@@ -7,6 +7,7 @@ not remove the Python package, runtime plugins, project source, or git history.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 from pathlib import Path
 import re
@@ -310,37 +311,36 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
         all_ok = len(removed) == len(skills)
         if all_ok:
             print_success(f"Removed {len(removed)} GJC Ouroboros skills")
+    # Re-validate each ownership judgment inside the destructive boundary:
+    # the discovery checks above may be stale by the time removal happens.
     if managed_bridge_config:
-        try:
-            bridge_config.unlink()
-        except OSError:
-            all_ok = False
-        else:
-            try:
-                bridge_config.parent.rmdir()
-            except OSError:
-                pass
+        all_ok = (
+            _claim_remove_owned_file(bridge_config, is_setup_managed_gjc_mcp_bridge_config)
+            and all_ok
+        )
     if managed_compatibility_bridge:
-        try:
-            compatibility_bridge.unlink()
-        except OSError:
-            all_ok = False
-        else:
-            try:
-                compatibility_bridge.parent.rmdir()
-            except OSError:
-                pass
+        all_ok = (
+            _claim_remove_owned_file(compatibility_bridge, is_setup_managed_gjc_bridge) and all_ok
+        )
     if managed_guide:
-        try:
-            guide.unlink()
-        except OSError:
-            all_ok = False
-        else:
-            try:
-                guide.parent.rmdir()
-            except OSError:
-                pass
+        all_ok = _claim_remove_owned_file(guide, is_setup_managed_gjc_instruction) and all_ok
     return all_ok
+
+
+def _claim_remove_owned_file(path: Path, is_owned: Callable[[Path], bool]) -> bool:
+    """Claim, re-validate, and remove one setup-owned file; prune its directory."""
+    from ouroboros.gjc.fs import claim_and_remove_setup_owned
+
+    try:
+        if not claim_and_remove_setup_owned(path, is_owned=is_owned):
+            return False
+    except OSError:
+        return False
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+    return True
 
 
 def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:

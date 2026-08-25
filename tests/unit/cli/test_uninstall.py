@@ -662,6 +662,34 @@ class TestRemoveGjcArtifacts:
         assert bridge.exists()
         assert "30 * 1000" in bridge.read_text(encoding="utf-8")
 
+    def test_preserves_guide_replaced_after_discovery(self, tmp_path: Path) -> None:
+        """A stale ownership observation must not delete an operator file that
+        replaced the guide between discovery and the destructive removal."""
+        from ouroboros.gjc import is_setup_managed_gjc_instruction as real_check
+
+        agent_dir = tmp_path / "agent"
+        guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
+        guide.parent.mkdir(parents=True)
+        guide.write_text("operator rules\n", encoding="utf-8")
+
+        def stale_for_canonical_path(path: Path) -> bool:
+            if Path(path) == guide:
+                return True
+            return real_check(path)
+
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+            patch(
+                "ouroboros.cli.commands.uninstall.is_setup_managed_gjc_instruction",
+                side_effect=stale_for_canonical_path,
+            ),
+        ):
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert guide.read_text(encoding="utf-8") == "operator rules\n"
+
     def test_preserves_custom_routing_guide(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / "agent"
         guide = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
