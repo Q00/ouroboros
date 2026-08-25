@@ -166,13 +166,19 @@ The event database and managed-worktree entries are defaults and compatibility
 fallbacks, not invariant paths; check `config.yaml` before inspecting or cleaning
 those resources. The runtime log destination is the fixed path shown above.
 
-This state accumulates and it is not small — the event DB and its WAL grow
-across runs, and abandoned run worktrees are the usual cause of a full disk.
-Clean up with the built-in command, which checks locks and dirty trees:
+The event database and its WAL can grow across runs. `ouroboros cleanup`
+does not checkpoint, vacuum, truncate, or remove either file; database
+maintenance is a separate operation and has no supported cleanup command in
+this guide.
+
+The built-in command prunes managed auto-session worktrees and their merged
+branches, stale locks, and orphaned `auto_*.json` session state. It checks live
+locks and dirty worktrees before removing anything:
 
 ```bash
 uv run ouroboros cleanup --dry-run   # report only
-uv run ouroboros cleanup --force
+uv run ouroboros cleanup --force     # also remove clean, unmerged worktrees
+uv run ouroboros cleanup --state-all # include blocked/failed session state
 ```
 
 Never delete the configured worktree root by hand — a live run may hold one.
