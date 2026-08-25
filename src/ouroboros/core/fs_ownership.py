@@ -16,14 +16,18 @@ Threat model and defenses:
   detected on the claimed entry (rename moves the link itself, never its
   target), so a link can never route a write to its target.
 * **Symlinked parent directories.** Mutations run relative to a pinned
-  directory descriptor. The caller-supplied *trusted ancestor* itself is
-  opened with ``O_NOFOLLOW`` — a symlinked configured root (for example a
-  redirected ``GJC_CODING_AGENT_DIR``) is rejected outright — and the chain
-  from it down to the artifact's parent is opened one component at a time
-  with ``O_NOFOLLOW``, so an operator-controlled symlink such as
-  ``<profile>/ouroboros -> /external`` cannot redirect publication or
-  removal outside the profile. On platforms without ``*at`` support the
-  chain is validated with per-component ``lstat`` best effort instead.
+  directory descriptor. The caller-supplied *trusted ancestor* is pinned by
+  walking every component of its absolute path from the filesystem root
+  with ``O_NOFOLLOW`` — a symlink at the configured root itself or anywhere
+  on the way to it (a redirected ``GJC_CODING_AGENT_DIR``, or a
+  ``/profile-link/agent`` whose ``profile-link`` is a symlink) is rejected
+  outright — and the chain from it down to the artifact's parent is opened
+  one component at a time with ``O_NOFOLLOW``, so an operator-controlled
+  symlink such as ``<profile>/ouroboros -> /external`` cannot redirect
+  publication or removal outside the profile. A profile that legitimately
+  lives behind a symlink must be configured by its resolved path. On
+  platforms without ``*at`` support the chain is validated with
+  per-component ``lstat`` best effort instead.
 * **Publication clobbering.** The final publish rename is no-replace:
   ``renameat2(RENAME_NOREPLACE)`` on Linux, ``renameatx_np(RENAME_EXCL)``
   on macOS, native no-replace ``rename`` on Windows, and an
@@ -43,10 +47,15 @@ Threat model and defenses:
   replacement, including an immediate inode-number reuse that would defeat
   a bare ``(device, inode)`` tuple. Destruction never runs as a bare
   pathname ``unlink``: the validated entry is atomically renamed into a
-  fresh, unpredictable ``0700`` quarantine directory, re-authenticated
-  *there* against the pinned identity, and only a match is destroyed — a
-  replacement raced onto the claim name at the last instant is captured by
-  the rename, fails re-authentication, and is moved back out untouched.
+  fresh, unpredictable ``0700`` quarantine directory that is itself held
+  open through an ``O_NOFOLLOW`` descriptor (so the container cannot be
+  swapped either), re-validated *there* against the pinned identity, and
+  the ownership predicate runs once more on the isolated entry — binding
+  tree destruction to descendant content, not just the top-level inode.
+  Only an entry that passes every re-check is destroyed; a replacement or
+  a tree modified after the original read is moved back out untouched, and
+  a destruction that fails partway restores the generation from the
+  quarantine so it stays discoverable for a retry.
 * **Builder redirection.** Tree and entry builders never write through a
   pathname under the shared parent: they build in a private workspace, and
   the finished generation is imported beside the canonical path through
@@ -165,6 +174,26 @@ _RENAME_NO_REPLACE = _load_rename_no_replace()
 # entry type (FIFO, socket, device, symlink) is rejected before the ownership
 # predicate runs, so content reads can never block on a special file.
 _OWNABLE_ENTRY_TYPES = (stat_module.S_IFREG, stat_module.S_IFDIR)
+
+
+def _rename_no_replace_between(src_fd: int, src_name: str, dst_fd: int, dst_name: str) -> None:
+    """Atomically rename across two held descriptors without replacing the target."""
+    if _RENAME_NO_REPLACE is not None:
+        result = _RENAME_NO_REPLACE(src_fd, src_name, dst_fd, dst_name)
+        if result == 0:
+            return
+        code = ctypes.get_errno()
+        if code in (errno.EEXIST, errno.ENOTEMPTY):
+            raise FileExistsError(code, os.strerror(code), dst_name)
+        if code not in (errno.ENOSYS, errno.EINVAL):
+            raise OSError(code, os.strerror(code), dst_name)
+    # Last-resort guarded rename; every supported platform takes the branch above.
+    try:
+        os.stat(dst_name, dir_fd=dst_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        os.rename(src_name, dst_name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+        return
+    raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), dst_name)
 
 
 class _PinnedEntry:
@@ -344,50 +373,132 @@ class _PinnedParent:
         except OSError as exc:
             if exc.errno != errno.EXDEV:
                 raise
-        _import_tree_fd(source, self.fd, name)
+        try:
+            _import_tree_fd(source, self.fd, name)
+        except BaseException:
+            # A partial cross-filesystem import must not strand staging state
+            # under the shared parent: remove whatever was created, then fail.
+            with suppress(OSError):
+                self.remove_entry(name)
+            raise
 
-    def quarantined_remove(self, name: str, expected_identity: tuple[int, int, int]) -> None:
-        """Destroy one validated entry through a setup-owned quarantine.
+    def quarantined_remove(
+        self,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        *,
+        reauthenticate: Callable[[Path], bool] | None = None,
+    ) -> None:
+        """Destroy one validated entry through a descriptor-pinned quarantine.
 
         A bare no-follow ``stat`` followed by a pathname ``unlink`` leaves a
         window in which a watcher can swap the claim name; instead the entry
         is atomically renamed into a fresh, unpredictable ``0700`` quarantine
-        directory and re-authenticated *there* against the pinned identity.
-        Only a match is destroyed; a raced-in replacement is moved back out
-        under a discoverable claim-shaped name, untouched, and the removal
-        fails with :class:`UnownedArtifactError`.
+        directory — held open through its own ``O_NOFOLLOW`` descriptor, so
+        the container itself cannot be swapped either — and re-validated
+        *there* against the pinned identity. With *reauthenticate*, the
+        ownership predicate runs again on the isolated entry, so a tree whose
+        descendants were modified after the original predicate read is
+        preserved even though its top-level inode never changed. Only an
+        entry that passes every re-check is destroyed; anything else — and
+        any entry whose destruction fails partway — is moved back out of the
+        quarantine untouched, under its original or a discoverable name, and
+        the removal fails with :class:`UnownedArtifactError` (or the
+        underlying error).
         """
         if self.fd is None:
-            if self.entry_identity(name) != expected_identity:
+            if self.entry_identity(name) != expected_identity or (
+                reauthenticate is not None and not reauthenticate(self.path / name)
+            ):
                 raise UnownedArtifactError(
-                    f"claimed generation changed identity before removal: {self.path / name}"
+                    f"claimed generation changed before removal: {self.path / name}"
                 )
             remove_path(self.path / name)
             return
         quarantine = self.make_staging_dir(prefix=f".{name}.")
-        held = f"{quarantine}/entry"
+        created = os.stat(quarantine, dir_fd=self.fd, follow_symlinks=False)
+        quarantine_flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
         try:
-            os.rename(name, held, src_dir_fd=self.fd, dst_dir_fd=self.fd)
-        except FileNotFoundError:
-            with suppress(OSError):
-                os.rmdir(quarantine, dir_fd=self.fd)
+            quarantine_fd = os.open(quarantine, quarantine_flags, dir_fd=self.fd)
+        except OSError as exc:
             raise UnownedArtifactError(
-                f"claimed generation disappeared before removal: {self.path / name}"
-            ) from None
-        if self.entry_identity(held) != expected_identity:
-            # The atomic move captured a raced-in replacement, not the
-            # validated generation: put it back out discoverable and abort.
+                f"could not pin the removal quarantine beside {self.path / name}"
+            ) from exc
+        try:
+            held = os.fstat(quarantine_fd)
+            if (held.st_dev, held.st_ino) != (created.st_dev, created.st_ino):
+                raise UnownedArtifactError(
+                    f"removal quarantine changed identity beside {self.path / name}"
+                )
+
+            def _entry_identity() -> tuple[int, int, int] | None:
+                try:
+                    entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+                except OSError:
+                    return None
+                return (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+
+            def _evict() -> None:
+                try:
+                    _rename_no_replace_between(quarantine_fd, "entry", self.fd, name)
+                except OSError:
+                    with suppress(OSError):
+                        _rename_no_replace_between(
+                            quarantine_fd,
+                            "entry",
+                            self.fd,
+                            f"{name}.{os.urandom(4).hex()}.evicted",
+                        )
+
             try:
-                self.rename_no_replace(held, name)
+                os.rename(name, "entry", src_dir_fd=self.fd, dst_dir_fd=quarantine_fd)
+            except FileNotFoundError:
+                raise UnownedArtifactError(
+                    f"claimed generation disappeared before removal: {self.path / name}"
+                ) from None
+            identity = _entry_identity()
+            if identity != expected_identity:
+                # The atomic move captured a raced-in replacement, not the
+                # validated generation: put it back out untouched and abort.
+                _evict()
+                raise UnownedArtifactError(
+                    f"claimed generation changed identity before removal: {self.path / name}"
+                )
+            if reauthenticate is not None:
+                quarantined_path = self.path / quarantine / "entry"
+                try:
+                    self.revalidate()
+                    still_owned = (
+                        reauthenticate(quarantined_path) and _entry_identity() == expected_identity
+                    )
+                    self.revalidate()
+                except BaseException:
+                    _evict()
+                    raise
+                if not still_owned:
+                    _evict()
+                    raise UnownedArtifactError(
+                        f"claimed generation changed content before removal: {self.path / name}"
+                    )
+            try:
+                if identity[2] == stat_module.S_IFDIR:
+                    shutil.rmtree("entry", dir_fd=quarantine_fd)
+                else:
+                    os.unlink("entry", dir_fd=quarantine_fd)
             except OSError:
-                with suppress(OSError):
-                    self.rename_no_replace(held, f"{name}.{os.urandom(4).hex()}.evicted")
+                # A partial destruction must not strand the generation inside
+                # an undiscoverable quarantine: restore it from the quarantine
+                # location so a retry can find it again.
+                _evict()
+                raise
+        finally:
+            os.close(quarantine_fd)
+            # The container is removed on success and failure alike; an
+            # eviction that could not empty it leaves it for the operator.
             with suppress(OSError):
                 os.rmdir(quarantine, dir_fd=self.fd)
-            raise UnownedArtifactError(
-                f"claimed generation changed identity before removal: {self.path / name}"
-            )
-        shutil.rmtree(quarantine, dir_fd=self.fd)
 
     def lexists(self, name: str) -> bool:
         if self.fd is None:
@@ -552,14 +663,21 @@ def _pinned_parent(
 ) -> Iterator[_PinnedParent]:
     """Pin *parent*, walking every component below the trusted ancestor no-follow.
 
-    A caller-declared trusted root is itself opened ``O_NOFOLLOW``: a symlink
-    planted at (or configured as) that root is rejected instead of silently
-    redirecting every mutation into its target.
+    A caller-declared trusted root is pinned by walking every component of
+    its absolute path from the filesystem root with ``O_NOFOLLOW``: a symlink
+    at the root itself *or anywhere on the way to it* (for example a
+    configured ``/profile-link/agent`` whose ``profile-link`` is a symlink)
+    is rejected instead of silently redirecting every mutation into its
+    target. An operator whose profile legitimately lives behind a symlink
+    must configure the resolved path instead.
     """
     base, components, base_is_trusted_root = _nofollow_components(parent, trusted_ancestor)
     if not _DIR_FD_SUPPORTED:
-        if base_is_trusted_root and base.is_symlink():  # pragma: no cover - non-posix
-            raise _symlink_trusted_root_error(base)
+        if base_is_trusted_root:  # pragma: no cover - non-posix best effort
+            probe = Path(os.path.abspath(base))
+            for ancestor in (probe, *probe.parents):
+                if ancestor.is_symlink():
+                    raise _symlink_trusted_root_error(ancestor)
         current = base
         for name in components:  # pragma: no cover - non-posix best effort
             current = current / name
@@ -570,16 +688,34 @@ def _pinned_parent(
         yield _PinnedParent(path=parent, fd=None)
         return
 
-    if create:
-        base.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
     nofollow_flags = flags | os.O_NOFOLLOW
-    try:
-        fd = os.open(base, nofollow_flags if base_is_trusted_root else flags)
-    except OSError as exc:
-        if base_is_trusted_root and exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
-            raise _symlink_trusted_root_error(base) from exc
-        raise
+    if base_is_trusted_root:
+        resolved_base = Path(os.path.abspath(base))
+        anchor = resolved_base.anchor or os.sep
+        fd = os.open(anchor, flags)
+        try:
+            walked = Path(anchor)
+            for name in resolved_base.parts[len(Path(anchor).parts) :]:
+                walked = walked / name
+                if create:
+                    with suppress(FileExistsError):
+                        os.mkdir(name, mode=0o755, dir_fd=fd)
+                try:
+                    child = os.open(name, nofollow_flags, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+                        raise _symlink_trusted_root_error(walked) from exc
+                    raise
+                os.close(fd)
+                fd = child
+        except BaseException:
+            os.close(fd)
+            raise
+    else:
+        if create:
+            base.mkdir(parents=True, exist_ok=True)
+        fd = os.open(base, flags)
     try:
         walked = base
         for name in components:
@@ -671,7 +807,7 @@ def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path]
                     changed = True
                 continue
             with suppress(OSError):
-                parent.quarantined_remove(claim_name, pin.identity)
+                parent.quarantined_remove(claim_name, pin.identity, reauthenticate=is_owned)
                 changed = True
         finally:
             pin.close()
@@ -823,7 +959,7 @@ def claim_and_remove_owned(
                     _restore_claimed(parent, claimed_name, path.name)
                     return False
                 try:
-                    parent.quarantined_remove(claimed_name, pin.identity)
+                    parent.quarantined_remove(claimed_name, pin.identity, reauthenticate=is_owned)
                 except UnownedArtifactError:
                     # The claimed sibling no longer carries the validated
                     # identity (the pinned descriptor makes inode reuse
@@ -1020,7 +1156,7 @@ def _publish_owned(
                     # An identity change means the claimed sibling is no longer
                     # the generation this transaction validated (the pinned
                     # descriptor rules out inode reuse); leave it for recovery.
-                    parent.quarantined_remove(claimed_name, pin.identity)
+                    parent.quarantined_remove(claimed_name, pin.identity, reauthenticate=is_owned)
         finally:
             if pin is not None:
                 pin.close()

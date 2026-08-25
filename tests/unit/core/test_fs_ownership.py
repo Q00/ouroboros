@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 import stat
@@ -242,10 +243,15 @@ def test_remove_restores_claim_on_transient_failure_and_supports_retry(
     real_remove = fs_ownership._PinnedParent.quarantined_remove
     failures = iter([True])
 
-    def flaky_remove(self: object, name: str, expected_identity: tuple[int, int, int]) -> None:
+    def flaky_remove(
+        self: object,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        **kwargs: object,
+    ) -> None:
         if next(failures, False):
             raise OSError("simulated transient removal failure")
-        real_remove(self, name, expected_identity)
+        real_remove(self, name, expected_identity, **kwargs)
 
     monkeypatch.setattr(fs_ownership._PinnedParent, "quarantined_remove", flaky_remove)
 
@@ -674,3 +680,127 @@ def test_tree_remove_never_deletes_a_replacement_swapped_at_the_last_instant(
 
     assert (hidden / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
     assert (target / "content.txt").read_text(encoding="utf-8") == "replacement generation\n"
+
+
+def test_rejects_a_symlinked_ancestor_of_the_trusted_root(tmp_path: Path) -> None:
+    """The reviewer's nested-parent-symlink probe: a configured root reached
+    through a symlinked ancestor (`/profile-link/agent`) must be rejected, not
+    silently redirected into the link target."""
+    external = tmp_path / "external"
+    (external / "agent").mkdir(parents=True)
+    link = tmp_path / "profile-link"
+    try:
+        link.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+    root = link / "agent"
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        publish_owned_file(
+            root / "rules" / "guide.md",
+            "managed\n",
+            is_owned=lambda _p: True,
+            trusted_ancestor=root,
+        )
+
+    assert list((external / "agent").rglob("*")) == []
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        claim_and_remove_owned(
+            root / "rules" / "guide.md", is_owned=lambda _p: True, trusted_ancestor=root
+        )
+
+
+def test_tree_remove_restores_from_the_quarantine_when_destruction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A destruction failure inside the quarantine must not strand the
+    generation in an undiscoverable container: it is restored and a retry
+    succeeds."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    real_rmtree = fs_ownership.shutil.rmtree
+    failures = iter([True])
+
+    def flaky_rmtree(path: object, *args: object, **kwargs: object) -> None:
+        if path == "entry" and kwargs.get("dir_fd") is not None and next(failures, False):
+            raise OSError("simulated destruction failure")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", flaky_rmtree)
+
+    with pytest.raises(OSError, match="simulated destruction failure"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
+    assert not target.exists()
+
+
+def test_failed_cross_filesystem_import_leaves_no_staging_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's EXDEV probe: a partial descriptor-relative import that
+    fails midway must clean its own staging state under the shared parent."""
+    target = tmp_path / "artifact-dir"
+    real_rename = fs_ownership.os.rename
+
+    def deny_workspace_rename(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if src_dir_fd is None and dst_dir_fd is not None:
+            raise OSError(errno.EXDEV, "simulated cross-device link")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_workspace_rename)
+
+    def build_with_unsupported_entry(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+        try:
+            os.mkfifo(staging / "unsupported")
+        except (AttributeError, OSError):
+            pytest.skip("FIFOs are not supported on this platform")
+
+    with pytest.raises(OSError, match="unsupported staged entry type"):
+        publish_owned_tree(target, build_with_unsupported_entry, is_owned=lambda _p: True)
+
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    publish_owned_tree(target, build, is_owned=lambda _p: True)
+    assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["artifact-dir"]
+
+
+def test_tree_remove_preserves_a_tree_modified_after_the_ownership_read(tmp_path: Path) -> None:
+    """The reviewer's descendant-modification probe: a tree edited after the
+    ownership read — same top-level inode — must survive, caught by the
+    re-authentication inside the descriptor-pinned quarantine."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    tampered = {"done": False}
+
+    def stale_approve(candidate: Path) -> bool:
+        owned = (candidate / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+        if owned and not tampered["done"]:
+            # The operator edits a descendant after the read; the stale
+            # judgment is still reported as owned.
+            (candidate / "content.txt").write_text("operator edit\n", encoding="utf-8")
+            tampered["done"] = True
+            return True
+        return owned
+
+    assert not claim_and_remove_owned(target, is_owned=stale_approve)
+
+    assert (target / "content.txt").read_text(encoding="utf-8") == "operator edit\n"
