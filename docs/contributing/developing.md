@@ -13,9 +13,18 @@ The checked-in `.mcp.json` points an MCP client at the **published PyPI
 package**, not at your working tree:
 
 ```json
-{ "command": "uvx",
-  "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]",
-           "ouroboros", "mcp", "serve", "..."] }
+{
+  "mcpServers": {
+    "ouroboros": {
+      "command": "uvx",
+      "args": [
+        "--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]",
+        "ouroboros", "mcp", "serve",
+        "--runtime", "claude-cli", "--llm-backend", "claude_code"
+      ]
+    }
+  }
+}
 ```
 
 So if you clone the repo, edit a handler, and open your agent client in the
