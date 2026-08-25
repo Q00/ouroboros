@@ -10634,6 +10634,27 @@ class TestGjcSetup:
 
         assert lock_states == [True]
 
+    def test_bridge_config_publication_refuses_symlinked_profile_component(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`<agent>/ouroboros -> /external` must not redirect setup publication."""
+        from ouroboros.cli.gjc_setup import install_gjc_mcp_bridge_config
+
+        agent_dir = tmp_path / "gjc-agent"
+        agent_dir.mkdir()
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        external = tmp_path / "external"
+        external.mkdir()
+        try:
+            (agent_dir / "ouroboros").symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        assert not install_gjc_mcp_bridge_config()
+
+        assert list(external.iterdir()) == []
+        assert (agent_dir / "ouroboros").is_symlink()
+
     def test_bridge_config_publication_never_writes_through_symlink(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

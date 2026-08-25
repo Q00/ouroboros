@@ -237,6 +237,36 @@ def test_publish_preserves_generation_recreated_while_backup_claim_was_held(
         install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
 
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "second operator generation\n"
-    preserved = sorted(target.parent.glob(f".{target.name}.*.old"))
+    preserved = sorted(target.parent.glob(f".{target.name}.*.replacing"))
     assert len(preserved) == 1
     assert (preserved[0] / "SKILL.md").read_text(encoding="utf-8") == "first operator generation\n"
+
+
+def test_publish_fails_when_skill_recreated_after_backup_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final tree rename is no-replace: even an approved backup cannot
+    justify overwriting a directory recreated at the canonical path."""
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    target = agent_dir / "skills" / "ouroboros-interview"
+    install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+    real = gjc_artifacts._is_managed_skill
+
+    def approve_then_recreate(candidate: Path) -> bool:
+        if candidate.name.startswith(f".{target.name}."):
+            target.mkdir(exist_ok=True)
+            return True
+        return real(candidate)
+
+    monkeypatch.setattr(gjc_artifacts, "_is_managed_skill", approve_then_recreate)
+
+    with pytest.raises(OSError, match="non-Ouroboros GJC skill"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    preserved = sorted(target.parent.glob(f".{target.name}.*.replacing"))
+    assert len(preserved) == 1
+    assert (preserved[0] / "SKILL.md").exists()

@@ -6,16 +6,17 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
-import os
 from pathlib import Path
 import re
 import shutil
-import tempfile
 
 import yaml
 
-from ouroboros.core.fs_ownership import claim_and_remove_owned, restore_claimed
-from ouroboros.core.fs_ownership import remove_path as _remove_path
+from ouroboros.core.fs_ownership import (
+    UnownedArtifactError,
+    claim_and_remove_owned,
+    publish_owned_tree,
+)
 from ouroboros.skills.artifacts import collect_skill_bundle_dirs, resolve_packaged_skills_dir
 
 GJC_SKILL_NAMESPACE = "ouroboros-"
@@ -160,50 +161,37 @@ def _is_managed_skill(path: Path) -> bool:
     )
 
 
-def _publish_skill(source_dir: Path, target_path: Path) -> None:
+def _publish_skill(source_dir: Path, target_path: Path, agent_root: Path) -> None:
     if target_path.is_symlink():
         raise OSError(f"Refusing to replace symlinked GJC skill: {target_path}")
     if target_path.exists() and not _is_managed_skill(target_path):
         raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}")
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=f".{target_path.name}.",
-            suffix=".tmp",
-            dir=str(target_path.parent),
-        )
-    )
-    backup: Path | None = None
-    try:
+
+    def _build(staging: Path) -> None:
         shutil.copytree(source_dir, staging, dirs_exist_ok=True, symlinks=False)
         rendered = _render_gjc_skill(source_dir)
         (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
         generation_digest = _skill_tree_digest(staging, expected_digest=_DIGEST_PLACEHOLDER)
         if generation_digest is None:
             raise OSError(f"Could not fingerprint projected GJC skill: {target_path}")
-        rendered = rendered.replace(
-            f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}",
-            f"{_MANAGED_DIGEST_FIELD}: {generation_digest}",
-            1,
+        (staging / "SKILL.md").write_text(
+            rendered.replace(
+                f"{_MANAGED_DIGEST_FIELD}: {_DIGEST_PLACEHOLDER}",
+                f"{_MANAGED_DIGEST_FIELD}: {generation_digest}",
+                1,
+            ),
+            encoding="utf-8",
         )
-        (staging / "SKILL.md").write_text(rendered, encoding="utf-8")
-        if os.path.lexists(target_path):
-            # Claim the current target atomically, then re-validate the claimed
-            # generation: the pre-staging ownership check above may be stale by
-            # the time the destructive replacement happens.
-            backup = target_path.with_name(f".{target_path.name}.{os.urandom(8).hex()}.old")
-            os.replace(target_path, backup)
-            if backup.is_symlink() or not _is_managed_skill(backup):
-                restore_claimed(backup, target_path)
-                backup = None
-                raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}")
-        os.replace(staging, target_path)
-    except BaseException:
-        _remove_path(staging)
-        if backup is not None and os.path.lexists(backup):
-            restore_claimed(backup, target_path)
-        raise
-    if backup is not None:
-        _remove_path(backup)
+
+    try:
+        publish_owned_tree(
+            target_path,
+            _build,
+            is_owned=_is_managed_skill,
+            trusted_ancestor=agent_root,
+        )
+    except UnownedArtifactError as exc:
+        raise OSError(f"Refusing to replace non-Ouroboros GJC skill: {target_path}") from exc
 
 
 @contextmanager
@@ -224,6 +212,7 @@ def install_gjc_skills(
     if target_root.is_symlink():
         raise OSError(f"Refusing to install GJC skills through a symlink: {target_root}")
 
+    agent_root = Path(agent_dir).expanduser()
     installed: list[Path] = []
     with _packaged_skills(skills_dir) as source_root:
         source_dirs = collect_skill_bundle_dirs(source_root)
@@ -232,7 +221,7 @@ def install_gjc_skills(
         expected_names = {f"{GJC_SKILL_NAMESPACE}{source_dir.name}" for source_dir in source_dirs}
         for source_dir in source_dirs:
             target_path = target_root / f"{GJC_SKILL_NAMESPACE}{source_dir.name}"
-            _publish_skill(source_dir, target_path)
+            _publish_skill(source_dir, target_path, agent_root)
             installed.append(target_path)
 
     if prune:
@@ -242,7 +231,9 @@ def install_gjc_skills(
                 and candidate.name not in expected_names
                 and not candidate.is_symlink()
             ):
-                claim_and_remove_owned(candidate, is_owned=_is_managed_skill)
+                claim_and_remove_owned(
+                    candidate, is_owned=_is_managed_skill, trusted_ancestor=agent_root
+                )
     return GjcSkillInstallResult(target_root=target_root, skill_paths=tuple(installed))
 
 
@@ -297,8 +288,11 @@ def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[
     )
     if dry_run:
         return targets
+    agent_root = Path(agent_dir).expanduser()
     return tuple(
-        target for target in targets if claim_and_remove_owned(target, is_owned=_is_managed_skill)
+        target
+        for target in targets
+        if claim_and_remove_owned(target, is_owned=_is_managed_skill, trusted_ancestor=agent_root)
     )
 
 

@@ -662,6 +662,33 @@ class TestRemoveGjcArtifacts:
         assert bridge.exists()
         assert "30 * 1000" in bridge.read_text(encoding="utf-8")
 
+    def test_bridge_config_only_failure_surfaces_in_cli_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed bridge-config removal must fail the command, not report success."""
+        agent_dir = tmp_path / "agent"
+        bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        bridge_config.parent.mkdir(parents=True)
+        bridge_config.write_text(
+            "# Managed by ouroboros setup --runtime gjc\nmcp_servers: []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.uninstall._claim_remove_owned_file",
+                return_value=False,
+            ),
+        ):
+            result = runner.invoke(app, ["--yes", "--keep-data"])
+
+        assert result.exit_code == 1
+        assert "partially removed" in result.output
+        assert bridge_config.exists()
+
     def test_preserves_guide_replaced_after_discovery(self, tmp_path: Path) -> None:
         """A stale ownership observation must not delete an operator file that
         replaced the guide between discovery and the destructive removal."""

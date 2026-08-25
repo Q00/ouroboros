@@ -332,7 +332,7 @@ def _claim_remove_owned_file(path: Path, is_owned: Callable[[Path], bool]) -> bo
     from ouroboros.core.fs_ownership import claim_and_remove_owned
 
     try:
-        if not claim_and_remove_owned(path, is_owned=is_owned):
+        if not claim_and_remove_owned(path, is_owned=is_owned, trusted_ancestor=gjc_agent_dir()):
             return False
     except OSError:
         return False
@@ -664,7 +664,7 @@ def uninstall(
             failed.append("~/.codex/ rules/skills")
 
     if not _remove_gjc_artifacts(dry_run=False):
-        if any(target.startswith("GJC Ouroboros") for target in targets):
+        if any(target.startswith("GJC ") for target in targets):
             failed.append("GJC Ouroboros skills/MCP")
 
     if not _remove_claude_md_block(cwd, dry_run=False):

@@ -169,6 +169,7 @@ def install_gjc_instruction_artifact(
     """Install GJC routing without replacing an operator-owned rules file."""
     from ouroboros.core.fs_ownership import UnownedArtifactError, publish_owned_file
     from ouroboros.gjc import (
+        gjc_agent_dir,
         gjc_instruction_path,
         is_setup_managed_gjc_instruction,
         render_gjc_guide,
@@ -180,6 +181,7 @@ def install_gjc_instruction_artifact(
             path,
             render_gjc_guide(),
             is_owned=is_setup_managed_gjc_instruction,
+            trusted_ancestor=gjc_agent_dir(home=home, environ=environ),
         )
     except UnownedArtifactError as exc:
         raise OSError(f"preserved user-managed GJC instruction guide at {path}") from exc

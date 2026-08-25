@@ -10,6 +10,7 @@ from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
     claim_and_remove_owned,
     publish_owned_file,
+    publish_owned_tree,
 )
 
 
@@ -106,3 +107,89 @@ def test_publish_replaces_an_owned_generation(tmp_path: Path) -> None:
 
     assert target.read_text(encoding="utf-8") == "next managed\n"
     assert _claim_siblings(target, "replacing") == []
+
+
+def test_publish_fails_when_canonical_recreated_after_validation(tmp_path: Path) -> None:
+    """The final rename is no-replace: a generation recreated after ownership
+    validation is preserved and the publication fails."""
+    target = tmp_path / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+
+    def approve_then_recreate(claimed: Path) -> bool:
+        target.write_text("recreated generation\n", encoding="utf-8")
+        return True
+
+    with pytest.raises(UnownedArtifactError, match="recreated during publication"):
+        publish_owned_file(target, "managed\n", is_owned=approve_then_recreate)
+
+    assert target.read_text(encoding="utf-8") == "recreated generation\n"
+    preserved = _claim_siblings(target, "replacing")
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_tree_publish_fails_when_canonical_recreated_after_validation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    def approve_then_recreate(claimed: Path) -> bool:
+        target.mkdir()
+        return True
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    with pytest.raises(UnownedArtifactError, match="recreated during publication"):
+        publish_owned_tree(target, build, is_owned=approve_then_recreate)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    preserved = _claim_siblings(target, "replacing")
+    assert len(preserved) == 1
+    assert (preserved[0] / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_publish_refuses_symlinked_parent_component(tmp_path: Path) -> None:
+    """A symlinked component below the trusted ancestor cannot redirect writes."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    try:
+        (profile / "ouroboros").symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="symlinked artifact parent component"):
+        publish_owned_file(
+            profile / "ouroboros" / "artifact.yaml",
+            "managed\n",
+            is_owned=lambda _p: True,
+            trusted_ancestor=profile,
+        )
+
+    assert list(external.iterdir()) == []
+
+
+def test_remove_refuses_symlinked_parent_component(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "artifact.yaml").write_text("external content\n", encoding="utf-8")
+    try:
+        (profile / "ouroboros").symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="symlinked artifact parent component"):
+        claim_and_remove_owned(
+            profile / "ouroboros" / "artifact.yaml",
+            is_owned=lambda _p: True,
+            trusted_ancestor=profile,
+        )
+
+    assert (external / "artifact.yaml").read_text(encoding="utf-8") == "external content\n"

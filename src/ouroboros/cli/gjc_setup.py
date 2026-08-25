@@ -84,6 +84,7 @@ def install_gjc_mcp_bridge_config() -> bool:
             MCP_BRIDGE_CONFIG_CONTENT,
             is_owned=is_setup_managed_gjc_mcp_bridge_config,
             mode=0o600,
+            trusted_ancestor=gjc_agent_dir(),
         )
     except UnownedArtifactError:
         print_error(
@@ -384,7 +385,12 @@ def install_gjc_compatibility_bridge(content: str) -> bool:
     """Install the owned bridge when the host cannot autoload native MCP entries."""
     bridge = gjc_bridge_path()
     try:
-        publish_owned_file(bridge, content, is_owned=is_setup_managed_gjc_bridge)
+        publish_owned_file(
+            bridge,
+            content,
+            is_owned=is_setup_managed_gjc_bridge,
+            trusted_ancestor=gjc_agent_dir(),
+        )
     except UnownedArtifactError:
         print_error(f"Preserved custom GJC extension at {bridge}; compatibility activation failed.")
         return False
@@ -403,7 +409,11 @@ def remove_legacy_gjc_bridge() -> bool:
     if not os.path.lexists(bridge):
         return True
     try:
-        removed = claim_and_remove_owned(bridge, is_owned=is_setup_managed_gjc_bridge)
+        removed = claim_and_remove_owned(
+            bridge,
+            is_owned=is_setup_managed_gjc_bridge,
+            trusted_ancestor=gjc_agent_dir(),
+        )
     except OSError as exc:
         print_warning(f"Could not remove legacy GJC bridge: {exc}")
         return False
