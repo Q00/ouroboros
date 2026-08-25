@@ -15,8 +15,9 @@ nobody catalogued. Start with the question. The rules are what it looks like
 when the answer was no.
 
 Everything here was extracted from the bot's actual review bodies on this
-repository's PRs, not from a style guide. Some PRs take a single round; one
-took thirty and was closed unmerged.
+repository's PRs, not from a style guide. Some PRs clear review quickly; PR
+#1926 accumulated 64 `CHANGES_REQUESTED` reviews across 60 commits and was
+closed unmerged.
 
 ## What the review actually contains
 
@@ -73,16 +74,16 @@ So when a round arrives, there are two possible readings:
 
 Telling those apart early is the whole skill. What it costs to get wrong:
 
-| PR | Direction taken | Rounds | Outcome |
+| PR | Direction taken | `CHANGES_REQUESTED` reviews | Outcome |
 |---|---|---|---|
-| #1926 | "**bind** regex evidence to acceptance input" — make the check correct enough to be trusted | 30 | **closed, never merged** |
+| #1926 | "**bind** regex evidence to acceptance input" — make the check correct enough to be trusted | 64 across 60 commits | **closed, never merged** |
 | #2065 | "**refuse** unbound regex evidence as grounds to overturn an agent FAIL" — stop trusting it | 3 | merged |
 
-The same defect. Thirty rounds versus three. #2065 did not out-argue the
+The same defect. Sixty-four change-request reviews versus three. #2065 did not out-argue the
 reviewer and did not write a better check — it asked whether that component
 should have been allowed to overturn a verdict at all, and the answer was no.
 
-Nobody in #1926 was careless. Every round was answered. The question that
+Nobody in #1926 was careless. The repeated findings were answered. The question that
 would have ended it in week one was never asked.
 
 ### The signal that you should be asking it
@@ -127,7 +128,7 @@ Re-derive from the problem instead:
 Read these as worked examples of the question being skipped, not as a taxonomy
 to match your situation against.
 
-**Enumerating a surface you do not own** (#2212, 10 rounds). A hand-maintained
+**Enumerating a surface you do not own** (#2212, 10 change-request reviews). A hand-maintained
 `uv run` option grammar inside a verification path. Round after round named
 another gap — *"The hand-maintained option grammar is still incomplete for
 valid current `uv run` commands."* A table mirroring someone else's CLI can
@@ -135,7 +136,7 @@ never be complete, so the rounds could not end. It closed when the code stopped
 enumerating what was allowed and started refusing anything it had not
 positively parsed.
 
-**Two paths kept alive that must agree** (#2193, 7 rounds). A new fused path
+**Two paths kept alive that must agree** (#2193, 7 change-request reviews). A new fused path
 beside the legacy one: the legacy branch skipping completion logic, the atomic
 branch losing an answer on failure, `[decide_later]` meaning different things
 depending on which path ran. Two implementations that must stay identical will

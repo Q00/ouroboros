@@ -152,7 +152,7 @@ assuming the config loader is broken.
 
 | What | Default or fallback | Override |
 |---|---|---|
-| Config | `~/.ouroboros/config.yaml` | Ouroboros config directory |
+| Config | `~/.ouroboros/config.yaml` | No dedicated override; follows the effective home directory |
 | Event database | Generated config: `~/.ouroboros/data/ouroboros.db`; legacy fallback: `~/.ouroboros/ouroboros.db` | `persistence.database_path`, relative to the config directory unless absolute |
 | Logs | `~/.ouroboros/logs/ouroboros.log` | No config-file path override; `logging.log_path` is persisted but is not consumed by the runtime logger |
 | Worktrees created by runs | `~/.ouroboros/worktrees/` | `orchestrator.worktree_root` |
