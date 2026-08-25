@@ -11,7 +11,7 @@ first push. This page exists so you can preempt them.
 It is tempting to read a page like this as a checklist to satisfy. Do not. The
 recurring blockers catalogued below are all the same question wearing different
 clothes — *is this change structurally in the right direction?* — and a
-contributor who memorizes ten rules will lose a month to the eleventh case
+contributor who memorizes a list of rules will lose time to the next case
 nobody catalogued. Start with the question. The rules are what it looks like
 when the answer was no.
 
@@ -163,13 +163,7 @@ disagreement, and the reviewer is probably right.
 
 Ordered by how often they appear in review bodies.
 
-### 1. Fix the root cause, not the symptom
-
-The per-diff form of the question above: *if this input arrives again through a
-different path, does the bug come back?* If yes, you moved the symptom rather
-than removing it, and the next round will say so somewhere else.
-
-### 2. Validate untrusted input — never coerce it
+### 1. Validate untrusted input — never coerce it
 
 `bool(...)` on an external payload is a blocker, not a shortcut:
 
@@ -181,7 +175,7 @@ Anything crossing a trust boundary — a planner payload, an MCP argument, a
 config file, `./.env` — gets parsed and validated against a closed set of
 accepted values.
 
-### 3. No silent success
+### 2. Honor the public schema and never report silent success
 
 A code path that accepts a request, does nothing, and reports success is
 always a blocker:
@@ -195,19 +189,7 @@ always a blocker:
 Corollaries the bot enforces: do not truncate silently, do not drop items from
 a batch without saying so, and do not swallow an exception into a default.
 
-### 4. Fail closed
-
-When a check cannot prove the safe condition holds, it must refuse, not
-proceed. Recent examples that landed on exactly this principle: making
-`is_on_protected_branch` fail closed (#2236), and a gate that errors rather
-than passing when it cannot enumerate changed files.
-
-### 5. Keep the public schema and the implementation in agreement
-
-If a declared parameter is not honored on every branch, that is a defect even
-when the common path works. See #2224 above.
-
-### 6. Same semantics across every runtime
+### 3. Keep the same semantics across every runtime
 
 This project drives many backends. Behavior that changes meaning depending on
 which one is active is a blocker:
@@ -219,7 +201,7 @@ which one is active is a blocker:
 
 When you add a behavior to one adapter, check the others.
 
-### 7. Crash-safety and idempotency on the persistence path
+### 4. Preserve crash-safety and idempotency on persistence paths
 
 Commit ordering and retry behavior are reviewed explicitly:
 
@@ -233,7 +215,7 @@ Commit ordering and retry behavior are reviewed explicitly:
 
 A lock serializes; it does not make an operation idempotent.
 
-### 8. Bound every wait
+### 5. Bound every wait
 
 Any subprocess wait, network call, or stream drain needs a finite ceiling, and
 the timeout must surface through the normal error contract rather than as a
@@ -245,17 +227,6 @@ bare exception:
 
 Bounding the primary wait is not enough if a stream drain sits outside the
 deadline (#2239).
-
-### 9. Regression coverage for every new branch
-
-"Add regression coverage for the newly bounded subprocess paths" appears
-verbatim as a blocker. A new conditional without a test that exercises it will
-be flagged, and the bot names the specific case it wants covered.
-
-### 10. Do not add production contracts for test convenience
-
-Test-only environment variables and test-only public knobs are rejected. Make
-the test set up real state instead.
 
 ## Preempting a round
 
