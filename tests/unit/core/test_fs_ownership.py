@@ -435,13 +435,23 @@ def test_every_transaction_reconciles_prior_interrupted_claims(tmp_path: Path) -
     assert not target.exists()
     assert _claim_siblings(target, "removing") == []
 
-    claim = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
-    claim.write_text("operator content\n", encoding="utf-8")
 
-    with pytest.raises(UnownedArtifactError):
-        publish_owned_file(target, "managed\n", is_owned=lambda _p: False)
+def test_recovery_never_promotes_a_forged_claim(tmp_path: Path) -> None:
+    """Claim-name syntax is not ownership evidence: a claim-shaped sibling that
+    fails authentication is neither restored into the canonical path nor
+    deleted — it stays in place as a collision."""
+    target = tmp_path / "artifact.txt"
+    forged = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
+    forged.write_text("forged payload\n", encoding="utf-8")
 
-    assert target.read_text(encoding="utf-8") == "operator content\n"
+    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert not target.exists()
+    assert forged.read_text(encoding="utf-8") == "forged payload\n"
+
+    publish_owned_file(target, "managed\n", is_owned=lambda _p: False)
+
+    assert target.read_text(encoding="utf-8") == "managed\n"
+    assert forged.read_text(encoding="utf-8") == "forged payload\n"
 
 
 def test_remove_refuses_a_claim_whose_identity_was_swapped(tmp_path: Path) -> None:

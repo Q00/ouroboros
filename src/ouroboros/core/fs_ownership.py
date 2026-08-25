@@ -34,24 +34,33 @@ Threat model and defenses:
   path while a claim is held, restoring the claim must not overwrite the
   new generation: both are preserved — the recreated entry stays canonical
   and the claimed generation remains beside it under its claim name.
-* **Claim-identity races.** The claimed entry's inode identity is captured
-  immediately after the claim rename and re-checked after the ownership
-  predicate and again inside the deletion itself, so a writer that swaps
-  the claimed sibling between the check and the mutation cannot have an
-  unrelated generation deleted on the strength of a stale predicate. The
-  final ``unlink``/``rmtree`` syscall itself is the platform's atomicity
-  limit; the unpredictable claim name closes the remaining window.
-* **Crash and partial state.** A claim name is a durable, self-describing
-  intent record (``.{name}.{nonce}.{removing|replacing}``). A process that
-  dies mid-transaction leaves the generation under that sibling name; every
-  later transaction on the same path — and :func:`recover_owned_claims`
-  directly — first reconciles such orphans: a claim whose canonical path is
-  absent is restored (no-clobber) so it stays discoverable, and a leftover
-  claim beside an occupied canonical path is deleted only when the caller's
-  ownership predicate confirms it. Parent-directory ``fsync`` after the
-  claim, restoration, and publication is best effort (errors are
-  suppressed); on filesystems that lose the rename, recovery simply finds
-  the pre-claim state, so crash consistency never depends on the fsync.
+* **Claim-identity races and inode reuse.** The claimed entry is held open
+  through an ``O_NOFOLLOW`` descriptor from immediately after the claim
+  rename until the final mutation. While that descriptor is open the
+  filesystem cannot recycle the inode, so a writer that unlinks and
+  recreates the claimed sibling necessarily produces a different identity
+  — the re-checks after the ownership predicate and inside the deletion
+  itself therefore detect every replacement, including an immediate
+  inode-number reuse that would defeat a bare ``(device, inode)`` tuple.
+  The final ``unlink``/``rmtree`` syscall itself is the platform's
+  atomicity limit; the unpredictable claim name closes that window.
+* **Crash, partial state, and forged claims.** A claim name is a durable,
+  self-describing intent record (``.{name}.{nonce}.{removing|replacing}``)
+  — but claim-name syntax is *discovery metadata, not ownership evidence*:
+  any shared-directory writer can forge a claim-shaped sibling. A process
+  that dies mid-transaction leaves the generation under that sibling name;
+  every later transaction on the same path — and
+  :func:`recover_owned_claims` directly — first reconciles such orphans,
+  authenticating ownership while the entry is still under its claim name
+  (through the pinned entry descriptor) before anything is promoted: only
+  an owned claim is restored (no-clobber) when the canonical path is
+  absent or deleted as a leftover when it is occupied, and a claim that
+  fails authentication is left untouched as a collision for the operator
+  rather than restored into a live artifact path. Parent-directory
+  ``fsync`` after the claim, restoration, and publication is best effort
+  (errors are suppressed); on filesystems that lose the rename, recovery
+  simply finds the pre-claim state, so crash consistency never depends on
+  the fsync.
 
 This adapts the journaled swap-intent/recovery design of
 :mod:`ouroboros.hermes.artifacts` — the claim name *is* the intent record —
@@ -136,6 +145,28 @@ def _load_rename_no_replace() -> Callable[[int, str, int, str], int] | None:
 _RENAME_NO_REPLACE = _load_rename_no_replace()
 
 
+class _PinnedEntry:
+    """One held entry capability: an ``O_NOFOLLOW`` descriptor plus its identity.
+
+    While the descriptor is open the filesystem cannot recycle the inode, so
+    the identity tuple stays unique for the transaction's lifetime. ``fd`` is
+    ``None`` only for symlink entries (which every flow rejects) and on the
+    non-``*at`` fallback, where identity checks are best effort.
+    """
+
+    __slots__ = ("fd", "identity")
+
+    def __init__(self, fd: int | None, identity: tuple[int, int, int]) -> None:
+        self.fd = fd
+        self.identity = identity
+
+    def close(self) -> None:
+        if self.fd is not None:
+            with suppress(OSError):
+                os.close(self.fd)
+            self.fd = None
+
+
 class _PinnedParent:
     """One held parent-directory capability for name-relative mutations."""
 
@@ -191,6 +222,36 @@ class _PinnedParent:
         except OSError:
             return None
         return (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+
+    def pin_entry(self, name: str) -> _PinnedEntry | None:
+        """Hold one entry open ``O_NOFOLLOW`` so its inode cannot be recycled.
+
+        The returned capability keeps the claimed inode alive for the duration
+        of a transaction: a writer that unlinks the entry and recreates it
+        necessarily gets a *different* inode, so identity re-checks against
+        the pinned identity detect every replacement — a bare
+        ``(device, inode)`` tuple without a held descriptor would be defeated
+        by immediate inode reuse. A symlink entry is returned identity-only
+        (the type marks it for rejection); ``None`` means the entry is gone.
+        """
+        if self.fd is None:
+            identity = self.entry_identity(name)
+            return None if identity is None else _PinnedEntry(None, identity)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            entry_fd = os.open(name, flags, dir_fd=self.fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                identity = self.entry_identity(name)
+                return None if identity is None else _PinnedEntry(None, identity)
+            identity = self.entry_identity(name)
+            return None if identity is None else _PinnedEntry(None, identity)
+        entry = os.fstat(entry_fd)
+        return _PinnedEntry(
+            entry_fd, (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+        )
 
     def remove_entry(
         self, name: str, expected_identity: tuple[int, int, int] | None = None
@@ -440,36 +501,45 @@ def _claim_siblings(parent: _PinnedParent, name: str) -> list[str]:
 def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path], bool]) -> bool:
     """Reconcile interrupted claim siblings of *path* left by a crashed transaction.
 
-    A claim whose canonical path is absent is restored (no-clobber) so the
-    generation stays discoverable; a leftover claim beside an occupied
-    canonical path is deleted only when *is_owned* confirms it. Unattributable
-    claims are left in place.
+    Claim-name syntax is discovery metadata, not ownership evidence: any
+    shared-directory writer can forge a claim-shaped sibling, so ownership is
+    authenticated *while the entry is still under its claim name* — through a
+    pinned entry descriptor — before anything is promoted or deleted. Only an
+    owned claim is restored (no-clobber) when the canonical path is absent, or
+    deleted as a leftover when the canonical path is occupied. A claim that
+    fails authentication is left untouched as a collision for the operator.
     """
     changed = False
     for claim_name in _claim_siblings(parent, path.name):
-        claim_identity = parent.entry_identity(claim_name)
-        if claim_identity is None:
+        pin = parent.pin_entry(claim_name)
+        if pin is None:
             continue
-        parent.revalidate()
-        if not parent.lexists(path.name):
-            if _restore_claimed(parent, claim_name, path.name):
-                changed = True
-                continue
-        claimed = path.with_name(claim_name)
         try:
-            parent.revalidate()
-            owned = (
-                claim_identity[2] != stat_module.S_IFLNK
-                and is_owned(claimed)
-                and parent.entry_identity(claim_name) == claim_identity
-            )
-            parent.revalidate()
-        except OSError:
-            continue
-        if owned:
+            claimed = path.with_name(claim_name)
+            try:
+                parent.revalidate()
+                owned = (
+                    pin.identity[2] != stat_module.S_IFLNK
+                    and parent.entry_identity(claim_name) == pin.identity
+                    and is_owned(claimed)
+                    and parent.entry_identity(claim_name) == pin.identity
+                )
+                parent.revalidate()
+            except OSError:
+                continue
+            if not owned:
+                continue
+            if not parent.lexists(path.name):
+                if parent.entry_identity(claim_name) == pin.identity and _restore_claimed(
+                    parent, claim_name, path.name
+                ):
+                    changed = True
+                continue
             with suppress(OSError):
-                parent.remove_entry(claim_name, expected_identity=claim_identity)
+                parent.remove_entry(claim_name, expected_identity=pin.identity)
                 changed = True
+        finally:
+            pin.close()
     if changed:
         parent.fsync()
     return changed
@@ -559,35 +629,42 @@ def claim_and_remove_owned(
             except FileNotFoundError:
                 return False
             parent.fsync()
-            claimed_identity = parent.entry_identity(claimed_name)
+            pin = parent.pin_entry(claimed_name)
             try:
-                parent.revalidate()
-                owned = (
-                    claimed_identity is not None
-                    and claimed_identity[2] != stat_module.S_IFLNK
-                    and is_owned(claimed)
-                    and parent.entry_identity(claimed_name) == claimed_identity
-                )
-                parent.revalidate()
-            except BaseException:
-                _restore_claimed(parent, claimed_name, path.name)
-                raise
-            if not owned:
-                _restore_claimed(parent, claimed_name, path.name)
-                return False
-            try:
-                parent.remove_entry(claimed_name, expected_identity=claimed_identity)
-            except UnownedArtifactError:
-                # The claimed sibling no longer carries the validated identity;
-                # deleting it would destroy a generation nobody attributed.
-                _restore_claimed(parent, claimed_name, path.name)
-                return False
-            except OSError:
-                # A transient removal failure must not strand the generation
-                # under an undiscoverable claim name: restore the canonical
-                # route so discovery still sees it and a retry can succeed.
-                _restore_claimed(parent, claimed_name, path.name)
-                raise
+                try:
+                    parent.revalidate()
+                    owned = (
+                        pin is not None
+                        and pin.identity[2] != stat_module.S_IFLNK
+                        and is_owned(claimed)
+                        and parent.entry_identity(claimed_name) == pin.identity
+                    )
+                    parent.revalidate()
+                except BaseException:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                if not owned or pin is None:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    return False
+                try:
+                    parent.remove_entry(claimed_name, expected_identity=pin.identity)
+                except UnownedArtifactError:
+                    # The claimed sibling no longer carries the validated
+                    # identity (the pinned descriptor makes inode reuse
+                    # impossible, so this is a real replacement); deleting it
+                    # would destroy a generation nobody attributed.
+                    _restore_claimed(parent, claimed_name, path.name)
+                    return False
+                except OSError:
+                    # A transient removal failure must not strand the
+                    # generation under an undiscoverable claim name: restore
+                    # the canonical route so discovery still sees it and a
+                    # retry can succeed.
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+            finally:
+                if pin is not None:
+                    pin.close()
             parent.fsync()
             return True
     except FileNotFoundError:
@@ -714,54 +791,59 @@ def _publish_owned(
     with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=True) as parent:
         _recover_claims(parent, path, is_owned)
         claimed_name: str | None = None
-        claimed_identity: tuple[int, int, int] | None = None
-        if parent.lexists(path.name):
-            claimed_name = _claim_name(path.name, "replacing")
-            claimed = path.with_name(claimed_name)
-            parent.replace(path.name, claimed_name)
-            parent.fsync()
-            claimed_identity = parent.entry_identity(claimed_name)
+        pin: _PinnedEntry | None = None
+        try:
+            if parent.lexists(path.name):
+                claimed_name = _claim_name(path.name, "replacing")
+                claimed = path.with_name(claimed_name)
+                parent.replace(path.name, claimed_name)
+                parent.fsync()
+                pin = parent.pin_entry(claimed_name)
+                try:
+                    parent.revalidate()
+                    owned = (
+                        pin is not None
+                        and pin.identity[2] != stat_module.S_IFLNK
+                        and is_owned(claimed)
+                        and parent.entry_identity(claimed_name) == pin.identity
+                    )
+                    parent.revalidate()
+                except BaseException:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                if not owned:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise UnownedArtifactError(f"preserved user-managed file at {path}")
+            elif require_existing:
+                raise UnownedArtifactError(f"artifact disappeared before publication: {path}")
+            try:
+                staged_name = build(parent, path.name)
+            except BaseException:
+                if claimed_name is not None:
+                    _restore_claimed(parent, claimed_name, path.name)
+                raise
             try:
                 parent.revalidate()
-                owned = (
-                    claimed_identity is not None
-                    and claimed_identity[2] != stat_module.S_IFLNK
-                    and is_owned(claimed)
-                    and parent.entry_identity(claimed_name) == claimed_identity
-                )
-                parent.revalidate()
+                parent.rename_no_replace(staged_name, path.name)
+            except FileExistsError as exc:
+                parent.remove_entry(staged_name)
+                if claimed_name is not None:
+                    _restore_claimed(parent, claimed_name, path.name)
+                raise UnownedArtifactError(
+                    f"canonical path was recreated during publication: {path}"
+                ) from exc
             except BaseException:
-                _restore_claimed(parent, claimed_name, path.name)
+                parent.remove_entry(staged_name)
+                if claimed_name is not None:
+                    _restore_claimed(parent, claimed_name, path.name)
                 raise
-            if not owned:
-                _restore_claimed(parent, claimed_name, path.name)
-                raise UnownedArtifactError(f"preserved user-managed file at {path}")
-        elif require_existing:
-            raise UnownedArtifactError(f"artifact disappeared before publication: {path}")
-        try:
-            staged_name = build(parent, path.name)
-        except BaseException:
-            if claimed_name is not None:
-                _restore_claimed(parent, claimed_name, path.name)
-            raise
-        try:
-            parent.revalidate()
-            parent.rename_no_replace(staged_name, path.name)
-        except FileExistsError as exc:
-            parent.remove_entry(staged_name)
-            if claimed_name is not None:
-                _restore_claimed(parent, claimed_name, path.name)
-            raise UnownedArtifactError(
-                f"canonical path was recreated during publication: {path}"
-            ) from exc
-        except BaseException:
-            parent.remove_entry(staged_name)
-            if claimed_name is not None:
-                _restore_claimed(parent, claimed_name, path.name)
-            raise
-        if claimed_name is not None:
-            with suppress(UnownedArtifactError):
-                # An identity change means the claimed sibling is no longer the
-                # generation this transaction validated; leave it for recovery.
-                parent.remove_entry(claimed_name, expected_identity=claimed_identity)
+            if claimed_name is not None and pin is not None:
+                with suppress(UnownedArtifactError):
+                    # An identity change means the claimed sibling is no longer
+                    # the generation this transaction validated (the pinned
+                    # descriptor rules out inode reuse); leave it for recovery.
+                    parent.remove_entry(claimed_name, expected_identity=pin.identity)
+        finally:
+            if pin is not None:
+                pin.close()
         parent.fsync()
