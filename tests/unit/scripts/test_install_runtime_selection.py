@@ -333,6 +333,7 @@ def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> 
     assert "AttributeError" not in result.stderr
     assert not (tmp_path / "telemetry.log").exists()
 
+
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
     config = tmp_path / "home" / ".ouroboros" / "config.yaml"
     config.parent.mkdir(parents=True)
