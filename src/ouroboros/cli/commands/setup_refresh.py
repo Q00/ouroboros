@@ -13,6 +13,7 @@ from ouroboros.gjc import (
     gjc_bridge_path,
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
+    has_orphaned_gjc_claims,
     has_setup_owned_gjc_skills,
     is_setup_managed_gjc_bridge,
     is_setup_managed_gjc_instruction,
@@ -105,6 +106,9 @@ def refresh_runtime_artifacts() -> None:
         or is_setup_managed_gjc_instruction(gjc_instruction_path())
         or is_setup_managed_gjc_mcp_bridge_config(gjc_mcp_bridge_config_path())
         or is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
+        # Managed state hidden under an interrupted claim sibling still counts
+        # as installed: the refresh reinstall reconciles it.
+        or has_orphaned_gjc_claims()
     )
     if gjc_expected:
         from ouroboros.config import get_gjc_cli_path

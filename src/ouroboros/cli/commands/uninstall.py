@@ -8,6 +8,7 @@ not remove the Python package, runtime plugins, project source, or git history.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 import json
 from pathlib import Path
 import re
@@ -34,12 +35,14 @@ from ouroboros.gjc import (
     gjc_bridge_path,
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
+    gjc_mcp_entry_generation,
     gjc_skills_root,
     is_setup_managed_gjc_bridge,
     is_setup_managed_gjc_instruction,
     is_setup_managed_gjc_mcp_bridge_config,
     is_setup_managed_gjc_mcp_entry,
     persisted_gjc_mcp_entry,
+    recover_gjc_skill_claims,
     remove_gjc_skills,
     remove_persisted_gjc_mcp_server,
 )
@@ -265,15 +268,29 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
     """Remove setup-owned GJC skills, active route, MCP state, config, and guide."""
+    from ouroboros.core.fs_ownership import recover_owned_claims
+
     agent_dir = gjc_agent_dir()
+    bridge_config = gjc_mcp_bridge_config_path()
+    compatibility_bridge = gjc_bridge_path()
+    guide = gjc_instruction_path()
+    if not dry_run:
+        # Reconcile claim state a crashed transaction left behind before the
+        # discovery judgments below, so interrupted artifacts are neither
+        # invisible to removal nor stranded under hidden claim names.
+        recover_gjc_skill_claims(agent_dir=agent_dir)
+        for orphan_path, orphan_judge in (
+            (bridge_config, is_setup_managed_gjc_mcp_bridge_config),
+            (compatibility_bridge, is_setup_managed_gjc_bridge),
+            (guide, is_setup_managed_gjc_instruction),
+        ):
+            with suppress(OSError):
+                recover_owned_claims(orphan_path, is_owned=orphan_judge, trusted_ancestor=agent_dir)
     skills = remove_gjc_skills(agent_dir=agent_dir, dry_run=True)
     durable_mcp = persisted_gjc_mcp_entry()
     managed_mcp = is_setup_managed_gjc_mcp_entry(durable_mcp)
-    bridge_config = gjc_mcp_bridge_config_path()
     managed_bridge_config = is_setup_managed_gjc_mcp_bridge_config(bridge_config)
-    compatibility_bridge = gjc_bridge_path()
     managed_compatibility_bridge = is_setup_managed_gjc_bridge(compatibility_bridge)
-    guide = gjc_instruction_path()
     managed_guide = is_setup_managed_gjc_instruction(guide)
     if not any(
         (skills, managed_mcp, managed_bridge_config, managed_compatibility_bridge, managed_guide)
@@ -293,7 +310,9 @@ def _remove_gjc_artifacts(dry_run: bool) -> bool:
         return True
 
     if managed_mcp:
-        if not remove_persisted_gjc_mcp_server():
+        if not remove_persisted_gjc_mcp_server(
+            expected_entry_generation=gjc_mcp_entry_generation(durable_mcp)
+        ):
             print_warning(
                 "Could not remove the setup-owned GJC MCP registration; "
                 "preserved the remaining ownership artifacts for a later retry."

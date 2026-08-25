@@ -658,6 +658,100 @@ class TestRemoveGjcArtifacts:
 
         assert mcp_path.read_text(encoding="utf-8") == operator
 
+    def test_locked_removal_is_bound_to_the_observed_entry_generation(self, tmp_path: Path) -> None:
+        """Cleanup removes only the exact registration generation it observed;
+        an entry rewritten by a non-cooperating writer is preserved."""
+        from ouroboros.gjc import (
+            gjc_mcp_entry_generation,
+            persisted_gjc_mcp_entry,
+            remove_persisted_gjc_mcp_server_locked,
+        )
+
+        agent_dir = tmp_path / "agent"
+        agent_dir.mkdir()
+        mcp_path = agent_dir / "mcp.json"
+        bridge_path = agent_dir / "ouroboros" / "mcp-bridge.yaml"
+        managed = {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(bridge_path)},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+        original = json.dumps({"mcpServers": {"ouroboros": managed}})
+        mcp_path.write_text(original, encoding="utf-8")
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            stale_generation = json.dumps({"stale": True}, sort_keys=True)
+            assert not remove_persisted_gjc_mcp_server_locked(
+                mcp_path, expected_entry_generation=stale_generation
+            )
+            assert mcp_path.read_text(encoding="utf-8") == original
+
+            observed = gjc_mcp_entry_generation(persisted_gjc_mcp_entry(mcp_path))
+            assert remove_persisted_gjc_mcp_server_locked(
+                mcp_path, expected_entry_generation=observed
+            )
+            assert json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"] == {}
+
+    def test_uninstall_recovers_an_interrupted_guide_claim(self, tmp_path: Path) -> None:
+        """A guide stranded under a crashed transaction's claim name is still
+        discovered and removed by uninstall."""
+        from ouroboros.core.fs_ownership import _claim_name
+
+        agent_dir = tmp_path / "agent"
+        with (
+            patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+            claim = guide.with_name(_claim_name(guide.name, "removing"))
+            guide.rename(claim)  # simulate a crash between the claim and the delete
+
+            assert _remove_gjc_artifacts(dry_run=False)
+
+        assert not guide.exists()
+        assert not claim.exists()
+
+    def test_uninstall_refuses_a_symlinked_agent_root(self, tmp_path: Path) -> None:
+        """A symlinked configured profile root must not redirect uninstall's
+        removals into its target."""
+        external = tmp_path / "external"
+        real_agent_env = {"GJC_CODING_AGENT_DIR": str(external)}
+        with (
+            patch.dict("os.environ", real_agent_env),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("ouroboros.cli.commands.uninstall.shutil.which", return_value=None),
+        ):
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+        agent_dir = tmp_path / "agent"
+        try:
+            agent_dir.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            assert not _remove_gjc_artifacts(dry_run=False)
+
+        assert guide.read_text(encoding="utf-8")
+
     def test_disabled_setup_shaped_mcp_is_operator_owned(self, tmp_path: Path) -> None:
         from ouroboros.gjc import persisted_gjc_mcp_entry
 

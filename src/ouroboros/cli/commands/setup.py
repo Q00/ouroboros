@@ -3715,7 +3715,7 @@ def _gjc_setup_host() -> GjcSetupHost:
 def _install_gjc_runtime_artifacts(
     gjc_path: str,
     *,
-    registration_state: dict[str, bool] | None = None,
+    registration_state: dict[str, object] | None = None,
 ) -> bool:
     from ouroboros.cli.gjc_setup import install_gjc_runtime_artifacts
 

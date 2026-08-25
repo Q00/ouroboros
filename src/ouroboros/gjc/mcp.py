@@ -100,6 +100,21 @@ def is_setup_managed_gjc_mcp_entry(entry: object, *, allow_redacted_env: bool = 
     )
 
 
+def gjc_mcp_entry_generation(entry: object) -> str | None:
+    """Canonical serialization of one persisted entry, used as a generation token.
+
+    Failure cleanup and rollback bind their removal to the exact generation
+    they observed: a registration that has since changed — however slightly —
+    no longer matches its token and is preserved.
+    """
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return json.dumps(entry, sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+
+
 def is_active_gjc_mcp_entry(entry: object) -> bool:
     """Return whether GJC reports the registration as session-autoloaded."""
     return isinstance(entry, dict) and entry.get("runtimeStatus") == MCP_RUNTIME_STATUS
@@ -169,20 +184,34 @@ def gjc_mcp_registration_lock() -> AbstractContextManager[None]:
     return file_lock(gjc_mcp_config_path())
 
 
-def remove_persisted_gjc_mcp_server(path: Path | None = None) -> bool:
+def remove_persisted_gjc_mcp_server(
+    path: Path | None = None, *, expected_entry_generation: str | None = None
+) -> bool:
     """Atomically remove only the setup-owned generation, preserving concurrent state."""
     config_path = path or gjc_mcp_config_path()
     if config_path.is_symlink():
         return False
     try:
         with file_lock(config_path):
-            return remove_persisted_gjc_mcp_server_locked(config_path)
+            return remove_persisted_gjc_mcp_server_locked(
+                config_path, expected_entry_generation=expected_entry_generation
+            )
     except OSError:
         return False
 
 
-def remove_persisted_gjc_mcp_server_locked(path: Path | None = None) -> bool:
-    """Remove the setup-owned generation; the caller must hold the registration lock."""
+def remove_persisted_gjc_mcp_server_locked(
+    path: Path | None = None, *, expected_entry_generation: str | None = None
+) -> bool:
+    """Remove the setup-owned generation; the caller must hold the registration lock.
+
+    With *expected_entry_generation*, the removal is additionally bound to the
+    exact registration generation the caller observed
+    (:func:`gjc_mcp_entry_generation`): an entry rewritten in the meantime —
+    by GJC itself or by an operator who does not take the Ouroboros lock — is
+    preserved. The whole-file compare-and-swap in the rewrite then binds the
+    write to this same read.
+    """
     config_path = path or gjc_mcp_config_path()
     try:
         if config_path.is_symlink():
@@ -195,6 +224,11 @@ def remove_persisted_gjc_mcp_server_locked(path: Path | None = None) -> bool:
         if not isinstance(disabled, list) or "ouroboros" in disabled:
             return False
         if not is_setup_managed_gjc_mcp_entry(entry):
+            return False
+        if (
+            expected_entry_generation is not None
+            and gjc_mcp_entry_generation(entry) != expected_entry_generation
+        ):
             return False
         del servers["ouroboros"]
         _atomic_replace_json(config_path, payload, raw)

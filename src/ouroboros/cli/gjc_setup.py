@@ -10,6 +10,7 @@ transaction seams (atomic writes, path snapshots) are owned by
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 import json
 import os
@@ -35,6 +36,7 @@ from ouroboros.gjc import (
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
     gjc_mcp_entry_config,
+    gjc_mcp_entry_generation,
     gjc_mcp_registration_lock,
     gjc_ooo_bridge_source_text,
     install_gjc_skills,
@@ -201,7 +203,7 @@ def register_gjc_mcp_server(
     detected: dict[str, object] | None = None,
     detect_mcp_entry: Callable[..., dict[str, object] | None] | None = None,
     run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
-    registration_state: dict[str, bool] | None = None,
+    registration_state: dict[str, object] | None = None,
     assume_registration_lock: bool = False,
 ) -> bool:
     """Register and validate the isolated Ouroboros MCP server through GJC.
@@ -247,7 +249,7 @@ def _register_gjc_mcp_server_locked(
     *,
     detected: dict[str, object],
     run_command: Callable[..., subprocess.CompletedProcess[str]],
-    registration_state: dict[str, bool] | None,
+    registration_state: dict[str, object] | None,
 ) -> bool:
     """Validate or add the registration; the caller holds the registration lock."""
     listed_ok, existing = _listed_gjc_mcp_entry(gjc_path, run_command)
@@ -308,25 +310,32 @@ def _add_gjc_mcp_server_locked(
     command: str,
     raw_args: list[str],
     run_command: Callable[..., subprocess.CompletedProcess[str]],
-    registration_state: dict[str, bool] | None,
+    registration_state: dict[str, object] | None,
 ) -> bool:
     """Add and validate a new registration; runs under the registration lock.
 
     The lock serializes every Ouroboros add/validate/cleanup transaction, so
     a setup-shaped durable entry observed during this window either predates
-    the add (``pre_add_owned``) or was created by this invocation's ``gjc
-    mcp add`` — never by a concurrent Ouroboros invocation.
+    the add or was written during this invocation's ``gjc mcp add`` window —
+    never by a concurrent Ouroboros invocation. Non-Ouroboros writers do not
+    take the lock, so cleanup never trusts a shape judgment alone: it removes
+    only an entry that (a) differs from the exact pre-add generation, (b) is
+    setup-shaped, and (c) still equals — under the lock, via a whole-file
+    compare-and-swap — the exact generation sampled for the cleanup decision.
+    A byte-identical setup-shaped registration raced in by a non-cooperating
+    writer inside the add window is indistinguishable from this invocation's
+    own write by construction; the generation binding confines the cleanup to
+    exactly that observed generation and nothing later.
     """
-    # Attribute cleanup to this invocation: a setup-shaped durable entry that
-    # already exists before the add (even when `mcp list` omits it) was not
-    # created here and must never be removed by a failed add.
-    pre_add_owned = is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
+    pre_add_generation = gjc_mcp_entry_generation(persisted_gjc_mcp_entry())
 
     def _cleanup_failed_add() -> None:
-        if pre_add_owned:
-            return
-        if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
-            remove_persisted_gjc_mcp_server_locked()
+        observed = persisted_gjc_mcp_entry()
+        observed_generation = gjc_mcp_entry_generation(observed)
+        if observed_generation is None or observed_generation == pre_add_generation:
+            return  # nothing appeared or changed during this invocation's add
+        if is_setup_managed_gjc_mcp_entry(observed):
+            remove_persisted_gjc_mcp_server_locked(expected_entry_generation=observed_generation)
 
     server_args = [*raw_args, "--runtime", "gjc"]
     add_command = [
@@ -368,19 +377,24 @@ def _add_gjc_mcp_server_locked(
         return False
 
     persisted = persisted_gjc_mcp_entry()
+    persisted_generation = gjc_mcp_entry_generation(persisted)
     persisted_by_setup = is_setup_managed_gjc_mcp_entry(persisted)
-    created_here = persisted_by_setup and not pre_add_owned
+    created_here = persisted_by_setup and persisted_generation != pre_add_generation
     if created_here and registration_state is not None:
         registration_state.update(created=True, changed=True)
+        registration_state["entry_generation"] = persisted_generation
     receipt_matches_request = (
         isinstance(add_payload, dict)
         and add_payload.get("action") == "add"
         and add_payload.get("name") == "ouroboros"
     )
     if not receipt_matches_request:
-        if created_here and remove_persisted_gjc_mcp_server_locked():
+        if created_here and remove_persisted_gjc_mcp_server_locked(
+            expected_entry_generation=persisted_generation
+        ):
             if registration_state is not None:
                 registration_state.update(created=False, changed=False)
+                registration_state.pop("entry_generation", None)
         print_warning("GJC did not report adding the requested Ouroboros MCP registration.")
         return False
 
@@ -400,9 +414,12 @@ def _add_gjc_mcp_server_locked(
     )
     if not activation_valid:
         if created_here:
-            if remove_persisted_gjc_mcp_server_locked():
+            if remove_persisted_gjc_mcp_server_locked(
+                expected_entry_generation=persisted_generation
+            ):
                 if registration_state is not None:
                     registration_state.update(created=False, changed=False)
+                    registration_state.pop("entry_generation", None)
             else:
                 print_warning("Could not roll back the unvalidated GJC MCP registration.")
         return False
@@ -432,9 +449,13 @@ def install_gjc_compatibility_bridge(content: str) -> bool:
 
 def remove_legacy_gjc_bridge() -> bool:
     """Remove the obsolete setup-owned input bridge without touching custom files."""
-    from ouroboros.core.fs_ownership import claim_and_remove_owned
+    from ouroboros.core.fs_ownership import claim_and_remove_owned, recover_owned_claims
 
     bridge = gjc_bridge_path()
+    with suppress(OSError):
+        recover_owned_claims(
+            bridge, is_owned=is_setup_managed_gjc_bridge, trusted_ancestor=gjc_agent_dir()
+        )
     if not os.path.lexists(bridge):
         return True
     try:
@@ -461,7 +482,7 @@ def install_gjc_runtime_artifacts(
     gjc_path: str,
     *,
     host: GjcSetupHost,
-    registration_state: dict[str, bool] | None = None,
+    registration_state: dict[str, object] | None = None,
 ) -> bool:
     """Activate one complete GJC frontdoor before retiring any prior route."""
     agent_dir = gjc_agent_dir()
@@ -562,7 +583,7 @@ def setup_gjc_runtime(gjc_path: str, *, host: GjcSetupHost) -> bool:
         gjc_mcp_bridge_config_path(),
         gjc_bridge_path(),
     )
-    registration_state: dict[str, bool] = {}
+    registration_state: dict[str, object] = {}
     snapshots: _PathSnapshots = ()
     expected: _PathSnapshots = ()
     try:
@@ -621,29 +642,79 @@ def _restore_gjc_paths(
     restore_path_snapshot: Callable[..., None],
     snapshot_path: Callable[..., object],
 ) -> None:
+    """Restore pre-transaction snapshots through the shared ownership primitives.
+
+    There is no separate check-then-restore sequence: each path's current
+    entry is claimed and verified against the exact generation this
+    transaction last wrote, and the snapshot is staged beside the canonical
+    path and published with a no-replace rename — an operator generation
+    inserted at any point is preserved and that path's rollback is skipped.
+    """
+    from ouroboros.core.fs_ownership import (
+        claim_and_remove_owned,
+        publish_owned_entry,
+        recover_owned_claims,
+    )
+
     failures: list[str] = []
     expected_by_path = dict(expected)
+    if not snapshots:
+        return
+    missing = snapshot_path(
+        snapshots[0][0].parent / f".{os.urandom(8).hex()}.gjc-missing-probe",
+        follow_links=False,
+    )
     for path, snapshot in reversed(snapshots):
+        expected_current = expected_by_path.get(path)
+        if expected_current is not None and snapshot == expected_current:
+            continue  # this transaction never changed the path
+
+        def _is_expected(claimed: Path, _expected: object = expected_current) -> bool:
+            return _expected is None or snapshot_path(claimed, follow_links=False) == _expected
+
+        def _build(staging: Path, _snapshot: object = snapshot) -> None:
+            restore_path_snapshot(staging, _snapshot, restore_link_targets=False)
+
         try:
-            expected_current = expected_by_path.get(path)
+            recover_owned_claims(path, is_owned=_is_expected, trusted_ancestor=path.parent)
+            if snapshot == missing:
+                if os.path.lexists(path) and not claim_and_remove_owned(
+                    path, is_owned=_is_expected, trusted_ancestor=path.parent
+                ):
+                    print_warning(f"Preserved concurrently changed GJC setup path: {path}")
+                continue
             if (
-                expected_current is not None
-                and snapshot_path(path, follow_links=False) != expected_current
+                not os.path.lexists(path)
+                and expected_current is not None
+                and expected_current != missing
             ):
+                # The generation this transaction wrote disappeared; do not
+                # resurrect state into a slot another writer is managing.
                 print_warning(f"Preserved concurrently changed GJC setup path: {path}")
                 continue
-            restore_path_snapshot(path, snapshot, restore_link_targets=False)
+            publish_owned_entry(
+                path,
+                _build,
+                is_owned=_is_expected,
+                trusted_ancestor=path.parent,
+            )
+        except UnownedArtifactError:
+            print_warning(f"Preserved concurrently changed GJC setup path: {path}")
         except OSError as exc:
             failures.append(f"{path}: {exc}")
     if failures:
         print_warning("GJC setup rollback was incomplete: " + "; ".join(failures))
 
 
-def _rollback_new_gjc_mcp_registration(registration_state: dict[str, bool]) -> None:
+def _rollback_new_gjc_mcp_registration(registration_state: dict[str, object]) -> None:
     if not registration_state.get("created"):
         return
-    if remove_persisted_gjc_mcp_server():
+    entry_generation = registration_state.get("entry_generation")
+    if remove_persisted_gjc_mcp_server(
+        expected_entry_generation=entry_generation if isinstance(entry_generation, str) else None
+    ):
         registration_state.update(created=False, changed=False)
+        registration_state.pop("entry_generation", None)
         return
     print_warning("Preserved the GJC MCP registration because it changed after setup created it.")
 
@@ -654,7 +725,7 @@ def rollback_gjc_activation(
     *,
     restore_path_snapshot: Callable[..., None],
     snapshot_path: Callable[..., object],
-    registration_state: dict[str, bool],
+    registration_state: dict[str, object],
 ) -> None:
     """Restore unchanged owned generations and remove a registration created here."""
     _restore_gjc_paths(snapshots, expected, restore_path_snapshot, snapshot_path)

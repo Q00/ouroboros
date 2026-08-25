@@ -10542,7 +10542,9 @@ class TestGjcSetup:
                 registration_state=state,
             )
 
-        remove.assert_called_once_with()
+        remove.assert_called_once_with(
+            expected_entry_generation=json.dumps(managed, sort_keys=True)
+        )
         assert state == {"created": False, "changed": False}
 
     def test_failed_add_preserves_preexisting_durable_registration(
@@ -10843,15 +10845,218 @@ class TestGjcSetup:
     def test_registration_rollback_preserves_concurrent_operator_change(self) -> None:
         from ouroboros.cli import gjc_setup
 
-        state = {"created": True, "changed": True}
+        state: dict[str, object] = {
+            "created": True,
+            "changed": True,
+            "entry_generation": "generation-token",
+        }
         with patch(
             "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server",
             return_value=False,
         ) as remove:
             gjc_setup._rollback_new_gjc_mcp_registration(state)
 
-        remove.assert_called_once_with()
-        assert state == {"created": True, "changed": True}
+        remove.assert_called_once_with(expected_entry_generation="generation-token")
+        assert state == {
+            "created": True,
+            "changed": True,
+            "entry_generation": "generation-token",
+        }
+
+    def test_gjc_install_steps_reject_a_symlinked_agent_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A symlinked configured profile root must not redirect any install or
+        retirement step into its target — the reviewer's `agent -> external`
+        reproduction, exercised through every publication boundary."""
+        from ouroboros.cli.gjc_setup import (
+            install_gjc_compatibility_bridge,
+            install_gjc_mcp_bridge_config,
+            remove_legacy_gjc_bridge,
+        )
+        from ouroboros.gjc import gjc_ooo_bridge_source_text
+
+        external = tmp_path / "external"
+        external.mkdir()
+        agent_dir = tmp_path / "agent"
+        try:
+            agent_dir.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        victim = external / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        victim.parent.mkdir(parents=True)
+        victim.write_text(gjc_ooo_bridge_source_text("ouroboros", []), encoding="utf-8")
+
+        assert not install_gjc_mcp_bridge_config()
+        assert not install_gjc_compatibility_bridge("// bridge\n")
+        assert not remove_legacy_gjc_bridge()
+
+        assert victim.exists()
+        assert not any(external.rglob("mcp-bridge.yaml"))
+
+    def _managed_gjc_entry(self) -> dict[str, object]:
+        return {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "gjc",
+            ],
+            "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
+            "sharing": "per-session",
+            "timeout": 30000,
+        }
+
+    def test_failed_add_cleanup_removes_only_the_generation_from_its_own_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed add's cleanup runs against the real durable file, bound to
+        the exact generation observed after the add window, and leaves every
+        other registration untouched."""
+        agent_dir = tmp_path / "gjc-agent"
+        agent_dir.mkdir(parents=True)
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        mcp_path = agent_dir / "mcp.json"
+        managed = self._managed_gjc_entry()
+        sibling = {"type": "stdio", "command": "other", "args": []}
+        empty = subprocess.CompletedProcess(
+            ["gjc", "mcp", "list", "--json"], 0, stdout=json.dumps({"servers": []}), stderr=""
+        )
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "add" in cmd:
+                mcp_path.write_text(
+                    json.dumps({"mcpServers": {"ouroboros": managed, "other": sibling}}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="add failed")
+            return empty
+
+        assert not register_gjc_mcp_server(
+            "/opt/bin/gjc",
+            detected={"command": "uvx", "args": managed["args"][:-2]},
+            run_command=fake_run,
+        )
+
+        assert json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"] == {"other": sibling}
+
+    def test_failed_add_cleanup_preserves_a_noncooperating_writers_registration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An entry a non-cooperating writer registered during the add window
+        that is not setup's exact generation is never cleaned up."""
+        agent_dir = tmp_path / "gjc-agent"
+        agent_dir.mkdir(parents=True)
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        mcp_path = agent_dir / "mcp.json"
+        managed = self._managed_gjc_entry()
+        writer_entry = {"type": "stdio", "command": "uvx", "args": ["run", "custom"]}
+        empty = subprocess.CompletedProcess(
+            ["gjc", "mcp", "list", "--json"], 0, stdout=json.dumps({"servers": []}), stderr=""
+        )
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "add" in cmd:
+                mcp_path.write_text(
+                    json.dumps({"mcpServers": {"ouroboros": writer_entry}}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="add failed")
+            return empty
+
+        assert not register_gjc_mcp_server(
+            "/opt/bin/gjc",
+            detected={"command": "uvx", "args": managed["args"][:-2]},
+            run_command=fake_run,
+        )
+
+        assert json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"] == {
+            "ouroboros": writer_entry
+        }
+
+    def test_gjc_rollback_restores_the_pre_transaction_snapshot(self, tmp_path: Path) -> None:
+        from ouroboros.cli import gjc_setup
+
+        path = tmp_path / "profile" / "guide.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("pre-setup\n", encoding="utf-8")
+        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
+        path.write_text("ours\n", encoding="utf-8")
+        expected = setup_cmd._snapshot_path(path, follow_links=False)
+
+        gjc_setup._restore_gjc_paths(
+            ((path, snapshot),),
+            ((path, expected),),
+            setup_cmd._restore_path_snapshot,
+            setup_cmd._snapshot_path,
+        )
+
+        assert path.read_text(encoding="utf-8") == "pre-setup\n"
+
+    def test_gjc_rollback_preserves_an_operator_generation_inserted_mid_restore(
+        self, tmp_path: Path
+    ) -> None:
+        """The reviewer's rollback probe: an operator replacement written after
+        the ownership judgment must survive — there is no check-then-restore
+        gap because the restore publishes through the claim primitive."""
+        from ouroboros.cli import gjc_setup
+
+        path = tmp_path / "profile" / "guide.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("pre-setup\n", encoding="utf-8")
+        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
+        path.write_text("ours\n", encoding="utf-8")
+        expected = setup_cmd._snapshot_path(path, follow_links=False)
+
+        def racing_restore(
+            target: Path, snap: object, *, restore_link_targets: bool = True
+        ) -> None:
+            # The operator recreates the canonical path while the rollback is
+            # materializing the snapshot: publication must fail no-replace.
+            path.write_text("operator replacement\n", encoding="utf-8")
+            setup_cmd._restore_path_snapshot(
+                target, snap, restore_link_targets=restore_link_targets
+            )
+
+        gjc_setup._restore_gjc_paths(
+            ((path, snapshot),),
+            ((path, expected),),
+            racing_restore,
+            setup_cmd._snapshot_path,
+        )
+
+        assert path.read_text(encoding="utf-8") == "operator replacement\n"
+
+    def test_gjc_rollback_preserves_an_operator_replacement_of_our_generation(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "profile" / "guide.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("pre-setup\n", encoding="utf-8")
+        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
+        path.write_text("ours\n", encoding="utf-8")
+        expected = setup_cmd._snapshot_path(path, follow_links=False)
+        path.write_text("operator replacement\n", encoding="utf-8")
+
+        from ouroboros.cli import gjc_setup
+
+        gjc_setup._restore_gjc_paths(
+            ((path, snapshot),),
+            ((path, expected),),
+            setup_cmd._restore_path_snapshot,
+            setup_cmd._snapshot_path,
+        )
+
+        assert path.read_text(encoding="utf-8") == "operator replacement\n"
 
     @pytest.mark.parametrize("command", ["uvx", "/usr/local/bin/pipx"])
     def test_mcp_ownership_requires_exact_setup_launcher(self, command: str) -> None:

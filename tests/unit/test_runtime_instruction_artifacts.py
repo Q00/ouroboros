@@ -148,6 +148,24 @@ def test_gjc_guide_publication_never_writes_through_symlink(tmp_path: Path) -> N
     assert path.is_symlink()
 
 
+def test_gjc_guide_publication_rejects_a_symlinked_agent_root(tmp_path: Path) -> None:
+    """A symlinked configured profile root must not redirect the routing-guide
+    publication into its target."""
+    external = tmp_path / "external"
+    external.mkdir()
+    agent_dir = tmp_path / "agent"
+    try:
+        agent_dir.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+    env = {"GJC_CODING_AGENT_DIR": str(agent_dir)}
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        install_gjc_instruction_artifact(environ=env)
+
+    assert list(external.rglob("*.md")) == []
+
+
 def test_gjc_rejects_modified_setup_owned_routing_guide(tmp_path: Path) -> None:
     env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
     path = install_gjc_instruction_artifact(environ=env).path

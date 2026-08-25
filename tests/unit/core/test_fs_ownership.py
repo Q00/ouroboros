@@ -240,10 +240,12 @@ def test_remove_restores_claim_on_transient_failure_and_supports_retry(
     real_remove = fs_ownership._PinnedParent.remove_entry
     failures = iter([True])
 
-    def flaky_remove(self: object, name: str) -> None:
+    def flaky_remove(
+        self: object, name: str, expected_identity: tuple[int, int, int] | None = None
+    ) -> None:
         if next(failures, False):
             raise OSError("simulated transient removal failure")
-        real_remove(self, name)
+        real_remove(self, name, expected_identity)
 
     monkeypatch.setattr(fs_ownership._PinnedParent, "remove_entry", flaky_remove)
 
@@ -334,3 +336,172 @@ def test_tree_publish_aborts_when_parent_swapped_during_build(tmp_path: Path) ->
     assert (moved / "artifact-dir" / "content.txt").read_text(encoding="utf-8") == (
         "owned generation\n"
     )
+
+
+def _make_symlinked_root(tmp_path: Path) -> tuple[Path, Path]:
+    external = tmp_path / "external"
+    external.mkdir()
+    root = tmp_path / "agent"
+    try:
+        root.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+    return root, external
+
+
+def test_publish_rejects_a_symlinked_trusted_root(tmp_path: Path) -> None:
+    """A symlinked configured profile root must not redirect publication into
+    its target — the reviewer's `agent -> external` reproduction."""
+    root, external = _make_symlinked_root(tmp_path)
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        publish_owned_file(
+            root / "rules" / "guide.md",
+            "managed\n",
+            is_owned=lambda _p: True,
+            trusted_ancestor=root,
+        )
+
+    assert list(external.rglob("*")) == []
+
+
+def test_tree_publish_rejects_a_symlinked_trusted_root(tmp_path: Path) -> None:
+    root, external = _make_symlinked_root(tmp_path)
+
+    def build(staging: Path) -> None:  # pragma: no cover - must not run
+        staging.mkdir()
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        publish_owned_tree(
+            root / "skills" / "ooo-run", build, is_owned=lambda _p: True, trusted_ancestor=root
+        )
+
+    assert list(external.rglob("*")) == []
+
+
+def test_remove_rejects_a_symlinked_trusted_root(tmp_path: Path) -> None:
+    root, external = _make_symlinked_root(tmp_path)
+    (external / "rules").mkdir()
+    victim = external / "rules" / "guide.md"
+    victim.write_text("managed\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        claim_and_remove_owned(
+            root / "rules" / "guide.md", is_owned=lambda _p: True, trusted_ancestor=root
+        )
+
+    assert victim.read_text(encoding="utf-8") == "managed\n"
+
+
+def test_recover_owned_claims_restores_an_interrupted_claim(tmp_path: Path) -> None:
+    """A crash between claim and completion leaves the generation only under a
+    hidden claim name; recovery restores the canonical route."""
+    target = tmp_path / "artifact.txt"
+    claim = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
+    claim.write_text("interrupted generation\n", encoding="utf-8")
+
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: True)
+
+    assert target.read_text(encoding="utf-8") == "interrupted generation\n"
+    assert _claim_siblings(target, "replacing") == []
+
+
+def test_recovery_deletes_only_an_owned_leftover_claim(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.txt"
+    target.write_text("current generation\n", encoding="utf-8")
+    owned_claim = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
+    owned_claim.write_text("owned leftover\n", encoding="utf-8")
+    operator_claim = target.with_name(fs_ownership._claim_name(target.name, "removing"))
+    operator_claim.write_text("operator content\n", encoding="utf-8")
+
+    def is_owned(path: Path) -> bool:
+        return path.read_text(encoding="utf-8") == "owned leftover\n"
+
+    assert fs_ownership.recover_owned_claims(target, is_owned=is_owned)
+
+    assert target.read_text(encoding="utf-8") == "current generation\n"
+    assert not owned_claim.exists()
+    assert operator_claim.read_text(encoding="utf-8") == "operator content\n"
+
+
+def test_every_transaction_reconciles_prior_interrupted_claims(tmp_path: Path) -> None:
+    """Publish and removal are self-healing: they first reconcile orphaned
+    claim state a crashed run left behind for the same path."""
+    target = tmp_path / "artifact.txt"
+    claim = target.with_name(fs_ownership._claim_name(target.name, "removing"))
+    claim.write_text("interrupted generation\n", encoding="utf-8")
+
+    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
+    assert not target.exists()
+    assert _claim_siblings(target, "removing") == []
+
+    claim = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
+    claim.write_text("operator content\n", encoding="utf-8")
+
+    with pytest.raises(UnownedArtifactError):
+        publish_owned_file(target, "managed\n", is_owned=lambda _p: False)
+
+    assert target.read_text(encoding="utf-8") == "operator content\n"
+
+
+def test_remove_refuses_a_claim_whose_identity_was_swapped(tmp_path: Path) -> None:
+    """The deletion is bound to the inode the predicate validated: a claimed
+    sibling swapped for different content after the check is not deleted."""
+    target = tmp_path / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+
+    def swap_claimed_then_approve(claimed: Path) -> bool:
+        claimed.unlink()
+        claimed.write_text("swapped-in generation\n", encoding="utf-8")
+        return True
+
+    assert not claim_and_remove_owned(target, is_owned=swap_claimed_then_approve)
+
+    assert target.read_text(encoding="utf-8") == "swapped-in generation\n"
+
+
+def test_publish_owned_entry_replaces_only_the_expected_generation(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.txt"
+    target.write_text("expected generation\n", encoding="utf-8")
+
+    def build(staging: Path) -> None:
+        staging.write_text("restored snapshot\n", encoding="utf-8")
+
+    fs_ownership.publish_owned_entry(
+        target,
+        build,
+        is_owned=lambda p: p.read_text(encoding="utf-8") == "expected generation\n",
+    )
+    assert target.read_text(encoding="utf-8") == "restored snapshot\n"
+
+    target.write_text("operator generation\n", encoding="utf-8")
+    with pytest.raises(UnownedArtifactError):
+        fs_ownership.publish_owned_entry(
+            target,
+            build,
+            is_owned=lambda p: p.read_text(encoding="utf-8") == "expected generation\n",
+        )
+    assert target.read_text(encoding="utf-8") == "operator generation\n"
+
+
+def test_publish_owned_entry_supports_symlink_topology(tmp_path: Path) -> None:
+    link_target = tmp_path / "elsewhere.txt"
+    link_target.write_text("payload\n", encoding="utf-8")
+    target = tmp_path / "artifact.txt"
+
+    def build(staging: Path) -> None:
+        try:
+            staging.symlink_to(link_target)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+    fs_ownership.publish_owned_entry(target, build, is_owned=lambda _p: False)
+    assert target.is_symlink()
+
+
+def test_find_orphaned_claims_names_the_canonical_entries(tmp_path: Path) -> None:
+    (tmp_path / fs_ownership._claim_name("guide.md", "replacing")).write_text("x", encoding="utf-8")
+    (tmp_path / fs_ownership._claim_name("index.ts", "removing")).write_text("y", encoding="utf-8")
+    (tmp_path / "unrelated.txt").write_text("z", encoding="utf-8")
+
+    assert fs_ownership.find_orphaned_claims(tmp_path) == ("guide.md", "index.ts")

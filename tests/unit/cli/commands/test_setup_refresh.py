@@ -213,6 +213,29 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert "No installed runtime artifacts found to refresh." in result.output
         install.assert_not_called()
 
+    def test_orphaned_gjc_claim_state_triggers_refresh(self, tmp_path: Path) -> None:
+        """Managed state hidden under a crashed transaction's claim sibling is
+        discovered as installed state; the reinstall reconciles it."""
+        from ouroboros.core.fs_ownership import _claim_name
+
+        rules_dir = tmp_path / ".gjc" / "agent" / "rules"
+        rules_dir.mkdir(parents=True)
+        claim = rules_dir / _claim_name("ouroboros-skill-capability-guide.md", "replacing")
+        claim.write_text("interrupted generation\n", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
+            patch(
+                "ouroboros.cli.commands.setup._install_gjc_runtime_artifacts",
+                return_value=True,
+            ) as install,
+        ):
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        install.assert_called_once_with("/opt/bin/gjc")
+        assert "Refreshed runtime artifacts: gjc" in result.output
+
     def test_refreshes_from_persistent_gjc_mcp_state_only(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / ".gjc" / "agent"
         bridge_config = agent_dir / "ouroboros" / "mcp-bridge.yaml"

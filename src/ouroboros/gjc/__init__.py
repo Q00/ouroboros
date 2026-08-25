@@ -14,6 +14,7 @@ from ouroboros.gjc.artifacts import (
     gjc_skills_root,
     has_setup_owned_gjc_skills,
     install_gjc_skills,
+    recover_gjc_skill_claims,
     remove_gjc_skills,
     setup_owned_gjc_skill_paths,
 )
@@ -31,6 +32,7 @@ from ouroboros.gjc.mcp import (
     MCP_SHARING,
     MCP_TIMEOUT,
     gjc_mcp_entry_config,
+    gjc_mcp_entry_generation,
     gjc_mcp_registration_lock,
     is_active_gjc_mcp_entry,
     is_setup_managed_gjc_mcp_bridge_config,
@@ -45,6 +47,7 @@ from ouroboros.gjc.paths import (
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
     gjc_mcp_config_path,
+    has_orphaned_gjc_claims,
 )
 
 __all__ = [
@@ -59,9 +62,11 @@ __all__ = [
     "gjc_mcp_bridge_config_path",
     "gjc_mcp_config_path",
     "gjc_mcp_entry_config",
+    "gjc_mcp_entry_generation",
     "gjc_mcp_registration_lock",
     "gjc_ooo_bridge_source_text",
     "gjc_skills_root",
+    "has_orphaned_gjc_claims",
     "has_setup_owned_gjc_skills",
     "install_gjc_skills",
     "is_active_gjc_mcp_entry",
@@ -71,6 +76,7 @@ __all__ = [
     "is_setup_managed_gjc_mcp_bridge_config",
     "is_setup_managed_gjc_mcp_entry",
     "persisted_gjc_mcp_entry",
+    "recover_gjc_skill_claims",
     "remove_gjc_skills",
     "remove_persisted_gjc_mcp_server",
     "remove_persisted_gjc_mcp_server_locked",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -15,7 +15,9 @@ import yaml
 from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
     claim_and_remove_owned,
+    find_orphaned_claims,
     publish_owned_tree,
+    recover_owned_claims,
 )
 from ouroboros.skills.artifacts import collect_skill_bundle_dirs, resolve_packaged_skills_dir
 
@@ -274,11 +276,32 @@ def setup_owned_gjc_skill_paths(
     return tuple(sorted(owned, key=lambda path: path.name))
 
 
+def recover_gjc_skill_claims(*, agent_dir: str | Path) -> bool:
+    """Reconcile interrupted skill-claim state left by a crashed transaction."""
+    target_root = gjc_skills_root(agent_dir)
+    if not target_root.is_dir() or target_root.is_symlink():
+        return False
+    agent_root = Path(agent_dir).expanduser()
+    changed = False
+    for name in find_orphaned_claims(target_root):
+        if not name.startswith(GJC_SKILL_NAMESPACE):
+            continue
+        with suppress(OSError):
+            changed = (
+                recover_owned_claims(
+                    target_root / name, is_owned=_is_managed_skill, trusted_ancestor=agent_root
+                )
+                or changed
+            )
+    return changed
+
+
 def remove_gjc_skills(*, agent_dir: str | Path, dry_run: bool = False) -> tuple[Path, ...]:
     """Remove only the namespaced skill projections managed by Ouroboros."""
     target_root = gjc_skills_root(agent_dir)
     if not target_root.is_dir() or target_root.is_symlink():
         return ()
+    recover_gjc_skill_claims(agent_dir=agent_dir)
     targets = tuple(
         candidate
         for candidate in sorted(target_root.iterdir(), key=lambda path: path.name)
@@ -302,6 +325,7 @@ __all__ = [
     "gjc_skills_root",
     "has_setup_owned_gjc_skills",
     "install_gjc_skills",
+    "recover_gjc_skill_claims",
     "remove_gjc_skills",
     "setup_owned_gjc_skill_paths",
 ]

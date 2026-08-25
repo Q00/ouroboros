@@ -270,3 +270,42 @@ def test_publish_fails_when_skill_recreated_after_backup_validation(
     preserved = sorted(target.parent.glob(f".{target.name}.*.replacing"))
     assert len(preserved) == 1
     assert (preserved[0] / "SKILL.md").exists()
+
+
+def test_install_rejects_a_symlinked_agent_root(tmp_path: Path) -> None:
+    """A symlinked configured profile root must not redirect skill projection
+    into its target."""
+    source = tmp_path / "source"
+    _skill(source, "interview")
+    external = tmp_path / "external"
+    external.mkdir()
+    agent_dir = tmp_path / "agent"
+    try:
+        agent_dir.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert not any(external.rglob("SKILL.md"))
+
+
+def test_remove_recovers_an_interrupted_skill_claim(tmp_path: Path) -> None:
+    """A skill stranded under a crashed transaction's claim name is restored
+    and then removed like any other managed generation."""
+    from ouroboros.core.fs_ownership import _claim_name
+
+    source = tmp_path / "source"
+    agent_dir = tmp_path / "agent"
+    _skill(source, "interview")
+    managed = install_gjc_skills(agent_dir=agent_dir, skills_dir=source).skill_paths[0]
+    claim = managed.with_name(_claim_name(managed.name, "removing"))
+    managed.rename(claim)  # simulate a crash between the claim and the delete
+    assert not managed.exists()
+
+    removed = remove_gjc_skills(agent_dir=agent_dir)
+
+    assert removed == (managed,)
+    assert not managed.exists()
+    assert not claim.exists()
