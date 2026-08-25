@@ -711,33 +711,49 @@ def test_rejects_a_symlinked_ancestor_of_the_trusted_root(tmp_path: Path) -> Non
         )
 
 
-def test_tree_remove_restores_from_the_quarantine_when_destruction_fails(
+def test_tree_remove_never_restores_a_half_destroyed_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A destruction failure inside the quarantine must not strand the
-    generation in an undiscoverable container: it is restored and a retry
-    succeeds."""
+    """The reviewer's partial-destruction probe: a recursive deletion that
+    fails after removing descendants must never rename damaged remains back
+    to the canonical path — removal commits with the atomic isolation, and
+    residue stays out of the canonical namespace."""
     target = tmp_path / "artifact-dir"
     target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    (target / "keep.txt").write_text("owned generation\n", encoding="utf-8")
+    (target / "lost.txt").write_text("owned generation\n", encoding="utf-8")
+    real_rename = fs_ownership.os.rename
     real_rmtree = fs_ownership.shutil.rmtree
-    failures = iter([True])
 
-    def flaky_rmtree(path: object, *args: object, **kwargs: object) -> None:
-        if path == "entry" and kwargs.get("dir_fd") is not None and next(failures, False):
+    def deny_private_move(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if src_dir_fd is not None and dst_dir_fd is None:
+            raise OSError(errno.EXDEV, "simulated cross-device link")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def half_destroy(path: object, *args: object, **kwargs: object) -> None:
+        dir_fd = kwargs.get("dir_fd")
+        if path == "entry" and dir_fd is not None:
+            # In-place destruction: delete one descendant, then fail.
+            os.unlink("entry/lost.txt", dir_fd=dir_fd)
             raise OSError("simulated destruction failure")
         real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(fs_ownership.shutil, "rmtree", flaky_rmtree)
-
-    with pytest.raises(OSError, match="simulated destruction failure"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
-    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", half_destroy)
 
     assert claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    # The canonical namespace never sees the damaged tree again: the residue
+    # stays quarantined under a tombstone, never as the artifact or a claim.
     assert not target.exists()
+    assert _claim_siblings(target, "removing") == []
+    assert not any(p.name == "artifact-dir" for p in tmp_path.iterdir())
 
 
 def test_failed_cross_filesystem_import_leaves_no_staging_residue(
@@ -804,3 +820,65 @@ def test_tree_remove_preserves_a_tree_modified_after_the_ownership_read(tmp_path
     assert not claim_and_remove_owned(target, is_owned=stale_approve)
 
     assert (target / "content.txt").read_text(encoding="utf-8") == "operator edit\n"
+
+
+def test_publish_never_publishes_a_staged_generation_swapped_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's staging-swap probe: content swapped onto the staging
+    name after the build must never become the canonical artifact — the
+    staged generation is pinned and authenticated through the publication."""
+    target = tmp_path / "artifact.txt"
+    real_rnr = fs_ownership._PinnedParent.rename_no_replace
+
+    def swap_then_rename(
+        self: fs_ownership._PinnedParent, source_name: str, target_name: str
+    ) -> None:
+        if target_name == target.name:
+            staged = tmp_path / source_name
+            staged.unlink()
+            staged.write_text("attacker generation\n", encoding="utf-8")
+        real_rnr(self, source_name, target_name)
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "rename_no_replace", swap_then_rename)
+
+    with pytest.raises(UnownedArtifactError, match="raced during publication"):
+        publish_owned_file(target, "managed\n", is_owned=lambda _p: True)
+
+    assert not target.exists() or target.read_text(encoding="utf-8") != "attacker generation\n"
+    survivors = {p.read_text(encoding="utf-8") for p in tmp_path.iterdir() if p.is_file()}
+    assert "attacker generation\n" in survivors  # preserved aside, never canonical
+
+
+def test_tree_publish_never_publishes_a_staged_generation_swapped_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    real_rnr = fs_ownership._PinnedParent.rename_no_replace
+
+    swapped = {"done": False}
+
+    def swap_then_rename(
+        self: fs_ownership._PinnedParent, source_name: str, target_name: str
+    ) -> None:
+        if target_name == target.name and not swapped["done"]:
+            swapped["done"] = True
+            staged = tmp_path / source_name
+            fs_ownership.remove_path(staged)
+            staged.mkdir()
+            (staged / "content.txt").write_text("attacker generation\n", encoding="utf-8")
+        real_rnr(self, source_name, target_name)
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "rename_no_replace", swap_then_rename)
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    with pytest.raises(UnownedArtifactError, match="raced during publication"):
+        publish_owned_tree(target, build, is_owned=lambda _p: True)
+
+    # The previous owned generation is restored; the attacker tree never
+    # becomes canonical.
+    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"

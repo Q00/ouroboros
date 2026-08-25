@@ -28,12 +28,20 @@ Threat model and defenses:
   lives behind a symlink must be configured by its resolved path. On
   platforms without ``*at`` support the chain is validated with
   per-component ``lstat`` best effort instead.
-* **Publication clobbering.** The final publish rename is no-replace:
-  ``renameat2(RENAME_NOREPLACE)`` on Linux, ``renameatx_np(RENAME_EXCL)``
-  on macOS, native no-replace ``rename`` on Windows, and an
-  existence-guarded rename as a last resort. A generation recreated at the
-  canonical path after ownership validation is preserved and the
-  publication fails instead of overwriting it.
+* **Publication clobbering and staging swaps.** The final publish rename
+  is no-replace: ``renameat2(RENAME_NOREPLACE)`` on Linux,
+  ``renameatx_np(RENAME_EXCL)`` on macOS, native no-replace ``rename`` on
+  Windows, and an existence-guarded rename as a last resort. A generation
+  recreated at the canonical path after ownership validation is preserved
+  and the publication fails instead of overwriting it. The staged
+  generation itself is a pinned capability from the moment it is authored
+  (the write descriptor for files, an ``O_NOFOLLOW`` pin after the
+  descriptor-bound import for trees): its identity is re-verified
+  immediately before and immediately after the final rename, so content
+  swapped onto the random staging name never becomes canonical — an
+  imposter that races the rename itself is pulled back out of the
+  canonical name untouched and the publication fails. Failed-publication
+  staging cleanup is bound to the same authored identity.
 * **Restoration clobbering.** When another process recreates the canonical
   path while a claim is held, restoring the claim must not overwrite the
   new generation: both are preserved — the recreated entry stays canonical
@@ -52,10 +60,19 @@ Threat model and defenses:
   swapped either), re-validated *there* against the pinned identity, and
   the ownership predicate runs once more on the isolated entry — binding
   tree destruction to descendant content, not just the top-level inode.
-  Only an entry that passes every re-check is destroyed; a replacement or
-  a tree modified after the original read is moved back out untouched, and
-  a destruction that fails partway restores the generation from the
-  quarantine so it stays discoverable for a retry.
+  Only an entry that passes every re-check is destroyed. A replacement or
+  a tree modified after the original read is moved back out untouched.
+  Destruction commits with the atomic isolation: a single-file ``unlink``
+  that fails leaves the file intact and restores it for a retry, while
+  trees are discarded commit-first — moved whole into a private directory
+  and destroyed there, or, across filesystems, destroyed in place with any
+  irrecoverable residue left quarantined under a self-describing
+  ``*.discarded`` tombstone — so a recursive deletion that fails partway
+  can never rename a half-destroyed tree back to the canonical path.
+  Cross-filesystem imports follow the same discipline: they assemble
+  inside a ``*.importing`` intent container and commit with one atomic
+  rename, so an interrupted import leaves no loose partial state in the
+  shared namespace.
 * **Builder redirection.** Tree and entry builders never write through a
   pathname under the shared parent: they build in a private workspace, and
   the finished generation is imported beside the canonical path through
@@ -373,14 +390,64 @@ class _PinnedParent:
         except OSError as exc:
             if exc.errno != errno.EXDEV:
                 raise
+        # Cross-filesystem: assemble inside a self-describing 0700 intent
+        # container, then commit with one atomic fd-relative rename. A failed
+        # or interrupted import never leaves loose partial state in the
+        # shared namespace — the container is discarded whole.
+        container = f".{name}.{os.urandom(8).hex()}.importing"
+        os.mkdir(container, mode=0o700, dir_fd=self.fd)
+        container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        container_fd = os.open(container, container_flags, dir_fd=self.fd)
         try:
-            _import_tree_fd(source, self.fd, name)
-        except BaseException:
-            # A partial cross-filesystem import must not strand staging state
-            # under the shared parent: remove whatever was created, then fail.
-            with suppress(OSError):
-                self.remove_entry(name)
-            raise
+            try:
+                _import_tree_fd(source, container_fd, "entry")
+                os.rename("entry", name, src_dir_fd=container_fd, dst_dir_fd=self.fd)
+            except BaseException:
+                self._discard_container_entry(container, container_fd)
+                raise
+        finally:
+            os.close(container_fd)
+        with suppress(OSError):
+            os.rmdir(container, dir_fd=self.fd)
+
+    def _discard_container_entry(self, container: str, container_fd: int) -> None:
+        """Destroy ``container/entry`` without ever damaging the shared namespace.
+
+        Commit-first: the entry is atomically moved into a private temporary
+        directory and destroyed there, so an in-place recursive deletion can
+        never half-destroy something that later leaks back. Across
+        filesystems the destruction runs inside the container; if even that
+        fails, the residue stays quarantined under a self-describing
+        ``*.discarded`` tombstone — never restored into a canonical or claim
+        name — for the operator to reclaim.
+        """
+        private_root = tempfile.mkdtemp(prefix="ouroboros-discard-")
+        try:
+            os.rename("entry", os.path.join(private_root, "entry"), src_dir_fd=container_fd)
+        except OSError:
+            shutil.rmtree(private_root, ignore_errors=True)
+            try:
+                entry = os.stat("entry", dir_fd=container_fd, follow_symlinks=False)
+                if stat_module.S_ISDIR(entry.st_mode):
+                    shutil.rmtree("entry", dir_fd=container_fd)
+                else:
+                    os.unlink("entry", dir_fd=container_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                with suppress(OSError):
+                    os.rename(
+                        container,
+                        f"{container}.discarded",
+                        src_dir_fd=self.fd,
+                        dst_dir_fd=self.fd,
+                    )
+                return
+        else:
+            with suppress(Exception):
+                shutil.rmtree(private_root, ignore_errors=True)
+        with suppress(OSError):
+            os.rmdir(container, dir_fd=self.fd)
 
     def quarantined_remove(
         self,
@@ -482,17 +549,22 @@ class _PinnedParent:
                     raise UnownedArtifactError(
                         f"claimed generation changed content before removal: {self.path / name}"
                     )
-            try:
-                if identity[2] == stat_module.S_IFDIR:
-                    shutil.rmtree("entry", dir_fd=quarantine_fd)
-                else:
+            if identity[2] == stat_module.S_IFDIR:
+                # Removal commits with the atomic move into the quarantine; a
+                # recursive deletion that fails partway must never restore a
+                # half-destroyed tree, so trees are discarded commit-first
+                # (moved into a private directory, or left quarantined under
+                # a tombstone) and this call cannot fail the removal.
+                self._discard_container_entry(quarantine, quarantine_fd)
+            else:
+                try:
                     os.unlink("entry", dir_fd=quarantine_fd)
-            except OSError:
-                # A partial destruction must not strand the generation inside
-                # an undiscoverable quarantine: restore it from the quarantine
-                # location so a retry can find it again.
-                _evict()
-                raise
+                except OSError:
+                    # A single unlink is atomic and leaves the file intact on
+                    # failure, so restoring it from the quarantine is safe and
+                    # keeps the generation discoverable for a retry.
+                    _evict()
+                    raise
         finally:
             os.close(quarantine_fd)
             # The container is removed on success and failure alike; an
@@ -1001,11 +1073,18 @@ def publish_owned_file(
     :class:`UnownedArtifactError` instead of replacing it.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> str:
+    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
         fd, temp_name = parent.create_temp_file(prefix=f".{target_name}.")
+        staged_pin: _PinnedEntry | None = None
         try:
             if mode is not None and hasattr(os, "fchmod"):
                 os.fchmod(fd, mode)
+            # Pin the authored inode through the write descriptor itself, so
+            # the staged generation is bound with no window at all.
+            entry = os.fstat(fd)
+            staged_pin = _PinnedEntry(
+                os.dup(fd), (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+            )
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(content)
                 handle.flush()
@@ -1013,9 +1092,11 @@ def publish_owned_file(
         except BaseException:
             with suppress(OSError):
                 os.close(fd)
+            if staged_pin is not None:
+                staged_pin.close()
             parent.unlink(temp_name)
             raise
-        return temp_name
+        return temp_name, staged_pin
 
     _publish_owned(
         path,
@@ -1044,14 +1125,14 @@ def publish_owned_tree(
     therefore cannot redirect a single builder write.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> str:
+    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
         staging_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
         with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
             workspace = Path(private_root) / "tree"
             workspace.mkdir(mode=0o700)
             build(workspace)
             parent.import_entry(workspace, staging_name)
-        return staging_name
+        return staging_name, parent.pin_entry(staging_name)
 
     _publish_owned(path, _build, is_owned=is_owned, trusted_ancestor=trusted_ancestor)
 
@@ -1075,7 +1156,7 @@ def publish_owned_entry(
     pre-transaction snapshots without a separate check-then-restore sequence.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> str:
+    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
         staged_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
         with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
             workspace = Path(private_root) / "entry"
@@ -1083,7 +1164,7 @@ def publish_owned_entry(
             if not os.path.lexists(workspace):
                 raise OSError(errno.ENOENT, "entry build produced no staged generation", str(path))
             parent.import_entry(workspace, staged_name)
-        return staged_name
+        return staged_name, parent.pin_entry(staged_name)
 
     _publish_owned(
         path,
@@ -1096,7 +1177,7 @@ def publish_owned_entry(
 
 def _publish_owned(
     path: Path,
-    build: Callable[[_PinnedParent, str], str],
+    build: Callable[[_PinnedParent, str], tuple[str, _PinnedEntry | None]],
     *,
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None,
@@ -1131,26 +1212,61 @@ def _publish_owned(
             elif require_existing:
                 raise UnownedArtifactError(f"artifact disappeared before publication: {path}")
             try:
-                staged_name = build(parent, path.name)
+                staged_name, staged_pin = build(parent, path.name)
             except BaseException:
                 if claimed_name is not None:
                     _restore_claimed(parent, claimed_name, path.name)
                 raise
+
+            def _discard_staged() -> None:
+                """Remove the staged entry, bound to the authored identity."""
+                if staged_pin is not None:
+                    with suppress(OSError, UnownedArtifactError):
+                        # A staged entry that no longer carries the authored
+                        # identity is a raced-in replacement: leave it.
+                        parent.quarantined_remove(staged_name, staged_pin.identity)
+                    return
+                with suppress(OSError):
+                    parent.remove_entry(staged_name)
+
             try:
-                parent.revalidate()
-                parent.rename_no_replace(staged_name, path.name)
-            except FileExistsError as exc:
-                parent.remove_entry(staged_name)
-                if claimed_name is not None:
-                    _restore_claimed(parent, claimed_name, path.name)
-                raise UnownedArtifactError(
-                    f"canonical path was recreated during publication: {path}"
-                ) from exc
-            except BaseException:
-                parent.remove_entry(staged_name)
-                if claimed_name is not None:
-                    _restore_claimed(parent, claimed_name, path.name)
-                raise
+                try:
+                    parent.revalidate()
+                    if (
+                        staged_pin is None
+                        or parent.entry_identity(staged_name) != staged_pin.identity
+                    ):
+                        # The randomly named staging entry was swapped after
+                        # the build: never publish unauthored content.
+                        raise UnownedArtifactError(
+                            f"staged generation changed before publication: {path}"
+                        )
+                    parent.rename_no_replace(staged_name, path.name)
+                except FileExistsError as exc:
+                    _discard_staged()
+                    if claimed_name is not None:
+                        _restore_claimed(parent, claimed_name, path.name)
+                    raise UnownedArtifactError(
+                        f"canonical path was recreated during publication: {path}"
+                    ) from exc
+                except BaseException:
+                    _discard_staged()
+                    if claimed_name is not None:
+                        _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                if parent.entry_identity(path.name) != staged_pin.identity:
+                    # The rename itself was raced: an imposter now sits at the
+                    # canonical name. Pull it aside untouched and fail.
+                    with suppress(OSError):
+                        parent.replace(path.name, _claim_name(path.name, "replacing"))
+                    if claimed_name is not None:
+                        _restore_claimed(parent, claimed_name, path.name)
+                    raise UnownedArtifactError(
+                        f"canonical path was raced during publication: {path}"
+                    )
+            finally:
+                if staged_pin is not None:
+                    staged_pin.close()
             if claimed_name is not None and pin is not None:
                 with suppress(UnownedArtifactError):
                     # An identity change means the claimed sibling is no longer
