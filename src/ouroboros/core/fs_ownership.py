@@ -39,11 +39,21 @@ Threat model and defenses:
   rename until the final mutation. While that descriptor is open the
   filesystem cannot recycle the inode, so a writer that unlinks and
   recreates the claimed sibling necessarily produces a different identity
-  — the re-checks after the ownership predicate and inside the deletion
-  itself therefore detect every replacement, including an immediate
-  inode-number reuse that would defeat a bare ``(device, inode)`` tuple.
-  The final ``unlink``/``rmtree`` syscall itself is the platform's
-  atomicity limit; the unpredictable claim name closes that window.
+  — the re-checks after the ownership predicate therefore detect every
+  replacement, including an immediate inode-number reuse that would defeat
+  a bare ``(device, inode)`` tuple. Destruction never runs as a bare
+  pathname ``unlink``: the validated entry is atomically renamed into a
+  fresh, unpredictable ``0700`` quarantine directory, re-authenticated
+  *there* against the pinned identity, and only a match is destroyed — a
+  replacement raced onto the claim name at the last instant is captured by
+  the rename, fails re-authentication, and is moved back out untouched.
+* **Builder redirection.** Tree and entry builders never write through a
+  pathname under the shared parent: they build in a private workspace, and
+  the finished generation is imported beside the canonical path through
+  descriptor-bound writes only (a ``dst_dir_fd`` rename, or a
+  descriptor-relative recursive copy across filesystems). A canonical
+  parent renamed away and replaced by a symlink during a build therefore
+  cannot receive — or redirect — a single builder write.
 * **Special-file entries.** Every pin is acquired without blocking
   (``O_PATH`` where available, ``O_NONBLOCK`` otherwise) and only regular
   files and directories are ownable: a FIFO, socket, or device planted at
@@ -316,6 +326,69 @@ class _PinnedParent:
         os.mkdir(name, mode=0o700, dir_fd=self.fd)
         return name
 
+    def import_entry(self, source: Path, name: str) -> None:
+        """Bring a privately built entry under the pinned parent, fd-relative only.
+
+        *source* lives in a private staging workspace nobody else can reach,
+        so reading it by pathname is safe; every write lands through the
+        pinned descriptor (``dst_dir_fd`` rename, or a descriptor-relative
+        recursive copy across filesystems), so a canonical parent renamed and
+        replaced by a symlink during a build can never redirect the import.
+        """
+        if self.fd is None:
+            shutil.move(os.fspath(source), self.path / name)
+            return
+        try:
+            os.rename(os.fspath(source), name, dst_dir_fd=self.fd)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+        _import_tree_fd(source, self.fd, name)
+
+    def quarantined_remove(self, name: str, expected_identity: tuple[int, int, int]) -> None:
+        """Destroy one validated entry through a setup-owned quarantine.
+
+        A bare no-follow ``stat`` followed by a pathname ``unlink`` leaves a
+        window in which a watcher can swap the claim name; instead the entry
+        is atomically renamed into a fresh, unpredictable ``0700`` quarantine
+        directory and re-authenticated *there* against the pinned identity.
+        Only a match is destroyed; a raced-in replacement is moved back out
+        under a discoverable claim-shaped name, untouched, and the removal
+        fails with :class:`UnownedArtifactError`.
+        """
+        if self.fd is None:
+            if self.entry_identity(name) != expected_identity:
+                raise UnownedArtifactError(
+                    f"claimed generation changed identity before removal: {self.path / name}"
+                )
+            remove_path(self.path / name)
+            return
+        quarantine = self.make_staging_dir(prefix=f".{name}.")
+        held = f"{quarantine}/entry"
+        try:
+            os.rename(name, held, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        except FileNotFoundError:
+            with suppress(OSError):
+                os.rmdir(quarantine, dir_fd=self.fd)
+            raise UnownedArtifactError(
+                f"claimed generation disappeared before removal: {self.path / name}"
+            ) from None
+        if self.entry_identity(held) != expected_identity:
+            # The atomic move captured a raced-in replacement, not the
+            # validated generation: put it back out discoverable and abort.
+            try:
+                self.rename_no_replace(held, name)
+            except OSError:
+                with suppress(OSError):
+                    self.rename_no_replace(held, f"{name}.{os.urandom(4).hex()}.evicted")
+            with suppress(OSError):
+                os.rmdir(quarantine, dir_fd=self.fd)
+            raise UnownedArtifactError(
+                f"claimed generation changed identity before removal: {self.path / name}"
+            )
+        shutil.rmtree(quarantine, dir_fd=self.fd)
+
     def lexists(self, name: str) -> bool:
         if self.fd is None:
             return os.path.lexists(self.path / name)
@@ -397,6 +470,46 @@ class _PinnedParent:
             return
         with suppress(OSError):
             os.fsync(self.fd)
+
+
+def _import_tree_fd(source: Path, parent_fd: int, name: str) -> None:
+    """Copy a privately built entry into *parent_fd* using only fd-relative writes.
+
+    *source* is trusted (it lives in a private workspace), so pathname reads
+    are safe; every created entry lands relative to a held descriptor, so no
+    concurrent parent swap can redirect a single write. Only regular files,
+    directories, and symlinks are importable.
+    """
+    entry = os.lstat(source)
+    mode = stat_module.S_IMODE(entry.st_mode)
+    if stat_module.S_ISLNK(entry.st_mode):
+        os.symlink(os.readlink(source), name, dir_fd=parent_fd)
+        return
+    if stat_module.S_ISREG(entry.st_mode):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        try:
+            with source.open("rb") as handle:
+                while chunk := handle.read(1 << 20):
+                    os.write(fd, chunk)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        return
+    if stat_module.S_ISDIR(entry.st_mode):
+        os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        child_fd = os.open(name, directory_flags, dir_fd=parent_fd)
+        try:
+            for child in sorted(source.iterdir(), key=lambda item: item.name):
+                _import_tree_fd(child, child_fd, child.name)
+            if hasattr(os, "fchmod"):
+                os.fchmod(child_fd, mode)
+        finally:
+            os.close(child_fd)
+        return
+    raise OSError(errno.EINVAL, "unsupported staged entry type", str(source))
 
 
 def _nofollow_components(
@@ -558,7 +671,7 @@ def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path]
                     changed = True
                 continue
             with suppress(OSError):
-                parent.remove_entry(claim_name, expected_identity=pin.identity)
+                parent.quarantined_remove(claim_name, pin.identity)
                 changed = True
         finally:
             pin.close()
@@ -710,7 +823,7 @@ def claim_and_remove_owned(
                     _restore_claimed(parent, claimed_name, path.name)
                     return False
                 try:
-                    parent.remove_entry(claimed_name, expected_identity=pin.identity)
+                    parent.quarantined_remove(claimed_name, pin.identity)
                 except UnownedArtifactError:
                     # The claimed sibling no longer carries the validated
                     # identity (the pinned descriptor makes inode reuse
@@ -786,19 +899,22 @@ def publish_owned_tree(
 ) -> None:
     """Atomically publish one owned directory-tree generation.
 
-    *build* receives a staging directory created beside *path* and must fill
-    it with the complete new generation. The staged tree then replaces the
-    canonical path under the same claim/verify/no-replace discipline as
-    :func:`publish_owned_file`.
+    *build* receives a staging directory in a private workspace (never a path
+    under the shared parent) and must fill it with the complete new
+    generation; the finished tree is then imported beside *path* through
+    descriptor-bound writes only and replaces the canonical path under the
+    same claim/verify/no-replace discipline as :func:`publish_owned_file`.
+    A shared parent renamed away and replaced by a symlink during the build
+    therefore cannot redirect a single builder write.
     """
 
     def _build(parent: _PinnedParent, target_name: str) -> str:
-        staging_name = parent.make_staging_dir(prefix=f".{target_name}.")
-        try:
-            build(parent.path / staging_name)
-        except BaseException:
-            parent.remove_entry(staging_name)
-            raise
+        staging_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
+        with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
+            workspace = Path(private_root) / "tree"
+            workspace.mkdir(mode=0o700)
+            build(workspace)
+            parent.import_entry(workspace, staging_name)
         return staging_name
 
     _publish_owned(path, _build, is_owned=is_owned, trusted_ancestor=trusted_ancestor)
@@ -814,24 +930,23 @@ def publish_owned_entry(
 ) -> None:
     """Atomically publish one owned generation of arbitrary topology.
 
-    *build* receives a nonexistent staging path beside *path* and must create
-    the complete entry there — a file, a directory tree, or a symlink. The
-    staged entry then replaces the canonical path under the same
-    claim/verify/no-replace discipline as :func:`publish_owned_file`; rollback
-    flows use this to restore pre-transaction snapshots without a separate
-    check-then-restore sequence.
+    *build* receives a nonexistent staging path in a private workspace (never
+    a path under the shared parent) and must create the complete entry there
+    — a file, a directory tree, or a symlink. The finished entry is imported
+    beside *path* through descriptor-bound writes only and replaces the
+    canonical path under the same claim/verify/no-replace discipline as
+    :func:`publish_owned_file`; rollback flows use this to restore
+    pre-transaction snapshots without a separate check-then-restore sequence.
     """
 
     def _build(parent: _PinnedParent, target_name: str) -> str:
         staged_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
-        try:
-            build(parent.path / staged_name)
-        except BaseException:
-            with suppress(OSError):
-                parent.remove_entry(staged_name)
-            raise
-        if not parent.lexists(staged_name):
-            raise OSError(errno.ENOENT, "entry build produced no staged generation", str(path))
+        with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
+            workspace = Path(private_root) / "entry"
+            build(workspace)
+            if not os.path.lexists(workspace):
+                raise OSError(errno.ENOENT, "entry build produced no staged generation", str(path))
+            parent.import_entry(workspace, staged_name)
         return staged_name
 
     _publish_owned(
@@ -905,7 +1020,7 @@ def _publish_owned(
                     # An identity change means the claimed sibling is no longer
                     # the generation this transaction validated (the pinned
                     # descriptor rules out inode reuse); leave it for recovery.
-                    parent.remove_entry(claimed_name, expected_identity=pin.identity)
+                    parent.quarantined_remove(claimed_name, pin.identity)
         finally:
             if pin is not None:
                 pin.close()

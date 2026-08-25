@@ -239,17 +239,15 @@ def test_remove_restores_claim_on_transient_failure_and_supports_retry(
     path, and a retry after the transient fault succeeds."""
     target = tmp_path / "artifact.txt"
     target.write_text("owned generation\n", encoding="utf-8")
-    real_remove = fs_ownership._PinnedParent.remove_entry
+    real_remove = fs_ownership._PinnedParent.quarantined_remove
     failures = iter([True])
 
-    def flaky_remove(
-        self: object, name: str, expected_identity: tuple[int, int, int] | None = None
-    ) -> None:
+    def flaky_remove(self: object, name: str, expected_identity: tuple[int, int, int]) -> None:
         if next(failures, False):
             raise OSError("simulated transient removal failure")
         real_remove(self, name, expected_identity)
 
-    monkeypatch.setattr(fs_ownership._PinnedParent, "remove_entry", flaky_remove)
+    monkeypatch.setattr(fs_ownership._PinnedParent, "quarantined_remove", flaky_remove)
 
     with pytest.raises(OSError, match="simulated transient removal failure"):
         claim_and_remove_owned(target, is_owned=lambda _p: True)
@@ -555,3 +553,124 @@ def test_has_recoverable_claim_requires_authentication(tmp_path: Path) -> None:
     assert not target.exists()
     assert owned_claim.exists()
     assert forged_claim.exists()
+
+
+def test_tree_builder_writes_cannot_escape_through_a_swapped_parent(tmp_path: Path) -> None:
+    """The reviewer's builder-redirection probe: a parent renamed away and
+    replaced by a symlink *during* the build must not receive a single builder
+    write — builders operate in a private workspace, never through the shared
+    parent's pathname."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    target = profile / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    external = tmp_path / "external"
+    external.mkdir()
+    moved = tmp_path / "profile-moved"
+
+    def swap_parent_then_write(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+        profile.rename(moved)
+        try:
+            profile.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        (staging / "escaped.txt").write_text("escaped payload\n", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        publish_owned_tree(target, swap_parent_then_write, is_owned=lambda _p: True)
+
+    assert list(external.rglob("*")) == []
+    assert (moved / "artifact-dir" / "content.txt").read_text(encoding="utf-8") == (
+        "owned generation\n"
+    )
+
+
+def test_entry_builder_writes_cannot_escape_through_a_swapped_parent(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    target = profile / "guide.md"
+    external = tmp_path / "external"
+    external.mkdir()
+    moved = tmp_path / "profile-moved"
+
+    def swap_parent_then_write(staging: Path) -> None:
+        profile.rename(moved)
+        try:
+            profile.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        staging.write_text("restored snapshot\n", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        fs_ownership.publish_owned_entry(target, swap_parent_then_write, is_owned=lambda _p: True)
+
+    assert list(external.rglob("*")) == []
+
+
+def test_remove_never_deletes_a_replacement_swapped_at_the_last_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's final-syscall race: a replacement swapped onto the claim
+    name after validation is captured by the quarantine rename, fails
+    re-authentication, and survives untouched."""
+    target = tmp_path / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+    hidden = tmp_path / "hidden"
+    state: dict[str, Path | None] = {"claimed": None}
+
+    def capture_then_approve(claimed: Path) -> bool:
+        state["claimed"] = claimed
+        return True
+
+    real_make = fs_ownership._PinnedParent.make_staging_dir
+
+    def hostile_make(self: fs_ownership._PinnedParent, prefix: str) -> str:
+        quarantine = real_make(self, prefix)
+        claimed = state["claimed"]
+        if claimed is not None and claimed.exists():
+            claimed.rename(hidden)
+            claimed.write_text("replacement generation\n", encoding="utf-8")
+            state["claimed"] = None
+        return quarantine
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "make_staging_dir", hostile_make)
+
+    assert not claim_and_remove_owned(target, is_owned=capture_then_approve)
+
+    assert hidden.read_text(encoding="utf-8") == "owned generation\n"
+    assert target.read_text(encoding="utf-8") == "replacement generation\n"
+
+
+def test_tree_remove_never_deletes_a_replacement_swapped_at_the_last_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    hidden = tmp_path / "hidden"
+    state: dict[str, Path | None] = {"claimed": None}
+
+    def capture_then_approve(claimed: Path) -> bool:
+        state["claimed"] = claimed
+        return True
+
+    real_make = fs_ownership._PinnedParent.make_staging_dir
+
+    def hostile_make(self: fs_ownership._PinnedParent, prefix: str) -> str:
+        quarantine = real_make(self, prefix)
+        claimed = state["claimed"]
+        if claimed is not None and claimed.exists():
+            claimed.rename(hidden)
+            claimed.mkdir()
+            (claimed / "content.txt").write_text("replacement generation\n", encoding="utf-8")
+            state["claimed"] = None
+        return quarantine
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "make_staging_dir", hostile_make)
+
+    assert not claim_and_remove_owned(target, is_owned=capture_then_approve)
+
+    assert (hidden / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+    assert (target / "content.txt").read_text(encoding="utf-8") == "replacement generation\n"

@@ -11036,6 +11036,46 @@ class TestGjcSetup:
 
         assert path.read_text(encoding="utf-8") == "operator replacement\n"
 
+    def test_gjc_rollback_restoration_cannot_escape_through_a_swapped_parent(
+        self, tmp_path: Path
+    ) -> None:
+        """A parent renamed away and replaced by a symlink while the rollback
+        materializes a snapshot must not receive a single restored write."""
+        from ouroboros.cli import gjc_setup
+
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        path = profile / "guide.md"
+        path.write_text("pre-setup\n", encoding="utf-8")
+        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
+        path.write_text("ours\n", encoding="utf-8")
+        expected = setup_cmd._snapshot_path(path, follow_links=False)
+        external = tmp_path / "external"
+        external.mkdir()
+        moved = tmp_path / "profile-moved"
+
+        def swap_then_restore(
+            target: Path, snap: object, *, restore_link_targets: bool = True
+        ) -> None:
+            profile.rename(moved)
+            try:
+                profile.symlink_to(external)
+            except OSError:
+                pytest.skip("symlinks are not supported on this platform")
+            setup_cmd._restore_path_snapshot(
+                target, snap, restore_link_targets=restore_link_targets
+            )
+
+        gjc_setup._restore_gjc_paths(
+            ((path, snapshot),),
+            ((path, expected),),
+            swap_then_restore,
+            setup_cmd._snapshot_path,
+        )
+
+        assert list(external.rglob("*")) == []
+        assert (moved / "guide.md").exists()
+
     def test_gjc_rollback_preserves_an_operator_replacement_of_our_generation(
         self, tmp_path: Path
     ) -> None:
