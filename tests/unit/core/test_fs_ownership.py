@@ -747,13 +747,23 @@ def test_tree_remove_never_restores_a_half_destroyed_tree(
     monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
     monkeypatch.setattr(fs_ownership.shutil, "rmtree", half_destroy)
 
-    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
+    with pytest.raises(OSError, match="residue retained"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
 
-    # The canonical namespace never sees the damaged tree again: the residue
-    # stays quarantined under a tombstone, never as the artifact or a claim.
+    # The canonical namespace never sees the damaged tree again: the removal
+    # is reported as failed, and the residue stays quarantined under an
+    # intent-marked, discoverable tombstone — never as the artifact or claim.
     assert not target.exists()
     assert _claim_siblings(target, "removing") == []
-    assert not any(p.name == "artifact-dir" for p in tmp_path.iterdir())
+    tombstones = [p for p in tmp_path.iterdir() if p.name.endswith(".discarding")]
+    assert len(tombstones) == 1
+    assert (tombstones[0] / ".ouroboros-intent").read_text(encoding="utf-8") == "artifact-dir"
+
+    # A later transaction on the same path reconciles the tombstone.
+    monkeypatch.setattr(fs_ownership.os, "rename", real_rename)
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: True)
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".discarding")] == []
 
 
 def test_failed_cross_filesystem_import_leaves_no_staging_residue(
@@ -882,3 +892,98 @@ def test_tree_publish_never_publishes_a_staged_generation_swapped_before_the_ren
     # The previous owned generation is restored; the attacker tree never
     # becomes canonical.
     assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_publish_never_publishes_staged_content_mutated_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's same-inode probe: staged file content modified in place
+    (same inode) after the build must never become canonical — publication is
+    bound to the authored content generation, not just the inode."""
+    target = tmp_path / "artifact.txt"
+    real_rnr = fs_ownership._PinnedParent.rename_no_replace
+    mutated = {"done": False}
+
+    def mutate_then_rename(
+        self: fs_ownership._PinnedParent, source_name: str, target_name: str
+    ) -> None:
+        if target_name == target.name and not mutated["done"]:
+            mutated["done"] = True
+            staged = tmp_path / source_name
+            with staged.open("r+", encoding="utf-8") as handle:  # same inode
+                handle.seek(0)
+                handle.write("attacker")
+        real_rnr(self, source_name, target_name)
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "rename_no_replace", mutate_then_rename)
+
+    # Caught either before the commit (staged digest) or immediately after
+    # it (canonical digest); the mutated content is never left canonical.
+    with pytest.raises(UnownedArtifactError, match="publication"):
+        publish_owned_file(target, "managed generation\n", is_owned=lambda _p: True)
+
+    # The unauthored generation was pulled aside; nothing canonical remains.
+    assert not target.exists()
+
+
+def test_tree_publish_never_publishes_descendants_mutated_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    real_rnr = fs_ownership._PinnedParent.rename_no_replace
+    mutated = {"done": False}
+
+    def mutate_then_rename(
+        self: fs_ownership._PinnedParent, source_name: str, target_name: str
+    ) -> None:
+        if target_name == target.name and not mutated["done"]:
+            mutated["done"] = True
+            # Same top-level inode: only a descendant's bytes change.
+            (tmp_path / source_name / "content.txt").write_text(
+                "attacker generation\n", encoding="utf-8"
+            )
+        real_rnr(self, source_name, target_name)
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "rename_no_replace", mutate_then_rename)
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    with pytest.raises(UnownedArtifactError, match="publication"):
+        publish_owned_tree(target, build, is_owned=lambda _p: True)
+
+    # The prior owned generation is restored; the mutated tree never stays
+    # canonical.
+    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's crash probe: a process exit during a cross-filesystem
+    import leaves an intent-marked container; the next transaction on the
+    same path reconciles it. A container without a matching intent marker is
+    a forgery and stays untouched."""
+    target = tmp_path / "artifact-dir"
+    staged_shape = f".{target.name}.{os.urandom(8).hex()}.tmp"
+    crashed = tmp_path / f".{staged_shape}.{os.urandom(8).hex()}.importing"
+    crashed.mkdir(mode=0o700)
+    (crashed / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
+    (crashed / "entry").mkdir()
+    (crashed / "entry" / "partial.txt").write_text("partial import\n", encoding="utf-8")
+
+    forged = tmp_path / f".forged.{os.urandom(8).hex()}.importing"
+    forged.mkdir(mode=0o700)
+    (forged / "entry").mkdir()
+    (forged / "entry" / "operator.txt").write_text("operator data\n", encoding="utf-8")
+
+    def build(staging: Path) -> None:
+        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
+
+    publish_owned_tree(target, build, is_owned=lambda _p: True)
+
+    assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
+    assert not crashed.exists()  # reconciled: authenticated by its intent marker
+    assert (forged / "entry" / "operator.txt").exists()  # forgery left untouched

@@ -36,10 +36,13 @@ Threat model and defenses:
   and the publication fails instead of overwriting it. The staged
   generation itself is a pinned capability from the moment it is authored
   (the write descriptor for files, an ``O_NOFOLLOW`` pin after the
-  descriptor-bound import for trees): its identity is re-verified
-  immediately before and immediately after the final rename, so content
-  swapped onto the random staging name never becomes canonical — an
-  imposter that races the rename itself is pulled back out of the
+  descriptor-bound import for trees) *and* a content digest computed from
+  the authored bytes — structure plus every descendant — in the private
+  workspace: both the identity and the digest are re-verified immediately
+  before and immediately after the final rename, so neither a swap onto
+  the random staging name nor a same-inode in-place mutation of the
+  staged file or a staged tree's descendants ever becomes canonical — an
+  unauthored generation that races the commit is pulled back out of the
   canonical name untouched and the publication fails. Failed-publication
   staging cleanup is bound to the same authored identity.
 * **Restoration clobbering.** When another process recreates the canonical
@@ -65,14 +68,20 @@ Threat model and defenses:
   Destruction commits with the atomic isolation: a single-file ``unlink``
   that fails leaves the file intact and restores it for a retry, while
   trees are discarded commit-first — moved whole into a private directory
-  and destroyed there, or, across filesystems, destroyed in place with any
-  irrecoverable residue left quarantined under a self-describing
-  ``*.discarded`` tombstone — so a recursive deletion that fails partway
-  can never rename a half-destroyed tree back to the canonical path.
+  and destroyed there, or, across filesystems, destroyed in place — so a
+  recursive deletion that fails partway can never rename a half-destroyed
+  tree back to the canonical path. A discard whose cleanup cannot
+  complete is *reported truthfully*: the residue stays quarantined under
+  an intent-marked ``.{canonical}.{nonce}.discarding`` tombstone and the
+  removal raises instead of claiming a finished cleanup.
   Cross-filesystem imports follow the same discipline: they assemble
-  inside a ``*.importing`` intent container and commit with one atomic
-  rename, so an interrupted import leaves no loose partial state in the
-  shared namespace.
+  inside an intent-marked ``*.importing`` container whose marker names
+  the canonical artifact from the first destination write, and commit
+  with one atomic rename. Every later transaction on the same path
+  reconciles interrupted ``*.importing``/``*.discarding`` containers
+  whose marker names it — completing the discard is the correct replay of
+  an interrupted transaction — while a container without a matching
+  marker is a forgery or another artifact's and is left untouched.
 * **Builder redirection.** Tree and entry builders never write through a
   pathname under the shared parent: they build in a private workspace, and
   the finished generation is imported beside the canonical path through
@@ -119,6 +128,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 import ctypes
 import errno
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -191,6 +201,84 @@ _RENAME_NO_REPLACE = _load_rename_no_replace()
 # entry type (FIFO, socket, device, symlink) is rejected before the ownership
 # predicate runs, so content reads can never block on a special file.
 _OWNABLE_ENTRY_TYPES = (stat_module.S_IFREG, stat_module.S_IFDIR)
+
+
+_INTENT_MARKER = ".ouroboros-intent"
+
+
+def _write_intent_marker(container_fd: int, canonical_name: str, *, exist_ok: bool = False) -> None:
+    """Record which canonical artifact a container's contents belong to."""
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= os.O_TRUNC if exist_ok else os.O_EXCL
+    try:
+        fd = os.open(_INTENT_MARKER, flags, 0o600, dir_fd=container_fd)
+    except FileExistsError:
+        return
+    try:
+        os.write(fd, canonical_name.encode("utf-8"))
+        with suppress(OSError):
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_intent_marker(container_fd: int) -> str | None:
+    try:
+        fd = os.open(_INTENT_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=container_fd)
+    except OSError:
+        return None
+    try:
+        return os.read(fd, 4096).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _digest_into(digest: hashlib._Hash, path: Path, relative: bytes) -> bool:
+    entry = os.lstat(path)
+    kind = stat_module.S_IFMT(entry.st_mode)
+    if kind == stat_module.S_IFLNK:
+        digest.update(b"link\0" + relative + b"\0" + os.fsencode(os.readlink(path)) + b"\0")
+        return True
+    if kind == stat_module.S_IFREG:
+        digest.update(b"file\0" + relative + b"\0")
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1 << 20):
+                digest.update(chunk)
+        digest.update(b"\0")
+        return True
+    if kind == stat_module.S_IFDIR:
+        digest.update(b"dir\0" + relative + b"\0")
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            if not _digest_into(digest, child, relative + b"/" + os.fsencode(child.name)):
+                return False
+        return True
+    return False
+
+
+def _entry_digest(path: Path) -> str | None:
+    """Content digest of one file, tree, or symlink entry; None when unsupported.
+
+    This is the *generation* of an entry — structure plus every descendant's
+    bytes — so publication can be bound to the authored content, not merely
+    the top-level inode, which an in-place write would leave unchanged.
+    """
+    digest = hashlib.sha256()
+    try:
+        complete = _digest_into(digest, path, b"")
+    except OSError:
+        return None
+    return digest.hexdigest() if complete else None
+
+
+def _file_content_digest(content: str) -> str:
+    """The :func:`_entry_digest` value a regular file with *content* will have."""
+    digest = hashlib.sha256()
+    digest.update(b"file\0" + b"" + b"\0")
+    digest.update(content.encode("utf-8"))
+    digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _rename_no_replace_between(src_fd: int, src_name: str, dst_fd: int, dst_name: str) -> None:
@@ -372,7 +460,7 @@ class _PinnedParent:
         os.mkdir(name, mode=0o700, dir_fd=self.fd)
         return name
 
-    def import_entry(self, source: Path, name: str) -> None:
+    def import_entry(self, source: Path, name: str, *, canonical_name: str | None = None) -> None:
         """Bring a privately built entry under the pinned parent, fd-relative only.
 
         *source* lives in a private staging workspace nobody else can reach,
@@ -391,41 +479,55 @@ class _PinnedParent:
             if exc.errno != errno.EXDEV:
                 raise
         # Cross-filesystem: assemble inside a self-describing 0700 intent
-        # container, then commit with one atomic fd-relative rename. A failed
-        # or interrupted import never leaves loose partial state in the
-        # shared namespace — the container is discarded whole.
+        # container, then commit with one atomic fd-relative rename. The
+        # intent marker written first names the canonical artifact, so an
+        # import interrupted even by a process crash is discoverable and
+        # reconciled by the next transaction on the same path.
         container = f".{name}.{os.urandom(8).hex()}.importing"
         os.mkdir(container, mode=0o700, dir_fd=self.fd)
         container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         container_fd = os.open(container, container_flags, dir_fd=self.fd)
         try:
+            _write_intent_marker(container_fd, canonical_name or name)
             try:
                 _import_tree_fd(source, container_fd, "entry")
                 os.rename("entry", name, src_dir_fd=container_fd, dst_dir_fd=self.fd)
             except BaseException:
-                self._discard_container_entry(container, container_fd)
+                with suppress(OSError):
+                    self._discard_container_entry(
+                        container, container_fd, canonical_name=canonical_name or name
+                    )
                 raise
+            os.unlink(_INTENT_MARKER, dir_fd=container_fd)
         finally:
             os.close(container_fd)
         with suppress(OSError):
             os.rmdir(container, dir_fd=self.fd)
 
-    def _discard_container_entry(self, container: str, container_fd: int) -> None:
+    def _discard_container_entry(
+        self, container: str, container_fd: int, *, canonical_name: str
+    ) -> None:
         """Destroy ``container/entry`` without ever damaging the shared namespace.
 
         Commit-first: the entry is atomically moved into a private temporary
         directory and destroyed there, so an in-place recursive deletion can
         never half-destroy something that later leaks back. Across
-        filesystems the destruction runs inside the container; if even that
-        fails, the residue stays quarantined under a self-describing
-        ``*.discarded`` tombstone — never restored into a canonical or claim
-        name — for the operator to reclaim.
+        filesystems the destruction runs inside the container. A destruction
+        that cannot complete is *reported*: the residue stays quarantined —
+        intent-marked — under a self-describing ``.{canonical}.{nonce}.discarding``
+        tombstone that the next transaction on the same path reconciles, and
+        :class:`OSError` is raised so removal and uninstall surfaces stay
+        truthful instead of claiming a cleanup that did not happen.
         """
+        _write_intent_marker(container_fd, canonical_name, exist_ok=True)
         private_root = tempfile.mkdtemp(prefix="ouroboros-discard-")
+        moved = False
         try:
             os.rename("entry", os.path.join(private_root, "entry"), src_dir_fd=container_fd)
+            moved = True
+        except FileNotFoundError:
+            pass
         except OSError:
-            shutil.rmtree(private_root, ignore_errors=True)
             try:
                 entry = os.stat("entry", dir_fd=container_fd, follow_symlinks=False)
                 if stat_module.S_ISDIR(entry.st_mode):
@@ -434,20 +536,42 @@ class _PinnedParent:
                     os.unlink("entry", dir_fd=container_fd)
             except FileNotFoundError:
                 pass
-            except OSError:
-                with suppress(OSError):
-                    os.rename(
-                        container,
-                        f"{container}.discarded",
-                        src_dir_fd=self.fd,
-                        dst_dir_fd=self.fd,
-                    )
-                return
-        else:
+            except OSError as exc:
+                shutil.rmtree(private_root, ignore_errors=True)
+                self._retain_tombstone(container, canonical_name)
+                raise OSError(
+                    errno.ENOTEMPTY,
+                    "cleanup residue retained in a discoverable tombstone",
+                    str(self.path / container),
+                ) from exc
+        if moved:
             with suppress(Exception):
                 shutil.rmtree(private_root, ignore_errors=True)
+            if os.path.lexists(os.path.join(private_root, "entry")):
+                # The private destruction failed: bring the residue back into
+                # the pinned container so it stays discoverable, and report.
+                try:
+                    os.rename(os.path.join(private_root, "entry"), "entry", dst_dir_fd=container_fd)
+                except OSError:
+                    pass  # residue stays in the private directory as last resort
+                else:
+                    self._retain_tombstone(container, canonical_name)
+                    raise OSError(
+                        errno.ENOTEMPTY,
+                        "cleanup residue retained in a discoverable tombstone",
+                        str(self.path / container),
+                    )
+        shutil.rmtree(private_root, ignore_errors=True)
+        with suppress(OSError):
+            os.unlink(_INTENT_MARKER, dir_fd=container_fd)
         with suppress(OSError):
             os.rmdir(container, dir_fd=self.fd)
+
+    def _retain_tombstone(self, container: str, canonical_name: str) -> None:
+        """Rename a container holding residue to the recognized tombstone shape."""
+        tombstone = f".{canonical_name}.{os.urandom(8).hex()}.discarding"
+        with suppress(OSError):
+            os.rename(container, tombstone, src_dir_fd=self.fd, dst_dir_fd=self.fd)
 
     def quarantined_remove(
         self,
@@ -455,6 +579,7 @@ class _PinnedParent:
         expected_identity: tuple[int, int, int],
         *,
         reauthenticate: Callable[[Path], bool] | None = None,
+        canonical_name: str | None = None,
     ) -> None:
         """Destroy one validated entry through a descriptor-pinned quarantine.
 
@@ -552,10 +677,13 @@ class _PinnedParent:
             if identity[2] == stat_module.S_IFDIR:
                 # Removal commits with the atomic move into the quarantine; a
                 # recursive deletion that fails partway must never restore a
-                # half-destroyed tree, so trees are discarded commit-first
-                # (moved into a private directory, or left quarantined under
-                # a tombstone) and this call cannot fail the removal.
-                self._discard_container_entry(quarantine, quarantine_fd)
+                # half-destroyed tree, so trees are discarded commit-first.
+                # A discard whose cleanup cannot complete leaves the residue
+                # in an intent-marked tombstone and raises, so the removal is
+                # reported truthfully instead of claiming a finished cleanup.
+                self._discard_container_entry(
+                    quarantine, quarantine_fd, canonical_name=canonical_name or name
+                )
             else:
                 try:
                     os.unlink("entry", dir_fd=quarantine_fd)
@@ -841,6 +969,47 @@ def _claim_siblings(parent: _PinnedParent, name: str) -> list[str]:
     return sorted(entry for entry in entries if pattern.match(entry))
 
 
+_STALE_CONTAINER_PATTERN = re.compile(r"^\..+\.[0-9a-f]{16}\.(?:importing|discarding)$")
+
+
+def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
+    """Reconcile interrupted import/discard containers that name *path*.
+
+    A process crash during a cross-filesystem import, or a destruction whose
+    cleanup could not complete, leaves an intent-marked ``*.importing`` /
+    ``*.discarding`` container. Only a container whose intent marker names
+    this canonical artifact is reconciled — its contents were authored (or
+    already approved for destruction) by an interrupted transaction on the
+    same path, so completing the discard is the correct replay. A
+    container without a matching marker is a forgery or belongs to another
+    artifact and is left untouched.
+    """
+    if parent.fd is None:
+        return False
+    try:
+        entries = os.listdir(parent.fd)
+    except OSError:
+        return False
+    changed = False
+    container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    for entry in sorted(entries):
+        if not _STALE_CONTAINER_PATTERN.match(entry):
+            continue
+        try:
+            container_fd = os.open(entry, container_flags, dir_fd=parent.fd)
+        except OSError:
+            continue
+        try:
+            if _read_intent_marker(container_fd) != path.name:
+                continue
+            with suppress(OSError):
+                parent._discard_container_entry(entry, container_fd, canonical_name=path.name)
+                changed = True
+        finally:
+            os.close(container_fd)
+    return changed
+
+
 def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path], bool]) -> bool:
     """Reconcile interrupted claim siblings of *path* left by a crashed transaction.
 
@@ -852,7 +1021,7 @@ def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path]
     deleted as a leftover when the canonical path is occupied. A claim that
     fails authentication is left untouched as a collision for the operator.
     """
-    changed = False
+    changed = _reconcile_stale_containers(parent, path)
     for claim_name in _claim_siblings(parent, path.name):
         pin = parent.pin_entry(claim_name)
         if pin is None:
@@ -879,7 +1048,9 @@ def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path]
                     changed = True
                 continue
             with suppress(OSError):
-                parent.quarantined_remove(claim_name, pin.identity, reauthenticate=is_owned)
+                parent.quarantined_remove(
+                    claim_name, pin.identity, reauthenticate=is_owned, canonical_name=path.name
+                )
                 changed = True
         finally:
             pin.close()
@@ -1031,7 +1202,12 @@ def claim_and_remove_owned(
                     _restore_claimed(parent, claimed_name, path.name)
                     return False
                 try:
-                    parent.quarantined_remove(claimed_name, pin.identity, reauthenticate=is_owned)
+                    parent.quarantined_remove(
+                        claimed_name,
+                        pin.identity,
+                        reauthenticate=is_owned,
+                        canonical_name=path.name,
+                    )
                 except UnownedArtifactError:
                     # The claimed sibling no longer carries the validated
                     # identity (the pinned descriptor makes inode reuse
@@ -1073,7 +1249,9 @@ def publish_owned_file(
     :class:`UnownedArtifactError` instead of replacing it.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
+    def _build(
+        parent: _PinnedParent, target_name: str
+    ) -> tuple[str, _PinnedEntry | None, str | None]:
         fd, temp_name = parent.create_temp_file(prefix=f".{target_name}.")
         staged_pin: _PinnedEntry | None = None
         try:
@@ -1096,7 +1274,7 @@ def publish_owned_file(
                 staged_pin.close()
             parent.unlink(temp_name)
             raise
-        return temp_name, staged_pin
+        return temp_name, staged_pin, _file_content_digest(content)
 
     _publish_owned(
         path,
@@ -1125,14 +1303,17 @@ def publish_owned_tree(
     therefore cannot redirect a single builder write.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
+    def _build(
+        parent: _PinnedParent, target_name: str
+    ) -> tuple[str, _PinnedEntry | None, str | None]:
         staging_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
         with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
             workspace = Path(private_root) / "tree"
             workspace.mkdir(mode=0o700)
             build(workspace)
-            parent.import_entry(workspace, staging_name)
-        return staging_name, parent.pin_entry(staging_name)
+            authored = _entry_digest(workspace)
+            parent.import_entry(workspace, staging_name, canonical_name=target_name)
+        return staging_name, parent.pin_entry(staging_name), authored
 
     _publish_owned(path, _build, is_owned=is_owned, trusted_ancestor=trusted_ancestor)
 
@@ -1156,15 +1337,18 @@ def publish_owned_entry(
     pre-transaction snapshots without a separate check-then-restore sequence.
     """
 
-    def _build(parent: _PinnedParent, target_name: str) -> tuple[str, _PinnedEntry | None]:
+    def _build(
+        parent: _PinnedParent, target_name: str
+    ) -> tuple[str, _PinnedEntry | None, str | None]:
         staged_name = f".{target_name}.{os.urandom(8).hex()}.tmp"
         with tempfile.TemporaryDirectory(prefix="ouroboros-staging-") as private_root:
             workspace = Path(private_root) / "entry"
             build(workspace)
             if not os.path.lexists(workspace):
                 raise OSError(errno.ENOENT, "entry build produced no staged generation", str(path))
-            parent.import_entry(workspace, staged_name)
-        return staged_name, parent.pin_entry(staged_name)
+            authored = _entry_digest(workspace)
+            parent.import_entry(workspace, staged_name, canonical_name=target_name)
+        return staged_name, parent.pin_entry(staged_name), authored
 
     _publish_owned(
         path,
@@ -1177,7 +1361,7 @@ def publish_owned_entry(
 
 def _publish_owned(
     path: Path,
-    build: Callable[[_PinnedParent, str], tuple[str, _PinnedEntry | None]],
+    build: Callable[[_PinnedParent, str], tuple[str, _PinnedEntry | None, str | None]],
     *,
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None,
@@ -1212,7 +1396,7 @@ def _publish_owned(
             elif require_existing:
                 raise UnownedArtifactError(f"artifact disappeared before publication: {path}")
             try:
-                staged_name, staged_pin = build(parent, path.name)
+                staged_name, staged_pin, staged_digest = build(parent, path.name)
             except BaseException:
                 if claimed_name is not None:
                     _restore_claimed(parent, claimed_name, path.name)
@@ -1224,7 +1408,9 @@ def _publish_owned(
                     with suppress(OSError, UnownedArtifactError):
                         # A staged entry that no longer carries the authored
                         # identity is a raced-in replacement: leave it.
-                        parent.quarantined_remove(staged_name, staged_pin.identity)
+                        parent.quarantined_remove(
+                            staged_name, staged_pin.identity, canonical_name=path.name
+                        )
                     return
                 with suppress(OSError):
                     parent.remove_entry(staged_name)
@@ -1234,13 +1420,18 @@ def _publish_owned(
                     parent.revalidate()
                     if (
                         staged_pin is None
+                        or staged_digest is None
                         or parent.entry_identity(staged_name) != staged_pin.identity
+                        or _entry_digest(path.with_name(staged_name)) != staged_digest
                     ):
-                        # The randomly named staging entry was swapped after
-                        # the build: never publish unauthored content.
+                        # The randomly named staging entry was swapped or its
+                        # content mutated in place after the build — the
+                        # content generation, not just the inode, must match
+                        # what this transaction authored.
                         raise UnownedArtifactError(
                             f"staged generation changed before publication: {path}"
                         )
+                    parent.revalidate()
                     parent.rename_no_replace(staged_name, path.name)
                 except FileExistsError as exc:
                     _discard_staged()
@@ -1254,9 +1445,13 @@ def _publish_owned(
                     if claimed_name is not None:
                         _restore_claimed(parent, claimed_name, path.name)
                     raise
-                if parent.entry_identity(path.name) != staged_pin.identity:
-                    # The rename itself was raced: an imposter now sits at the
-                    # canonical name. Pull it aside untouched and fail.
+                if (
+                    parent.entry_identity(path.name) != staged_pin.identity
+                    or _entry_digest(path) != staged_digest
+                ):
+                    # The rename itself was raced, or the content was mutated
+                    # in place across the commit: an unauthored generation now
+                    # sits at the canonical name. Pull it aside untouched.
                     with suppress(OSError):
                         parent.replace(path.name, _claim_name(path.name, "replacing"))
                     if claimed_name is not None:
@@ -1272,7 +1467,12 @@ def _publish_owned(
                     # An identity change means the claimed sibling is no longer
                     # the generation this transaction validated (the pinned
                     # descriptor rules out inode reuse); leave it for recovery.
-                    parent.quarantined_remove(claimed_name, pin.identity, reauthenticate=is_owned)
+                    parent.quarantined_remove(
+                        claimed_name,
+                        pin.identity,
+                        reauthenticate=is_owned,
+                        canonical_name=path.name,
+                    )
         finally:
             if pin is not None:
                 pin.close()
