@@ -111,6 +111,7 @@ def _run_installer(
     *,
     include_uv: bool = True,
     local_repo: bool = True,
+    piped: bool = False,
     env: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     fake_commands: dict[str, str] | None = None,
@@ -181,10 +182,12 @@ exit 0
     for key in drop_env:
         run_env.pop(key, None)
 
+    command = ["bash"] if piped else ["bash", str(install_sh)]
     return subprocess.run(
-        ["bash", str(install_sh)],
+        command,
         cwd=cwd,
         env=run_env,
+        input=install_sh.read_text(encoding="utf-8") if piped else None,
         text=True,
         capture_output=True,
         check=False,
@@ -311,6 +314,62 @@ def test_installer_does_not_relabel_existing_first_command_surface_hint(
 
     assert result.returncode == 0, result.stderr
     assert hint.read_text(encoding="utf-8") == "readme_quickstart\n"
+
+
+def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        piped=True,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "BASH_SOURCE" not in result.stderr
+
+
+def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    old_package = tmp_path / "old-package" / "ouroboros" / "config"
+    old_package.mkdir(parents=True)
+    (old_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "models.py").write_text(
+        "class OuroborosConfig:\n"
+        "    @classmethod\n"
+        "    def model_validate(cls, raw):\n"
+        "        return cls()\n",
+        encoding="utf-8",
+    )
+    python_wrapper = (
+        "#!/bin/sh\n"
+        "shift\n"
+        f"PYTHONPATH={shlex.quote(str(old_package.parents[1]))} "
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={
+            "curl": _telemetry_probe_curl(),
+            "python3": python_wrapper,
+            "python": python_wrapper,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "AttributeError" not in result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:

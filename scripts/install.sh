@@ -314,7 +314,7 @@ PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9
 PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
 
 _telemetry_config_allows() {
-  local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
+  local f="$HOME/.ouroboros/config.yaml" script_path script_dir source_root=""
   local python_candidate ouroboros_cmd shebang status
   # `-e` is false for a dangling symlink. That is invalid persisted state,
   # not a genuinely absent config, so keep it on the fail-closed path.
@@ -328,7 +328,13 @@ _telemetry_config_allows() {
   # requires a Python environment with Ouroboros' real schema available;
   # otherwise collection fails closed. A genuinely absent config retains the
   # documented default-on behavior after the notice below.
-  script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || true
+  # `curl | bash` has no sourced file path; nounset must not break this
+  # optional local-source optimization.
+  script_path="${BASH_SOURCE[0]-}"
+  script_dir=""
+  if [ -n "$script_path" ]; then
+    script_dir=$(CDPATH='' cd -- "$(dirname -- "$script_path")" 2>/dev/null && pwd) || true
+  fi
   if [ -n "$script_dir" ] && [ -f "$script_dir/../src/ouroboros/config/models.py" ]; then
     source_root=$(CDPATH='' cd -- "$script_dir/../src" 2>/dev/null && pwd) || true
   fi
@@ -355,7 +361,10 @@ try:
 except Exception:
     raise SystemExit(1)
 
-raise SystemExit(0 if config.telemetry.enabled is True else 1)
+# Older installed schemas may validate without a telemetry field. Fail closed
+# instead of dereferencing an attribute the schema does not have.
+enabled = getattr(getattr(config, "telemetry", None), "enabled", False)
+raise SystemExit(0 if enabled is True else 1)
 PY
   }
 
