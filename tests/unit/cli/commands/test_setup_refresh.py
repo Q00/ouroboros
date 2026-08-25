@@ -214,14 +214,18 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         install.assert_not_called()
 
     def test_orphaned_gjc_claim_state_triggers_refresh(self, tmp_path: Path) -> None:
-        """Managed state hidden under a crashed transaction's claim sibling is
-        discovered as installed state; the reinstall reconciles it."""
+        """An authentic managed generation hidden under a crashed transaction's
+        claim sibling is discovered as installed state; the reinstall
+        reconciles it."""
         from ouroboros.core.fs_ownership import _claim_name
 
-        rules_dir = tmp_path / ".gjc" / "agent" / "rules"
-        rules_dir.mkdir(parents=True)
-        claim = rules_dir / _claim_name("ouroboros-skill-capability-guide.md", "replacing")
-        claim.write_text("interrupted generation\n", encoding="utf-8")
+        agent_dir = tmp_path / ".gjc" / "agent"
+        with patch.dict("os.environ", {"GJC_CODING_AGENT_DIR": str(agent_dir)}):
+            from ouroboros.runtime_instruction_artifacts import install_gjc_instruction_artifact
+
+            guide = install_gjc_instruction_artifact().path
+        claim = guide.with_name(_claim_name(guide.name, "replacing"))
+        guide.rename(claim)  # simulate a crash between the claim and completion
 
         with (
             patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/bin/gjc"),
@@ -235,6 +239,28 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         install.assert_called_once_with("/opt/bin/gjc")
         assert "Refreshed runtime artifacts: gjc" in result.output
+
+    def test_forged_gjc_claim_does_not_trigger_refresh(self, tmp_path: Path) -> None:
+        """Claim-name syntax alone is not evidence of installed GJC state: a
+        forged claim-shaped file must not activate a runtime that setup never
+        configured."""
+        from ouroboros.core.fs_ownership import _claim_name
+
+        agent_dir = tmp_path / ".gjc" / "agent"
+        rules_dir = agent_dir / "rules"
+        rules_dir.mkdir(parents=True)
+        forged = rules_dir / _claim_name("ouroboros-skill-capability-guide.md", "replacing")
+        forged.write_text("forged payload\n", encoding="utf-8")
+        unrelated = agent_dir / _claim_name("unrelated.bin", "removing")
+        unrelated.write_text("unrelated\n", encoding="utf-8")
+
+        with patch("ouroboros.cli.commands.setup._install_gjc_runtime_artifacts") as install:
+            result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "No installed runtime artifacts found to refresh." in result.output
+        install.assert_not_called()
+        assert forged.read_text(encoding="utf-8") == "forged payload\n"
 
     def test_refreshes_from_persistent_gjc_mcp_state_only(self, tmp_path: Path) -> None:
         agent_dir = tmp_path / ".gjc" / "agent"

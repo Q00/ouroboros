@@ -51,23 +51,3 @@ def gjc_mcp_bridge_config_path() -> Path:
 def gjc_bridge_path() -> Path:
     """Return the compatibility input bridge path for the active GJC profile."""
     return gjc_agent_dir() / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-
-
-def has_orphaned_gjc_claims() -> bool:
-    """Return whether any GJC artifact directory holds an interrupted claim.
-
-    A crashed transaction leaves the managed generation under a hidden claim
-    sibling; discovery must treat that as installed state so refresh and
-    uninstall reconcile it instead of skipping the artifact.
-    """
-    from ouroboros.core.fs_ownership import find_orphaned_claims
-
-    agent_dir = gjc_agent_dir()
-    parents = (
-        agent_dir,
-        agent_dir / "skills",
-        gjc_instruction_path().parent,
-        gjc_mcp_bridge_config_path().parent,
-        gjc_bridge_path().parent,
-    )
-    return any(find_orphaned_claims(parent) for parent in parents)

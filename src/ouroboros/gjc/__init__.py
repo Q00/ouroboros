@@ -12,6 +12,7 @@ from ouroboros.gjc.artifacts import (
     GJC_SKILL_NAMESPACE,
     GjcSkillInstallResult,
     gjc_skills_root,
+    has_orphaned_gjc_claims,
     has_setup_owned_gjc_skills,
     install_gjc_skills,
     recover_gjc_skill_claims,
@@ -47,7 +48,6 @@ from ouroboros.gjc.paths import (
     gjc_instruction_path,
     gjc_mcp_bridge_config_path,
     gjc_mcp_config_path,
-    has_orphaned_gjc_claims,
 )
 
 __all__ = [

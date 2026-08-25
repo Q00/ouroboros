@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 import hashlib
@@ -276,6 +276,49 @@ def setup_owned_gjc_skill_paths(
     return tuple(sorted(owned, key=lambda path: path.name))
 
 
+def has_orphaned_gjc_claims() -> bool:
+    """Return whether an *authenticated* interrupted GJC claim exists.
+
+    Claim-name syntax is discovery metadata, not ownership evidence: only a
+    claim sibling of a known GJC artifact path whose content passes that
+    artifact's exact ownership predicate counts as installed state. A forged
+    or unrelated claim-shaped file must never cause refresh to activate a
+    runtime that setup did not previously configure.
+    """
+    from ouroboros.core.fs_ownership import find_orphaned_claims, has_recoverable_claim
+    from ouroboros.gjc.bridge import is_setup_managed_gjc_bridge
+    from ouroboros.gjc.guide import is_setup_managed_gjc_instruction
+    from ouroboros.gjc.mcp import is_setup_managed_gjc_mcp_bridge_config
+    from ouroboros.gjc.paths import (
+        gjc_agent_dir,
+        gjc_bridge_path,
+        gjc_instruction_path,
+        gjc_mcp_bridge_config_path,
+    )
+
+    agent_dir = gjc_agent_dir()
+    known_artifacts: tuple[tuple[Path, Callable[[Path], bool]], ...] = (
+        (gjc_instruction_path(), is_setup_managed_gjc_instruction),
+        (gjc_mcp_bridge_config_path(), is_setup_managed_gjc_mcp_bridge_config),
+        (gjc_bridge_path(), is_setup_managed_gjc_bridge),
+    )
+    if any(
+        has_recoverable_claim(artifact, is_owned=judge, trusted_ancestor=agent_dir)
+        for artifact, judge in known_artifacts
+    ):
+        return True
+    skills_root = gjc_skills_root(agent_dir)
+    if not skills_root.is_dir() or skills_root.is_symlink():
+        return False
+    return any(
+        name.startswith(GJC_SKILL_NAMESPACE)
+        and has_recoverable_claim(
+            skills_root / name, is_owned=_is_managed_skill, trusted_ancestor=agent_dir
+        )
+        for name in find_orphaned_claims(skills_root)
+    )
+
+
 def recover_gjc_skill_claims(*, agent_dir: str | Path) -> bool:
     """Reconcile interrupted skill-claim state left by a crashed transaction."""
     target_root = gjc_skills_root(agent_dir)
@@ -323,6 +366,7 @@ __all__ = [
     "GJC_SKILL_NAMESPACE",
     "GjcSkillInstallResult",
     "gjc_skills_root",
+    "has_orphaned_gjc_claims",
     "has_setup_owned_gjc_skills",
     "install_gjc_skills",
     "recover_gjc_skill_claims",

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -515,3 +517,41 @@ def test_find_orphaned_claims_names_the_canonical_entries(tmp_path: Path) -> Non
     (tmp_path / "unrelated.txt").write_text("z", encoding="utf-8")
 
     assert fs_ownership.find_orphaned_claims(tmp_path) == ("guide.md", "index.ts")
+
+
+def test_special_file_at_canonical_path_is_rejected_without_blocking(tmp_path: Path) -> None:
+    """A FIFO planted at a managed path must neither hang the transaction nor
+    pass ownership — the reviewer's `os.mkfifo` probe."""
+    target = tmp_path / "artifact.txt"
+    try:
+        os.mkfifo(target)
+    except (AttributeError, OSError):
+        pytest.skip("FIFOs are not supported on this platform")
+
+    def must_not_run(_claimed: Path) -> bool:  # pragma: no cover - must not run
+        raise AssertionError("ownership predicate must not read a special file")
+
+    with pytest.raises(UnownedArtifactError):
+        publish_owned_file(target, "managed\n", is_owned=must_not_run)
+    assert stat.S_ISFIFO(target.lstat().st_mode)
+
+    assert not claim_and_remove_owned(target, is_owned=must_not_run)
+    assert stat.S_ISFIFO(target.lstat().st_mode)
+
+
+def test_has_recoverable_claim_requires_authentication(tmp_path: Path) -> None:
+    target = tmp_path / "artifact.txt"
+    owned_claim = target.with_name(fs_ownership._claim_name(target.name, "replacing"))
+    owned_claim.write_text("owned generation\n", encoding="utf-8")
+    forged_claim = target.with_name(fs_ownership._claim_name(target.name, "removing"))
+    forged_claim.write_text("forged payload\n", encoding="utf-8")
+
+    def is_owned(path: Path) -> bool:
+        return path.read_text(encoding="utf-8") == "owned generation\n"
+
+    assert fs_ownership.has_recoverable_claim(target, is_owned=is_owned)
+    assert not fs_ownership.has_recoverable_claim(target, is_owned=lambda _p: False)
+    # Discovery is read-only: nothing was promoted or deleted.
+    assert not target.exists()
+    assert owned_claim.exists()
+    assert forged_claim.exists()

@@ -44,6 +44,13 @@ Threat model and defenses:
   inode-number reuse that would defeat a bare ``(device, inode)`` tuple.
   The final ``unlink``/``rmtree`` syscall itself is the platform's
   atomicity limit; the unpredictable claim name closes that window.
+* **Special-file entries.** Every pin is acquired without blocking
+  (``O_PATH`` where available, ``O_NONBLOCK`` otherwise) and only regular
+  files and directories are ownable: a FIFO, socket, or device planted at
+  a managed path is classified by type and rejected *before* any content
+  read, so it can neither stall a transaction indefinitely nor pass an
+  ownership predicate — it is claimed, refused, and restored like any
+  other unowned generation.
 * **Crash, partial state, and forged claims.** A claim name is a durable,
   self-describing intent record (``.{name}.{nonce}.{removing|replacing}``)
   — but claim-name syntax is *discovery metadata, not ownership evidence*:
@@ -144,6 +151,11 @@ def _load_rename_no_replace() -> Callable[[int, str, int, str], int] | None:
 
 _RENAME_NO_REPLACE = _load_rename_no_replace()
 
+# Only regular files and directories can be owned generations: any other
+# entry type (FIFO, socket, device, symlink) is rejected before the ownership
+# predicate runs, so content reads can never block on a special file.
+_OWNABLE_ENTRY_TYPES = (stat_module.S_IFREG, stat_module.S_IFDIR)
+
 
 class _PinnedEntry:
     """One held entry capability: an ``O_NOFOLLOW`` descriptor plus its identity.
@@ -233,11 +245,21 @@ class _PinnedParent:
         ``(device, inode)`` tuple without a held descriptor would be defeated
         by immediate inode reuse. A symlink entry is returned identity-only
         (the type marks it for rejection); ``None`` means the entry is gone.
+
+        The open must never block: ``O_PATH`` where the platform has it
+        (which also never triggers device side effects), ``O_NONBLOCK``
+        otherwise, so a FIFO or other special file planted at a managed path
+        cannot stall the transaction — its type is rejected by every caller
+        before any content read.
         """
         if self.fd is None:
             identity = self.entry_identity(name)
             return None if identity is None else _PinnedEntry(None, identity)
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_PATH"):
+            flags |= os.O_PATH
+        else:
+            flags |= os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
         try:
             entry_fd = os.open(name, flags, dir_fd=self.fd)
         except FileNotFoundError:
@@ -519,7 +541,7 @@ def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path]
             try:
                 parent.revalidate()
                 owned = (
-                    pin.identity[2] != stat_module.S_IFLNK
+                    pin.identity[2] in _OWNABLE_ENTRY_TYPES
                     and parent.entry_identity(claim_name) == pin.identity
                     and is_owned(claimed)
                     and parent.entry_identity(claim_name) == pin.identity
@@ -562,6 +584,47 @@ def recover_owned_claims(
             return _recover_claims(parent, path, is_owned)
     except FileNotFoundError:
         return False
+
+
+def has_recoverable_claim(
+    path: Path,
+    *,
+    is_owned: Callable[[Path], bool],
+    trusted_ancestor: Path | None = None,
+) -> bool:
+    """Read-only discovery: does an authenticated owned claim sibling of *path* exist?
+
+    Authenticates under the claim name exactly like recovery — pinned entry,
+    ownable type before any content read, identity-bracketed predicate — but
+    mutates nothing. Discovery flows use this to decide whether managed state
+    exists; claim-name syntax alone is never evidence, so a forged or
+    unrelated claim-shaped sibling reports False.
+    """
+    try:
+        with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent:
+            for claim_name in _claim_siblings(parent, path.name):
+                pin = parent.pin_entry(claim_name)
+                if pin is None:
+                    continue
+                try:
+                    try:
+                        parent.revalidate()
+                        owned = (
+                            pin.identity[2] in _OWNABLE_ENTRY_TYPES
+                            and parent.entry_identity(claim_name) == pin.identity
+                            and is_owned(path.with_name(claim_name))
+                            and parent.entry_identity(claim_name) == pin.identity
+                        )
+                        parent.revalidate()
+                    except OSError:
+                        continue
+                    if owned:
+                        return True
+                finally:
+                    pin.close()
+    except OSError:
+        return False
+    return False
 
 
 def remove_path(path: Path) -> None:
@@ -635,7 +698,7 @@ def claim_and_remove_owned(
                     parent.revalidate()
                     owned = (
                         pin is not None
-                        and pin.identity[2] != stat_module.S_IFLNK
+                        and pin.identity[2] in _OWNABLE_ENTRY_TYPES
                         and is_owned(claimed)
                         and parent.entry_identity(claimed_name) == pin.identity
                     )
@@ -803,7 +866,7 @@ def _publish_owned(
                     parent.revalidate()
                     owned = (
                         pin is not None
-                        and pin.identity[2] != stat_module.S_IFLNK
+                        and pin.identity[2] in _OWNABLE_ENTRY_TYPES
                         and is_owned(claimed)
                         and parent.entry_identity(claimed_name) == pin.identity
                     )
