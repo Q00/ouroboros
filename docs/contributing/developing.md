@@ -20,8 +20,9 @@ package**, not at your working tree:
 
 So if you clone the repo, edit a handler, and open your agent client in the
 project directory, the server that answers is the last release — your change
-has no effect and nothing warns you. Same for `uvx ouroboros ...` on the
-command line.
+has no effect and nothing warns you. The distribution-qualified command
+`uvx --from ouroboros-ai ouroboros ...` likewise runs the published release on
+the command line.
 
 Point the tooling at your working tree instead. There are two surfaces, and
 which one you need depends on what you changed.
