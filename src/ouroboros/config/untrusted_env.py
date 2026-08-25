@@ -142,6 +142,13 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_MCP_CONFIG",
         "OUROBOROS_PLUGIN_LOCKFILE",
         "OUROBOROS_PLUGIN_TRUST_ROOT",
+        # Destructive-recovery authority root. core/fs_ownership.py
+        # authenticates crash-replay reconciliation of shared-directory
+        # transaction containers against ledger records under this dir; a
+        # cloned repo's .env choosing it could vouch for forged containers
+        # and have recovery delete operator-owned payloads. Only the real
+        # process environment / trusted home configuration may select it.
+        "OUROBOROS_FS_TRANSACTION_DIR",
         # SSRF guard toggle. `mcp/types.py` blocks loopback/private/link-local
         # MCP transport targets unless this is "1"; an untrusted .env must not
         # be able to re-enable connections to internal addresses.
