@@ -1103,19 +1103,17 @@ def test_ledger_root_swap_cannot_split_lock_and_record_authority(
 def test_discard_entry_swap_is_detected_before_recursive_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reviewer's EXDEV-fallback probe: when the private move fails and
-    destruction must run inside the container, a writer swapping ``entry``
-    after the pre-deletion stat must not have the replacement recursively
-    deleted. The entry is captured by an atomic rename and re-verified
-    against the observed identity; the mismatch restores the replacement
-    untouched and the removal reports the cleanup failure truthfully."""
+    """The reviewer's EXDEV probe, under the no-in-place-destruction model:
+    when no private area can receive the entry, nothing is destroyed through
+    shared names at all — a writer swapping ``entry`` mid-removal keeps both
+    the displaced generation and the replacement intact inside the
+    truthfully-reported tombstone."""
     target = tmp_path / "artifact-dir"
     target.mkdir()
     (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
 
     real_rename = fs_ownership.os.rename
-    real_stat = fs_ownership.os.stat
-    state = {"exdev_raised": False, "swapped": False}
+    state = {"swapped": False}
 
     def deny_private_move(
         src: object,
@@ -1125,43 +1123,86 @@ def test_discard_entry_swap_is_detected_before_recursive_deletion(
         dst_dir_fd: int | None = None,
     ) -> None:
         if src == "entry" and isinstance(dst, str) and "ouroboros-discard-" in dst:
-            state["exdev_raised"] = True
+            if not state["swapped"]:
+                # The hostile writer swaps the quarantined entry for
+                # operator data while the removal is in flight.
+                state["swapped"] = True
+                quarantine = next(
+                    entry
+                    for entry in tmp_path.iterdir()
+                    if entry.name.endswith(".tmp") and (entry / "entry").exists()
+                )
+                real_rename(str(quarantine / "entry"), str(quarantine / "stashed"))
+                replacement = quarantine / "entry"
+                replacement.mkdir()
+                (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
             raise OSError(errno.EXDEV, "simulated cross-device link")
         real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
-    def stat_then_swap(path: object, *args: object, **kwargs: object) -> object:
-        result = real_stat(path, *args, **kwargs)
-        if (
-            path == "entry"
-            and kwargs.get("dir_fd") is not None
-            and kwargs.get("follow_symlinks") is False
-            and state["exdev_raised"]
-            and not state["swapped"]
-        ):
-            state["swapped"] = True
-            quarantine = next(
-                entry
-                for entry in tmp_path.iterdir()
-                if entry.name.endswith(".tmp") and (entry / "entry").exists()
-            )
-            real_rename(str(quarantine / "entry"), str(quarantine / "stashed"))
-            replacement = quarantine / "entry"
-            replacement.mkdir()
-            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-        return result
-
     monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
-    monkeypatch.setattr(fs_ownership.os, "stat", stat_then_swap)
 
     with pytest.raises(OSError, match="cleanup residue retained"):
         claim_and_remove_owned(target, is_owned=lambda _p: True)
 
     assert state["swapped"]
-    # The raced-in replacement survived, intact, inside the retained
-    # tombstone; nothing was recursively deleted through a reused pathname.
+    # Nothing was deleted through a shared pathname: the replacement and the
+    # displaced original both survive inside the retained tombstone.
     tombstone = next(tmp_path.glob(f".{target.name}.*.discarding"))
-    survivors = sorted(p.name for p in tombstone.glob("**/operator.txt"))
-    assert survivors == ["operator.txt"]
+    assert (tombstone / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
+    assert (tombstone / "stashed" / "content.txt").read_text(encoding="utf-8") == (
+        "owned generation\n"
+    )
+
+
+def test_recursive_descendant_swap_is_never_deleted_through_stale_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's descendant probe: a regular-file descendant replaced
+    mid-removal must never be unlinked through a stale pathname. Physical
+    erasure happens only after an atomic whole-entry move into a
+    writer-private area; when no private area can receive the entry, no
+    descendant is touched — the operator's replacement survives byte for
+    byte inside the truthful tombstone."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    real_rename = fs_ownership.os.rename
+    state = {"swapped": False}
+
+    def deny_private_move(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if src == "entry" and isinstance(dst, str) and "ouroboros-discard-" in dst:
+            if not state["swapped"]:
+                # The hostile writer swaps a descendant, not the top level.
+                state["swapped"] = True
+                quarantine = next(
+                    entry
+                    for entry in tmp_path.iterdir()
+                    if entry.name.endswith(".tmp") and (entry / "entry").exists()
+                )
+                (quarantine / "entry" / "content.txt").unlink()
+                (quarantine / "entry" / "content.txt").write_text(
+                    "operator replacement\n", encoding="utf-8"
+                )
+            raise OSError(errno.EXDEV, "simulated cross-device link")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
+
+    with pytest.raises(OSError, match="cleanup residue retained"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    assert state["swapped"]
+    tombstone = next(tmp_path.glob(f".{target.name}.*.discarding"))
+    assert (tombstone / "entry" / "content.txt").read_text(encoding="utf-8") == (
+        "operator replacement\n"
+    )
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(

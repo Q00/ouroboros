@@ -291,6 +291,27 @@ def test_install_rejects_a_symlinked_agent_root(tmp_path: Path) -> None:
     assert not any(external.rglob("SKILL.md"))
 
 
+def test_symlinked_agent_root_no_side_effects_before_validation(tmp_path: Path) -> None:
+    """The reviewer's side-effect probe: skill setup must not mutate through
+    a symlinked configured root before the shared primitive's no-follow walk
+    validates it — not even by creating an empty ``skills`` directory. The
+    external target stays entirely unchanged."""
+    source = tmp_path / "source"
+    _skill(source, "interview")
+    external = tmp_path / "external"
+    external.mkdir()
+    agent_dir = tmp_path / "agent"
+    try:
+        agent_dir.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    with pytest.raises(OSError, match="symlinked trusted root"):
+        install_gjc_skills(agent_dir=agent_dir, skills_dir=source)
+
+    assert list(external.iterdir()) == []
+
+
 def test_remove_recovers_an_interrupted_skill_claim(tmp_path: Path) -> None:
     """A skill stranded under a crashed transaction's claim name is restored
     and then removed like any other managed generation."""

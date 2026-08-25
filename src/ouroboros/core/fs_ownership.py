@@ -65,15 +65,20 @@ Threat model and defenses:
   tree destruction to descendant content, not just the top-level inode.
   Only an entry that passes every re-check is destroyed. A replacement or
   a tree modified after the original read is moved back out untouched.
-  Destruction commits with the atomic isolation: a single-file ``unlink``
+  Removal commits with the atomic isolation: a single-file ``unlink``
   that fails leaves the file intact and restores it for a retry, while
-  trees are discarded commit-first — moved whole into a private directory
-  and destroyed there, or, across filesystems, destroyed in place — so a
-  recursive deletion that fails partway can never rename a half-destroyed
-  tree back to the canonical path. A discard whose cleanup cannot
-  complete is *reported truthfully*: the residue stays quarantined under
-  an intent-marked ``.{canonical}.{nonce}.discarding`` tombstone and the
-  removal raises instead of claiming a finished cleanup.
+  trees are discarded commit-first — moved whole into a writer-private
+  directory and destroyed there through private pathnames. Physical
+  erasure is never part of the shared-namespace transaction: filesystems
+  provide an atomic rename for an entry but no atomic tree deletion, so
+  nothing is ever recursively destroyed through names in an
+  operator-reachable location — a later substitution therefore cannot be
+  deleted, and a half-destroyed tree can never leak back to the canonical
+  path. A residue no private area can receive (every private move fails,
+  e.g. across filesystems), or whose private destruction cannot complete,
+  is *reported truthfully*: it stays quarantined under an intent-marked
+  ``.{canonical}.{nonce}.discarding`` tombstone and the removal raises
+  instead of claiming a finished cleanup.
   Cross-filesystem imports follow the same discipline: they assemble
   inside an intent-marked ``*.importing`` container and commit with one
   atomic rename. Container names and intent markers live in the shared
@@ -214,84 +219,6 @@ _RENAME_NO_REPLACE = _load_rename_no_replace()
 # entry type (FIFO, socket, device, symlink) is rejected before the ownership
 # predicate runs, so content reads can never block on a special file.
 _OWNABLE_ENTRY_TYPES = (stat_module.S_IFREG, stat_module.S_IFDIR)
-
-
-def _remove_tree_contents_fd(dir_fd: int) -> None:
-    """Recursively empty a directory through descriptors only, never following
-    symlinks; a child whose type changes mid-walk fails the affected syscall
-    instead of resolving a fresh pathname."""
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    for child in os.listdir(dir_fd):
-        entry = os.stat(child, dir_fd=dir_fd, follow_symlinks=False)
-        if stat_module.S_ISDIR(entry.st_mode):
-            child_fd = os.open(child, flags, dir_fd=dir_fd)
-            try:
-                held = os.fstat(child_fd)
-                if (held.st_dev, held.st_ino) != (entry.st_dev, entry.st_ino):
-                    raise OSError(errno.EBUSY, "directory replaced during recursive discard", child)
-                _remove_tree_contents_fd(child_fd)
-            finally:
-                os.close(child_fd)
-            os.rmdir(child, dir_fd=dir_fd)
-        else:
-            os.unlink(child, dir_fd=dir_fd)
-
-
-def _destroy_container_entry_fd(container_fd: int) -> None:
-    """Destroy ``entry`` inside a pinned container, bound to the observed generation.
-
-    A stat followed by a pathname recursive delete can destroy a raced-in
-    replacement instead of the generation this transaction intended to
-    discard. The entry is therefore atomically renamed to an unpredictable
-    sibling inside the pinned container — capturing whatever occupies the
-    name — and re-verified against the pre-capture identity before any
-    destruction: a mismatch restores the replacement to ``entry`` untouched
-    and reports the cleanup as failed. Directories are then emptied through
-    descriptors only, and the final ``rmdir``/``unlink`` runs on the
-    unpredictable captured name whose identity was just pinned (an ``rmdir``
-    can only ever remove an empty directory, so even that last name lookup
-    cannot destroy content).
-    """
-    observed = os.stat("entry", dir_fd=container_fd, follow_symlinks=False)
-    expected = (observed.st_dev, observed.st_ino, stat_module.S_IFMT(observed.st_mode))
-    captured_name = f".condemned.{os.urandom(8).hex()}"
-    os.rename("entry", captured_name, src_dir_fd=container_fd, dst_dir_fd=container_fd)
-    captured = os.stat(captured_name, dir_fd=container_fd, follow_symlinks=False)
-    if (captured.st_dev, captured.st_ino, stat_module.S_IFMT(captured.st_mode)) != expected:
-        with suppress(OSError):
-            os.rename(captured_name, "entry", src_dir_fd=container_fd, dst_dir_fd=container_fd)
-        raise OSError(errno.EBUSY, "entry replaced during cross-filesystem discard")
-    try:
-        if stat_module.S_ISDIR(captured.st_mode):
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-            )
-            captured_fd = os.open(captured_name, flags, dir_fd=container_fd)
-            try:
-                held = os.fstat(captured_fd)
-                if (held.st_dev, held.st_ino) != (captured.st_dev, captured.st_ino):
-                    raise OSError(errno.EBUSY, "entry replaced during cross-filesystem discard")
-                _remove_tree_contents_fd(captured_fd)
-            finally:
-                os.close(captured_fd)
-            os.rmdir(captured_name, dir_fd=container_fd)
-        else:
-            os.unlink(captured_name, dir_fd=container_fd)
-    except OSError:
-        # A destruction that fails partway restores what remains to the
-        # canonical in-container name, so a later tombstone replay finds the
-        # residue where the transaction schema expects it.
-        with suppress(OSError):
-            os.rename(captured_name, "entry", src_dir_fd=container_fd, dst_dir_fd=container_fd)
-        raise
 
 
 _INTENT_MARKER = ".ouroboros-intent"
@@ -765,39 +692,59 @@ class _PinnedParent:
     def _discard_container_entry(
         self, container: str, container_fd: int, *, canonical_name: str, ledger: _LedgerAuthority
     ) -> None:
-        """Destroy ``container/entry`` without ever damaging the shared namespace.
+        """Discard ``container/entry`` without ever destroying through a shared name.
 
-        Commit-first: the entry is atomically moved into a private temporary
-        directory and destroyed there, so an in-place recursive deletion can
-        never half-destroy something that later leaks back. Across
-        filesystems the destruction runs inside the container. A destruction
-        that cannot complete is *reported*: the residue stays quarantined —
+        The atomic quarantine is the removal commit; physical erasure is a
+        private afterstep, never part of the shared-namespace transaction.
+        The entry is atomically moved — whole — into a writer-private
+        directory and destroyed there through private pathnames no other
+        writer can reach. Nothing is ever deleted in place inside the
+        operator-reachable container: filesystems provide an atomic rename
+        for an entry but no atomic tree deletion, so any in-place recursive
+        removal would necessarily walk names a concurrent writer can swap.
+        A move that no private area can receive, or a private destruction
+        that cannot complete, is *reported*: the residue stays quarantined —
         intent-marked — under a self-describing ``.{canonical}.{nonce}.discarding``
         tombstone that the next transaction on the same path reconciles, and
         :class:`OSError` is raised so removal and uninstall surfaces stay
         truthful instead of claiming a cleanup that did not happen.
         """
         _write_intent_marker(container_fd, canonical_name, exist_ok=True)
-        private_root = tempfile.mkdtemp(prefix="ouroboros-discard-")
         moved = False
-        try:
-            os.rename("entry", os.path.join(private_root, "entry"), src_dir_fd=container_fd)
-            moved = True
-        except FileNotFoundError:
-            pass
-        except OSError:
+        missing = False
+        private_root: str | None = None
+        # Candidate private destruction areas, tried in order: the
+        # writer-owned ledger root (usually the artifact's own filesystem),
+        # then the system temporary directory. The move must be atomic — a
+        # candidate on another filesystem simply fails with EXDEV and the
+        # next is tried; when none can receive the entry, nothing is
+        # destroyed in place: the residue is retained in a truthful
+        # tombstone instead. Physical erasure is not part of the ownership
+        # transaction — the atomic quarantine is the removal commit.
+        for candidate in (str(_transaction_ledger_root()), None):
             try:
-                _destroy_container_entry_fd(container_fd)
+                private_root = tempfile.mkdtemp(prefix="ouroboros-discard-", dir=candidate)
+            except OSError:
+                continue
+            try:
+                os.rename("entry", os.path.join(private_root, "entry"), src_dir_fd=container_fd)
+                moved = True
+                break
             except FileNotFoundError:
-                pass
-            except OSError as exc:
+                missing = True
+                break
+            except OSError:
                 shutil.rmtree(private_root, ignore_errors=True)
-                self._retain_tombstone(container, canonical_name, ledger)
-                raise OSError(
-                    errno.ENOTEMPTY,
-                    "cleanup residue retained in a discoverable tombstone",
-                    str(self.path / container),
-                ) from exc
+                private_root = None
+        if not moved and not missing:
+            if private_root is not None:
+                shutil.rmtree(private_root, ignore_errors=True)
+            self._retain_tombstone(container, canonical_name, ledger)
+            raise OSError(
+                errno.ENOTEMPTY,
+                "cleanup residue retained in a discoverable tombstone",
+                str(self.path / container),
+            )
         if moved:
             with suppress(Exception):
                 shutil.rmtree(private_root, ignore_errors=True)
@@ -815,7 +762,8 @@ class _PinnedParent:
                         "cleanup residue retained in a discoverable tombstone",
                         str(self.path / container),
                     )
-        shutil.rmtree(private_root, ignore_errors=True)
+        if private_root is not None:
+            shutil.rmtree(private_root, ignore_errors=True)
         with suppress(OSError):
             os.unlink(_INTENT_MARKER, dir_fd=container_fd)
         try:

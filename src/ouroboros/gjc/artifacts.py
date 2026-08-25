@@ -209,11 +209,10 @@ def install_gjc_skills(
     prune: bool = True,
 ) -> GjcSkillInstallResult:
     """Install or refresh namespaced Ouroboros skills for one GJC profile."""
+    # The skills/ parent is created by publish_owned_tree's pinned no-follow
+    # walk from the trusted agent root — never by a pathname mkdir here, so a
+    # symlinked or hostile root produces no side effects before validation.
     target_root = gjc_skills_root(agent_dir)
-    target_root.mkdir(parents=True, exist_ok=True)
-    if target_root.is_symlink():
-        raise OSError(f"Refusing to install GJC skills through a symlink: {target_root}")
-
     agent_root = Path(agent_dir).expanduser()
     installed: list[Path] = []
     with _packaged_skills(skills_dir) as source_root:
