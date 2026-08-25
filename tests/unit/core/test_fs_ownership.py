@@ -1006,6 +1006,51 @@ def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
     assert (forged / "entry" / "operator.txt").exists()  # forgery left untouched
 
 
+def test_live_record_survives_concurrent_reconcile_and_creator_crash_recovery(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's interleaving probe: a publisher writes its ledger
+    record before its container exists, and a concurrent transaction
+    reconciles the same canonical path inside that window. The per-path
+    ledger lock serializes the two — the reconciler blocks instead of
+    retiring the live record, and when the creator then publishes the
+    container and dies, the blocked reconciliation replays it and retires
+    the record instead of stranding unauthenticated residue."""
+    import threading
+
+    target = tmp_path / "artifact-dir"
+    canonical = fs_ownership._ledger_canonical(target)
+    nonce = os.urandom(8).hex()
+    container = f".{target.name}.{nonce}.importing"
+    outcome: dict[str, bool] = {}
+
+    def concurrent_reconcile() -> None:
+        outcome["changed"] = fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+
+    racer = threading.Thread(target=concurrent_reconcile)
+    with fs_ownership._ledger_lock(canonical):
+        # Creator: inside the record-before-container window.
+        fs_ownership._ledger_record(
+            nonce, canonical=target, container=container, operation="importing"
+        )
+        racer.start()
+        racer.join(timeout=1.0)
+        # The reconciler is blocked on the lock; the live record survives.
+        assert racer.is_alive()
+        assert fs_ownership._ledger_read(nonce) is not None
+        # Creator publishes the container, then dies (the crash releases the
+        # lock with the import unfinished).
+        (tmp_path / container).mkdir(mode=0o700)
+    racer.join(timeout=30.0)
+    assert not racer.is_alive()
+
+    # The reconciliation ran only after the container existed: it replayed
+    # the interrupted import and retired its record.
+    assert outcome["changed"] is True
+    assert not (tmp_path / container).exists()
+    assert fs_ownership._ledger_read(nonce) is None
+
+
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
     tmp_path: Path,
 ) -> None:

@@ -81,7 +81,11 @@ Threat model and defenses:
   recovery authority. That authority is a *transaction ledger* record in
   an exclusively writer-owned state root, written before the container
   ever becomes discoverable and binding the canonical path, operation,
-  and exact container name. Every later transaction on the same path
+  and exact container name. Record creation, container publication,
+  replay, and orphan retirement are serialized per canonical path by a
+  lock in the same writer-owned root, so reconciliation can never
+  observe — let alone revoke — a live transaction inside its
+  record-before-container window. Every later transaction on the same path
   reconciles interrupted ``*.importing``/``*.discarding`` containers the
   ledger vouches for (and whose marker, when present, agrees) — completing
   the discard
@@ -142,6 +146,8 @@ import re
 import shutil
 import stat as stat_module
 import tempfile
+
+from ouroboros.core.file_lock import file_lock
 
 
 class UnownedArtifactError(OSError):
@@ -307,6 +313,29 @@ def _ledger_read(nonce: str) -> dict[str, object] | None:
 def _ledger_retire(nonce: str) -> None:
     with suppress(OSError):
         os.unlink(_transaction_ledger_root() / f"{nonce}.json")
+
+
+@contextmanager
+def _ledger_lock(canonical: str) -> Iterator[None]:
+    """Serialize one canonical path's ledger/container lifecycle.
+
+    Ledger-record creation and container publication are separate filesystem
+    effects, so on their own they are independently interleavable. This lock
+    turns them into one generation: a cooperating publisher holds it from
+    before its record is written until its container exists (or the
+    transaction rolled back), and reconciliation acquires it before replaying
+    or retiring anything. Acquisition therefore proves no live publisher is
+    inside its record-before-container window — a directory snapshot taken
+    under the lock is evidence of completion, never a guess. The lock file
+    lives in the writer-owned ledger root, keyed by the canonical path, so
+    holders never touch the operator-shared parent. Never nest acquisitions:
+    ``flock`` conflicts across descriptors within one process as well.
+    """
+    root = _transaction_ledger_root()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    with file_lock(root / key):
+        yield
 
 
 def _digest_into(digest: hashlib._Hash, path: Path, relative: bytes) -> bool:
@@ -557,42 +586,50 @@ class _PinnedParent:
         # ledger record written first — in the writer-owned transaction root,
         # not the shared parent — is what authorizes recovery to reconcile
         # this container after a crash; the in-container intent marker is
-        # discovery metadata only.
-        nonce = os.urandom(8).hex()
-        container = f".{name}.{nonce}.importing"
-        _ledger_record(
-            nonce,
-            canonical=self.path / (canonical_name or name),
-            container=container,
-            operation="importing",
-        )
-        try:
-            os.mkdir(container, mode=0o700, dir_fd=self.fd)
-        except OSError:
-            _ledger_retire(nonce)
-            raise
-        container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        container_fd = os.open(container, container_flags, dir_fd=self.fd)
-        try:
-            _write_intent_marker(container_fd, canonical_name or name)
+        # discovery metadata only. The whole record-to-commit lifetime runs
+        # under the canonical path's ledger lock, so a concurrent
+        # reconciliation can never observe (and retire) the record while the
+        # container has not been published yet, nor replay the container out
+        # from under the still-running copy.
+        canonical_path = self.path / (canonical_name or name)
+        with _ledger_lock(_ledger_canonical(canonical_path)):
+            nonce = os.urandom(8).hex()
+            container = f".{name}.{nonce}.importing"
+            _ledger_record(
+                nonce,
+                canonical=canonical_path,
+                container=container,
+                operation="importing",
+            )
             try:
-                _import_tree_fd(source, container_fd, "entry")
-                os.rename("entry", name, src_dir_fd=container_fd, dst_dir_fd=self.fd)
-            except BaseException:
-                with suppress(OSError):
-                    self._discard_container_entry(
-                        container, container_fd, canonical_name=canonical_name or name
-                    )
+                os.mkdir(container, mode=0o700, dir_fd=self.fd)
+            except OSError:
+                _ledger_retire(nonce)
                 raise
-            os.unlink(_INTENT_MARKER, dir_fd=container_fd)
-        finally:
-            os.close(container_fd)
-        try:
-            os.rmdir(container, dir_fd=self.fd)
-        except OSError:
-            pass
-        else:
-            _ledger_retire(nonce)
+            container_flags = (
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            )
+            container_fd = os.open(container, container_flags, dir_fd=self.fd)
+            try:
+                _write_intent_marker(container_fd, canonical_name or name)
+                try:
+                    _import_tree_fd(source, container_fd, "entry")
+                    os.rename("entry", name, src_dir_fd=container_fd, dst_dir_fd=self.fd)
+                except BaseException:
+                    with suppress(OSError):
+                        self._discard_container_entry(
+                            container, container_fd, canonical_name=canonical_name or name
+                        )
+                    raise
+                os.unlink(_INTENT_MARKER, dir_fd=container_fd)
+            finally:
+                os.close(container_fd)
+            try:
+                os.rmdir(container, dir_fd=self.fd)
+            except OSError:
+                pass
+            else:
+                _ledger_retire(nonce)
 
     def _discard_container_entry(
         self, container: str, container_fd: int, *, canonical_name: str
@@ -802,9 +839,13 @@ class _PinnedParent:
                 # A discard whose cleanup cannot complete leaves the residue
                 # in an intent-marked tombstone and raises, so the removal is
                 # reported truthfully instead of claiming a finished cleanup.
-                self._discard_container_entry(
-                    quarantine, quarantine_fd, canonical_name=canonical_name or name
-                )
+                # Under the ledger lock: a failed discard hands the residue a
+                # tombstone ledger record, and that record-before-rename
+                # window must not be observable by a concurrent reconciler.
+                with _ledger_lock(_ledger_canonical(self.path / (canonical_name or name))):
+                    self._discard_container_entry(
+                        quarantine, quarantine_fd, canonical_name=canonical_name or name
+                    )
             else:
                 try:
                     os.unlink("entry", dir_fd=quarantine_fd)
@@ -1106,63 +1147,74 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
     the discard is then the correct replay of an interrupted transaction, and
     the record is retired with it. Any container the ledger does not vouch
     for — marker or no marker — is operator state and is left untouched.
-    Ledger records whose container no longer exists (a crash between cleanup
-    and retirement) are retired here as well.
+    Ledger records whose container no longer exists are retired here too —
+    but only under the canonical path's ledger lock: a cooperating publisher
+    holds that lock from before its record is written until its container is
+    published, so a snapshot taken while holding it distinguishes a
+    completed cleanup from a live record-before-container transaction, which
+    an unlocked snapshot never could.
     """
     if parent.fd is None:
-        return False
-    try:
-        entries = os.listdir(parent.fd)
-    except OSError:
         return False
     canonical = _ledger_canonical(path)
     changed = False
     container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    for entry in sorted(entries):
-        match = _CONTAINER_PATTERN.match(entry)
-        if match is None:
-            continue
-        record = _ledger_read(match.group(1))
-        if (
-            record is None
-            or record.get("container") != entry
-            or record.get("canonical") != canonical
-            or record.get("operation") != match.group(2)
-        ):
-            continue
+    with _ledger_lock(canonical):
         try:
-            container_fd = os.open(entry, container_flags, dir_fd=parent.fd)
+            entries = os.listdir(parent.fd)
         except OSError:
-            continue
-        try:
-            # The ledger alone is the authority: a crash can die between the
-            # container mkdir and the marker write, so a missing marker does
-            # not block the replay — only a marker naming a *different*
-            # artifact does (the container then belongs to another path).
-            marker = _read_intent_marker(container_fd)
-            if marker is not None and marker != path.name:
+            return False
+        for entry in sorted(entries):
+            match = _CONTAINER_PATTERN.match(entry)
+            if match is None:
                 continue
-            with suppress(OSError):
-                parent._discard_container_entry(entry, container_fd, canonical_name=path.name)
-                changed = True
-        finally:
-            os.close(container_fd)
-    # Retire records orphaned by a crash after cleanup but before retirement.
-    # A record whose transaction is still live sits in a brief window between
-    # the ledger write and the container mkdir; retiring it early can only
-    # strand that transaction's residue (never delete operator state).
-    with suppress(OSError):
-        for record_name in os.listdir(_transaction_ledger_root()):
-            if not record_name.endswith(".json"):
-                continue
-            nonce = record_name[: -len(".json")]
-            record = _ledger_read(nonce)
+            record = _ledger_read(match.group(1))
             if (
-                record is not None
-                and record.get("canonical") == canonical
-                and record.get("container") not in entries
+                record is None
+                or record.get("container") != entry
+                or record.get("canonical") != canonical
+                or record.get("operation") != match.group(2)
             ):
-                _ledger_retire(nonce)
+                continue
+            try:
+                container_fd = os.open(entry, container_flags, dir_fd=parent.fd)
+            except OSError:
+                continue
+            try:
+                # The ledger alone is the authority: a crash can die between
+                # the container mkdir and the marker write, so a missing
+                # marker does not block the replay — only a marker naming a
+                # *different* artifact does (the container then belongs to
+                # another path).
+                marker = _read_intent_marker(container_fd)
+                if marker is not None and marker != path.name:
+                    continue
+                with suppress(OSError):
+                    parent._discard_container_entry(entry, container_fd, canonical_name=path.name)
+                    changed = True
+            finally:
+                os.close(container_fd)
+        # Retire records orphaned by a crash after cleanup but before
+        # retirement. The fresh snapshot is taken while the lock is held, so
+        # a matching record with no container is proof of a completed (or
+        # rolled-back) transaction — no cooperating publisher can be inside
+        # its record-before-container window right now.
+        with suppress(OSError):
+            try:
+                remaining = frozenset(os.listdir(parent.fd))
+            except OSError:
+                return changed
+            for record_name in os.listdir(_transaction_ledger_root()):
+                if not record_name.endswith(".json"):
+                    continue
+                nonce = record_name[: -len(".json")]
+                record = _ledger_read(nonce)
+                if (
+                    record is not None
+                    and record.get("canonical") == canonical
+                    and record.get("container") not in remaining
+                ):
+                    _ledger_retire(nonce)
     return changed
 
 
