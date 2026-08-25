@@ -22,6 +22,16 @@ def _claim_siblings(path: Path, suffix: str) -> list[Path]:
     return sorted(path.parent.glob(f".{path.name}.*.{suffix}"))
 
 
+def _ledger_record(nonce: str, **kwargs: object) -> None:
+    with fs_ownership._ledger_authority() as ledger:
+        ledger.record(nonce, **kwargs)  # type: ignore[arg-type]
+
+
+def _ledger_read(nonce: str) -> dict[str, object] | None:
+    with fs_ownership._ledger_authority() as ledger:
+        return ledger.read(nonce)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_transaction_ledger(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -734,7 +744,7 @@ def test_tree_remove_never_restores_a_half_destroyed_tree(
     (target / "keep.txt").write_text("owned generation\n", encoding="utf-8")
     (target / "lost.txt").write_text("owned generation\n", encoding="utf-8")
     real_rename = fs_ownership.os.rename
-    real_rmtree = fs_ownership.shutil.rmtree
+    real_unlink = fs_ownership.os.unlink
 
     def deny_private_move(
         src: object,
@@ -748,15 +758,14 @@ def test_tree_remove_never_restores_a_half_destroyed_tree(
         real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
     def half_destroy(path: object, *args: object, **kwargs: object) -> None:
-        dir_fd = kwargs.get("dir_fd")
-        if path == "entry" and dir_fd is not None:
-            # In-place destruction: delete one descendant, then fail.
-            os.unlink("entry/lost.txt", dir_fd=dir_fd)
-            raise OSError("simulated destruction failure")
-        real_rmtree(path, *args, **kwargs)
+        # In-place fd-relative destruction: one descendant is already gone
+        # when the deletion of the next one fails.
+        if path == "keep.txt" and kwargs.get("dir_fd") is not None:
+            raise OSError(errno.EPERM, "simulated destruction failure")
+        real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
-    monkeypatch.setattr(fs_ownership.shutil, "rmtree", half_destroy)
+    monkeypatch.setattr(fs_ownership.os, "unlink", half_destroy)
 
     with pytest.raises(OSError, match="residue retained"):
         claim_and_remove_owned(target, is_owned=lambda _p: True)
@@ -772,7 +781,7 @@ def test_tree_remove_never_restores_a_half_destroyed_tree(
 
     # A later transaction on the same path reconciles the tombstone.
     monkeypatch.setattr(fs_ownership.os, "rename", real_rename)
-    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
+    monkeypatch.setattr(fs_ownership.os, "unlink", real_unlink)
     assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: True)
     assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".discarding")] == []
 
@@ -982,9 +991,7 @@ def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
     staged_shape = f".{target.name}.{os.urandom(8).hex()}.tmp"
     nonce = os.urandom(8).hex()
     crashed = tmp_path / f".{staged_shape}.{nonce}.importing"
-    fs_ownership._ledger_record(
-        nonce, canonical=target, container=crashed.name, operation="importing"
-    )
+    _ledger_record(nonce, canonical=target, container=crashed.name, operation="importing")
     crashed.mkdir(mode=0o700)
     (crashed / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
     (crashed / "entry").mkdir()
@@ -1002,7 +1009,7 @@ def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
 
     assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
     assert not crashed.exists()  # reconciled: the ledger vouched for it
-    assert fs_ownership._ledger_read(nonce) is None  # record retired with the replay
+    assert _ledger_read(nonce) is None  # record retired with the replay
     assert (forged / "entry" / "operator.txt").exists()  # forgery left untouched
 
 
@@ -1028,16 +1035,14 @@ def test_live_record_survives_concurrent_reconcile_and_creator_crash_recovery(
         outcome["changed"] = fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
 
     racer = threading.Thread(target=concurrent_reconcile)
-    with fs_ownership._ledger_lock(canonical):
+    with fs_ownership._ledger_authority() as creator, creator.lock(canonical):
         # Creator: inside the record-before-container window.
-        fs_ownership._ledger_record(
-            nonce, canonical=target, container=container, operation="importing"
-        )
+        creator.record(nonce, canonical=target, container=container, operation="importing")
         racer.start()
         racer.join(timeout=1.0)
         # The reconciler is blocked on the lock; the live record survives.
         assert racer.is_alive()
-        assert fs_ownership._ledger_read(nonce) is not None
+        assert _ledger_read(nonce) is not None
         # Creator publishes the container, then dies (the crash releases the
         # lock with the import unfinished).
         (tmp_path / container).mkdir(mode=0o700)
@@ -1048,7 +1053,115 @@ def test_live_record_survives_concurrent_reconcile_and_creator_crash_recovery(
     # the interrupted import and retired its record.
     assert outcome["changed"] is True
     assert not (tmp_path / container).exists()
-    assert fs_ownership._ledger_read(nonce) is None
+    assert _ledger_read(nonce) is None
+
+
+def test_ledger_root_swap_cannot_split_lock_and_record_authority(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's root-replacement probe: the ledger root is renamed and
+    recreated while a publisher is inside its record-before-container
+    window. Locking and every record operation are bound to the one root
+    descriptor the publisher pinned, so a reconciler acting on the
+    replacement root can neither see nor retire the live record — and once
+    the genuine root is back, the interrupted transaction replays normally."""
+    target = tmp_path / "artifact-dir"
+    canonical = fs_ownership._ledger_canonical(target)
+    nonce = os.urandom(8).hex()
+    container = f".{target.name}.{nonce}.importing"
+    root = fs_ownership._transaction_ledger_root()
+
+    with fs_ownership._ledger_authority() as creator:
+        with pytest.raises(OSError, match="lockfile parent changed"):
+            with creator.lock(canonical):
+                creator.record(nonce, canonical=target, container=container, operation="importing")
+                # Hostile: the ledger root is renamed away and recreated.
+                stolen = root.parent / "stolen-root"
+                os.rename(root, stolen)
+                root.mkdir(mode=0o700)
+                # A reconciler on the replacement root must not retire the
+                # live record (which lives in the pinned, renamed-away
+                # authority).
+                fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+                assert creator.read(nonce) is not None
+                assert (stolen / f"{nonce}.json").exists()
+                # The publisher's container lands; then the creator dies —
+                # and releasing the lock itself detects the swapped parent,
+                # so a live publisher can never mistake the imposter root
+                # for its own authority.
+                (tmp_path / container).mkdir(mode=0o700)
+
+    # The genuine authority is restored (the imposter root moved aside);
+    # recovery replays the interrupted import and retires its record.
+    os.rename(root, root.parent / "imposter-root")
+    os.rename(stolen, root)
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert not (tmp_path / container).exists()
+    assert _ledger_read(nonce) is None
+
+
+def test_discard_entry_swap_is_detected_before_recursive_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's EXDEV-fallback probe: when the private move fails and
+    destruction must run inside the container, a writer swapping ``entry``
+    after the pre-deletion stat must not have the replacement recursively
+    deleted. The entry is captured by an atomic rename and re-verified
+    against the observed identity; the mismatch restores the replacement
+    untouched and the removal reports the cleanup failure truthfully."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    real_rename = fs_ownership.os.rename
+    real_stat = fs_ownership.os.stat
+    state = {"exdev_raised": False, "swapped": False}
+
+    def deny_private_move(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if src == "entry" and isinstance(dst, str) and "ouroboros-discard-" in dst:
+            state["exdev_raised"] = True
+            raise OSError(errno.EXDEV, "simulated cross-device link")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def stat_then_swap(path: object, *args: object, **kwargs: object) -> object:
+        result = real_stat(path, *args, **kwargs)
+        if (
+            path == "entry"
+            and kwargs.get("dir_fd") is not None
+            and kwargs.get("follow_symlinks") is False
+            and state["exdev_raised"]
+            and not state["swapped"]
+        ):
+            state["swapped"] = True
+            quarantine = next(
+                entry
+                for entry in tmp_path.iterdir()
+                if entry.name.endswith(".tmp") and (entry / "entry").exists()
+            )
+            real_rename(str(quarantine / "entry"), str(quarantine / "stashed"))
+            replacement = quarantine / "entry"
+            replacement.mkdir()
+            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
+    monkeypatch.setattr(fs_ownership.os, "stat", stat_then_swap)
+
+    with pytest.raises(OSError, match="cleanup residue retained"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    assert state["swapped"]
+    # The raced-in replacement survived, intact, inside the retained
+    # tombstone; nothing was recursively deleted through a reused pathname.
+    tombstone = next(tmp_path.glob(f".{target.name}.*.discarding"))
+    survivors = sorted(p.name for p in tombstone.glob("**/operator.txt"))
+    assert survivors == ["operator.txt"]
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
@@ -1061,14 +1174,12 @@ def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
     target = tmp_path / "artifact-dir"
     nonce = os.urandom(8).hex()
     crashed = tmp_path / f".{target.name}.{nonce}.importing"
-    fs_ownership._ledger_record(
-        nonce, canonical=target, container=crashed.name, operation="importing"
-    )
+    _ledger_record(nonce, canonical=target, container=crashed.name, operation="importing")
     crashed.mkdir(mode=0o700)  # crash: no marker, no entry yet
 
     assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
     assert not crashed.exists()
-    assert fs_ownership._ledger_read(nonce) is None
+    assert _ledger_read(nonce) is None
 
 
 def test_recovery_never_destroys_a_forged_container_with_a_matching_marker(
