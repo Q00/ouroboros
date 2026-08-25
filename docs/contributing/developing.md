@@ -60,12 +60,12 @@ the MCP 1.x `[claude]`, `[claude-sdk]`, or `[all]` profiles to this
 environment. Re-run the command after edits because a tool install is a
 snapshot; use `uv run` below when every invocation should reflect the working tree.
 
-The `--python '>=3.12'` option makes the global tool install's interpreter
-request explicit. uv can discover or download compatible interpreters when
-needed, and this package declares `requires-python = ">=3.12"`. Keep the
-explicit request here for reproducibility. The project-scoped `uv run` commands
-below resolve through the checkout's Python requirement and do not need the same
-flag.
+The `--python '>=3.12'` option repeats the package's compatibility floor at
+the global tool-install boundary. uv can discover or download a compatible
+interpreter when needed, and this package declares `requires-python = ">=3.12"`.
+The range does not pin an exact Python version. The project-scoped `uv run`
+commands below resolve through the checkout's Python requirement and do not need
+the same flag.
 
 ### Surface 2 — the MCP server
 
