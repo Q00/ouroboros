@@ -274,7 +274,8 @@ requirement that is simply unmet.
 - **Re-review is triggered by a comment.** Push your fix, then post a comment
   explaining what changed. A push alone is unreliable; empty commits and
   re-requesting a reviewer do not work. Turnaround is typically 7–15 minutes.
-- **The review pins a commit.** Check the `HEAD checked` field — a verdict may
+- **The review pins a commit.** Compare the commit associated with the submitted
+  review in the PR review metadata with the PR's current head; a verdict may
   predate your latest push.
 - **Prior findings carry forward.** Respond to each one, in the PR
   conversation, even if the answer is "not doing this, because …".
