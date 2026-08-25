@@ -158,9 +158,10 @@ on the paths you touched. Every gate, its local reproduction command, and its
 legitimate escape hatch are documented in
 [CI Gates and Branch Protection](./docs/contributing/ci-gates.md).
 
-Review is performed by `ouroboros-agent[bot]`, and its approval satisfies the
-required review. It grades your PR against the linked issue's requirements and
-reproduces the defects it reports. Read
+`ouroboros-agent[bot]` ties each review verdict to the commit it checked. It
+grades your PR against the linked issue's requirements and reproduces the
+defects it reports. Confirm the applicable verdict belongs to the current head,
+then read
 [Review Conventions](./docs/contributing/review-conventions.md) before your first
 push — most review rounds are lost to objections you can preempt.
 

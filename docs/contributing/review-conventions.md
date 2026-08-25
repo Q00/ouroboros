@@ -1,7 +1,8 @@
 # Review Conventions
 
-Every PR is reviewed by `ouroboros-agent[bot]` ("ourobot") before it can merge.
-Its approval satisfies the required review on `main`.
+`ouroboros-agent[bot]` ("ourobot") records review verdicts against specific
+commits. Before acting on a verdict, verify that its associated commit is the
+PR's current head.
 
 The bot is strict, and it is strict in a predictable, repeatable way. Most
 review rounds are lost to objections that could have been preempted before the
@@ -117,36 +118,39 @@ Re-derive from the problem instead:
    you have the change you should have opened.
 4. Say it in the PR: the current shape cannot close, here is the one that can.
    A stated structural argument gets engaged with — the reviewer's own
-   non-blocking notes are frequently pointing at it already. In #2212 the exit
-   was sitting in a round-5 suggestion to share one authoritative parser
-   instead of maintaining parallel option tables that drift.
+   non-blocking notes are frequently pointing at it already. In #2212 a round-5
+   suggestion proposed one authoritative parser instead of parallel option
+   tables; the merged repair instead bounded the affected parser and rejected
+   unknown or malformed option forms.
 5. Be willing to close the PR and open a differently-shaped one. #2065 is not a
    failure story. It is the correct ending to #1926.
 
-### Three ways this has actually gone wrong here
+### Three ways review pressure changed the design
 
-Read these as worked examples of the question being skipped, not as a taxonomy
-to match your situation against.
+Read these as worked examples of a boundary becoming explicit, not as a
+taxonomy to match your situation against.
 
-**Enumerating a surface you do not own** (#2212, 10 change-request reviews). A hand-maintained
-`uv run` option grammar inside a verification path. Round after round named
-another gap — *"The hand-maintained option grammar is still incomplete for
-valid current `uv run` commands."* A table mirroring someone else's CLI can
-never be complete, so the rounds could not end. It closed when the code stopped
-enumerating what was allowed and started refusing anything it had not
-positively parsed.
+**Conservatively parsing a surface you do not own** (#2212, 10 change-request
+reviews). The verification path needed to recognize `uv run` without accepting
+non-executing or malformed commands as test evidence. Repeated reviews found
+missing value-taking options and unsafe command forms. The merged repair kept a
+bounded option table for that path, rejected unknown or malformed forms, and
+covered compound and non-executing modes. The current tree still has a separate
+`uv run` parser in `evaluation/detector.py`; this example is about fail-closed
+evidence validation, not eliminating every option table.
 
-**Two paths kept alive that must agree** (#2193, 7 change-request reviews). A new fused path
-beside the legacy one: the legacy branch skipping completion logic, the atomic
-branch losing an answer on failure, `[decide_later]` meaning different things
-depending on which path ran. Two implementations that must stay identical will
-diverge along a new axis every round. One of them has to stop existing.
+**Keeping compatibility paths under one contract** (#2193, 7 change-request
+reviews). The atomic PM path and legacy two-call fallback both remained. The
+repair aligned decision counting and Seed eligibility across them, then made
+the fallback boundary explicit through the atomic-turn capability flag. The
+lesson is not that one path must disappear; it is that capability differences
+must not change shared interview semantics.
 
-**Trusting a component that should not be trusted** (#1926 → #2065, above).
+**Removing authority from an unreliable component** (#1926 → #2065, above).
 
-In all three, the reviewer was not being pedantic. It was repeatedly reporting
-the same underlying fact — this shape cannot hold — in the only vocabulary it
-has: specific findings at specific lines.
+In all three, specific line findings exposed an authority, parsing, or
+compatibility boundary. The durable repair stated that boundary in code and
+tests instead of patching each observed example.
 
 ### Not an escape hatch
 
@@ -183,8 +187,10 @@ A code path that accepts a request, does nothing, and reports success is
 always a blocker:
 
 > "The public tool schema accepts `answers`, but plugin mode only examines the
-> singular `answer` variable. A request … enters the plugin branch, records no
-> rounds, and still returns a successful delegation receipt." — #2224
+> singular `answer` variable. A request such as `{"session_id": id, "answers":
+> [{"question": "Which workflow?", "answer": "Review"}]}` enters the plugin
+> branch, records no rounds, and still returns a successful delegation receipt."
+> — #2224
 
 Corollaries the bot enforces: do not truncate silently, do not drop items from
 a batch without saying so, and do not swallow an exception into a default.
@@ -234,7 +240,7 @@ the timeout must surface through the normal error contract rather than as a
 bare exception:
 
 > "Timeout from the changed legacy `communicate()` path is not translated into
-> the adapter's `Result.err(ProviderError)` contract or followed by child
+> the adapter’s `Result.err(ProviderError)` contract or followed by child
 > cleanup." — #2239
 
 Bounding the primary wait is not enough if a stream drain sits outside the
