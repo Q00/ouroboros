@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ouroboros.core import fs_ownership
 from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
     claim_and_remove_owned,
@@ -193,3 +194,64 @@ def test_remove_refuses_symlinked_parent_component(tmp_path: Path) -> None:
         )
 
     assert (external / "artifact.yaml").read_text(encoding="utf-8") == "external content\n"
+
+
+def test_publish_restores_claim_when_file_staging_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging failure after the claim must restore the canonical generation."""
+    target = tmp_path / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+
+    def broken_temp(self: object, prefix: str) -> tuple[int, str]:
+        raise OSError("simulated staging failure")
+
+    monkeypatch.setattr(fs_ownership._PinnedParent, "create_temp_file", broken_temp)
+
+    with pytest.raises(OSError, match="simulated staging failure"):
+        publish_owned_file(target, "managed\n", is_owned=lambda _p: True)
+
+    assert target.read_text(encoding="utf-8") == "owned generation\n"
+    assert _claim_siblings(target, "replacing") == []
+
+
+def test_tree_publish_restores_claim_when_build_fails(tmp_path: Path) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    def failing_build(staging: Path) -> None:
+        raise RuntimeError("simulated build failure")
+
+    with pytest.raises(RuntimeError, match="simulated build failure"):
+        publish_owned_tree(target, failing_build, is_owned=lambda _p: True)
+
+    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+    assert _claim_siblings(target, "replacing") == []
+
+
+def test_remove_restores_claim_on_transient_failure_and_supports_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed removal keeps the generation discoverable at its canonical
+    path, and a retry after the transient fault succeeds."""
+    target = tmp_path / "artifact.txt"
+    target.write_text("owned generation\n", encoding="utf-8")
+    real_remove = fs_ownership.remove_path
+    failures = iter([True])
+
+    def flaky_remove(path: Path) -> None:
+        if next(failures, False):
+            raise OSError("simulated transient removal failure")
+        real_remove(path)
+
+    monkeypatch.setattr(fs_ownership, "remove_path", flaky_remove)
+
+    with pytest.raises(OSError, match="simulated transient removal failure"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    assert target.read_text(encoding="utf-8") == "owned generation\n"
+    assert _claim_siblings(target, "removing") == []
+
+    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
+    assert not target.exists()

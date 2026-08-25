@@ -10336,6 +10336,10 @@ class TestGjcSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=True),
             patch(
+                "ouroboros.cli.gjc_setup.is_setup_managed_gjc_mcp_entry",
+                return_value=True,
+            ),
+            patch(
                 "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
                 return_value=True,
             ),
@@ -10633,6 +10637,36 @@ class TestGjcSetup:
             )
 
         assert lock_states == [True]
+
+    def test_registration_removed_before_retirement_keeps_legacy_bridge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration, final durable validation, and legacy retirement are one
+        transaction: a registration that disappears before retirement must keep
+        the compatibility route instead of leaving no route at all."""
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        bridge = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge.parent.mkdir(parents=True)
+        legacy_source = gjc_ooo_bridge_source_text("ouroboros", [])
+        bridge.write_text(legacy_source, encoding="utf-8")
+
+        with (
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
+            patch("ouroboros.cli.gjc_setup.install_gjc_mcp_bridge_config", return_value=True),
+            patch("ouroboros.cli.gjc_setup.install_gjc_skills_step", return_value=True),
+            patch("ouroboros.cli.gjc_setup.install_gjc_instruction_step", return_value=True),
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=True),
+            patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=None),
+            patch("ouroboros.cli.gjc_setup.remove_legacy_gjc_bridge") as remove_legacy,
+        ):
+            assert not setup_cmd._install_gjc_runtime_artifacts("/opt/bin/gjc")
+
+        remove_legacy.assert_not_called()
+        assert bridge.read_text(encoding="utf-8") == legacy_source
 
     def test_bridge_config_publication_refuses_symlinked_profile_component(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

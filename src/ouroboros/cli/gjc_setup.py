@@ -202,8 +202,15 @@ def register_gjc_mcp_server(
     detect_mcp_entry: Callable[..., dict[str, object] | None] | None = None,
     run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     registration_state: dict[str, bool] | None = None,
+    assume_registration_lock: bool = False,
 ) -> bool:
-    """Register and validate the isolated Ouroboros MCP server through GJC."""
+    """Register and validate the isolated Ouroboros MCP server through GJC.
+
+    The complete validate/add/cleanup sequence runs under the cross-process
+    registration lock. A caller that must extend the transaction past the
+    registration itself (for example through legacy-route retirement) holds
+    the lock and passes ``assume_registration_lock=True``.
+    """
     run_command = run_command or subprocess.run
     if registration_state is not None:
         registration_state.update(created=False, changed=False)
@@ -215,7 +222,34 @@ def register_gjc_mcp_server(
             "Install uv/uvx or pipx, then re-run setup."
         )
         return False
+    if assume_registration_lock:
+        return _register_gjc_mcp_server_locked(
+            gjc_path,
+            detected=detected,
+            run_command=run_command,
+            registration_state=registration_state,
+        )
+    try:
+        with gjc_mcp_registration_lock():
+            return _register_gjc_mcp_server_locked(
+                gjc_path,
+                detected=detected,
+                run_command=run_command,
+                registration_state=registration_state,
+            )
+    except OSError as exc:
+        print_warning(f"Could not serialize the GJC MCP registration transaction: {exc}")
+        return False
 
+
+def _register_gjc_mcp_server_locked(
+    gjc_path: str,
+    *,
+    detected: dict[str, object],
+    run_command: Callable[..., subprocess.CompletedProcess[str]],
+    registration_state: dict[str, bool] | None,
+) -> bool:
+    """Validate or add the registration; the caller holds the registration lock."""
     listed_ok, existing = _listed_gjc_mcp_entry(gjc_path, run_command)
     if not listed_ok:
         return False
@@ -259,18 +293,13 @@ def register_gjc_mcp_server(
     ):
         print_warning("Detected Ouroboros MCP launcher is invalid; GJC registration skipped.")
         return False
-    try:
-        with gjc_mcp_registration_lock():
-            return _add_gjc_mcp_server_locked(
-                gjc_path,
-                command=command,
-                raw_args=raw_args,
-                run_command=run_command,
-                registration_state=registration_state,
-            )
-    except OSError as exc:
-        print_warning(f"Could not serialize the GJC MCP registration transaction: {exc}")
-        return False
+    return _add_gjc_mcp_server_locked(
+        gjc_path,
+        command=command,
+        raw_args=raw_args,
+        run_command=run_command,
+        registration_state=registration_state,
+    )
 
 
 def _add_gjc_mcp_server_locked(
@@ -461,16 +490,33 @@ def install_gjc_runtime_artifacts(
                 and install_gjc_instruction_step()
             )
             expected = _snapshot_gjc_paths(paths, host)
-            succeeded = bool(
-                installed
-                and register_gjc_mcp_server(
-                    gjc_path,
-                    detect_mcp_entry=host.detect_mcp_entry,
-                    registration_state=state,
-                )
-            )
+            if installed:
+                # Registration, the final durable-state validation, and legacy
+                # retirement form one serialized transaction: a concurrent
+                # uninstall cannot remove the MCP registration between the
+                # validation and the retirement of the compatibility route.
+                try:
+                    with gjc_mcp_registration_lock():
+                        succeeded = register_gjc_mcp_server(
+                            gjc_path,
+                            detect_mcp_entry=host.detect_mcp_entry,
+                            registration_state=state,
+                            assume_registration_lock=True,
+                        )
+                        if succeeded and not is_setup_managed_gjc_mcp_entry(
+                            persisted_gjc_mcp_entry()
+                        ):
+                            print_warning(
+                                "The GJC MCP registration disappeared before the legacy "
+                                "route was retired; kept the compatibility bridge."
+                            )
+                            succeeded = False
+                        if succeeded:
+                            succeeded = remove_legacy_gjc_bridge()
+                except OSError as exc:
+                    print_warning(f"Could not serialize the GJC MCP activation transaction: {exc}")
+                    succeeded = False
             if succeeded:
-                succeeded = remove_legacy_gjc_bridge()
                 expected = _snapshot_gjc_paths(paths, host)
     except OSError as exc:
         print_warning(f"Could not install GJC runtime artifacts: {exc}")

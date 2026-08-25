@@ -341,7 +341,14 @@ def claim_and_remove_owned(
             if not owned:
                 _restore_claimed(parent, claimed_name, path.name)
                 return False
-            remove_path(claimed)
+            try:
+                remove_path(claimed)
+            except OSError:
+                # A transient removal failure must not strand the generation
+                # under an undiscoverable claim name: restore the canonical
+                # route so discovery still sees it and a retry can succeed.
+                _restore_claimed(parent, claimed_name, path.name)
+                raise
             parent.fsync()
             return True
     except FileNotFoundError:
@@ -434,7 +441,12 @@ def _publish_owned(
             if not owned:
                 _restore_claimed(parent, claimed_name, path.name)
                 raise UnownedArtifactError(f"preserved user-managed file at {path}")
-        staged_name = build(parent, path.name)
+        try:
+            staged_name = build(parent, path.name)
+        except BaseException:
+            if claimed_name is not None:
+                _restore_claimed(parent, claimed_name, path.name)
+            raise
         try:
             parent.rename_no_replace(staged_name, path.name)
         except FileExistsError as exc:
