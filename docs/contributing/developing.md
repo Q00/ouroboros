@@ -82,24 +82,28 @@ command is implemented by `serve()` in
 [`src/ouroboros/cli/commands/mcp.py`](../../src/ouroboros/cli/commands/mcp.py).
 
 
-To make a client use it, replace the `ouroboros` entry in your client's MCP
-config — `~/.claude/mcp.json` for Claude Code, or the project `.mcp.json` —
-with the local form, and **preserve every other server entry in the file**:
+To make Claude Code use it without editing the checked-in `.mcp.json`, add a
+local-scoped server with the same name. Claude Code stores local scope under the
+project entry in `~/.claude.json`, and local scope takes precedence over the
+project-scoped server:
 
-```json
-"ouroboros": {
-  "command": "uv",
-  "args": ["run", "--directory", "/path/to/your/clone", "--group", "mcp-test", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"],
-  "timeout": 600
-}
+```bash
+claude mcp add --scope local --transport stdio ouroboros -- \
+  uv run --directory /path/to/your/clone --group mcp-test \
+  ouroboros mcp serve --runtime claude-cli --llm-backend claude_code
 ```
+
+Use `claude mcp get ouroboros` to inspect the registered command. Claude Code's
+supported scopes and storage locations are documented in
+[Connect Claude Code to tools via MCP](https://code.claude.com/docs/en/mcp).
+For another client, use that client's documented MCP registration surface
+rather than assuming Claude Code's file locations.
 
 Connection and runtime selection are separate concepts. The example above
 deliberately pins `--runtime` and `--llm-backend` so its smoke-test behavior is
 deterministic. Remove those two option/value pairs if the server should inherit
-the environment/config precedence documented below. Back up the client file
-before editing it, preserve every unrelated server, and restore it when testing
-ends so you do not silently keep running a stale branch weeks later.
+the environment/config precedence documented below. Remove the local override
+when testing ends so you do not silently keep running a stale branch weeks later.
 
 **Restart the client after changing MCP config.** Nothing hot-reloads.
 
@@ -153,7 +157,7 @@ assuming the config loader is broken.
 | What | Default or fallback | Override |
 |---|---|---|
 | Config | `~/.ouroboros/config.yaml` | No dedicated override; follows the effective home directory |
-| Event database | Generated config: `~/.ouroboros/data/ouroboros.db`; legacy fallback: `~/.ouroboros/ouroboros.db` | `persistence.database_path`, relative to the config directory unless absolute |
+| Event database | Generated config: `~/.ouroboros/data/ouroboros.db`; legacy fallback: `~/.ouroboros/ouroboros.db` | `mcp serve --db PATH` for that server process; otherwise `persistence.database_path`, relative to the config directory unless absolute |
 | Logs | `~/.ouroboros/logs/ouroboros.log` | No config-file path override; `logging.log_path` is persisted but is not consumed by the runtime logger |
 | Worktrees created by runs | `~/.ouroboros/worktrees/` | `orchestrator.worktree_root` |
 
@@ -163,8 +167,11 @@ Event-store resolution is implemented by `resolve_event_store_path()` and
 Managed worktrees resolve through `managed_worktree_root()` in
 [`src/ouroboros/core/worktree.py`](../../src/ouroboros/core/worktree.py).
 The event database and managed-worktree entries are defaults and compatibility
-fallbacks, not invariant paths; check `config.yaml` before inspecting or cleaning
-those resources. The runtime log destination is the fixed path shown above.
+fallbacks, not invariant paths. For an MCP server, inspect the active client
+launch command first: an explicit `mcp serve --db PATH` selects that process's
+EventStore instead of the config-resolved path. Otherwise check `config.yaml`
+before inspecting those resources. The runtime log destination is the fixed
+path shown above.
 
 The event database and its WAL can grow across runs. `ouroboros cleanup`
 does not checkpoint, vacuum, truncate, or remove either file; database
