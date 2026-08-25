@@ -28,11 +28,19 @@ from ouroboros.cli.opencode_config import (
     opencode_config_dir,
 )
 from ouroboros.codex import CODEX_RULE_FILENAME, resolve_codex_home, resolve_packaged_codex_assets
-from ouroboros.gjc import gjc_skills_root, remove_gjc_skills
-from ouroboros.runtime_instruction_artifacts import (
+from ouroboros.gjc import (
     gjc_agent_dir,
+    gjc_bridge_path,
     gjc_instruction_path,
+    gjc_mcp_bridge_config_path,
+    gjc_skills_root,
+    is_setup_managed_gjc_bridge,
     is_setup_managed_gjc_instruction,
+    is_setup_managed_gjc_mcp_bridge_config,
+    is_setup_managed_gjc_mcp_entry,
+    persisted_gjc_mcp_entry,
+    remove_gjc_skills,
+    remove_persisted_gjc_mcp_server,
 )
 
 app = typer.Typer(
@@ -256,24 +264,12 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
 
 def _remove_gjc_artifacts(dry_run: bool) -> bool:
     """Remove setup-owned GJC skills, active route, MCP state, config, and guide."""
-    from ouroboros.cli.commands.setup import (
-        _gjc_mcp_bridge_config_path,
-        _is_setup_managed_gjc_mcp_bridge_config,
-        _is_setup_managed_gjc_mcp_entry,
-    )
-    from ouroboros.cli.gjc_setup import (
-        gjc_bridge_path,
-        is_setup_managed_gjc_bridge,
-        persisted_gjc_mcp_entry,
-        remove_persisted_gjc_mcp_server,
-    )
-
     agent_dir = gjc_agent_dir()
     skills = remove_gjc_skills(agent_dir=agent_dir, dry_run=True)
     durable_mcp = persisted_gjc_mcp_entry()
-    managed_mcp = _is_setup_managed_gjc_mcp_entry(durable_mcp)
-    bridge_config = _gjc_mcp_bridge_config_path()
-    managed_bridge_config = _is_setup_managed_gjc_mcp_bridge_config(bridge_config)
+    managed_mcp = is_setup_managed_gjc_mcp_entry(durable_mcp)
+    bridge_config = gjc_mcp_bridge_config_path()
+    managed_bridge_config = is_setup_managed_gjc_mcp_bridge_config(bridge_config)
     compatibility_bridge = gjc_bridge_path()
     managed_compatibility_bridge = is_setup_managed_gjc_bridge(compatibility_bridge)
     guide = gjc_instruction_path()
@@ -573,19 +569,10 @@ def uninstall(
     gjc_skill_root = gjc_skills_root(gjc_agent_root)
     if remove_gjc_skills(agent_dir=gjc_agent_root, dry_run=True):
         targets.append(f"GJC Ouroboros skills ({gjc_skill_root}/)")
-    from ouroboros.cli.commands.setup import _is_setup_managed_gjc_mcp_entry
-    from ouroboros.cli.gjc_setup import (
-        gjc_bridge_path,
-        gjc_mcp_bridge_config_path,
-        is_setup_managed_gjc_bridge,
-        is_setup_managed_gjc_mcp_bridge_config,
-        persisted_gjc_mcp_entry,
-    )
-
     bridge_config = gjc_mcp_bridge_config_path()
     if is_setup_managed_gjc_mcp_bridge_config(bridge_config):
         targets.append(f"GJC MCP bridge config ({bridge_config})")
-    if _is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
+    if is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry()):
         targets.append("GJC Ouroboros MCP registration")
     compatibility_bridge = gjc_bridge_path()
     if is_setup_managed_gjc_bridge(compatibility_bridge):

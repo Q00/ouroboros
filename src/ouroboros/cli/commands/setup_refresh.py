@@ -8,12 +8,20 @@ import shutil
 
 import typer
 
+from ouroboros.gjc import (
+    gjc_agent_dir,
+    gjc_bridge_path,
+    gjc_instruction_path,
+    gjc_mcp_bridge_config_path,
+    has_setup_owned_gjc_skills,
+    is_setup_managed_gjc_mcp_bridge_config,
+    is_setup_managed_gjc_mcp_entry,
+    persisted_gjc_mcp_entry,
+)
 from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
 from ouroboros.runtime_instruction_artifacts import (
     copilot_instruction_path,
     gemini_instruction_path,
-    gjc_agent_dir,
-    gjc_instruction_path,
     has_managed_section,
     kiro_instruction_path,
     opencode_instruction_path,
@@ -88,29 +96,13 @@ def refresh_runtime_artifacts() -> None:
         else:
             failed.append("pi")
 
-    gjc_expected = False
     gjc_succeeded = True
-    gjc_root = gjc_agent_dir()
-    from ouroboros.gjc import has_setup_owned_gjc_skills
-
-    gjc_bridge = gjc_root / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-    has_projected_skill = has_setup_owned_gjc_skills(agent_dir=gjc_root)
-    from ouroboros.cli.gjc_setup import (
-        gjc_mcp_bridge_config_path,
-        is_setup_managed_gjc_mcp_bridge_config,
-        is_setup_managed_gjc_mcp_entry,
-        persisted_gjc_mcp_entry,
-    )
-
-    bridge_config = gjc_mcp_bridge_config_path()
-    has_managed_bridge_config = is_setup_managed_gjc_mcp_bridge_config(bridge_config)
-    has_managed_registration = is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
     gjc_expected = (
-        gjc_bridge.exists()
-        or has_projected_skill
+        gjc_bridge_path().exists()
+        or has_setup_owned_gjc_skills(agent_dir=gjc_agent_dir())
         or gjc_instruction_path().exists()
-        or has_managed_bridge_config
-        or has_managed_registration
+        or is_setup_managed_gjc_mcp_bridge_config(gjc_mcp_bridge_config_path())
+        or is_setup_managed_gjc_mcp_entry(persisted_gjc_mcp_entry())
     )
     if gjc_expected:
         from ouroboros.config import get_gjc_cli_path

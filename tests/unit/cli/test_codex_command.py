@@ -16,14 +16,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from ouroboros.cli import stdio_mcp_probe
 from ouroboros.cli.commands import codex as codex_command
 from ouroboros.cli.commands import setup as setup_command
 from ouroboros.cli.commands.codex import (
-    _MCP_PROTOCOL_VERSION,
     _check_auto_dispatch_surface,
     _list_stdio_mcp_tool_names,
-    _should_retry_stdio_mcp_framing,
     app,
+)
+from ouroboros.cli.stdio_mcp_probe import (
+    _MCP_PROTOCOL_VERSION,
+    _should_retry_stdio_mcp_framing,
 )
 from ouroboros.codex import CodexArtifactInstallResult, install_codex_artifacts
 from ouroboros.codex import artifacts as codex_artifacts
@@ -1987,7 +1990,7 @@ class TestCodexDoctor:
             encoding="utf-8",
         )
         real_create_subprocess = asyncio.create_subprocess_exec
-        real_signal_process = codex_command._signal_stdio_mcp_process
+        real_signal_process = stdio_mcp_probe._signal_stdio_mcp_process
         spawn_options: dict[str, object] = {}
 
         async def _capturing_create_subprocess(*command: str, **kwargs: object):
@@ -2000,7 +2003,7 @@ class TestCodexDoctor:
                 side_effect=_capturing_create_subprocess,
             ),
             patch(
-                "ouroboros.cli.commands.codex._signal_stdio_mcp_process",
+                "ouroboros.cli.stdio_mcp_probe._signal_stdio_mcp_process",
                 wraps=real_signal_process,
             ) as signal_process,
         ):
@@ -2050,7 +2053,7 @@ class TestCodexDoctor:
             patch("ouroboros.cli.commands.codex.os.killpg", side_effect=probe_errors) as probe,
             patch("ouroboros.cli.commands.codex.asyncio.sleep", sleep),
         ):
-            asyncio.run(codex_command._wait_for_stdio_mcp_process_group_exit(4321))
+            asyncio.run(stdio_mcp_probe._wait_for_stdio_mcp_process_group_exit(4321))
 
         assert probe.call_count == len(probe_errors)
         assert sleep.await_count == expected_sleeps
@@ -2077,15 +2080,15 @@ class TestCodexDoctor:
         group_wait = AsyncMock(side_effect=TimeoutError)
         with (
             patch(
-                "ouroboros.cli.commands.codex._signal_stdio_mcp_process",
+                "ouroboros.cli.stdio_mcp_probe._signal_stdio_mcp_process",
                 side_effect=_record_signal,
             ),
             patch(
-                "ouroboros.cli.commands.codex._wait_for_stdio_mcp_process_group_exit",
+                "ouroboros.cli.stdio_mcp_probe._wait_for_stdio_mcp_process_group_exit",
                 group_wait,
             ),
         ):
-            asyncio.run(codex_command._terminate_stdio_mcp_process(proc))  # type: ignore[arg-type]
+            asyncio.run(stdio_mcp_probe._terminate_stdio_mcp_process(proc))  # type: ignore[arg-type]
 
         assert signal_forces == [False, True]
         group_wait.assert_awaited_once_with(proc.pid)
@@ -2227,7 +2230,7 @@ class TestCodexDoctor:
             ),
             encoding="utf-8",
         )
-        original_send = codex_command._send_stdio_mcp_message
+        original_send = stdio_mcp_probe._send_stdio_mcp_message
 
         async def fail_jsonl_initialize_send(proc, message, *, framing):
             if framing == "jsonl" and message.get("method") == "initialize":
@@ -2235,7 +2238,7 @@ class TestCodexDoctor:
             await original_send(proc, message, framing=framing)
 
         with patch(
-            "ouroboros.cli.commands.codex._send_stdio_mcp_message",
+            "ouroboros.cli.stdio_mcp_probe._send_stdio_mcp_message",
             side_effect=fail_jsonl_initialize_send,
         ):
             tool_names = asyncio.run(

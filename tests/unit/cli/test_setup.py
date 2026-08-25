@@ -20,7 +20,6 @@ import typer
 from typer.testing import CliRunner
 import yaml
 
-from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _codex_uses_profile_v2,  # real fn bound at import; bypasses the autouse probe guard
@@ -32,6 +31,7 @@ from ouroboros.cli.commands.setup import (
     _scan_and_register_repos,
     _set_default_repo,
 )
+from ouroboros.cli.gjc_setup import register_gjc_mcp_server
 import ouroboros.cli.runtime_activation as runtime_activation
 from ouroboros.codex import CodexArtifactInstallResult
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2
@@ -42,6 +42,11 @@ from ouroboros.config.models import (
     ProviderCredentials,
     get_default_config,
     get_default_credentials,
+)
+from ouroboros.gjc import (
+    gjc_mcp_bridge_config_path,
+    gjc_ooo_bridge_source_text,
+    is_setup_managed_gjc_mcp_entry,
 )
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
@@ -10246,7 +10251,7 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup.subprocess.run", return_value=old_help),
-            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server") as register,
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server") as register,
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc")
 
@@ -10329,7 +10334,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=True),
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=True),
             patch(
                 "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
                 return_value=True,
@@ -10392,7 +10397,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+                "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
                 "sharing": "per-session",
                 "timeout": 30000,
             },
@@ -10413,7 +10418,7 @@ class TestGjcSetup:
                 side_effect=[listed, added, validated],
             ) as run,
         ):
-            assert setup_cmd._register_gjc_mcp_server(
+            assert register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={
                     "command": "uvx",
@@ -10431,7 +10436,7 @@ class TestGjcSetup:
         assert not any(value.startswith("OUROBOROS_LLM_BACKEND=") for value in add_args)
         assert "--force" not in add_args
         assert add_args[add_args.index("--timeout") + 1] == "30000"
-        expected_bridge_config = setup_cmd._gjc_mcp_bridge_config_path()
+        expected_bridge_config = gjc_mcp_bridge_config_path()
         assert f"--env=OUROBOROS_MCP_CONFIG={expected_bridge_config}" in add_args
 
     def test_register_gjc_mcp_rolls_back_unvalidated_new_entry(self) -> None:
@@ -10454,7 +10459,7 @@ class TestGjcSetup:
                 side_effect=[empty, added, empty],
             ) as run,
         ):
-            assert not setup_cmd._register_gjc_mcp_server(
+            assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={
                     "command": "uvx",
@@ -10501,7 +10506,7 @@ class TestGjcSetup:
                 "--runtime",
                 "gjc",
             ],
-            "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+            "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
             "sharing": "per-session",
             "timeout": 30000,
         }
@@ -10517,7 +10522,7 @@ class TestGjcSetup:
                 side_effect=[empty, added, empty],
             ),
         ):
-            assert not setup_cmd._register_gjc_mcp_server(
+            assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": managed["args"][:-2]},
                 registration_state=state,
@@ -10548,7 +10553,7 @@ class TestGjcSetup:
             stderr="",
         )
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed) as run:
-            assert not setup_cmd._register_gjc_mcp_server(
+            assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp]"]},
             )
@@ -10582,13 +10587,13 @@ class TestGjcSetup:
                 "--runtime",
                 "gjc",
             ],
-            "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+            "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
             "sharing": "per-session",
             "timeout": 30000,
         }
         entry[field] = value
 
-        assert not setup_cmd._is_setup_managed_gjc_mcp_entry(entry)
+        assert not is_setup_managed_gjc_mcp_entry(entry)
 
     def test_register_gjc_mcp_rejects_canonical_but_inactive_entry(self) -> None:
         entry = {
@@ -10609,7 +10614,7 @@ class TestGjcSetup:
                     "--runtime",
                     "gjc",
                 ],
-                "env": {"OUROBOROS_MCP_CONFIG": str(setup_cmd._gjc_mcp_bridge_config_path())},
+                "env": {"OUROBOROS_MCP_CONFIG": str(gjc_mcp_bridge_config_path())},
                 "sharing": "per-session",
                 "timeout": 30000,
             },
@@ -10628,7 +10633,7 @@ class TestGjcSetup:
             ),
             patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed),
         ):
-            assert not setup_cmd._register_gjc_mcp_server(
+            assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": entry["config"]["args"][:-2]},
             )
@@ -10657,7 +10662,7 @@ class TestGjcSetup:
             },
         }
 
-        assert not setup_cmd._is_setup_managed_gjc_mcp_entry(entry)
+        assert not is_setup_managed_gjc_mcp_entry(entry)
 
     def test_setup_gjc_registration_failure_rolls_back_and_exits_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10674,7 +10679,7 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch.object(setup_cmd, "_detect_runtimes", return_value={"gjc": "/opt/bin/gjc"}),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch.object(setup_cmd, "_register_gjc_mcp_server", return_value=False),
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=False),
             patch(
                 "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
                 return_value=True,
@@ -10709,9 +10714,8 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch.object(
-                setup_cmd,
-                "_register_gjc_mcp_server",
+            patch(
+                "ouroboros.cli.gjc_setup.register_gjc_mcp_server",
                 side_effect=fail_after_operator_write,
             ),
             patch(
@@ -10740,7 +10744,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch.object(setup_cmd, "_register_gjc_mcp_server") as register,
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server") as register,
             patch(
                 "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
                 return_value=True,

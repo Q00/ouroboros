@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.uninstall import (
     _remove_claude_mcp,
@@ -22,7 +21,7 @@ from ouroboros.cli.commands.uninstall import (
     _remove_opencode_bridge_plugin,
     app,
 )
-from ouroboros.gjc import install_gjc_skills
+from ouroboros.gjc import gjc_ooo_bridge_source_text, install_gjc_skills
 
 runner = CliRunner()
 
@@ -592,14 +591,14 @@ class TestRemoveGjcArtifacts:
         except OSError:
             pytest.skip("symlinks are not supported on this platform")
 
-        from ouroboros.cli.gjc_setup import remove_persisted_gjc_mcp_server
+        from ouroboros.gjc import remove_persisted_gjc_mcp_server
 
         before = external.read_text(encoding="utf-8")
         assert not remove_persisted_gjc_mcp_server(mcp_path)
         assert external.read_text(encoding="utf-8") == before
 
     def test_persistent_cleanup_rejects_changed_generation(self, tmp_path: Path) -> None:
-        from ouroboros.cli import gjc_setup
+        from ouroboros.gjc import mcp as gjc_mcp
 
         mcp_path = tmp_path / "mcp.json"
         original = '{"mcpServers": {"ouroboros": {}}}\n'
@@ -607,12 +606,12 @@ class TestRemoveGjcArtifacts:
         mcp_path.write_text(operator, encoding="utf-8")
 
         with pytest.raises(OSError, match="changed concurrently"):
-            gjc_setup._atomic_replace_json(mcp_path, {"mcpServers": {}}, original)
+            gjc_mcp._atomic_replace_json(mcp_path, {"mcpServers": {}}, original)
 
         assert mcp_path.read_text(encoding="utf-8") == operator
 
     def test_disabled_setup_shaped_mcp_is_operator_owned(self, tmp_path: Path) -> None:
-        from ouroboros.cli.gjc_setup import persisted_gjc_mcp_entry
+        from ouroboros.gjc import persisted_gjc_mcp_entry
 
         mcp_path = tmp_path / "mcp.json"
         mcp_path.write_text(

@@ -182,7 +182,7 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
                 return_value=True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=True
+                "ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=True
             ) as register_mcp,
         ):
             result = _invoke_refresh(tmp_path)
@@ -273,23 +273,23 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
                 return_value=True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._install_gjc_mcp_bridge_config",
-                side_effect=lambda: calls.append("bridge-config") or True,
+                "ouroboros.cli.gjc_setup.install_gjc_mcp_bridge_config",
+                side_effect=lambda *_args, **_kwargs: calls.append("bridge-config") or True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._install_gjc_skills",
+                "ouroboros.cli.gjc_setup.install_gjc_skills_step",
                 side_effect=lambda: calls.append("skills") or True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._install_runtime_instruction_artifact",
-                side_effect=lambda runtime: calls.append(f"guide:{runtime}") or True,
+                "ouroboros.cli.gjc_setup.install_gjc_instruction_step",
+                side_effect=lambda: calls.append("guide:gjc") or True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._register_gjc_mcp_server",
+                "ouroboros.cli.gjc_setup.register_gjc_mcp_server",
                 side_effect=lambda *_args, **_kwargs: calls.append("mcp") or True,
             ),
             patch(
-                "ouroboros.cli.commands.setup._remove_legacy_gjc_bridge",
+                "ouroboros.cli.gjc_setup.remove_legacy_gjc_bridge",
                 side_effect=lambda: calls.append("remove-legacy") or True,
             ),
         ):
@@ -309,8 +309,8 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
                 "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
                 return_value=True,
             ),
-            patch("ouroboros.cli.commands.setup._register_gjc_mcp_server", return_value=False),
-            patch("ouroboros.cli.commands.setup._remove_legacy_gjc_bridge") as remove_legacy,
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=False),
+            patch("ouroboros.cli.gjc_setup.remove_legacy_gjc_bridge") as remove_legacy,
         ):
             result = _invoke_refresh(tmp_path)
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import os
 from pathlib import Path
 
@@ -14,7 +13,6 @@ COPILOT_INSTRUCTIONS_DIRNAME = "ouroboros-instructions"
 COPILOT_AGENTS_FILENAME = "AGENTS.md"
 _SECTION_START = "<!-- ouroboros:skill-capability-guide:start -->"
 _SECTION_END = "<!-- ouroboros:skill-capability-guide:end -->"
-_GJC_OWNERSHIP_PREFIX = "<!-- ouroboros:gjc-guide-sha256:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,56 +26,6 @@ class RuntimeInstructionArtifact:
 def _render_section(backend: str) -> str:
     guide = render_backend_skill_capability_guide(backend).rstrip()
     return f"{_SECTION_START}\n{guide}\n{_SECTION_END}\n"
-
-
-def _render_gjc_guide_body() -> str:
-    """Render GJC's always-applied exact-command routing and capability guide."""
-    from ouroboros.gjc import GJC_SKILL_NAMESPACE
-    from ouroboros.router import packaged_skill_dispatch_registry
-
-    with packaged_skill_dispatch_registry() as registry:
-        routes = sorted(
-            (
-                identifier,
-                f"{GJC_SKILL_NAMESPACE}{target.skill_name}",
-            )
-            for identifier, target in registry.mapping.items()
-            if identifier != "ooo"
-        )
-    lines = [
-        "---",
-        "alwaysApply: true",
-        "description: Deterministic Ouroboros command routing for GJC",
-        "---",
-        "",
-        "## Ouroboros command routing",
-        "",
-        "Exact `ooo` commands are explicit skill invocations, not ordinary natural-language requests.",
-        "They MUST be routed before generic planning, interview, search, or implementation skills:",
-        "",
-        "- Bare `ooo` → invoke `/skill:ouroboros-ooo`.",
-    ]
-    lines.extend(
-        f"- `ooo {identifier} [arguments]` → invoke `/skill:{skill_name} [arguments]`."
-        for identifier, skill_name in routes
-    )
-    lines.extend(
-        (
-            "",
-            "Preserve every argument after the command prefix verbatim. Do not inspect the repository,",
-            "infer another workflow, or route to GJC's bundled `deep-interview` when an exact route above matches.",
-            "",
-            render_backend_skill_capability_guide("gjc").rstrip(),
-            "",
-        )
-    )
-    return "\n".join(lines)
-
-
-def _render_gjc_guide() -> str:
-    body = _render_gjc_guide_body()
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    return f"{body}{_GJC_OWNERSHIP_PREFIX}{digest} -->\n"
 
 
 def _upsert_marked_section(existing: str, section: str) -> str:
@@ -126,28 +74,6 @@ def has_managed_section(path: str | Path) -> bool:
         return False
 
 
-def is_setup_managed_gjc_instruction(path: str | Path) -> bool:
-    """Return whether *path* is a complete routing guide emitted by setup."""
-    candidate = Path(path)
-    try:
-        source = candidate.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-    if candidate.is_symlink():
-        return False
-    if source == _render_gjc_guide_body():
-        return True
-    body, separator, digest_suffix = source.rpartition(_GJC_OWNERSHIP_PREFIX)
-    if not separator or not digest_suffix.endswith(" -->\n"):
-        return False
-    digest = digest_suffix.removesuffix(" -->\n")
-    return (
-        len(digest) == 64
-        and all(character in "0123456789abcdef" for character in digest)
-        and hashlib.sha256(body.encode("utf-8")).hexdigest() == digest
-    )
-
-
 def _write_managed_section(path: Path, backend: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -190,36 +116,6 @@ def copilot_instruction_dir(home: str | Path | None = None) -> Path:
 def copilot_instruction_path(home: str | Path | None = None) -> Path:
     """Return the setup-owned Copilot AGENTS.md instruction artifact path."""
     return copilot_instruction_dir(home) / COPILOT_AGENTS_FILENAME
-
-
-def gjc_agent_dir(home: str | Path | None = None, environ: dict[str, str] | None = None) -> Path:
-    """Return GJC's agent directory for rules/extensions discovery.
-
-    Mirrors gjc's own resolution (``@gajae-code/utils`` ``dirs.ts``):
-    ``GJC_CODING_AGENT_DIR`` overrides the agent directory as a path, while
-    ``GJC_CONFIG_DIR`` (with ``PI_CONFIG_DIR`` as fallback) is a directory
-    *name* joined under the home directory — not an absolute path.
-    """
-    env = os.environ if environ is None else environ
-    explicit_agent_dir = env.get("GJC_CODING_AGENT_DIR", "").strip()
-    if explicit_agent_dir:
-        return Path(explicit_agent_dir).expanduser()
-
-    root = Path(home).expanduser() if home is not None else Path.home()
-    config_dir_name = (
-        env.get("GJC_CONFIG_DIR", "").strip() or env.get("PI_CONFIG_DIR", "").strip() or ".gjc"
-    )
-    normalized_parts = config_dir_name.replace("\\", "/").split("/")
-    if ".." in normalized_parts:
-        config_dir_name = ".gjc"
-    return root / config_dir_name.lstrip("/\\") / "agent"
-
-
-def gjc_instruction_path(
-    home: str | Path | None = None, environ: dict[str, str] | None = None
-) -> Path:
-    """Return GJC's global rules artifact path."""
-    return gjc_agent_dir(home=home, environ=environ) / "rules" / GUIDE_FILENAME
 
 
 def install_opencode_instruction_artifact(
@@ -272,12 +168,18 @@ def install_gjc_instruction_artifact(
     environ: dict[str, str] | None = None,
 ) -> RuntimeInstructionArtifact:
     """Install GJC routing without replacing an operator-owned rules file."""
+    from ouroboros.gjc import (
+        gjc_instruction_path,
+        is_setup_managed_gjc_instruction,
+        render_gjc_guide,
+    )
+
     path = gjc_instruction_path(home=home, environ=environ)
     if os.path.lexists(path) and not is_setup_managed_gjc_instruction(path):
         raise OSError(f"preserved user-managed GJC instruction guide at {path}")
     return RuntimeInstructionArtifact(
         backend="gjc",
-        path=_write_exact_guide(path, "gjc", content=_render_gjc_guide()),
+        path=_write_exact_guide(path, "gjc", content=render_gjc_guide()),
     )
 
 
@@ -289,10 +191,7 @@ __all__ = [
     "copilot_instruction_dir",
     "copilot_instruction_path",
     "gemini_instruction_path",
-    "gjc_agent_dir",
-    "gjc_instruction_path",
     "has_managed_section",
-    "is_setup_managed_gjc_instruction",
     "install_copilot_instruction_artifact",
     "install_gemini_instruction_artifact",
     "install_gjc_instruction_artifact",

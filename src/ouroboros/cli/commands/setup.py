@@ -28,7 +28,7 @@ import stat
 import subprocess
 import sys
 import tomllib
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from rich.markup import escape
 from rich.prompt import Prompt
@@ -46,7 +46,6 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
-from ouroboros.cli.commands.gjc_bridge import gjc_ooo_bridge_source_text
 from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.commands.setup_completion import print_setup_completion
@@ -96,6 +95,9 @@ from ouroboros.package_profiles import (
     has_unsupported_claude_sdk_mcp_mix,
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
+
+if TYPE_CHECKING:
+    from ouroboros.cli.gjc_setup import GjcSetupHost
 
 
 class _SetupCodexCliLogger:
@@ -3697,65 +3699,17 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
-def _install_gjc_skills() -> bool:
-    """Project packaged Ouroboros skills into GJC's native user registry."""
-    from ouroboros.gjc import install_gjc_skills
-    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
+def _gjc_setup_host() -> GjcSetupHost:
+    """Bind setup-owned filesystem and launcher seams for GJC activation."""
+    from ouroboros.cli.gjc_setup import GjcSetupHost
 
-    try:
-        result = install_gjc_skills(agent_dir=gjc_agent_dir(), prune=True)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        print_warning(f"Could not install GJC Ouroboros skills: {exc}")
-        return False
-    print_success(f"Installed {len(result.skill_paths)} Ouroboros skills → {result.target_root}")
-    return True
-
-
-def _gjc_mcp_bridge_config_path() -> Path:
-    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
-
-    return gjc_mcp_bridge_config_path()
-
-
-def _install_gjc_mcp_bridge_config() -> bool:
-    from ouroboros.cli.gjc_setup import install_gjc_mcp_bridge_config
-
-    return install_gjc_mcp_bridge_config(_atomic_write_text)
-
-
-def _is_setup_managed_gjc_mcp_bridge_config(path: Path) -> bool:
-    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_bridge_config
-
-    return is_setup_managed_gjc_mcp_bridge_config(path)
-
-
-def _is_setup_managed_gjc_mcp_entry(entry: object) -> bool:
-    from ouroboros.cli.gjc_setup import is_setup_managed_gjc_mcp_entry
-
-    return is_setup_managed_gjc_mcp_entry(entry)
-
-
-def _register_gjc_mcp_server(
-    gjc_path: str,
-    *,
-    detected: dict[str, object] | None = None,
-    registration_state: dict[str, bool] | None = None,
-) -> bool:
-    from ouroboros.cli.gjc_setup import register_gjc_mcp_server
-
-    return register_gjc_mcp_server(
-        gjc_path,
+    return GjcSetupHost(
+        atomic_write_text=_atomic_write_text,
+        snapshot_path=_snapshot_path,
+        restore_path_snapshot=_restore_path_snapshot,
         detect_mcp_entry=_detect_mcp_entry,
-        run_command=subprocess.run,
-        detected=detected,
-        registration_state=registration_state,
+        bridge_dispatch_entry=_detect_pi_bridge_dispatch_entry,
     )
-
-
-def _remove_legacy_gjc_bridge() -> bool:
-    from ouroboros.cli.gjc_setup import remove_legacy_gjc_bridge
-
-    return remove_legacy_gjc_bridge()
 
 
 def _install_gjc_runtime_artifacts(
@@ -3763,27 +3717,12 @@ def _install_gjc_runtime_artifacts(
     *,
     registration_state: dict[str, bool] | None = None,
 ) -> bool:
-    from ouroboros.cli.commands.setup_gjc_activation import install_gjc_runtime_artifacts
-    from ouroboros.cli.gjc_setup import gjc_mcp_bridge_config_path
-    from ouroboros.runtime_instruction_artifacts import gjc_agent_dir, gjc_instruction_path
+    from ouroboros.cli.gjc_setup import install_gjc_runtime_artifacts
 
-    command, args = _detect_pi_bridge_dispatch_entry()
     return install_gjc_runtime_artifacts(
         gjc_path,
+        host=_gjc_setup_host(),
         registration_state=registration_state,
-        bridge_source=gjc_ooo_bridge_source_text(command, args),
-        agent_dir=gjc_agent_dir(),
-        instruction_path=gjc_instruction_path(),
-        bridge_config_path=gjc_mcp_bridge_config_path(),
-        atomic_write_text=_atomic_write_text,
-        snapshot_path=_snapshot_path,
-        restore_path_snapshot=_restore_path_snapshot,
-        install_bridge_config=_install_gjc_mcp_bridge_config,
-        install_skills=_install_gjc_skills,
-        install_instruction=lambda: _install_runtime_instruction_artifact("gjc"),
-        register_server=_register_gjc_mcp_server,
-        remove_legacy_bridge=_remove_legacy_gjc_bridge,
-        warn=print_warning,
     )
 
 
@@ -3791,13 +3730,7 @@ def _setup_gjc(gjc_path: str) -> bool:
     """Configure GJC through the ownership-safe runtime transaction."""
     from ouroboros.cli.gjc_setup import setup_gjc_runtime
 
-    return setup_gjc_runtime(
-        gjc_path,
-        install_runtime_artifacts=_install_gjc_runtime_artifacts,
-        atomic_write_text=_atomic_write_text,
-        snapshot_path=_snapshot_path,
-        restore_path_snapshot=_restore_path_snapshot,
-    )
+    return setup_gjc_runtime(gjc_path, host=_gjc_setup_host())
 
 
 def _setup_gemini(gemini_path: str) -> None:

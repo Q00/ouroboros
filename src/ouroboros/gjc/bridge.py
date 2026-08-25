@@ -1,10 +1,13 @@
-"""Managed GJC bridge extension source for compatibility frontdoor dispatch."""
+"""Rendering and ownership judgment for the GJC compatibility input bridge."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import re
+
+from ouroboros.gjc.paths import gjc_bridge_path
 
 _OWNERSHIP_PREFIX = "// ouroboros-setup-sha256:"
 
@@ -114,3 +117,13 @@ def is_gjc_ooo_bridge_source_text(source: str) -> bool:
         and all(isinstance(arg, str) for arg in args)
         and source == _gjc_ooo_bridge_source_body(command, args)
     )
+
+
+def is_setup_managed_gjc_bridge(path: Path | None = None) -> bool:
+    """Return whether the bridge is a complete setup-rendered generation."""
+    candidate = path or gjc_bridge_path()
+    try:
+        source = candidate.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return False
+    return not candidate.is_symlink() and is_gjc_ooo_bridge_source_text(source)

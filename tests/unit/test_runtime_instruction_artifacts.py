@@ -4,12 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from ouroboros.gjc import gjc_agent_dir, gjc_instruction_path
 from ouroboros.runtime_instruction_artifacts import (
     COPILOT_AGENTS_FILENAME,
     COPILOT_INSTRUCTIONS_DIRNAME,
     GUIDE_FILENAME,
-    gjc_agent_dir,
-    gjc_instruction_path,
     install_copilot_instruction_artifact,
     install_gemini_instruction_artifact,
     install_gjc_instruction_artifact,
