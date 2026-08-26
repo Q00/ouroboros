@@ -244,6 +244,14 @@ _MAX_EXECUTION_ALLOWED_TOOLS = 1024
 _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS = 100_000
 _MAX_EXECUTION_PROFILE_CHARS = 100_000
 _MAX_EXECUTION_RUNTIME_HANDLE_CHARS = 1_000_000
+_EXECUTION_WORKER_ROLE_PROMPT = """## Ouroboros Execution Worker Role
+This process is the dedicated execution worker for the Seed. The parent or verifier is outside this process. Execute the Seed directly in this worker process and produce evidence for the acceptance criteria.
+
+Do not delegate, hand off, or spawn another agent. A plan, delegation receipt,
+or claim that another worker will execute the Seed is not execution evidence.
+Follow the Seed's goal, acceptance criteria, and safety constraints exactly;
+if a precondition cannot be proven, stop and report the blocker with evidence.
+"""
 _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -566,7 +574,9 @@ def build_system_prompt(
     seed_contract = render_seed_contract_for_execution(SeedContract.from_seed(seed))
     conductor_directive = _render_conductor_directive(seed)
 
-    prompt = f"""{strategy_fragment}
+    prompt = f"""{_EXECUTION_WORKER_ROLE_PROMPT}
+
+{strategy_fragment}
 
 {seed_contract}
 
@@ -577,7 +587,9 @@ def build_system_prompt(
 {recovery_protocol}"""
 
     if not guidance_fragment:
-        prompt = f"""{strategy_fragment}
+        prompt = f"""{_EXECUTION_WORKER_ROLE_PROMPT}
+
+{strategy_fragment}
 
 {seed_contract}
 

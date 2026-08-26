@@ -344,6 +344,14 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(sample_seed)
         assert sample_seed.goal in prompt
 
+    def test_binds_dedicated_worker_role(self, sample_seed: Seed) -> None:
+        """Background execution must run in this worker, not hand off again."""
+        prompt = build_system_prompt(sample_seed)
+
+        assert "## Ouroboros Execution Worker Role" in prompt
+        assert "Execute the Seed directly in this worker process" in prompt
+        assert "Do not delegate, hand off, or spawn another agent" in prompt
+
     def test_includes_constraints(self, sample_seed: Seed) -> None:
         """Test that system prompt includes constraints."""
         prompt = build_system_prompt(sample_seed)
