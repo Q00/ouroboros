@@ -375,6 +375,10 @@ here because ``ledger_seed`` imports this module. The two are pinned equal by a
 regression test.
 """
 
+_LEGACY_V104_VERSION = "1.0.4"
+_LEGACY_V104_GENERATION_MODE = "revised_after_qa"
+_LEGACY_V104_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-z][a-z0-9_]*$")
+
 
 class SeedMetadata(BaseModel, frozen=True):
     """Metadata about the Seed generation.
@@ -760,6 +764,71 @@ def ac_texts(criteria: Any) -> tuple[str, ...]:
     return tuple(ac_text(criterion) for criterion in criteria)
 
 
+def _migrate_legacy_v104_seed_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Migrate the pre-hash v1.0.4 parser shape into the strict Seed schema.
+
+    The v1.0.4 Seed generator emitted human-readable ``semantic_ac_key``
+    labels and omitted ontology-field descriptions.  The current schema
+    intentionally rejects both shapes, so migration is limited to that exact
+    version/provenance envelope and then delegates all values to the existing
+    strict Pydantic validation.  Invalid labels, blank values, and malformed
+    fields are not repaired.
+    """
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return data
+    if (
+        metadata.get("version") != _LEGACY_V104_VERSION
+        or metadata.get("generation_mode") != _LEGACY_V104_GENERATION_MODE
+    ):
+        return data
+
+    normalized = dict(data)
+
+    criteria = data.get("acceptance_criteria")
+    if isinstance(criteria, list | tuple):
+        normalized_criteria: list[Any] = []
+        criteria_changed = False
+        for item in criteria:
+            if isinstance(item, dict):
+                semantic_ac_key = item.get("semantic_ac_key")
+                if isinstance(semantic_ac_key, str) and _LEGACY_V104_SEMANTIC_AC_KEY_RE.fullmatch(
+                    semantic_ac_key
+                ):
+                    item = {**item, "semantic_ac_key": None}
+                    criteria_changed = True
+            normalized_criteria.append(item)
+        if criteria_changed:
+            normalized["acceptance_criteria"] = (
+                tuple(normalized_criteria) if isinstance(criteria, tuple) else normalized_criteria
+            )
+
+    ontology_schema = data.get("ontology_schema")
+    if isinstance(ontology_schema, dict):
+        fields = ontology_schema.get("fields")
+        if isinstance(fields, list | tuple):
+            normalized_fields: list[Any] = []
+            fields_changed = False
+            for item in fields:
+                if (
+                    isinstance(item, dict)
+                    and "description" not in item
+                    and isinstance(item.get("name"), str)
+                    and bool(item["name"].strip())
+                ):
+                    item = {**item, "description": item["name"]}
+                    fields_changed = True
+                normalized_fields.append(item)
+            if fields_changed:
+                normalized_schema = dict(ontology_schema)
+                normalized_schema["fields"] = (
+                    tuple(normalized_fields) if isinstance(fields, tuple) else normalized_fields
+                )
+                normalized["ontology_schema"] = normalized_schema
+
+    return normalized
+
+
 class Seed(BaseModel, frozen=True):
     """Immutable specification for workflow execution.
 
@@ -1021,7 +1090,7 @@ class Seed(BaseModel, frozen=True):
         Returns:
             Seed instance.
         """
-        return cls.model_validate(data)
+        return cls.model_validate(_migrate_legacy_v104_seed_dict(data))
 
 
 def _freeze_seed_extra_value(value: Any, *, path: str) -> Any:

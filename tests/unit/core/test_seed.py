@@ -1058,6 +1058,64 @@ class TestSeed:
             reconstructed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
         )
 
+    def test_seed_from_dict_migrates_v104_legacy_contract_fields(self) -> None:
+        """Version 1.0.4 revised Seeds normalize legacy parser fields."""
+        seed_dict = {
+            "goal": "Reconcile a campaign",
+            "acceptance_criteria": [
+                {
+                    "description": "A deterministic receipt is written",
+                    "semantic_ac_key": "ac_manifest_exact_frozen",
+                },
+            ],
+            "ontology_schema": {
+                "name": "Receipt",
+                "description": "A reconciliation receipt",
+                "fields": [
+                    {"name": "manifest_id", "type": "string", "required": True},
+                ],
+            },
+            "metadata": {
+                "version": "1.0.4",
+                "generation_mode": "revised_after_qa",
+            },
+        }
+
+        reconstructed = Seed.from_dict(seed_dict)
+
+        criterion = reconstructed.acceptance_criteria[0]
+        assert criterion.semantic_ac_key == derive_semantic_ac_key(criterion)
+        assert criterion.semantic_ac_key != "ac_manifest_exact_frozen"
+        assert reconstructed.ontology_schema.fields[0].description == "manifest_id"
+        assert seed_dict["acceptance_criteria"][0]["semantic_ac_key"] == "ac_manifest_exact_frozen"
+        assert "description" not in seed_dict["ontology_schema"]["fields"][0]
+
+    def test_seed_from_dict_rejects_malformed_v104_legacy_contract(self) -> None:
+        """Compatibility normalization must not weaken malformed-input rejection."""
+        seed_dict = {
+            "goal": "Reconcile a campaign",
+            "acceptance_criteria": [
+                {
+                    "description": "A deterministic receipt is written",
+                    "semantic_ac_key": "ac_bad-key!",
+                },
+            ],
+            "ontology_schema": {
+                "name": "Receipt",
+                "description": "A reconciliation receipt",
+                "fields": [
+                    {"name": "manifest_id", "type": "string", "required": True},
+                ],
+            },
+            "metadata": {
+                "version": "1.0.4",
+                "generation_mode": "revised_after_qa",
+            },
+        }
+
+        with pytest.raises(PydanticValidationError):
+            Seed.from_dict(seed_dict)
+
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
         """Seed can roundtrip through dict serialization."""
         seed_dict = full_seed.to_dict()
