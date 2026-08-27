@@ -1192,6 +1192,25 @@ def test_rollback_archive_replacement_cannot_be_removed_on_close(tmp_path: Path)
         assert ledger.read(archive.record_nonce) is not None
 
 
+def test_rollback_archive_replacement_survives_crash_replay(tmp_path: Path) -> None:
+    archive = prepare_rollback_archive(tmp_path / "profile")
+    record_nonce = archive.record_nonce
+    displaced = archive.path.with_name(archive.path.name + ".displaced")
+    os.close(archive.fd)
+    os.close(archive.parent_fd)
+    archive.closed = True
+    os.rename(archive.path, displaced)
+    archive.path.mkdir(mode=0o700)
+
+    next_archive = prepare_rollback_archive(tmp_path / "profile")
+
+    assert archive.path.is_dir()
+    assert displaced.is_dir()
+    with fs_ownership._ledger_authority() as ledger:
+        assert ledger.read(record_nonce) is not None
+    close_rollback_archive(next_archive)
+
+
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
     tmp_path: Path,
 ) -> None:

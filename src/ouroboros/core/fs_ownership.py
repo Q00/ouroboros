@@ -1277,7 +1277,7 @@ def _recorded_identity(record: dict[str, object]) -> tuple[int, int, int] | None
 
 
 def _reconcile_rollback_archives(ledger: _LedgerAuthority) -> None:
-    """Conservatively retire only empty archives matching their recorded generation."""
+    """Retire only empty archives authenticated under their recorded parent."""
     for nonce in ledger.nonces():
         record = ledger.read(nonce)
         if record is None or record.get("operation") != "rollback-archive":
@@ -1286,20 +1286,57 @@ def _reconcile_rollback_archives(ledger: _LedgerAuthority) -> None:
         identity = _recorded_identity(record)
         if not isinstance(raw_path, str) or identity is None:
             continue
-        path = Path(raw_path)
+        archive_path = Path(raw_path)
         try:
-            current = os.stat(path, follow_symlinks=False)
-        except OSError:
-            continue
-        current_identity = (
-            current.st_dev,
-            current.st_ino,
-            stat_module.S_IFMT(current.st_mode),
-        )
-        if current_identity != identity:
-            continue
-        try:
-            path.rmdir()
+            with _pinned_parent(
+                archive_path.parent,
+                trusted_ancestor=archive_path.parent,
+                create=False,
+            ) as parent:
+                if parent.fd is None:
+                    continue
+                current = os.stat(
+                    archive_path.name,
+                    dir_fd=parent.fd,
+                    follow_symlinks=False,
+                )
+                current_identity = (
+                    current.st_dev,
+                    current.st_ino,
+                    stat_module.S_IFMT(current.st_mode),
+                )
+                if current_identity != identity:
+                    continue
+                archive_fd = os.open(
+                    archive_path.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent.fd,
+                )
+                try:
+                    if os.listdir(archive_fd):
+                        continue
+                    claimed = f".{archive_path.name}.{os.urandom(8).hex()}.closing"
+                    os.rename(
+                        archive_path.name,
+                        claimed,
+                        src_dir_fd=parent.fd,
+                        dst_dir_fd=parent.fd,
+                    )
+                    captured = os.stat(claimed, dir_fd=parent.fd, follow_symlinks=False)
+                    captured_identity = (
+                        captured.st_dev,
+                        captured.st_ino,
+                        stat_module.S_IFMT(captured.st_mode),
+                    )
+                    if captured_identity != identity:
+                        with suppress(OSError):
+                            _rename_no_replace_between(
+                                parent.fd, claimed, parent.fd, archive_path.name
+                            )
+                        continue
+                    os.rmdir(claimed, dir_fd=parent.fd)
+                finally:
+                    os.close(archive_fd)
         except OSError:
             continue
         ledger.retire(nonce)
