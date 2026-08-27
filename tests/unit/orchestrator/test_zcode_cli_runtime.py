@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import plistlib
 from typing import Any
@@ -235,6 +236,32 @@ def test_rollout_exact_turn_superseded_by_newer_turn_fails_closed(
     newer["turnId"] = "turn-newer"
     path.write_text(json.dumps(matched) + "\n" + json.dumps(newer) + "\n", encoding="utf-8")
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_replayed_exact_identity_after_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    other = json.loads(json.dumps(matched))
+    other["turnId"] = "turn-newer"
+    replayed_match = json.loads(json.dumps(matched))
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (matched, other, replayed_match)) + "\n",
+        encoding="utf-8",
+    )
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_loads_without_getuid_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, _ = _rollout_fixture(tmp_path, monkeypatch)
+    monkeypatch.delattr(os, "getuid", raising=False)
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
 
 
 def test_rollout_non_uuid_session_id_fails_closed(
