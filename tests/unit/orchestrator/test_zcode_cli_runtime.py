@@ -116,6 +116,197 @@ def test_convert_event_tool_summary_to_assistant(runtime: ZcodeCLIRuntime) -> No
     assert msgs[0].data.get("usage", {}).get("modelRequestCount") == 2
 
 
+def _rollout_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ZcodeCLIRuntime, dict[str, Any], Path]:
+    """Create an exact-bound Zcode rollout receipt fixture under a fake HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "sess_12345678-1234-1234-1234-123456789abc"
+    event = {
+        "sessionId": session_id,
+        "traceId": "trace-test-1",
+        "turnId": "turn-test-1",
+        "response": "Final answer",
+    }
+    rollout = tmp_path / ".zcode" / "cli" / "rollout"
+    rollout.mkdir(parents=True)
+    path = rollout / f"model-io-{session_id}.jsonl"
+    record = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messages": [
+                {"role": "user", "content": "current turn"},
+                {
+                    "role": "assistant",
+                    "toolCalls": [
+                        {"id": "call-1", "name": "Bash", "input": {"command": "printf ok"}}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "toolCallId": "call-1",
+                    "toolName": "Bash",
+                    "content": "ok",
+                    "isError": False,
+                },
+            ]
+        },
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs"), event, path
+
+
+def test_convert_event_loads_exact_rollout_receipts_and_preserves_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, _ = _rollout_fixture(tmp_path, monkeypatch)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
+    assert messages[0].tool_name == "Bash"
+    assert messages[1].data["exit_code"] == 0
+    assert messages[-1].content == "Final answer"
+
+
+def test_rollout_cumulative_messages_deduplicate_exact_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    # 0.16.1 request.messages is cumulative across model-io records; the
+    # second snapshot repeats the prior call/result and adds a new pair.
+    record["request"]["messages"] += [
+        *record["request"]["messages"][1:],
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+def test_rollout_conflicting_duplicate_call_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"].insert(
+        1, {"role": "assistant", "toolCalls": [{"id": "call-1", "name": "Write", "input": {}}]}
+    )
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_excludes_receipts_before_current_turn_user_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    old_pair = record["request"]["messages"]
+    record["request"]["messages"] = [
+        {"role": "user", "content": "old turn"},
+        *old_pair,
+        {"role": "assistant", "content": "old final"},
+        {"role": "user", "content": "current turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.tool_name for message in messages[:-1]] == ["Read", "Read"]
+
+
+def test_rollout_malformed_tool_calls_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["toolCalls"] = {"not": "a list"}
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize("variant", ["trace", "turn"])
+def test_rollout_identifier_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][0]["unused"] = variant
+    record[f"{variant}Id"] = "different"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_malformed_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.write_text("{not-json}\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_symlink_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    target = path.with_suffix(".target")
+    target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    path.symlink_to(target)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_oversized_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    with path.open("ab") as stream:
+        stream.write(b"x" * (16 * 1024 * 1024))
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+@pytest.mark.parametrize("mutation", ["unmatched", "name", "missing_error"])
+def test_rollout_invalid_tool_pair_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    result = record["request"]["messages"][2]
+    if mutation == "unmatched":
+        result["toolCallId"] = "call-missing"
+    elif mutation == "name":
+        result["toolName"] = "Write"
+    else:
+        result.pop("isError")
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
 @pytest.mark.parametrize(
     "event",
     [
