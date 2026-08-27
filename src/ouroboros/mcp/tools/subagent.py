@@ -1427,6 +1427,7 @@ def build_generate_seed_subagent(
             "is still recorded in seed metadata for provenance. Do not refuse "
             "on ambiguity grounds.\n"
         )
+
     distillation_note = ""
     distillation_payload: Any | None = None
     if requirement_distillation is not None:
