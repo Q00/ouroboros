@@ -1,9 +1,8 @@
 """Ownership judgment and durable-state primitives for GJC MCP registrations.
 
-Every function here is side-effect free except
-:func:`remove_persisted_gjc_mcp_server`, which mutates only a registration
-that exactly matches setup's own generation. Progress narration and GJC CLI
-invocations live in :mod:`ouroboros.cli.gjc_setup`.
+Every function here is side-effect free except the exact-generation persistent
+removal functions. GJC CLI probing, registration, and endpoint validation live
+in :mod:`ouroboros.gjc.adapter`.
 """
 
 from __future__ import annotations
@@ -103,9 +102,8 @@ def is_setup_managed_gjc_mcp_entry(entry: object, *, allow_redacted_env: bool = 
 def gjc_mcp_entry_generation(entry: object) -> str | None:
     """Canonical serialization of one persisted entry, used as a generation token.
 
-    Failure cleanup and rollback bind their removal to the exact generation
-    they observed: a registration that has since changed — however slightly —
-    no longer matches its token and is preserved.
+    Failure cleanup binds removal to the exact generation it observed: a
+    registration that has since changed is preserved.
     """
     if not isinstance(entry, dict):
         return None

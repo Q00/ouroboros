@@ -169,8 +169,11 @@ ooo status
 ```
 
 Setup removes an obsolete setup-owned input bridge only after native activation
-validates. GJC remains a product-agnostic host: Ouroboros owns the selected route,
-refresh, rollback, and uninstall lifecycle.
+validates. Each skill, guide, bridge config, and compatibility route is published
+independently through the shared single-entry ownership primitive. Setup does not
+journal or roll back those host artifacts as one transaction; on failure it leaves
+complete setup-owned generations for `ouroboros setup refresh` and never replaces
+an operator generation.
 
 ## GJC As LLM Backend
 

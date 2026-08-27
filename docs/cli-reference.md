@@ -314,8 +314,8 @@ ouroboros setup --non-interactive
 - Kiro, Copilot, and Hermes setup is transactional at the activation boundary: if no isolated launcher is available or host registration fails, setup exits non-zero without persisting the selected Ouroboros runtime
 - For Kiro CLI: installs the runtime skill capability guide into `~/.kiro/steering/ouroboros-skill-capability-guide.md`
 - For Copilot CLI: installs the runtime skill capability guide into `~/.copilot/ouroboros-instructions/AGENTS.md` and configures Ouroboros-launched Copilot child sessions to read it via `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
-- For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`
-- For GJC: capability-checks the installed `gjc mcp` contract. Hosts with conventional standalone MCP autoload receive namespaced skills under `<agent-dir>/skills`, an always-applied routing guide under `<agent-dir>/rules`, and the isolated server through `gjc mcp add`; storage-only hosts receive a setup-owned compatibility input bridge instead. Refresh revalidates the complete route, and uninstall removes only exact setup-owned generations.
+- For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml` only after host activation succeeds.
+- For GJC: capability-checks the installed `gjc mcp` contract through the GJC adapter. Hosts with conventional standalone MCP autoload receive namespaced skills under `<agent-dir>/skills`, an always-applied routing guide under `<agent-dir>/rules`, and the isolated server through `gjc mcp add`; storage-only hosts receive a setup-owned compatibility input bridge instead. Each artifact is an independent ownership-checked publication—there is no GJC-wide journal, archive, or rollback transaction. Failed activation preserves complete setup-owned generations for refresh, and uninstall removes only exact setup-owned generations.
 - For Zcode: sets `orchestrator.runtime_backend: zcode` and `orchestrator.zcode_cli_path` while leaving the completion-only `llm.backend` unchanged
 
 Claude runtime activation publishes a newly needed `credentials.yaml` before

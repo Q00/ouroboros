@@ -3706,28 +3706,19 @@ def _gjc_setup_host() -> GjcSetupHost:
     return GjcSetupHost(
         atomic_write_text=_atomic_write_text,
         snapshot_path=_snapshot_path,
-        restore_path_snapshot=_restore_path_snapshot,
         detect_mcp_entry=_detect_mcp_entry,
         bridge_dispatch_entry=_detect_pi_bridge_dispatch_entry,
     )
 
 
-def _install_gjc_runtime_artifacts(
-    gjc_path: str,
-    *,
-    registration_state: dict[str, object] | None = None,
-) -> bool:
+def _install_gjc_runtime_artifacts(gjc_path: str) -> bool:
     from ouroboros.cli.gjc_setup import install_gjc_runtime_artifacts
 
-    return install_gjc_runtime_artifacts(
-        gjc_path,
-        host=_gjc_setup_host(),
-        registration_state=registration_state,
-    )
+    return install_gjc_runtime_artifacts(gjc_path, host=_gjc_setup_host())
 
 
 def _setup_gjc(gjc_path: str) -> bool:
-    """Configure GJC through the ownership-safe runtime transaction."""
+    """Configure GJC through independently owned activation steps."""
     from ouroboros.cli.gjc_setup import setup_gjc_runtime
 
     return setup_gjc_runtime(gjc_path, host=_gjc_setup_host())

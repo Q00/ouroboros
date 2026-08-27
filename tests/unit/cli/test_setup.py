@@ -31,7 +31,6 @@ from ouroboros.cli.commands.setup import (
     _scan_and_register_repos,
     _set_default_repo,
 )
-from ouroboros.cli.gjc_setup import register_gjc_mcp_server
 import ouroboros.cli.runtime_activation as runtime_activation
 from ouroboros.codex import CodexArtifactInstallResult
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2
@@ -47,6 +46,7 @@ from ouroboros.gjc import (
     gjc_mcp_bridge_config_path,
     gjc_ooo_bridge_source_text,
     is_setup_managed_gjc_mcp_entry,
+    register_gjc_mcp_server,
 )
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
@@ -10250,7 +10250,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch("ouroboros.cli.commands.setup.subprocess.run", return_value=old_help),
+            patch("ouroboros.gjc.adapter.subprocess.run", return_value=old_help),
             patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server") as register,
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc")
@@ -10260,7 +10260,7 @@ class TestGjcSetup:
         register.assert_not_called()
 
     def test_native_gjc_contract_requires_sharing_and_standalone_autoload(self) -> None:
-        from ouroboros.cli.gjc_setup import gjc_native_mcp_autoload_support
+        from ouroboros.gjc import gjc_native_mcp_autoload_support
 
         storage_only = subprocess.CompletedProcess(
             ["gjc", "mcp", "add", "--help"],
@@ -10415,11 +10415,11 @@ class TestGjcSetup:
         )
         with (
             patch(
-                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                "ouroboros.gjc.adapter.persisted_gjc_mcp_entry",
                 return_value=managed_entry["config"],
             ),
             patch(
-                "ouroboros.cli.commands.setup.subprocess.run",
+                "ouroboros.gjc.adapter.subprocess.run",
                 side_effect=[listed, added, validated],
             ) as run,
         ):
@@ -10461,9 +10461,9 @@ class TestGjcSetup:
             stderr="",
         )
         with (
-            patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=None),
+            patch("ouroboros.gjc.adapter.persisted_gjc_mcp_entry", return_value=None),
             patch(
-                "ouroboros.cli.commands.setup.subprocess.run",
+                "ouroboros.gjc.adapter.subprocess.run",
                 side_effect=[empty, added, empty],
             ) as run,
         ):
@@ -10521,31 +10521,28 @@ class TestGjcSetup:
             "sharing": "per-session",
             "timeout": 30000,
         }
-        state: dict[str, bool] = {}
         with (
             patch(
-                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                "ouroboros.gjc.adapter.persisted_gjc_mcp_entry",
                 side_effect=[None, managed],
             ),
             patch(
-                "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server_locked",
+                "ouroboros.gjc.adapter.remove_persisted_gjc_mcp_server_locked",
                 return_value=True,
             ) as remove,
             patch(
-                "ouroboros.cli.commands.setup.subprocess.run",
+                "ouroboros.gjc.adapter.subprocess.run",
                 side_effect=[empty, added, empty],
             ),
         ):
             assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": managed["args"][:-2]},
-                registration_state=state,
             )
 
         remove.assert_called_once_with(
             expected_entry_generation=json.dumps(managed, sort_keys=True)
         )
-        assert state == {"created": False, "changed": False}
 
     def test_failed_add_preserves_preexisting_durable_registration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10586,12 +10583,12 @@ class TestGjcSetup:
         }
         with (
             patch(
-                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                "ouroboros.gjc.adapter.persisted_gjc_mcp_entry",
                 return_value=preexisting,
             ),
-            patch("ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server_locked") as remove,
+            patch("ouroboros.gjc.adapter.remove_persisted_gjc_mcp_server_locked") as remove,
             patch(
-                "ouroboros.cli.commands.setup.subprocess.run",
+                "ouroboros.gjc.adapter.subprocess.run",
                 side_effect=[empty, failed_add],
             ),
         ):
@@ -10630,8 +10627,8 @@ class TestGjcSetup:
             return empty
 
         with (
-            patch("ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry", return_value=None),
-            patch("ouroboros.cli.commands.setup.subprocess.run", side_effect=run_side_effect),
+            patch("ouroboros.gjc.adapter.persisted_gjc_mcp_entry", return_value=None),
+            patch("ouroboros.gjc.adapter.subprocess.run", side_effect=run_side_effect),
         ):
             assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
@@ -10756,7 +10753,7 @@ class TestGjcSetup:
             ),
             stderr="",
         )
-        with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed) as run:
+        with patch("ouroboros.gjc.adapter.subprocess.run", return_value=listed) as run:
             assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp]"]},
@@ -10832,36 +10829,15 @@ class TestGjcSetup:
 
         with (
             patch(
-                "ouroboros.cli.gjc_setup.persisted_gjc_mcp_entry",
+                "ouroboros.gjc.adapter.persisted_gjc_mcp_entry",
                 return_value=entry["config"],
             ),
-            patch("ouroboros.cli.commands.setup.subprocess.run", return_value=listed),
+            patch("ouroboros.gjc.adapter.subprocess.run", return_value=listed),
         ):
             assert not register_gjc_mcp_server(
                 "/opt/bin/gjc",
                 detected={"command": "uvx", "args": entry["config"]["args"][:-2]},
             )
-
-    def test_registration_rollback_preserves_concurrent_operator_change(self) -> None:
-        from ouroboros.cli import gjc_setup
-
-        state: dict[str, object] = {
-            "created": True,
-            "changed": True,
-            "entry_generation": "generation-token",
-        }
-        with patch(
-            "ouroboros.cli.gjc_setup.remove_persisted_gjc_mcp_server",
-            return_value=False,
-        ) as remove:
-            gjc_setup._rollback_new_gjc_mcp_registration(state)
-
-        remove.assert_called_once_with(expected_entry_generation="generation-token")
-        assert state == {
-            "created": True,
-            "changed": True,
-            "entry_generation": "generation-token",
-        }
 
     def test_gjc_install_steps_reject_a_symlinked_agent_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10983,121 +10959,6 @@ class TestGjcSetup:
             "ouroboros": writer_entry
         }
 
-    def test_gjc_rollback_restores_the_pre_transaction_snapshot(self, tmp_path: Path) -> None:
-        from ouroboros.cli import gjc_setup
-
-        path = tmp_path / "profile" / "guide.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("pre-setup\n", encoding="utf-8")
-        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
-        path.write_text("ours\n", encoding="utf-8")
-        expected = setup_cmd._snapshot_path(path, follow_links=False)
-
-        gjc_setup._restore_gjc_paths(
-            ((path, snapshot),),
-            ((path, expected),),
-            setup_cmd._restore_path_snapshot,
-            setup_cmd._snapshot_path,
-        )
-
-        assert path.read_text(encoding="utf-8") == "pre-setup\n"
-
-    def test_gjc_rollback_preserves_an_operator_generation_inserted_mid_restore(
-        self, tmp_path: Path
-    ) -> None:
-        """The reviewer's rollback probe: an operator replacement written after
-        the ownership judgment must survive — there is no check-then-restore
-        gap because the restore publishes through the claim primitive."""
-        from ouroboros.cli import gjc_setup
-
-        path = tmp_path / "profile" / "guide.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("pre-setup\n", encoding="utf-8")
-        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
-        path.write_text("ours\n", encoding="utf-8")
-        expected = setup_cmd._snapshot_path(path, follow_links=False)
-
-        def racing_restore(
-            target: Path, snap: object, *, restore_link_targets: bool = True
-        ) -> None:
-            # The operator recreates the canonical path while the rollback is
-            # materializing the snapshot: publication must fail no-replace.
-            path.write_text("operator replacement\n", encoding="utf-8")
-            setup_cmd._restore_path_snapshot(
-                target, snap, restore_link_targets=restore_link_targets
-            )
-
-        gjc_setup._restore_gjc_paths(
-            ((path, snapshot),),
-            ((path, expected),),
-            racing_restore,
-            setup_cmd._snapshot_path,
-        )
-
-        assert path.read_text(encoding="utf-8") == "operator replacement\n"
-
-    def test_gjc_rollback_restoration_cannot_escape_through_a_swapped_parent(
-        self, tmp_path: Path
-    ) -> None:
-        """A parent renamed away and replaced by a symlink while the rollback
-        materializes a snapshot must not receive a single restored write."""
-        from ouroboros.cli import gjc_setup
-
-        profile = tmp_path / "profile"
-        profile.mkdir()
-        path = profile / "guide.md"
-        path.write_text("pre-setup\n", encoding="utf-8")
-        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
-        path.write_text("ours\n", encoding="utf-8")
-        expected = setup_cmd._snapshot_path(path, follow_links=False)
-        external = tmp_path / "external"
-        external.mkdir()
-        moved = tmp_path / "profile-moved"
-
-        def swap_then_restore(
-            target: Path, snap: object, *, restore_link_targets: bool = True
-        ) -> None:
-            profile.rename(moved)
-            try:
-                profile.symlink_to(external)
-            except OSError:
-                pytest.skip("symlinks are not supported on this platform")
-            setup_cmd._restore_path_snapshot(
-                target, snap, restore_link_targets=restore_link_targets
-            )
-
-        gjc_setup._restore_gjc_paths(
-            ((path, snapshot),),
-            ((path, expected),),
-            swap_then_restore,
-            setup_cmd._snapshot_path,
-        )
-
-        assert list(external.rglob("*")) == []
-        assert (moved / "guide.md").exists()
-
-    def test_gjc_rollback_preserves_an_operator_replacement_of_our_generation(
-        self, tmp_path: Path
-    ) -> None:
-        path = tmp_path / "profile" / "guide.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("pre-setup\n", encoding="utf-8")
-        snapshot = setup_cmd._snapshot_path(path, follow_links=False)
-        path.write_text("ours\n", encoding="utf-8")
-        expected = setup_cmd._snapshot_path(path, follow_links=False)
-        path.write_text("operator replacement\n", encoding="utf-8")
-
-        from ouroboros.cli import gjc_setup
-
-        gjc_setup._restore_gjc_paths(
-            ((path, snapshot),),
-            ((path, expected),),
-            setup_cmd._restore_path_snapshot,
-            setup_cmd._snapshot_path,
-        )
-
-        assert path.read_text(encoding="utf-8") == "operator replacement\n"
-
     @pytest.mark.parametrize("command", ["uvx", "/usr/local/bin/pipx"])
     def test_mcp_ownership_requires_exact_setup_launcher(self, command: str) -> None:
         entry = {
@@ -11111,7 +10972,7 @@ class TestGjcSetup:
 
         assert not is_setup_managed_gjc_mcp_entry(entry)
 
-    def test_setup_gjc_registration_failure_rolls_back_and_exits_nonzero(
+    def test_setup_gjc_registration_failure_preserves_complete_publications(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
@@ -11138,13 +10999,49 @@ class TestGjcSetup:
         assert "Setup complete!" not in result.output
         assert config_path.read_text(encoding="utf-8") == original
         skills_root = agent_dir / "skills"
-        assert not any(path.name.startswith("ouroboros-") for path in skills_root.iterdir())
-        retired = list(skills_root.glob(".ouroboros-*.*.retired"))
-        assert retired
-        assert not (agent_dir / "rules").exists()
-        assert not (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
+        assert any(path.name.startswith("ouroboros-") for path in skills_root.iterdir())
+        assert not list(skills_root.glob(".ouroboros-*.*.retired"))
+        assert (agent_dir / "rules" / "ouroboros-skill-capability-guide.md").exists()
+        assert (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
 
-    def test_setup_gjc_rollback_preserves_concurrent_operator_skill(
+    def test_setup_gjc_does_not_create_config_before_activation_succeeds(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.gjc_setup.install_gjc_runtime_artifacts", return_value=False),
+        ):
+            assert not setup_cmd._setup_gjc("/opt/bin/gjc")
+
+        assert not (config_dir / "config.yaml").exists()
+        assert not (config_dir / "credentials.yaml").exists()
+
+    def test_setup_gjc_preserves_config_changed_during_activation(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
+        operator = "operator: concurrent\n"
+
+        def activate(*_args: object, **_kwargs: object) -> bool:
+            config_path.write_text(operator, encoding="utf-8")
+            return True
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.gjc_setup.install_gjc_runtime_artifacts",
+                side_effect=activate,
+            ),
+        ):
+            assert not setup_cmd._setup_gjc("/opt/bin/gjc")
+
+        assert config_path.read_text(encoding="utf-8") == operator
+
+    def test_failed_gjc_activation_preserves_concurrent_operator_skill(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_dir = tmp_path / ".ouroboros"

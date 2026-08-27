@@ -253,28 +253,6 @@ def has_setup_owned_gjc_skills(*, agent_dir: str | Path) -> bool:
     )
 
 
-def setup_owned_gjc_skill_paths(
-    *, agent_dir: str | Path, skills_dir: str | Path | None = None
-) -> tuple[Path, ...]:
-    """Return every exact skill path setup may create, replace, or prune."""
-    target_root = gjc_skills_root(agent_dir)
-    owned: set[Path] = set()
-    if target_root.is_dir() and not target_root.is_symlink():
-        owned.update(
-            candidate
-            for candidate in target_root.iterdir()
-            if candidate.name.startswith(GJC_SKILL_NAMESPACE)
-            and not candidate.is_symlink()
-            and _is_managed_skill(candidate)
-        )
-    with _packaged_skills(skills_dir) as source_root:
-        owned.update(
-            target_root / f"{GJC_SKILL_NAMESPACE}{source_dir.name}"
-            for source_dir in collect_skill_bundle_dirs(source_root)
-        )
-    return tuple(sorted(owned, key=lambda path: path.name))
-
-
 def has_orphaned_gjc_claims() -> bool:
     """Return whether an *authenticated* interrupted GJC claim exists.
 
@@ -370,5 +348,4 @@ __all__ = [
     "install_gjc_skills",
     "recover_gjc_skill_claims",
     "remove_gjc_skills",
-    "setup_owned_gjc_skill_paths",
 ]
