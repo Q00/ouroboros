@@ -139,10 +139,33 @@ class ProjectRunSummary(BaseModel, frozen=True):
 def _gate_counts(
     runs: tuple[ProjectRunSummary, ...] | list[ProjectRunSummary],
 ) -> tuple[int, int, int, float | None]:
-    """Summarize recorded ambiguity-gate decisions for project runs."""
-    gated = sum(run.gate_forced is False for run in runs)
-    forced = sum(run.gate_forced is True for run in runs)
-    unknown = sum(run.gate_forced is None for run in runs)
+    """Summarize one ambiguity-gate decision per distinct Seed.
+
+    A Seed can be executed more than once, so run-attempt cardinality must not
+    inflate the project-level Seed statistics. Known and unknown observations
+    are merged conservatively: a known decision wins over an unknown repeat,
+    while conflicting known decisions are treated as unknown.
+    """
+    decisions: dict[str, bool | None] = {}
+    conflicts: set[str] = set()
+    for run in runs:
+        seed_id = run.seed_id
+        current = run.gate_forced
+        if seed_id not in decisions:
+            decisions[seed_id] = current
+            continue
+        if seed_id in conflicts:
+            continue
+        previous = decisions[seed_id]
+        if previous is None:
+            decisions[seed_id] = current
+        elif current is not None and previous != current:
+            decisions[seed_id] = None
+            conflicts.add(seed_id)
+
+    gated = sum(decision is False for decision in decisions.values())
+    forced = sum(decision is True for decision in decisions.values())
+    unknown = sum(decision is None for decision in decisions.values())
     known = gated + forced
     rate = forced / known if known else None
     return gated, forced, unknown, rate

@@ -1386,6 +1386,10 @@ class GenerateSeedHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "force": force,
+                    # Caller-authoritative provenance for the delegated Seed.
+                    # The bridge/parent must stamp this into accepted Seed
+                    # metadata rather than relying on model-produced YAML.
+                    "gate_forced": force,
                     **client_gate_status,
                 },
             )

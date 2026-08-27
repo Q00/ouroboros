@@ -1427,6 +1427,12 @@ def build_generate_seed_subagent(
             "is still recorded in seed metadata for provenance. Do not refuse "
             "on ambiguity grounds.\n"
         )
+    provenance_note = (
+        "\n## Authoritative Gate Provenance\n"
+        f"The caller-authoritative `gate_forced` value is `{str(force).lower()}`. "
+        "Preserve this exact value under `metadata.gate_forced` in the returned "
+        "Seed YAML; do not infer or change it.\n"
+    )
 
     distillation_note = ""
     distillation_payload: Any | None = None
@@ -1461,7 +1467,7 @@ criteria, ontology schema, evaluation principles, and exit conditions.
 
 ## Session ID
 {session_id}
-{ambiguity_note}{transcript_section}{force_note}{distillation_note}
+{ambiguity_note}{transcript_section}{force_note}{provenance_note}{distillation_note}
 Extract all requirements from the interview conversation and produce a
 complete YAML seed specification. The seed should be precise enough for
 autonomous execution."""
@@ -1471,6 +1477,7 @@ autonomous execution."""
         "ambiguity_score": ambiguity_score,
         "client_gates": client_gates,
         "force": force,
+        "gate_forced": force,
         "requirement_distillation": distillation_payload,
     }
 
