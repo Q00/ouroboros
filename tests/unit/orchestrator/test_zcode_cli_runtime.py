@@ -305,6 +305,35 @@ def test_rollout_excludes_receipts_before_current_turn_user_boundary(
     assert [message.tool_name for message in messages[:-1]] == ["Read", "Read"]
 
 
+def test_rollout_current_no_tool_turn_does_not_replay_prior_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "prior-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "prior-call",
+            "content": "passed",
+            "isError": False,
+        },
+        {"role": "assistant", "content": "prior turn done"},
+        {"role": "user", "content": "current no-tool turn"},
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
 def test_rollout_malformed_tool_calls_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
