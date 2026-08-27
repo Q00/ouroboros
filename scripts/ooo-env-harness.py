@@ -96,6 +96,10 @@ def run_command(
         stdout_path.write_text(_text_output(exc.stdout), encoding="utf-8")
         stderr_path.write_text(_text_output(exc.stderr), encoding="utf-8")
         return CommandResult(command, None, str(stdout_path), str(stderr_path), timed_out=True)
+    except OSError as exc:
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text(str(exc), encoding="utf-8")
+        return CommandResult(command, None, str(stdout_path), str(stderr_path))
 
 
 def read_mcp_entry(path: Path) -> dict[str, Any]:

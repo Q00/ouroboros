@@ -111,3 +111,20 @@ def test_run_command_records_real_timeout(tmp_path: Path) -> None:
     assert result.returncode is None
     assert Path(result.stdout_path).read_text(encoding="utf-8") == ""
     assert Path(result.stderr_path).read_text(encoding="utf-8") == ""
+
+
+def test_run_command_records_missing_executable(tmp_path: Path) -> None:
+    harness = _load_harness()
+
+    result = harness.run_command(
+        [str(tmp_path / "missing-tool"), "--version"],
+        cwd=tmp_path,
+        log_dir=tmp_path,
+        name="missing_tool",
+        timeout=1,
+    )
+
+    assert result.timed_out is False
+    assert result.returncode is None
+    assert Path(result.stdout_path).read_text(encoding="utf-8") == ""
+    assert "No such file or directory" in Path(result.stderr_path).read_text(encoding="utf-8")
