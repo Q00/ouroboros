@@ -16,6 +16,8 @@ from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
     claim_and_archive_owned,
     claim_and_remove_owned,
+    close_rollback_archive,
+    prepare_rollback_archive,
     publish_owned_file,
     publish_owned_tree,
 )
@@ -1142,17 +1144,16 @@ def test_failed_gjc_activation_preserves_post_validation_descendant_write(
         (claimed / "operator.txt").write_text("operator generation\n", encoding="utf-8")
         return True
 
-    assert claim_and_archive_owned(target, is_owned=approve_then_write)
+    archive = prepare_rollback_archive(target.parent / "profile")
+    assert claim_and_archive_owned(target, archive=archive, is_owned=approve_then_write)
     assert not target.exists()
-    with fs_ownership._ledger_authority() as archive:
-        archived = [
-            archive.path / name
-            for name in os.listdir(archive.fd)
-            if name.startswith("rollback-artifact-dir-")
-        ]
+    archived = [
+        archive.path / name for name in os.listdir(archive.path) if name.startswith("artifact-dir-")
+    ]
     assert len(archived) == 1
-    assert (archived[0] / "content.txt").read_text(encoding="utf-8") == ("owned generation\n")
+    assert (archived[0] / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
     assert (archived[0] / "operator.txt").read_text(encoding="utf-8") == ("operator generation\n")
+    close_rollback_archive(archive)
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(

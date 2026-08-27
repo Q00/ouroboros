@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 import ctypes
+from dataclasses import dataclass
 import errno
 import hashlib
 import json
@@ -1201,17 +1202,62 @@ def _restore_claimed(parent: _PinnedParent, claimed_name: str, name: str) -> boo
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class RollbackArchive:
+    path: Path
+    record_nonce: str
+
+
+def prepare_rollback_archive(managed_root: Path) -> RollbackArchive:
+    """Create a pinned rollback archive beside the managed profile filesystem."""
+    parent_path = managed_root.parent
+    nonce = os.urandom(8).hex()
+    name = f".{managed_root.name}.{nonce}.rollback"
+    with _pinned_parent(parent_path, trusted_ancestor=parent_path, create=True) as parent:
+        if parent.fd is None:
+            archive_path = parent_path / name
+            archive_path.mkdir(mode=0o700)
+        else:
+            os.mkdir(name, mode=0o700, dir_fd=parent.fd)
+            parent.fsync()
+            archive_path = parent_path / name
+    with _ledger_authority() as ledger:
+        ledger.record(
+            nonce,
+            canonical=managed_root,
+            container=os.path.abspath(archive_path),
+            operation="rollback-archive",
+        )
+    return RollbackArchive(path=archive_path, record_nonce=nonce)
+
+
+def close_rollback_archive(archive: RollbackArchive) -> None:
+    """Retire metadata when an unused rollback archive is empty."""
+    try:
+        archive.path.rmdir()
+    except OSError:
+        return
+    with _ledger_authority() as ledger:
+        ledger.retire(archive.record_nonce)
+
+
 def claim_and_archive_owned(
     path: Path,
     *,
+    archive: RollbackArchive,
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None = None,
 ) -> bool:
-    """Move an exact rollback generation out of the active namespace intact."""
+    """Move an exact rollback generation into its preflighted same-device archive."""
     claimed_name = _claim_name(path.name, "removing")
     claimed = path.with_name(claimed_name)
     try:
-        with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent:
+        with (
+            _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent,
+            _pinned_parent(
+                archive.path, trusted_ancestor=archive.path, create=False
+            ) as destination,
+        ):
             _recover_claims(parent, path, is_owned)
             try:
                 parent.replace(path.name, claimed_name)
@@ -1236,34 +1282,32 @@ def claim_and_archive_owned(
                     _restore_claimed(parent, claimed_name, path.name)
                     return False
 
-                with _ledger_authority() as archive:
-                    archived_name = f"rollback-{path.name}-{os.urandom(8).hex()}"
-                    try:
-                        os.rename(
-                            claimed_name,
-                            archived_name,
-                            src_dir_fd=parent.fd,
-                            dst_dir_fd=archive.fd,
-                        )
-                    except BaseException:
-                        _restore_claimed(parent, claimed_name, path.name)
-                        raise
-                    archived = os.stat(
+                archived_name = f"{path.name}-{os.urandom(8).hex()}"
+                try:
+                    os.rename(
+                        claimed_name,
                         archived_name,
-                        dir_fd=archive.fd,
-                        follow_symlinks=False,
+                        src_dir_fd=parent.fd,
+                        dst_dir_fd=destination.fd,
                     )
-                    archived_identity = (
-                        archived.st_dev,
-                        archived.st_ino,
-                        stat_module.S_IFMT(archived.st_mode),
+                except BaseException:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                archived = os.stat(
+                    archived_name,
+                    dir_fd=destination.fd,
+                    follow_symlinks=False,
+                )
+                archived_identity = (
+                    archived.st_dev,
+                    archived.st_ino,
+                    stat_module.S_IFMT(archived.st_mode),
+                )
+                if archived_identity != pin.identity:
+                    raise UnownedArtifactError(
+                        f"rollback generation changed during archival: {path}"
                     )
-                    if archived_identity != pin.identity:
-                        raise UnownedArtifactError(
-                            f"rollback generation changed during archival: {path}"
-                        )
-                    with suppress(OSError):
-                        os.fsync(archive.fd)
+                destination.fsync()
             finally:
                 if pin is not None:
                     pin.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, suppress
+import errno
 import json
 import os
 from pathlib import Path
@@ -11140,6 +11141,53 @@ class TestGjcSetup:
         assert not (agent_dir / "skills").exists()
         assert not (agent_dir / "rules").exists()
         assert not (agent_dir / "ouroboros" / "mcp-bridge.yaml").exists()
+
+    def test_gjc_rollback_cross_filesystem_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "external-volume" / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+
+        real_rename = os.rename
+
+        def reject_global_ledger_payload_move(
+            src: object,
+            dst: object,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            if src_dir_fd is not None and dst_dir_fd is not None:
+                ledger_root = tmp_path / ".ouroboros" / "fs-transactions"
+                if ledger_root.exists():
+                    destination = os.fstat(dst_dir_fd)
+                    ledger = os.stat(ledger_root, follow_symlinks=False)
+                    if (destination.st_dev, destination.st_ino) == (ledger.st_dev, ledger.st_ino):
+                        raise OSError(errno.EXDEV, "simulated cross-device link")
+            real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        monkeypatch.setattr(os, "rename", reject_global_ledger_payload_move)
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.gjc_setup.register_gjc_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.gjc_setup.gjc_native_mcp_autoload_support",
+                return_value=True,
+            ),
+        ):
+            assert not setup_cmd._setup_gjc("/opt/bin/gjc")
+
+        assert config_path.read_text(encoding="utf-8") == original
+        assert not (agent_dir / "skills").exists()
+        archives = list(agent_dir.parent.glob(f".{agent_dir.name}.*.rollback"))
+        assert len(archives) == 1
+        assert any(archives[0].iterdir())
 
     def test_setup_gjc_rollback_preserves_concurrent_operator_skill(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
