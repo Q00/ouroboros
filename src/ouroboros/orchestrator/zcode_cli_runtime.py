@@ -597,9 +597,11 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             fd = os.open(rollout_path, flags)
             try:
                 fd_stat = os.fstat(fd)
+                getuid = getattr(os, "getuid", None)
+                current_uid = getuid() if callable(getuid) else None
                 if (
                     not stat.S_ISREG(fd_stat.st_mode)
-                    or fd_stat.st_uid != os.getuid()
+                    or (current_uid is not None and fd_stat.st_uid != current_uid)
                     or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
                     # Bind validation and reads to the same inode. This also
                     # closes the symlink/rename race on platforms lacking
@@ -650,11 +652,12 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # receipt history. If this session has advanced to another trace/turn
         # after the matched snapshot, the summary is stale and cannot recover
         # evidence from an older turn.
+        first_matching_index = matching_indexes[0]
         last_matching_index = matching_indexes[-1]
         if any(
             candidate.get("sessionId") == session_id
             and (candidate.get("traceId") != trace_id or candidate.get("turnId") != turn_id)
-            for candidate in records[last_matching_index + 1 :]
+            for candidate in records[first_matching_index + 1 :]
         ):
             return []
 
