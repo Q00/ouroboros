@@ -206,15 +206,24 @@ class _LedgerAuthority:
         with file_lock(self.path / key, parent_fd=self.fd):
             yield
 
-    def record(self, nonce: str, *, canonical: Path, container: str, operation: str) -> None:
+    def record(
+        self,
+        nonce: str,
+        *,
+        canonical: Path,
+        container: str,
+        operation: str,
+        identity: tuple[int, int, int] | None = None,
+    ) -> None:
         """Durably record a transaction before its container becomes discoverable."""
-        payload = json.dumps(
-            {
-                "canonical": _ledger_canonical(canonical),
-                "container": container,
-                "operation": operation,
-            }
-        ).encode("utf-8")
+        record: dict[str, object] = {
+            "canonical": _ledger_canonical(canonical),
+            "container": container,
+            "operation": operation,
+        }
+        if identity is not None:
+            record["identity"] = list(identity)
+        payload = json.dumps(record).encode("utf-8")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(f"{nonce}.json", flags, 0o600, dir_fd=self.fd)
         try:
@@ -1202,43 +1211,145 @@ def _restore_claimed(parent: _PinnedParent, claimed_name: str, name: str) -> boo
     return True
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class RollbackArchive:
     path: Path
+    name: str
+    parent_fd: int
+    fd: int
+    identity: tuple[int, int, int]
     record_nonce: str
+    closed: bool = False
+
+    def revalidate(self) -> None:
+        held = os.fstat(self.fd)
+        held_identity = (held.st_dev, held.st_ino, stat_module.S_IFMT(held.st_mode))
+        current = os.stat(self.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            stat_module.S_IFMT(current.st_mode),
+        )
+        if held_identity != self.identity or current_identity != self.identity:
+            raise UnownedArtifactError(f"rollback archive changed generation: {self.path}")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if not os.listdir(self.fd):
+                self.revalidate()
+                claimed = f".{self.name}.{os.urandom(8).hex()}.closing"
+                os.rename(
+                    self.name,
+                    claimed,
+                    src_dir_fd=self.parent_fd,
+                    dst_dir_fd=self.parent_fd,
+                )
+                captured = os.stat(claimed, dir_fd=self.parent_fd, follow_symlinks=False)
+                captured_identity = (
+                    captured.st_dev,
+                    captured.st_ino,
+                    stat_module.S_IFMT(captured.st_mode),
+                )
+                if captured_identity != self.identity:
+                    with suppress(OSError):
+                        _rename_no_replace_between(
+                            self.parent_fd, claimed, self.parent_fd, self.name
+                        )
+                    raise UnownedArtifactError(
+                        f"rollback archive changed before close: {self.path}"
+                    )
+                os.rmdir(claimed, dir_fd=self.parent_fd)
+                with _ledger_authority() as ledger:
+                    ledger.retire(self.record_nonce)
+        finally:
+            os.close(self.fd)
+            os.close(self.parent_fd)
+            self.closed = True
+
+
+def _recorded_identity(record: dict[str, object]) -> tuple[int, int, int] | None:
+    raw = record.get("identity")
+    if not isinstance(raw, list) or len(raw) != 3 or not all(isinstance(v, int) for v in raw):
+        return None
+    return (raw[0], raw[1], raw[2])
+
+
+def _reconcile_rollback_archives(ledger: _LedgerAuthority) -> None:
+    """Conservatively retire only empty archives matching their recorded generation."""
+    for nonce in ledger.nonces():
+        record = ledger.read(nonce)
+        if record is None or record.get("operation") != "rollback-archive":
+            continue
+        raw_path = record.get("container")
+        identity = _recorded_identity(record)
+        if not isinstance(raw_path, str) or identity is None:
+            continue
+        path = Path(raw_path)
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError:
+            continue
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            stat_module.S_IFMT(current.st_mode),
+        )
+        if current_identity != identity:
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            continue
+        ledger.retire(nonce)
 
 
 def prepare_rollback_archive(managed_root: Path) -> RollbackArchive:
-    """Create a pinned rollback archive beside the managed profile filesystem."""
+    """Create and retain a same-filesystem rollback archive capability."""
     parent_path = managed_root.parent
     nonce = os.urandom(8).hex()
     name = f".{managed_root.name}.{nonce}.rollback"
+    with _ledger_authority() as ledger:
+        _reconcile_rollback_archives(ledger)
     with _pinned_parent(parent_path, trusted_ancestor=parent_path, create=True) as parent:
         if parent.fd is None:
-            archive_path = parent_path / name
-            archive_path.mkdir(mode=0o700)
-        else:
-            os.mkdir(name, mode=0o700, dir_fd=parent.fd)
-            parent.fsync()
-            archive_path = parent_path / name
-    with _ledger_authority() as ledger:
-        ledger.record(
-            nonce,
-            canonical=managed_root,
-            container=os.path.abspath(archive_path),
-            operation="rollback-archive",
-        )
-    return RollbackArchive(path=archive_path, record_nonce=nonce)
+            raise OSError(errno.ENOTSUP, "safe rollback archives require directory descriptors")
+        os.mkdir(name, mode=0o700, dir_fd=parent.fd)
+        archive_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        archive_fd = os.open(name, archive_flags, dir_fd=parent.fd)
+        created = os.fstat(archive_fd)
+        identity = (created.st_dev, created.st_ino, stat_module.S_IFMT(created.st_mode))
+        parent_fd = os.dup(parent.fd)
+        parent.fsync()
+        archive_path = parent_path / name
+    try:
+        with _ledger_authority() as ledger:
+            ledger.record(
+                nonce,
+                canonical=managed_root,
+                container=os.path.abspath(archive_path),
+                operation="rollback-archive",
+                identity=identity,
+            )
+    except BaseException:
+        os.close(archive_fd)
+        with suppress(OSError):
+            os.rmdir(name, dir_fd=parent_fd)
+        os.close(parent_fd)
+        raise
+    return RollbackArchive(
+        path=archive_path,
+        name=name,
+        parent_fd=parent_fd,
+        fd=archive_fd,
+        identity=identity,
+        record_nonce=nonce,
+    )
 
 
 def close_rollback_archive(archive: RollbackArchive) -> None:
-    """Retire metadata when an unused rollback archive is empty."""
-    try:
-        archive.path.rmdir()
-    except OSError:
-        return
-    with _ledger_authority() as ledger:
-        ledger.retire(archive.record_nonce)
+    archive.close()
 
 
 def claim_and_archive_owned(
@@ -1248,16 +1359,12 @@ def claim_and_archive_owned(
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None = None,
 ) -> bool:
-    """Move an exact rollback generation into its preflighted same-device archive."""
+    """Move an exact rollback generation through the retained archive capability."""
     claimed_name = _claim_name(path.name, "removing")
     claimed = path.with_name(claimed_name)
     try:
-        with (
-            _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent,
-            _pinned_parent(
-                archive.path, trusted_ancestor=archive.path, create=False
-            ) as destination,
-        ):
+        with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent:
+            archive.revalidate()
             _recover_claims(parent, path, is_owned)
             try:
                 parent.replace(path.name, claimed_name)
@@ -1275,6 +1382,7 @@ def claim_and_archive_owned(
                         and parent.entry_identity(claimed_name) == pin.identity
                     )
                     parent.revalidate()
+                    archive.revalidate()
                 except BaseException:
                     _restore_claimed(parent, claimed_name, path.name)
                     raise
@@ -1288,14 +1396,14 @@ def claim_and_archive_owned(
                         claimed_name,
                         archived_name,
                         src_dir_fd=parent.fd,
-                        dst_dir_fd=destination.fd,
+                        dst_dir_fd=archive.fd,
                     )
                 except BaseException:
                     _restore_claimed(parent, claimed_name, path.name)
                     raise
                 archived = os.stat(
                     archived_name,
-                    dir_fd=destination.fd,
+                    dir_fd=archive.fd,
                     follow_symlinks=False,
                 )
                 archived_identity = (
@@ -1307,7 +1415,9 @@ def claim_and_archive_owned(
                     raise UnownedArtifactError(
                         f"rollback generation changed during archival: {path}"
                     )
-                destination.fsync()
+                archive.revalidate()
+                with suppress(OSError):
+                    os.fsync(archive.fd)
             finally:
                 if pin is not None:
                     pin.close()
