@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import errno
+import multiprocessing
 import os
 from pathlib import Path
 import stat
+import time
 
 import pytest
 
@@ -30,6 +32,25 @@ def _ledger_record(nonce: str, **kwargs: object) -> None:
 def _ledger_read(nonce: str) -> dict[str, object] | None:
     with fs_ownership._ledger_authority() as ledger:
         return ledger.read(nonce)
+
+
+def _replace_retired_descendant(parent: Path, canonical_name: str, signal: Path) -> None:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        retired = next(parent.glob(f".{canonical_name}.*.retired"), None)
+        if retired is None:
+            time.sleep(0.001)
+            continue
+        hot = retired / "entry" / "victim" / "hot"
+        if not hot.exists():
+            time.sleep(0.001)
+            continue
+        displaced = hot.with_name("hot.original")
+        os.rename(hot, displaced)
+        hot.write_text("operator replacement\n", encoding="utf-8")
+        signal.write_text("replaced\n", encoding="utf-8")
+        return
+    raise RuntimeError("retired generation did not become visible")
 
 
 @pytest.fixture(autouse=True)
@@ -732,58 +753,20 @@ def test_rejects_a_symlinked_ancestor_of_the_trusted_root(tmp_path: Path) -> Non
         )
 
 
-def test_tree_remove_never_restores_a_half_destroyed_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The reviewer's partial-destruction probe: a recursive deletion that
-    fails after removing descendants must never rename damaged remains back
-    to the canonical path — removal commits with the atomic isolation, and
-    residue stays out of the canonical namespace."""
+def test_tree_remove_never_mutates_retired_descendants(tmp_path: Path) -> None:
     target = tmp_path / "artifact-dir"
     target.mkdir()
     (target / "keep.txt").write_text("owned generation\n", encoding="utf-8")
     (target / "lost.txt").write_text("owned generation\n", encoding="utf-8")
-    real_rename = fs_ownership.os.rename
-    real_unlink = fs_ownership.os.unlink
 
-    def deny_private_move(
-        src: object,
-        dst: object,
-        *,
-        src_dir_fd: int | None = None,
-        dst_dir_fd: int | None = None,
-    ) -> None:
-        if src_dir_fd is not None and dst_dir_fd is None:
-            raise OSError(errno.EXDEV, "simulated cross-device link")
-        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-
-    def half_destroy(path: object, *args: object, **kwargs: object) -> None:
-        # In-place fd-relative destruction: one descendant is already gone
-        # when the deletion of the next one fails.
-        if path == "keep.txt" and kwargs.get("dir_fd") is not None:
-            raise OSError(errno.EPERM, "simulated destruction failure")
-        real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(fs_ownership.os, "rename", deny_private_move)
-    monkeypatch.setattr(fs_ownership.os, "unlink", half_destroy)
-
-    with pytest.raises(OSError, match="residue retained"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    # The canonical namespace never sees the damaged tree again: the removal
-    # is reported as failed, and the residue stays quarantined under an
-    # intent-marked, discoverable tombstone — never as the artifact or claim.
+    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
     assert not target.exists()
-    assert _claim_siblings(target, "removing") == []
-    tombstones = [p for p in tmp_path.iterdir() if p.name.endswith(".discarding")]
-    assert len(tombstones) == 1
-    assert (tombstones[0] / ".ouroboros-intent").read_text(encoding="utf-8") == "artifact-dir"
 
-    # A later transaction on the same path reconciles the tombstone.
-    monkeypatch.setattr(fs_ownership.os, "rename", real_rename)
-    monkeypatch.setattr(fs_ownership.os, "unlink", real_unlink)
-    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: True)
-    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".discarding")] == []
+    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
+    assert len(retired) == 1
+    entry = retired[0] / "entry"
+    assert (entry / "keep.txt").read_text(encoding="utf-8") == "owned generation\n"
+    assert (entry / "lost.txt").read_text(encoding="utf-8") == "owned generation\n"
 
 
 def test_failed_cross_filesystem_import_leaves_no_staging_residue(
@@ -818,14 +801,18 @@ def test_failed_cross_filesystem_import_leaves_no_staging_residue(
         publish_owned_tree(target, build_with_unsupported_entry, is_owned=lambda _p: True)
 
     assert not target.exists()
-    assert [p.name for p in tmp_path.iterdir()] == []
+    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
+    assert len(retired) == 1
+    assert (retired[0] / "entry" / "content.txt").read_text(encoding="utf-8") == (
+        "next generation\n"
+    )
 
     def build(staging: Path) -> None:
         (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
 
     publish_owned_tree(target, build, is_owned=lambda _p: True)
     assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
-    assert [p.name for p in tmp_path.iterdir()] == ["artifact-dir"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["artifact-dir", retired[0].name])
 
 
 def test_tree_remove_preserves_a_tree_modified_after_the_ownership_read(tmp_path: Path) -> None:
@@ -1100,477 +1087,47 @@ def test_ledger_root_swap_cannot_split_lock_and_record_authority(
     assert _ledger_read(nonce) is None
 
 
-def test_discard_entry_swap_is_detected_before_recursive_deletion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The reviewer's EXDEV probe, under the no-in-place-destruction model:
-    when no private area can receive the entry, nothing is destroyed through
-    shared names at all — a writer swapping ``entry`` mid-removal keeps both
-    the displaced generation and the replacement intact inside the
-    truthfully-reported tombstone."""
+def test_tree_removal_retires_generation_without_recursive_erasure(tmp_path: Path) -> None:
     target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    (target / "victim").mkdir(parents=True)
+    (target / "victim" / "hot").write_text("owned generation\n", encoding="utf-8")
 
-    state = {"swapped": False}
-
-    def deny_private_move(
-        ledger: fs_ownership._LedgerAuthority,
-        name: str,
-        expected_identity: tuple[int, int, int],
-        container_fd: int,
-    ) -> None:
-        if not state["swapped"]:
-            state["swapped"] = True
-            quarantine = next(
-                entry
-                for entry in tmp_path.iterdir()
-                if entry.name.endswith(".tmp") and (entry / "entry").exists()
-            )
-            os.rename(quarantine / "entry", quarantine / "stashed")
-            replacement = quarantine / "entry"
-            replacement.mkdir()
-            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-        raise OSError(errno.EXDEV, "simulated cross-device link")
-
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "move_into_private_quarantine",
-        deny_private_move,
-    )
-
-    with pytest.raises(OSError, match="cleanup residue retained"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert state["swapped"]
-    # Nothing was deleted through a shared pathname: the replacement and the
-    # displaced original both survive inside the retained tombstone.
-    tombstone = next(tmp_path.glob(f".{target.name}.*.discarding"))
-    assert (tombstone / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-    assert (tombstone / "stashed" / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
-
-
-def test_recursive_descendant_swap_is_never_deleted_through_stale_names(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The reviewer's descendant probe: a regular-file descendant replaced
-    mid-removal must never be unlinked through a stale pathname. Physical
-    erasure happens only after an atomic whole-entry move into a
-    writer-private area; when no private area can receive the entry, no
-    descendant is touched — the operator's replacement survives byte for
-    byte inside the truthful tombstone."""
-    target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
-
-    state = {"swapped": False}
-
-    def deny_private_move(
-        ledger: fs_ownership._LedgerAuthority,
-        name: str,
-        expected_identity: tuple[int, int, int],
-        container_fd: int,
-    ) -> None:
-        if not state["swapped"]:
-            state["swapped"] = True
-            quarantine = next(
-                entry
-                for entry in tmp_path.iterdir()
-                if entry.name.endswith(".tmp") and (entry / "entry").exists()
-            )
-            (quarantine / "entry" / "content.txt").write_text(
-                "operator replacement\n", encoding="utf-8"
-            )
-        raise OSError(errno.EXDEV, "simulated cross-device link")
-
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "move_into_private_quarantine",
-        deny_private_move,
-    )
-
-    with pytest.raises(OSError, match="cleanup residue retained"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert state["swapped"]
-    tombstone = next(tmp_path.glob(f".{target.name}.*.discarding"))
-    assert (tombstone / "entry" / "content.txt").read_text(encoding="utf-8") == (
-        "operator replacement\n"
-    )
-
-
-def test_private_cleanup_restore_failure_retains_ledger_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
-    real_erase_claimed = fs_ownership._LedgerAuthority._erase_claimed_private_entry
-    real_restore_private = fs_ownership._LedgerAuthority.restore_private_entry
-
-    def skip_private_erasure(
-        ledger: fs_ownership._LedgerAuthority,
-        quarantine_fd: int,
-        claimed_name: str,
-        claimed_fd: int,
-        expected_identity: tuple[int, int, int],
-    ) -> bool:
-        fs_ownership._rename_no_replace_between(quarantine_fd, claimed_name, quarantine_fd, "entry")
-        return False
-
-    def deny_reinsertion(
-        ledger: fs_ownership._LedgerAuthority,
-        name: str,
-        expected_identity: tuple[int, int, int],
-        expected_entry_identity: tuple[int, int, int],
-        container_fd: int,
-    ) -> None:
-        raise OSError(errno.EIO, "simulated reinsertion failure")
-
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "_erase_claimed_private_entry",
-        skip_private_erasure,
-    )
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "restore_private_entry",
-        deny_reinsertion,
-    )
-
-    with pytest.raises(OSError, match="ledger-backed private quarantine"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
+    assert claim_and_remove_owned(target, is_owned=lambda _p: True)
     assert not target.exists()
-    with fs_ownership._ledger_authority() as ledger:
-        erasing = [
-            ledger.read(nonce)
-            for nonce in ledger.nonces()
-            if (ledger.read(nonce) or {}).get("operation") == "erasing"
-        ]
-    assert len(erasing) == 1
-    location = erasing[0]["container"]
-    assert isinstance(location, str)
-    with fs_ownership._ledger_authority() as ledger:
-        residue = ledger.path / location / "entry" / "content.txt"
-        assert residue.read_text(encoding="utf-8") == "owned generation\n"
 
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "_erase_claimed_private_entry",
-        real_erase_claimed,
+    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
+    assert len(retired) == 1
+    assert (retired[0] / "entry" / "victim" / "hot").read_text(encoding="utf-8") == (
+        "owned generation\n"
     )
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "restore_private_entry",
-        real_restore_private,
-    )
-    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    with fs_ownership._ledger_authority() as ledger:
-        assert not (ledger.path / location).exists()
-        assert all(
-            (ledger.read(nonce) or {}).get("operation") != "erasing" for nonce in ledger.nonces()
-        )
 
 
-def test_private_quarantine_root_swap_keeps_residue_with_ledger_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.skipif(os.name != "posix", reason="requires an external forked filesystem racer")
+def test_concurrent_descendant_replacement_survives_terminal_retirement(tmp_path: Path) -> None:
     target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+    (target / "victim").mkdir(parents=True)
+    (target / "victim" / "hot").write_text("owned generation\n", encoding="utf-8")
+    signal = tmp_path / "replacement-complete"
 
-    root = fs_ownership._transaction_ledger_root()
-    stolen = root.parent / "stolen-private-quarantine-root"
-    imposter = root.parent / "imposter-private-quarantine-root"
-    real_mkdir = fs_ownership.os.mkdir
-    real_rename = fs_ownership.os.rename
-    real_rmtree = fs_ownership.shutil.rmtree
-    real_erase_claimed = fs_ownership._LedgerAuthority._erase_claimed_private_entry
-    real_restore_private = fs_ownership._LedgerAuthority.restore_private_entry
-    state = {"swapped": False}
-
-    def swap_before_private_quarantine(
-        path: object, mode: int = 0o777, *, dir_fd: int | None = None
-    ) -> None:
-        if (
-            isinstance(path, str)
-            and path.startswith("ouroboros-discard-")
-            and dir_fd is not None
-            and not state["swapped"]
-        ):
-            state["swapped"] = True
-            real_rename(root, stolen)
-            real_mkdir(root, mode=0o700)
-        real_mkdir(path, mode=mode, dir_fd=dir_fd)
-
-    def skip_private_erasure(
-        ledger: fs_ownership._LedgerAuthority,
-        quarantine_fd: int,
-        claimed_name: str,
-        claimed_fd: int,
-        expected_identity: tuple[int, int, int],
-    ) -> bool:
-        fs_ownership._rename_no_replace_between(quarantine_fd, claimed_name, quarantine_fd, "entry")
-        return False
-
-    def deny_reinsertion(
-        ledger: fs_ownership._LedgerAuthority,
-        name: str,
-        expected_identity: tuple[int, int, int],
-        expected_entry_identity: tuple[int, int, int],
-        container_fd: int,
-    ) -> None:
-        raise OSError(errno.EIO, "simulated reinsertion failure")
-
-    monkeypatch.setattr(fs_ownership.os, "mkdir", swap_before_private_quarantine)
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "_erase_claimed_private_entry",
-        skip_private_erasure,
+    process = multiprocessing.get_context("fork").Process(
+        target=_replace_retired_descendant,
+        args=(tmp_path, target.name, signal),
     )
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "restore_private_entry",
-        deny_reinsertion,
-    )
+    process.start()
+    removed = claim_and_remove_owned(target, is_owned=lambda _p: True)
+    process.join(timeout=15.0)
 
-    with pytest.raises(OSError, match="ledger-backed private quarantine"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert state["swapped"]
+    assert removed is True
+    assert not process.is_alive()
+    assert process.exitcode == 0
+    assert signal.read_text(encoding="utf-8") == "replaced\n"
     assert not target.exists()
-    erasing_records = sorted(stolen.glob("*.json"))
-    private_quarantines = sorted(stolen.glob("ouroboros-discard-*"))
-    assert len(erasing_records) == 1
-    assert len(private_quarantines) == 1
-    assert (private_quarantines[0] / "entry" / "content.txt").read_text(
-        encoding="utf-8"
-    ) == "owned generation\n"
-    assert list(root.glob("ouroboros-discard-*")) == []
 
-    monkeypatch.setattr(fs_ownership.os, "mkdir", real_mkdir)
-    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "_erase_claimed_private_entry",
-        real_erase_claimed,
-    )
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "restore_private_entry",
-        real_restore_private,
-    )
-    real_rename(root, imposter)
-    real_rename(stolen, root)
-
-    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert not private_quarantines[0].exists()
-
-
-def test_private_quarantine_leaf_replacement_fails_immediate_cleanup_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Immediate cleanup must not delete a replacement at the recorded leaf."""
-    target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
-
-    real_erase = fs_ownership._LedgerAuthority.erase_private_quarantine
-    state: dict[str, Path] = {}
-
-    def replace_leaf_then_erase(
-        ledger: fs_ownership._LedgerAuthority,
-        name: str,
-        expected_identity: tuple[int, int, int],
-        *,
-        expected_entry_identity: tuple[int, int, int] | None = None,
-        record_nonce: str | None = None,
-    ) -> bool:
-        if record_nonce is not None and not state:
-            original = ledger.path / name
-            displaced = ledger.path / f"{name}.displaced"
-            os.rename(original, displaced)
-            replacement = ledger.path / name
-            replacement.mkdir(mode=0o700)
-            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-            state.update(displaced=displaced, replacement=replacement)
-        return real_erase(
-            ledger,
-            name,
-            expected_identity,
-            expected_entry_identity=expected_entry_identity,
-            record_nonce=record_nonce,
-        )
-
-    monkeypatch.setattr(
-        fs_ownership._LedgerAuthority,
-        "erase_private_quarantine",
-        replace_leaf_then_erase,
-    )
-
-    with pytest.raises(OSError, match="private quarantine replacement"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert not target.exists()
-    assert (state["replacement"] / "operator.txt").read_text(encoding="utf-8") == (
-        "operator data\n"
-    )
-    assert (state["displaced"] / "entry" / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
-    with fs_ownership._ledger_authority() as ledger:
-        assert any(
-            (ledger.read(nonce) or {}).get("operation") == "erasing" for nonce in ledger.nonces()
-        )
-
-
-def test_private_quarantine_leaf_replacement_fails_replay_closed(tmp_path: Path) -> None:
-    """Replay must preserve a replacement and the original recorded residue."""
-    target = tmp_path / "artifact-dir"
-    record_nonce = os.urandom(8).hex()
-
-    with fs_ownership._ledger_authority() as ledger:
-        private_name, private_identity = ledger.create_private_quarantine(os.urandom(8).hex())
-        ledger.record(
-            record_nonce,
-            canonical=target,
-            container=private_name,
-            operation="erasing",
-            identity=private_identity,
-        )
-        original = ledger.path / private_name
-        (original / "entry").mkdir(mode=0o700)
-        (original / "entry" / "content.txt").write_text("owned generation\n", encoding="utf-8")
-        entry_stat = os.stat(original / "entry", follow_symlinks=False)
-        ledger.record_private_entry_identity(
-            record_nonce,
-            (entry_stat.st_dev, entry_stat.st_ino, stat.S_IFMT(entry_stat.st_mode)),
-        )
-        displaced = ledger.path / f"{private_name}.displaced"
-        os.rename(original, displaced)
-        replacement = ledger.path / private_name
-        replacement.mkdir(mode=0o700)
-        (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-
-    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert (replacement / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-    assert (displaced / "entry" / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
-    assert _ledger_read(record_nonce) is not None
-
-
-def test_private_quarantine_entry_replacement_fails_immediate_cleanup_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
-    ledger_root = fs_ownership._transaction_ledger_root()
-    real_rename = fs_ownership.os.rename
-    state: dict[str, Path] = {}
-
-    def replace_entry_before_claim(
-        src: object,
-        dst: object,
-        *,
-        src_dir_fd: int | None = None,
-        dst_dir_fd: int | None = None,
-    ) -> None:
-        if src == "entry" and str(dst).startswith(".entry.") and not state:
-            quarantine = next(
-                path
-                for path in ledger_root.glob("ouroboros-discard-*")
-                if (path / "entry").exists()
-            )
-            displaced = quarantine / "displaced-entry"
-            real_rename(quarantine / "entry", displaced)
-            replacement = quarantine / "entry"
-            replacement.mkdir(mode=0o700)
-            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-            state.update(
-                quarantine=quarantine,
-                displaced=displaced,
-                replacement=replacement,
-            )
-        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-
-    monkeypatch.setattr(fs_ownership.os, "rename", replace_entry_before_claim)
-
-    with pytest.raises(OSError, match="private quarantine replacement"):
-        claim_and_remove_owned(target, is_owned=lambda _p: True)
-
-    assert not target.exists()
-    assert (state["replacement"] / "operator.txt").read_text(encoding="utf-8") == (
-        "operator data\n"
-    )
-    assert (state["displaced"] / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
-    with fs_ownership._ledger_authority() as ledger:
-        assert any(
-            (ledger.read(nonce) or {}).get("operation") == "erasing" for nonce in ledger.nonces()
-        )
-
-
-def test_private_quarantine_entry_replacement_fails_replay_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "artifact-dir"
-    record_nonce = os.urandom(8).hex()
-    ledger_root = fs_ownership._transaction_ledger_root()
-
-    with fs_ownership._ledger_authority() as ledger:
-        private_name, private_identity = ledger.create_private_quarantine(os.urandom(8).hex())
-        ledger.record(
-            record_nonce,
-            canonical=target,
-            container=private_name,
-            operation="erasing",
-            identity=private_identity,
-        )
-        entry = ledger.path / private_name / "entry"
-        entry.mkdir(mode=0o700)
-        (entry / "content.txt").write_text("owned generation\n", encoding="utf-8")
-        entry_stat = os.stat(entry, follow_symlinks=False)
-        ledger.record_private_entry_identity(
-            record_nonce,
-            (entry_stat.st_dev, entry_stat.st_ino, stat.S_IFMT(entry_stat.st_mode)),
-        )
-
-    real_rename = fs_ownership.os.rename
-    state: dict[str, Path] = {}
-
-    def replace_entry_before_claim(
-        src: object,
-        dst: object,
-        *,
-        src_dir_fd: int | None = None,
-        dst_dir_fd: int | None = None,
-    ) -> None:
-        if src == "entry" and str(dst).startswith(".entry.") and not state:
-            quarantine = ledger_root / private_name
-            displaced = quarantine / "displaced-entry"
-            real_rename(quarantine / "entry", displaced)
-            replacement = quarantine / "entry"
-            replacement.mkdir(mode=0o700)
-            (replacement / "operator.txt").write_text("operator data\n", encoding="utf-8")
-            state.update(displaced=displaced, replacement=replacement)
-        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
-
-    monkeypatch.setattr(fs_ownership.os, "rename", replace_entry_before_claim)
-
-    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert (state["replacement"] / "operator.txt").read_text(encoding="utf-8") == (
-        "operator data\n"
-    )
-    assert (state["displaced"] / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
-    assert _ledger_read(record_nonce) is not None
+    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
+    assert len(retired) == 1
+    victim = retired[0] / "entry" / "victim"
+    assert (victim / "hot").read_text(encoding="utf-8") == "operator replacement\n"
+    assert (victim / "hot.original").read_text(encoding="utf-8") == "owned generation\n"
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
