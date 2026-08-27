@@ -694,17 +694,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # bound to one turn, so accept only the suffix after that turn's final
         # user message.  Without this boundary, a prior successful command
         # could be replayed as evidence for the current AC.
-        assistant_indexes = [
-            index
-            for index, message in enumerate(messages)
-            if isinstance(message, dict) and message.get("role") == "assistant"
-        ]
-        if not assistant_indexes:
-            return []
-        latest_assistant = assistant_indexes[-1]
         user_boundaries = [
             index
-            for index, message in enumerate(messages[: latest_assistant + 1])
+            for index, message in enumerate(messages)
             if isinstance(message, dict) and message.get("role") == "user"
         ]
         if not user_boundaries:
