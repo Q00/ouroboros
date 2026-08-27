@@ -211,6 +211,45 @@ def test_rollout_conflicting_duplicate_call_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_conflicting_exact_identity_records_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"][1]["toolCalls"][0] = {
+        "id": "call-1",
+        "name": "Write",
+        "input": {"path": "different"},
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_exact_turn_superseded_by_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    newer = json.loads(json.dumps(matched))
+    newer["turnId"] = "turn-newer"
+    path.write_text(json.dumps(matched) + "\n" + json.dumps(newer) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_non_uuid_session_id_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    malformed = "sess_------------------------------------"
+    malformed_path = path.with_name(f"model-io-{malformed}.jsonl")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    event["sessionId"] = malformed
+    record["sessionId"] = malformed
+    malformed_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_excludes_receipts_before_current_turn_user_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -99,7 +99,9 @@ _CHILD_ENV_STRIP_KEYS = (
     "NODE_OPTIONS",
 )
 
-_ZCODE_SESSION_ID_RE = re.compile(r"sess_[0-9a-f-]{36}\Z")
+_ZCODE_SESSION_ID_RE = re.compile(
+    r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
 
 
@@ -622,7 +624,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         except (OSError, UnicodeError):
             return []
 
-        matching: dict[str, Any] | None = None
+        records: list[dict[str, Any]] = []
         for line in text.splitlines():
             if not line.strip():
                 continue
@@ -632,14 +634,50 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 return []
             if not isinstance(candidate, dict):
                 return []
-            if (
-                candidate.get("sessionId") == session_id
-                and candidate.get("traceId") == trace_id
-                and candidate.get("turnId") == turn_id
-            ):
-                matching = candidate
-        if matching is None:
+            records.append(candidate)
+
+        matching_indexes = [
+            index
+            for index, candidate in enumerate(records)
+            if candidate.get("sessionId") == session_id
+            and candidate.get("traceId") == trace_id
+            and candidate.get("turnId") == turn_id
+        ]
+        if not matching_indexes:
             return []
+
+        # A terminal summary may only consume the current, uniquely ordered
+        # receipt history. If this session has advanced to another trace/turn
+        # after the matched snapshot, the summary is stale and cannot recover
+        # evidence from an older turn.
+        last_matching_index = matching_indexes[-1]
+        if any(
+            candidate.get("sessionId") == session_id
+            and (candidate.get("traceId") != trace_id or candidate.get("turnId") != turn_id)
+            for candidate in records[last_matching_index + 1 :]
+        ):
+            return []
+
+        # ZCode appends cumulative request.messages snapshots for one turn.
+        # Repeated exact-identity records therefore must preserve the complete
+        # prior snapshot as a prefix. A rewrite or conflicting call under the
+        # same identity makes the entire history ambiguous and fail-closed.
+        previous_messages: list[Any] | None = None
+        for index in matching_indexes:
+            candidate_request = records[index].get("request")
+            candidate_messages = (
+                candidate_request.get("messages") if isinstance(candidate_request, dict) else None
+            )
+            if not isinstance(candidate_messages, list):
+                return []
+            if (
+                previous_messages is not None
+                and candidate_messages[: len(previous_messages)] != previous_messages
+            ):
+                return []
+            previous_messages = candidate_messages
+
+        matching = records[last_matching_index]
 
         request = matching.get("request")
         # ZCode stores the normalized conversation at request.messages.  The
