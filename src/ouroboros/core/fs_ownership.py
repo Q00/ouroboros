@@ -80,10 +80,11 @@ Threat model and defenses:
   ``.{canonical}.{nonce}.discarding`` tombstone and the removal raises
   instead of claiming a finished cleanup. The private quarantine is created
   relative to the same pinned ledger descriptor that receives its record;
-  the record stores only its validated relative name and is retired only
-  after descriptor-bound verified erasure. Even a residue stranded in that
-  private area (erasure and reinsertion both failing) stays under one durable
-  recovery authority and is replayed by later transactions.
+  both the quarantine directory and moved ``entry`` child identities are
+  recorded and pinned through recursive erasure. Replacements at either
+  generation are preserved, and the record is retired only after the exact
+  attributed generations are verified absent. Even stranded residue remains
+  under durable recovery authority for later replay.
   Cross-filesystem imports follow the same discipline: they assemble
   inside an intent-marked ``*.importing`` container and commit with one
   atomic rename. Container names and intent markers live in the shared
@@ -367,6 +368,33 @@ class _LedgerAuthority:
         with suppress(OSError):
             os.fsync(self.fd)
 
+    def record_private_entry_identity(
+        self, nonce: str, entry_identity: tuple[int, int, int]
+    ) -> None:
+        """Atomically add the moved private-entry generation to an erasing record."""
+        record = self.read(nonce)
+        if record is None or record.get("operation") != "erasing":
+            raise OSError(errno.EINVAL, "missing erasing ledger record", nonce)
+        record["entry_identity"] = list(entry_identity)
+        payload = json.dumps(record).encode("utf-8")
+        temp_name = f".{nonce}.{os.urandom(8).hex()}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(temp_name, flags, 0o600, dir_fd=self.fd)
+        try:
+            os.write(fd, payload)
+            with suppress(OSError):
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.rename(temp_name, f"{nonce}.json", src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=self.fd)
+            raise
+        with suppress(OSError):
+            os.fsync(self.fd)
+
     def read(self, nonce: str) -> dict[str, object] | None:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
@@ -427,15 +455,15 @@ class _LedgerAuthority:
                 f"recorded private quarantine is unavailable: {name}"
             ) from exc
         try:
-            entry = os.fstat(quarantine_fd)
-            identity = (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+            held = os.fstat(quarantine_fd)
+            held_identity = (held.st_dev, held.st_ino, stat_module.S_IFMT(held.st_mode))
             current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
             current_identity = (
                 current.st_dev,
                 current.st_ino,
                 stat_module.S_IFMT(current.st_mode),
             )
-            if identity != expected_identity or current_identity != expected_identity:
+            if held_identity != expected_identity or current_identity != expected_identity:
                 raise UnownedArtifactError(
                     f"recorded private quarantine changed generation: {name}"
                 )
@@ -448,39 +476,134 @@ class _LedgerAuthority:
         name: str,
         expected_identity: tuple[int, int, int],
         container_fd: int,
-    ) -> None:
-        """Move ``container/entry`` into the exact recorded quarantine generation."""
+    ) -> tuple[int, int, int]:
+        """Move and identify ``container/entry`` inside the recorded quarantine."""
         with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
             os.rename("entry", "entry", src_dir_fd=container_fd, dst_dir_fd=quarantine_fd)
+            entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+            return (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+
+    def _erase_claimed_private_entry(
+        self,
+        quarantine_fd: int,
+        claimed_name: str,
+        claimed_fd: int,
+        expected_identity: tuple[int, int, int],
+    ) -> bool:
+        """Erase one pinned child without recursing through its public pathname."""
+        for child in os.listdir(claimed_fd):
+            try:
+                entry = os.stat(child, dir_fd=claimed_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat_module.S_ISDIR(entry.st_mode):
+                with suppress(Exception):
+                    shutil.rmtree(child, dir_fd=claimed_fd, ignore_errors=True)
+            else:
+                with suppress(OSError):
+                    os.unlink(child, dir_fd=claimed_fd)
+        if os.listdir(claimed_fd):
+            with suppress(OSError):
+                _rename_no_replace_between(
+                    quarantine_fd,
+                    claimed_name,
+                    quarantine_fd,
+                    "entry",
+                )
+            return False
+        current = os.stat(claimed_name, dir_fd=quarantine_fd, follow_symlinks=False)
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            stat_module.S_IFMT(current.st_mode),
+        )
+        if current_identity != expected_identity:
+            with suppress(OSError):
+                _rename_no_replace_between(
+                    quarantine_fd,
+                    claimed_name,
+                    quarantine_fd,
+                    "entry",
+                )
+            raise UnownedArtifactError("recorded private entry changed during erasure")
+        os.rmdir(claimed_name, dir_fd=quarantine_fd)
+        return True
 
     def erase_private_quarantine(
         self,
         name: str,
         expected_identity: tuple[int, int, int],
         *,
+        expected_entry_identity: tuple[int, int, int] | None = None,
         record_nonce: str | None = None,
     ) -> bool:
-        """Erase only the exact private-quarantine generation attributed by a record."""
+        """Erase only record-attributed quarantine and child generations."""
         name = self._validated_private_quarantine(name)
         with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
             try:
-                entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+                os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
             except FileNotFoundError:
-                pass
+                if expected_entry_identity is not None:
+                    return False
             else:
-                if stat_module.S_ISDIR(entry.st_mode):
-                    with suppress(Exception):
-                        shutil.rmtree("entry", dir_fd=quarantine_fd, ignore_errors=True)
-                else:
+                if expected_entry_identity is None:
+                    return False
+                claimed_entry = f".entry.{os.urandom(8).hex()}.erasing"
+                os.rename(
+                    "entry",
+                    claimed_entry,
+                    src_dir_fd=quarantine_fd,
+                    dst_dir_fd=quarantine_fd,
+                )
+                claimed_flags = (
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                )
+                try:
+                    claimed_fd = os.open(claimed_entry, claimed_flags, dir_fd=quarantine_fd)
+                except OSError:
                     with suppress(OSError):
-                        os.unlink("entry", dir_fd=quarantine_fd)
+                        _rename_no_replace_between(
+                            quarantine_fd, claimed_entry, quarantine_fd, "entry"
+                        )
+                    raise
+                try:
+                    claimed = os.fstat(claimed_fd)
+                    claimed_identity = (
+                        claimed.st_dev,
+                        claimed.st_ino,
+                        stat_module.S_IFMT(claimed.st_mode),
+                    )
+                    current = os.stat(
+                        claimed_entry,
+                        dir_fd=quarantine_fd,
+                        follow_symlinks=False,
+                    )
+                    current_identity = (
+                        current.st_dev,
+                        current.st_ino,
+                        stat_module.S_IFMT(current.st_mode),
+                    )
+                    if (
+                        claimed_identity != expected_entry_identity
+                        or current_identity != expected_entry_identity
+                    ):
+                        with suppress(OSError):
+                            _rename_no_replace_between(
+                                quarantine_fd, claimed_entry, quarantine_fd, "entry"
+                            )
+                        raise UnownedArtifactError("recorded private entry changed before erasure")
+                    if not self._erase_claimed_private_entry(
+                        quarantine_fd,
+                        claimed_entry,
+                        claimed_fd,
+                        expected_entry_identity,
+                    ):
+                        return False
+                finally:
+                    os.close(claimed_fd)
+
             if os.listdir(quarantine_fd):
                 return False
-
-            # Capture the pathname immediately before removing the now-empty
-            # leaf. A replacement at the recorded name is moved aside, fails
-            # the identity check, and is restored no-clobber rather than
-            # recursively deleted or mistaken for the recorded generation.
             claimed = f".{name}.{os.urandom(8).hex()}.erasing"
             try:
                 os.rename(name, claimed, src_dir_fd=self.fd, dst_dir_fd=self.fd)
@@ -504,28 +627,48 @@ class _LedgerAuthority:
             self.retire(record_nonce)
         return True
 
-    def private_entry_exists(self, name: str, expected_identity: tuple[int, int, int]) -> bool:
-        """Return whether the exact recorded quarantine still contains its entry."""
+    def private_entry_exists(
+        self,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        expected_entry_identity: tuple[int, int, int],
+    ) -> bool:
         with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
             try:
-                os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+                entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
             except FileNotFoundError:
                 return False
+            identity = (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+            if identity != expected_entry_identity:
+                raise UnownedArtifactError("recorded private entry changed generation")
             return True
 
     def restore_private_entry(
         self,
         name: str,
         expected_identity: tuple[int, int, int],
+        expected_entry_identity: tuple[int, int, int],
         container_fd: int,
     ) -> None:
-        """Restore residue only from the exact recorded quarantine generation."""
         with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
+            entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+            identity = (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+            if identity != expected_entry_identity:
+                raise UnownedArtifactError("recorded private entry changed generation")
             os.rename("entry", "entry", src_dir_fd=quarantine_fd, dst_dir_fd=container_fd)
 
     @staticmethod
     def recorded_private_identity(record: dict[str, object]) -> tuple[int, int, int] | None:
-        raw = record.get("identity")
+        return _LedgerAuthority._recorded_identity(record.get("identity"))
+
+    @staticmethod
+    def recorded_private_entry_identity(
+        record: dict[str, object],
+    ) -> tuple[int, int, int] | None:
+        return _LedgerAuthority._recorded_identity(record.get("entry_identity"))
+
+    @staticmethod
+    def _recorded_identity(raw: object) -> tuple[int, int, int] | None:
         if not isinstance(raw, list) or len(raw) != 3 or not all(isinstance(v, int) for v in raw):
             return None
         identity = (raw[0], raw[1], raw[2])
@@ -846,6 +989,7 @@ class _PinnedParent:
         missing = False
         private_name: str | None = None
         private_identity: tuple[int, int, int] | None = None
+        private_entry_identity: tuple[int, int, int] | None = None
         erase_nonce: str | None = None
 
         private_nonce = os.urandom(8).hex()
@@ -872,9 +1016,10 @@ class _PinnedParent:
                 erase_nonce = None
             else:
                 try:
-                    ledger.move_into_private_quarantine(
+                    private_entry_identity = ledger.move_into_private_quarantine(
                         private_name, private_identity, container_fd
                     )
+                    ledger.record_private_entry_identity(erase_nonce, private_entry_identity)
                     moved = True
                 except FileNotFoundError:
                     missing = True
@@ -905,6 +1050,7 @@ class _PinnedParent:
                 erased = ledger.erase_private_quarantine(
                     private_name,
                     private_identity,
+                    expected_entry_identity=private_entry_identity,
                     record_nonce=erase_nonce,
                 )
             except UnownedArtifactError as exc:
@@ -917,17 +1063,32 @@ class _PinnedParent:
                     private_name,
                 ) from exc
             if not erased:
+                if private_entry_identity is None:
+                    raise OSError(
+                        errno.ENOTEMPTY,
+                        "cleanup residue retained without private entry attribution",
+                        private_name,
+                    )
                 try:
-                    has_entry = ledger.private_entry_exists(private_name, private_identity)
+                    has_entry = ledger.private_entry_exists(
+                        private_name,
+                        private_identity,
+                        private_entry_identity,
+                    )
                 except UnownedArtifactError as exc:
                     raise OSError(
                         errno.ENOTEMPTY,
-                        "cleanup residue retained after private quarantine replacement",
+                        "cleanup residue retained after private entry replacement",
                         private_name,
                     ) from exc
                 if has_entry:
                     try:
-                        ledger.restore_private_entry(private_name, private_identity, container_fd)
+                        ledger.restore_private_entry(
+                            private_name,
+                            private_identity,
+                            private_entry_identity,
+                            container_fd,
+                        )
                     except OSError as exc:
                         raise OSError(
                             errno.ENOTEMPTY,
@@ -938,6 +1099,7 @@ class _PinnedParent:
                         emptied = ledger.erase_private_quarantine(
                             private_name,
                             private_identity,
+                            expected_entry_identity=None,
                             record_nonce=erase_nonce,
                         )
                     except UnownedArtifactError as exc:
@@ -1415,28 +1577,7 @@ def _claim_siblings(parent: _PinnedParent, name: str) -> list[str]:
 
 
 def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
-    """Reconcile interrupted import/discard containers that belong to *path*.
-
-    A process crash during a cross-filesystem import, or a destruction whose
-    cleanup could not complete, leaves a ``*.importing`` / ``*.discarding``
-    container in the shared parent. Container names and in-container intent
-    markers are *forgeable* by any same-user writer, so neither is ownership
-    evidence: a container is reconciled only when the writer-owned
-    transaction ledger holds a record — written before the container ever
-    became discoverable — binding this canonical path, the operation, and the
-    exact container name, and the container's own marker — discovery
-    metadata that a crash may not have written yet — does not name a
-    different artifact. Completing
-    the discard is then the correct replay of an interrupted transaction, and
-    the record is retired with it. Any container the ledger does not vouch
-    for — marker or no marker — is operator state and is left untouched.
-    Ledger records whose container no longer exists are retired here too —
-    but only under the canonical path's ledger lock: a cooperating publisher
-    holds that lock from before its record is written until its container is
-    published, so a snapshot taken while holding it distinguishes a
-    completed cleanup from a live record-before-container transaction, which
-    an unlocked snapshot never could.
-    """
+    """Reconcile interrupted import/discard containers that belong to *path*."""
     if parent.fd is None:
         return False
     canonical = _ledger_canonical(path)
@@ -1464,11 +1605,6 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
             except OSError:
                 continue
             try:
-                # The ledger alone is the authority: a crash can die between
-                # the container mkdir and the marker write, so a missing
-                # marker does not block the replay — only a marker naming a
-                # *different* artifact does (the container then belongs to
-                # another path).
                 marker = _read_intent_marker(container_fd)
                 if marker is not None and marker != path.name:
                     continue
@@ -1479,13 +1615,7 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
                     changed = True
             finally:
                 os.close(container_fd)
-        # Retire records orphaned by a crash after cleanup but before
-        # retirement. The fresh snapshot is taken while the lock is held, so
-        # a matching record with no container is proof of a completed (or
-        # rolled-back) transaction — no cooperating publisher can be inside
-        # its record-before-container window right now — and both the
-        # snapshot's records and the retirement act on the same pinned
-        # ledger authority the lock itself lives in.
+
         with suppress(OSError):
             try:
                 remaining = frozenset(os.listdir(parent.fd))
@@ -1499,11 +1629,13 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
                 location = record.get("container")
                 if operation == "erasing":
                     identity = ledger.recorded_private_identity(record)
+                    entry_identity = ledger.recorded_private_entry_identity(record)
                     if isinstance(location, str) and identity is not None:
                         try:
                             erased = ledger.erase_private_quarantine(
                                 location,
                                 identity,
+                                expected_entry_identity=entry_identity,
                                 record_nonce=nonce,
                             )
                         except OSError:
