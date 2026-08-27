@@ -140,11 +140,6 @@ _ASYNC_SUBMISSION_TOOLS = frozenset(
         "ouroboros_start_ralph",
     }
 )
-
-# Backstop for capture_tool_call: shipped tool names are lowercase snake-case
-# after the `ouroboros_` prefix. Unknown or extension names are folded to fixed
-# literals before the command dimension is emitted.
-_TOOL_NAME_PATTERN = re.compile(r"^ouroboros_[a-z0-9_]{1,64}$")
 _UNKNOWN_TOOL_NAME = "ouroboros_unknown_tool"
 
 # The audited privacy contract for `tool`/`command`: every SHIPPED built-in
@@ -907,15 +902,14 @@ def capture_tool_call(
     duration_ms: float | None = None,
     error_type: str | None = None,
     blocked: bool = False,
+    registered: bool = True,
 ) -> None:
-    """Capture retained lifecycle commands and every failed MCP call."""
+    """Capture service activity plus retained lifecycle/failure commands."""
     del duration_ms
     try:
-        if not name.startswith("ouroboros_"):
-            return
-        if not _TOOL_NAME_PATTERN.fullmatch(name):
+        if not registered:
             name = _UNKNOWN_TOOL_NAME
-        elif name != _UNKNOWN_TOOL_NAME and name not in _CANONICAL_TOOL_NAMES:
+        elif name not in _CANONICAL_TOOL_NAMES:
             name = _EXTENSION_TOOL_NAME
         command = _TOOL_FUNNEL.get(name)
         capture_service_active()

@@ -191,6 +191,7 @@ async def observe_adapter_tool_call[T, E](
             ok=False,
             duration_ms=_duration_ms(started_at),
             error_type=_safe_error_type(exc),
+            registered=registered,
         )
         raise
     logical_error = result.is_ok and _is_logical_error(result.value)
@@ -200,6 +201,7 @@ async def observe_adapter_tool_call[T, E](
         duration_ms=_duration_ms(started_at),
         error_type=_safe_error_type(result.error) if result.is_err else None,
         blocked=logical_error,
+        registered=registered,
     )
     return result
 
@@ -261,9 +263,7 @@ async def call_sdk_tool(
 
     started_at = time.monotonic()
     error_type: str | None = None
-    # Unregistered until a matching definition is found below; never
-    # overwritten with the caller-controlled ``name`` before that (see
-    # _UNKNOWN_TOOL_NAME).
+    registered = False
     safe_name = _UNKNOWN_TOOL_NAME
     try:
         definition = next(
@@ -272,6 +272,7 @@ async def call_sdk_tool(
         )
         if definition is None:
             raise RuntimeError(f"Tool not found: {name}")
+        registered = True
         safe_name = name
         if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
             arguments = arguments["kwargs"]
@@ -302,6 +303,7 @@ async def call_sdk_tool(
             ok=False,
             duration_ms=_duration_ms(started_at),
             error_type=error_type or _safe_error_type(exc),
+            registered=registered,
         )
         raise
     logical_error = _is_logical_error(value)
@@ -310,6 +312,7 @@ async def call_sdk_tool(
         ok=not logical_error,
         duration_ms=_duration_ms(started_at),
         blocked=logical_error,
+        registered=registered,
     )
     return response
 

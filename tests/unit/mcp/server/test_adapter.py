@@ -2709,7 +2709,7 @@ class TestMCPServerAdapterTools:
         boundary drops successful non-lifecycle extension calls entirely.
         """
         adapter = MCPServerAdapter()
-        extension_name = "ouroboros_acme_private_project"
+        extension_name = "custom_tool"
         adapter.register_tool(MockToolHandler(extension_name))
 
         with patch("ouroboros.telemetry.capture") as capture:
@@ -2717,6 +2717,53 @@ class TestMCPServerAdapterTools:
 
         assert result.is_ok
         capture.assert_called_once_with("service_active", {"service": "mcp"})
+
+    async def test_call_tool_non_prefixed_extension_failure_is_folded(self) -> None:
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("custom_tool")
+        handler.handle_mock.return_value = Result.err(MCPServerError("failed"))
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            result = await adapter.call_tool("custom_tool", {"input": "safe"})
+
+        assert result.is_err
+        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
+        assert capture.call_args_list[1].args == (
+            "command_run",
+            {
+                "command": "extension_tool",
+                "service": "mcp",
+                "status": "failed",
+                "error_type": "MCPServerError",
+            },
+        )
+
+    async def test_call_tool_non_prefixed_extension_logical_block_is_folded(self) -> None:
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("custom_tool")
+        handler.handle_mock.return_value = Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
+                is_error=True,
+            )
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            result = await adapter.call_tool("custom_tool", {"input": "safe"})
+
+        assert result.is_ok
+        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
+        assert capture.call_args_list[1].args == (
+            "command_run",
+            {
+                "command": "extension_tool",
+                "service": "mcp",
+                "status": "blocked",
+                "error_type": None,
+            },
+        )
 
     async def test_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """A built-in handler returning Result.ok(MCPToolResult(is_error=True))
@@ -3806,18 +3853,70 @@ class TestServeTransport:
             assert "private-project" not in str(value)
 
     async def test_sdk_call_tool_registered_extension_success_is_not_collected(self) -> None:
-        """SDK-path companion for dropped successful extension telemetry."""
+        """Successful non-product extension calls emit service activity only."""
         pytest.importorskip("mcp.server")
         from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
         adapter = MCPServerAdapter()
-        extension_name = "ouroboros_acme_private_project"
+        extension_name = "custom_tool"
         adapter.register_tool(MockToolHandler(extension_name))
 
         with patch("ouroboros.telemetry.capture") as capture:
             await call_sdk_tool(adapter, extension_name, {"input": "safe"})
 
         capture.assert_called_once_with("service_active", {"service": "mcp"})
+
+    async def test_sdk_non_prefixed_extension_failure_is_folded(self) -> None:
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("custom_tool")
+        handler.handle_mock.return_value = Result.err(MCPServerError("failed"))
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            with pytest.raises(RuntimeError, match="failed"):
+                await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
+
+        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
+        assert capture.call_args_list[1].args == (
+            "command_run",
+            {
+                "command": "extension_tool",
+                "service": "mcp",
+                "status": "failed",
+                "error_type": "MCPServerError",
+            },
+        )
+
+    async def test_sdk_non_prefixed_extension_logical_block_is_folded(self) -> None:
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        adapter = MCPServerAdapter()
+        handler = MockToolHandler("custom_tool")
+        handler.handle_mock.return_value = Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="input_required"),),
+                is_error=True,
+            )
+        )
+        adapter.register_tool(handler)
+
+        with patch("ouroboros.telemetry.capture") as capture:
+            await call_sdk_tool(adapter, "custom_tool", {"input": "safe"})
+
+        assert capture.call_args_list[0].args == ("service_active", {"service": "mcp"})
+        assert capture.call_args_list[1].args == (
+            "command_run",
+            {
+                "command": "extension_tool",
+                "service": "mcp",
+                "status": "blocked",
+                "error_type": None,
+            },
+        )
 
     async def test_sdk_call_tool_logical_error_response_counts_as_not_ok(self) -> None:
         """SDK-path companion to the typed-adapter logical-error test."""

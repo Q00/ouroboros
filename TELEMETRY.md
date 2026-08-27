@@ -100,6 +100,9 @@ Notes:
   identity and daily `service_active` rows; no extra lifecycle-state property is sent.
 - A logical tool result with `is_error=true` is recorded as `status=blocked`.
   This makes seed blocks and other validation stops distinct from exceptions.
+- Registered non-product MCP tools are folded to `extension_tool` regardless of
+  their textual prefix. Their successful requests contribute only to service
+  activity; failures and logical blocks retain the fixed command token.
 - `error_type` is only an audited exception class name, never a message or
   traceback. `failure_reason_code` is one of `config`, `auth`, `timeout`,
   `model`, `tool`, `validation`, `cancelled`, or `unknown`.
