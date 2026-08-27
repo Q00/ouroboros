@@ -1201,6 +1201,77 @@ def _restore_claimed(parent: _PinnedParent, claimed_name: str, name: str) -> boo
     return True
 
 
+def claim_and_reclaim_owned(
+    path: Path,
+    *,
+    is_owned: Callable[[Path], bool],
+    trusted_ancestor: Path | None = None,
+) -> bool:
+    """Reclaim an exact transaction-owned generation outside the shared namespace.
+
+    Unlike ordinary removal, this is only for rollback material authored by
+    the current transaction. The verified generation is moved whole into a
+    private temporary directory before recursive disposal; concurrent
+    generations at the canonical path are never moved or mutated.
+    """
+    claimed_name = _claim_name(path.name, "removing")
+    claimed = path.with_name(claimed_name)
+    try:
+        with _pinned_parent(path.parent, trusted_ancestor=trusted_ancestor, create=False) as parent:
+            _recover_claims(parent, path, is_owned)
+            try:
+                parent.replace(path.name, claimed_name)
+            except FileNotFoundError:
+                return False
+            parent.fsync()
+            pin = parent.pin_entry(claimed_name)
+            try:
+                try:
+                    parent.revalidate()
+                    owned = (
+                        pin is not None
+                        and pin.identity[2] in _OWNABLE_ENTRY_TYPES
+                        and is_owned(claimed)
+                        and parent.entry_identity(claimed_name) == pin.identity
+                    )
+                    parent.revalidate()
+                except BaseException:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                if not owned or pin is None:
+                    _restore_claimed(parent, claimed_name, path.name)
+                    return False
+
+                private_root = Path(tempfile.mkdtemp(prefix="ouroboros-rollback-"))
+                private_entry = private_root / "entry"
+                try:
+                    os.rename(claimed_name, private_entry, src_dir_fd=parent.fd)
+                except BaseException:
+                    with suppress(OSError):
+                        private_root.rmdir()
+                    _restore_claimed(parent, claimed_name, path.name)
+                    raise
+                isolated = os.lstat(private_entry)
+                isolated_identity = (
+                    isolated.st_dev,
+                    isolated.st_ino,
+                    stat_module.S_IFMT(isolated.st_mode),
+                )
+                if isolated_identity != pin.identity:
+                    raise UnownedArtifactError(
+                        f"transaction-owned generation changed before reclamation: {path}"
+                    )
+                remove_path(private_entry)
+                private_root.rmdir()
+            finally:
+                if pin is not None:
+                    pin.close()
+            parent.fsync()
+            return True
+    except FileNotFoundError:
+        return False
+
+
 def claim_and_remove_owned(
     path: Path,
     *,

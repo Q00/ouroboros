@@ -651,7 +651,7 @@ def _restore_gjc_paths(
     inserted at any point is preserved and that path's rollback is skipped.
     """
     from ouroboros.core.fs_ownership import (
-        claim_and_remove_owned,
+        claim_and_reclaim_owned,
         publish_owned_entry,
         recover_owned_claims,
     )
@@ -678,7 +678,7 @@ def _restore_gjc_paths(
         try:
             recover_owned_claims(path, is_owned=_is_expected, trusted_ancestor=path.parent)
             if snapshot == missing:
-                if os.path.lexists(path) and not claim_and_remove_owned(
+                if os.path.lexists(path) and not claim_and_reclaim_owned(
                     path, is_owned=_is_expected, trusted_ancestor=path.parent
                 ):
                     print_warning(f"Preserved concurrently changed GJC setup path: {path}")
