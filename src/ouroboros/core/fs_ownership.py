@@ -338,15 +338,24 @@ class _LedgerAuthority:
         with file_lock(self.path / key, parent_fd=self.fd):
             yield
 
-    def record(self, nonce: str, *, canonical: Path, container: str, operation: str) -> None:
+    def record(
+        self,
+        nonce: str,
+        *,
+        canonical: Path,
+        container: str,
+        operation: str,
+        identity: tuple[int, int, int] | None = None,
+    ) -> None:
         """Durably record a transaction before its container becomes discoverable."""
-        payload = json.dumps(
-            {
-                "canonical": _ledger_canonical(canonical),
-                "container": container,
-                "operation": operation,
-            }
-        ).encode("utf-8")
+        record: dict[str, object] = {
+            "canonical": _ledger_canonical(canonical),
+            "container": container,
+            "operation": operation,
+        }
+        if identity is not None:
+            record["identity"] = list(identity)
+        payload = json.dumps(record).encode("utf-8")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(f"{nonce}.json", flags, 0o600, dir_fd=self.fd)
         try:
@@ -395,43 +404,132 @@ class _LedgerAuthority:
             raise OSError(errno.EINVAL, "invalid private quarantine name", name)
         return name
 
-    def create_private_quarantine(self, nonce: str) -> str:
-        """Create a private quarantine under this pinned ledger generation."""
+    def create_private_quarantine(self, nonce: str) -> tuple[str, tuple[int, int, int]]:
+        """Create and identify a private quarantine under this ledger generation."""
         name = self._validated_private_quarantine(f"ouroboros-discard-{nonce}")
         os.mkdir(name, mode=0o700, dir_fd=self.fd)
+        entry = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        identity = (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
         with suppress(OSError):
             os.fsync(self.fd)
-        return name
+        return name, identity
 
-    def erase_private_quarantine(self, name: str) -> bool:
-        """Erase one quarantine relative to this authority; report verified absence."""
+    @contextmanager
+    def _pinned_private_quarantine(
+        self, name: str, expected_identity: tuple[int, int, int]
+    ) -> Iterator[int]:
         name = self._validated_private_quarantine(name)
-        with suppress(Exception):
-            shutil.rmtree(name, dir_fd=self.fd, ignore_errors=True)
-        return not self.private_quarantine_exists(name)
-
-    def private_quarantine_exists(self, name: str) -> bool:
-        """Return whether *name* exists under this pinned ledger generation."""
-        name = self._validated_private_quarantine(name)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         try:
-            os.stat(name, dir_fd=self.fd, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError):
-            return False
+            quarantine_fd = os.open(name, flags, dir_fd=self.fd)
+        except OSError as exc:
+            raise UnownedArtifactError(
+                f"recorded private quarantine is unavailable: {name}"
+            ) from exc
+        try:
+            entry = os.fstat(quarantine_fd)
+            identity = (entry.st_dev, entry.st_ino, stat_module.S_IFMT(entry.st_mode))
+            current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            current_identity = (
+                current.st_dev,
+                current.st_ino,
+                stat_module.S_IFMT(current.st_mode),
+            )
+            if identity != expected_identity or current_identity != expected_identity:
+                raise UnownedArtifactError(
+                    f"recorded private quarantine changed generation: {name}"
+                )
+            yield quarantine_fd
+        finally:
+            os.close(quarantine_fd)
+
+    def move_into_private_quarantine(
+        self,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        container_fd: int,
+    ) -> None:
+        """Move ``container/entry`` into the exact recorded quarantine generation."""
+        with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
+            os.rename("entry", "entry", src_dir_fd=container_fd, dst_dir_fd=quarantine_fd)
+
+    def erase_private_quarantine(
+        self,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        *,
+        record_nonce: str | None = None,
+    ) -> bool:
+        """Erase only the exact private-quarantine generation attributed by a record."""
+        name = self._validated_private_quarantine(name)
+        with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
+            try:
+                entry = os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if stat_module.S_ISDIR(entry.st_mode):
+                    with suppress(Exception):
+                        shutil.rmtree("entry", dir_fd=quarantine_fd, ignore_errors=True)
+                else:
+                    with suppress(OSError):
+                        os.unlink("entry", dir_fd=quarantine_fd)
+            if os.listdir(quarantine_fd):
+                return False
+
+            # Capture the pathname immediately before removing the now-empty
+            # leaf. A replacement at the recorded name is moved aside, fails
+            # the identity check, and is restored no-clobber rather than
+            # recursively deleted or mistaken for the recorded generation.
+            claimed = f".{name}.{os.urandom(8).hex()}.erasing"
+            try:
+                os.rename(name, claimed, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            except FileNotFoundError:
+                return False
+            captured = os.stat(claimed, dir_fd=self.fd, follow_symlinks=False)
+            captured_identity = (
+                captured.st_dev,
+                captured.st_ino,
+                stat_module.S_IFMT(captured.st_mode),
+            )
+            if captured_identity != expected_identity:
+                with suppress(OSError):
+                    _rename_no_replace_between(self.fd, claimed, self.fd, name)
+                raise UnownedArtifactError(
+                    f"recorded private quarantine changed before erasure: {name}"
+                )
+            os.rmdir(claimed, dir_fd=self.fd)
+
+        if record_nonce is not None:
+            self.retire(record_nonce)
         return True
 
-    def private_entry_exists(self, name: str) -> bool:
-        """Return whether a quarantine still contains its transaction entry."""
-        name = self._validated_private_quarantine(name)
-        try:
-            os.stat(f"{name}/entry", dir_fd=self.fd, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError):
-            return False
-        return True
+    def private_entry_exists(self, name: str, expected_identity: tuple[int, int, int]) -> bool:
+        """Return whether the exact recorded quarantine still contains its entry."""
+        with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
+            try:
+                os.stat("entry", dir_fd=quarantine_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return True
 
-    def restore_private_entry(self, name: str, container_fd: int) -> None:
-        """Move residue from this authority back into a pinned shared container."""
-        name = self._validated_private_quarantine(name)
-        os.rename(f"{name}/entry", "entry", src_dir_fd=self.fd, dst_dir_fd=container_fd)
+    def restore_private_entry(
+        self,
+        name: str,
+        expected_identity: tuple[int, int, int],
+        container_fd: int,
+    ) -> None:
+        """Restore residue only from the exact recorded quarantine generation."""
+        with self._pinned_private_quarantine(name, expected_identity) as quarantine_fd:
+            os.rename("entry", "entry", src_dir_fd=quarantine_fd, dst_dir_fd=container_fd)
+
+    @staticmethod
+    def recorded_private_identity(record: dict[str, object]) -> tuple[int, int, int] | None:
+        raw = record.get("identity")
+        if not isinstance(raw, list) or len(raw) != 3 or not all(isinstance(v, int) for v in raw):
+            return None
+        identity = (raw[0], raw[1], raw[2])
+        return identity if identity[2] == stat_module.S_IFDIR else None
 
 
 @contextmanager
@@ -742,31 +840,21 @@ class _PinnedParent:
     def _discard_container_entry(
         self, container: str, container_fd: int, *, canonical_name: str, ledger: _LedgerAuthority
     ) -> None:
-        """Discard ``container/entry`` without ever destroying through a shared name.
-
-        The atomic quarantine is the removal commit; physical erasure is a
-        private afterstep, never part of the shared-namespace transaction.
-        The entry is atomically moved whole into a directory created through
-        the same pinned ledger descriptor that owns its durable record. A
-        ledger-root pathname replacement therefore cannot split the residue
-        from the authority that will replay or retire it.
-        """
+        """Discard ``container/entry`` through one record-bound private generation."""
         _write_intent_marker(container_fd, canonical_name, exist_ok=True)
         moved = False
         missing = False
         private_name: str | None = None
+        private_identity: tuple[int, int, int] | None = None
         erase_nonce: str | None = None
 
-        # The private quarantine and its record belong to one descriptor-pinned
-        # ledger generation. There is intentionally no independently resolved
-        # temporary-directory fallback: if this authority cannot atomically
-        # receive the entry, the shared container becomes a truthful tombstone.
         private_nonce = os.urandom(8).hex()
         try:
-            private_name = ledger.create_private_quarantine(private_nonce)
+            private_name, private_identity = ledger.create_private_quarantine(private_nonce)
         except OSError:
             private_name = None
-        if private_name is not None:
+            private_identity = None
+        if private_name is not None and private_identity is not None:
             erase_nonce = os.urandom(8).hex()
             try:
                 ledger.record(
@@ -774,31 +862,37 @@ class _PinnedParent:
                     canonical=self.path / canonical_name,
                     container=private_name,
                     operation="erasing",
+                    identity=private_identity,
                 )
             except OSError:
-                ledger.erase_private_quarantine(private_name)
+                with suppress(OSError):
+                    ledger.erase_private_quarantine(private_name, private_identity)
                 private_name = None
+                private_identity = None
                 erase_nonce = None
             else:
                 try:
-                    os.rename(
-                        "entry",
-                        f"{private_name}/entry",
-                        src_dir_fd=container_fd,
-                        dst_dir_fd=ledger.fd,
+                    ledger.move_into_private_quarantine(
+                        private_name, private_identity, container_fd
                     )
                     moved = True
                 except FileNotFoundError:
                     missing = True
                 except OSError:
-                    ledger.retire(erase_nonce)
-                    ledger.erase_private_quarantine(private_name)
-                    private_name = None
-                    erase_nonce = None
+                    try:
+                        cleaned = ledger.erase_private_quarantine(
+                            private_name,
+                            private_identity,
+                            record_nonce=erase_nonce,
+                        )
+                    except OSError:
+                        cleaned = False
+                    if cleaned:
+                        private_name = None
+                        private_identity = None
+                        erase_nonce = None
 
         if not moved and not missing:
-            if private_name is not None:
-                ledger.erase_private_quarantine(private_name)
             self._retain_tombstone(container, canonical_name, ledger)
             raise OSError(
                 errno.ENOTEMPTY,
@@ -806,45 +900,70 @@ class _PinnedParent:
                 str(self.path / container),
             )
 
-        if moved and private_name is not None:
-            erased = ledger.erase_private_quarantine(private_name)
+        if private_name is not None and private_identity is not None:
+            try:
+                erased = ledger.erase_private_quarantine(
+                    private_name,
+                    private_identity,
+                    record_nonce=erase_nonce,
+                )
+            except UnownedArtifactError as exc:
+                # The recorded leaf was replaced. Delete neither generation:
+                # retain the record for the original and fail the removal
+                # instead of treating the replacement as authorized residue.
+                raise OSError(
+                    errno.ENOTEMPTY,
+                    "cleanup residue retained after private quarantine replacement",
+                    private_name,
+                ) from exc
             if not erased:
-                if ledger.private_entry_exists(private_name):
-                    # Physical erasure failed. Reinsert only through the pinned
-                    # ledger and container descriptors; if that fails, keep the
-                    # erasing record so recovery can replay the exact residue.
+                try:
+                    has_entry = ledger.private_entry_exists(private_name, private_identity)
+                except UnownedArtifactError as exc:
+                    raise OSError(
+                        errno.ENOTEMPTY,
+                        "cleanup residue retained after private quarantine replacement",
+                        private_name,
+                    ) from exc
+                if has_entry:
                     try:
-                        ledger.restore_private_entry(private_name, container_fd)
+                        ledger.restore_private_entry(private_name, private_identity, container_fd)
                     except OSError as exc:
                         raise OSError(
                             errno.ENOTEMPTY,
                             "cleanup residue retained in a ledger-backed private quarantine",
                             private_name,
                         ) from exc
-                    ledger.erase_private_quarantine(private_name)
-                    if erase_nonce is not None:
-                        ledger.retire(erase_nonce)
-                        erase_nonce = None
+                    try:
+                        emptied = ledger.erase_private_quarantine(
+                            private_name,
+                            private_identity,
+                            record_nonce=erase_nonce,
+                        )
+                    except UnownedArtifactError as exc:
+                        raise OSError(
+                            errno.ENOTEMPTY,
+                            "cleanup residue retained after private quarantine replacement",
+                            private_name,
+                        ) from exc
+                    if not emptied:
+                        raise OSError(
+                            errno.ENOTEMPTY,
+                            "cleanup residue retained in a ledger-backed private quarantine",
+                            private_name,
+                        )
                     self._retain_tombstone(container, canonical_name, ledger)
                     raise OSError(
                         errno.ENOTEMPTY,
                         "cleanup residue retained in a discoverable tombstone",
                         str(self.path / container),
                     )
-                # Unexpected quarantine residue still means cleanup is not
-                # complete. Keep the record and report the durable location.
                 raise OSError(
                     errno.ENOTEMPTY,
                     "cleanup residue retained in a ledger-backed private quarantine",
                     private_name,
                 )
 
-        if private_name is not None:
-            ledger.erase_private_quarantine(private_name)
-        if erase_nonce is not None and (
-            private_name is None or not ledger.private_quarantine_exists(private_name)
-        ):
-            ledger.retire(erase_nonce)
         with suppress(OSError):
             os.unlink(_INTENT_MARKER, dir_fd=container_fd)
         try:
@@ -1379,16 +1498,17 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
                 operation = record.get("operation")
                 location = record.get("container")
                 if operation == "erasing":
-                    # Private quarantine names are relative capabilities under
-                    # this pinned ledger generation. Replay never resolves the
-                    # configured ledger root again by pathname.
-                    if isinstance(location, str):
+                    identity = ledger.recorded_private_identity(record)
+                    if isinstance(location, str) and identity is not None:
                         try:
-                            erased = ledger.erase_private_quarantine(location)
+                            erased = ledger.erase_private_quarantine(
+                                location,
+                                identity,
+                                record_nonce=nonce,
+                            )
                         except OSError:
                             erased = False
                         if erased:
-                            ledger.retire(nonce)
                             changed = True
                     continue
                 if operation in ("importing", "discarding") and location not in remaining:
