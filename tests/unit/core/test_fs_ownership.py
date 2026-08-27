@@ -24,16 +24,6 @@ def _claim_siblings(path: Path, suffix: str) -> list[Path]:
     return sorted(path.parent.glob(f".{path.name}.*.{suffix}"))
 
 
-def _ledger_record(nonce: str, **kwargs: object) -> None:
-    with fs_ownership._ledger_authority() as ledger:
-        ledger.record(nonce, **kwargs)  # type: ignore[arg-type]
-
-
-def _ledger_read(nonce: str) -> dict[str, object] | None:
-    with fs_ownership._ledger_authority() as ledger:
-        return ledger.read(nonce)
-
-
 def _replace_retired_descendant(parent: Path, canonical_name: str, signal: Path) -> None:
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -51,17 +41,6 @@ def _replace_retired_descendant(parent: Path, canonical_name: str, signal: Path)
         signal.write_text("replaced\n", encoding="utf-8")
         return
     raise RuntimeError("retired generation did not become visible")
-
-
-@pytest.fixture(autouse=True)
-def _isolated_transaction_ledger(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> Path:
-    """Keep the writer-owned transaction ledger out of the real home directory
-    (and out of the shared-parent ``tmp_path`` the tests inspect)."""
-    ledger = tmp_path_factory.mktemp("txn-ledger")
-    monkeypatch.setenv(fs_ownership._TRANSACTION_LEDGER_ENV, str(ledger))
-    return ledger
 
 
 def test_remove_deletes_only_an_owned_claimed_generation(tmp_path: Path) -> None:
@@ -769,11 +748,9 @@ def test_tree_remove_never_mutates_retired_descendants(tmp_path: Path) -> None:
     assert (entry / "lost.txt").read_text(encoding="utf-8") == "owned generation\n"
 
 
-def test_failed_cross_filesystem_import_leaves_no_staging_residue(
+def test_cross_filesystem_staging_fails_before_visible_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reviewer's EXDEV probe: a partial descriptor-relative import that
-    fails midway must clean its own staging state under the shared parent."""
     target = tmp_path / "artifact-dir"
     real_rename = fs_ownership.os.rename
 
@@ -790,29 +767,15 @@ def test_failed_cross_filesystem_import_leaves_no_staging_residue(
 
     monkeypatch.setattr(fs_ownership.os, "rename", deny_workspace_rename)
 
-    def build_with_unsupported_entry(staging: Path) -> None:
-        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
-        try:
-            os.mkfifo(staging / "unsupported")
-        except (AttributeError, OSError):
-            pytest.skip("FIFOs are not supported on this platform")
-
-    with pytest.raises(OSError, match="unsupported staged entry type"):
-        publish_owned_tree(target, build_with_unsupported_entry, is_owned=lambda _p: True)
-
-    assert not target.exists()
-    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
-    assert len(retired) == 1
-    assert (retired[0] / "entry" / "content.txt").read_text(encoding="utf-8") == (
-        "next generation\n"
-    )
-
     def build(staging: Path) -> None:
         (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
 
-    publish_owned_tree(target, build, is_owned=lambda _p: True)
-    assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["artifact-dir", retired[0].name])
+    with pytest.raises(OSError, match="cannot be published atomically"):
+        publish_owned_tree(target, build, is_owned=lambda _p: True)
+
+    assert not target.exists()
+    assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+    assert list(tmp_path.glob(f".{target.name}.*.importing")) == []
 
 
 def test_tree_remove_preserves_a_tree_modified_after_the_ownership_read(tmp_path: Path) -> None:
@@ -966,127 +929,6 @@ def test_tree_publish_never_publishes_descendants_mutated_in_place(
     assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
 
 
-def test_interrupted_import_container_is_reconciled_on_the_next_transaction(
-    tmp_path: Path,
-) -> None:
-    """The reviewer's crash probe: a process exit during a cross-filesystem
-    import leaves a container whose transaction was recorded in the
-    writer-owned ledger before the container appeared; the next transaction
-    on the same path replays the discard and retires the record. A container
-    the ledger does not vouch for is operator state and stays untouched."""
-    target = tmp_path / "artifact-dir"
-    staged_shape = f".{target.name}.{os.urandom(8).hex()}.tmp"
-    nonce = os.urandom(8).hex()
-    crashed = tmp_path / f".{staged_shape}.{nonce}.importing"
-    _ledger_record(nonce, canonical=target, container=crashed.name, operation="importing")
-    crashed.mkdir(mode=0o700)
-    (crashed / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
-    (crashed / "entry").mkdir()
-    (crashed / "entry" / "partial.txt").write_text("partial import\n", encoding="utf-8")
-
-    forged = tmp_path / f".forged.{os.urandom(8).hex()}.importing"
-    forged.mkdir(mode=0o700)
-    (forged / "entry").mkdir()
-    (forged / "entry" / "operator.txt").write_text("operator data\n", encoding="utf-8")
-
-    def build(staging: Path) -> None:
-        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
-
-    publish_owned_tree(target, build, is_owned=lambda _p: True)
-
-    assert (target / "content.txt").read_text(encoding="utf-8") == "next generation\n"
-    assert not crashed.exists()  # reconciled: the ledger vouched for it
-    assert _ledger_read(nonce) is None  # record retired with the replay
-    assert (forged / "entry" / "operator.txt").exists()  # forgery left untouched
-
-
-def test_live_record_survives_concurrent_reconcile_and_creator_crash_recovery(
-    tmp_path: Path,
-) -> None:
-    """The reviewer's interleaving probe: a publisher writes its ledger
-    record before its container exists, and a concurrent transaction
-    reconciles the same canonical path inside that window. The per-path
-    ledger lock serializes the two — the reconciler blocks instead of
-    retiring the live record, and when the creator then publishes the
-    container and dies, the blocked reconciliation replays it and retires
-    the record instead of stranding unauthenticated residue."""
-    import threading
-
-    target = tmp_path / "artifact-dir"
-    canonical = fs_ownership._ledger_canonical(target)
-    nonce = os.urandom(8).hex()
-    container = f".{target.name}.{nonce}.importing"
-    outcome: dict[str, bool] = {}
-
-    def concurrent_reconcile() -> None:
-        outcome["changed"] = fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-
-    racer = threading.Thread(target=concurrent_reconcile)
-    with fs_ownership._ledger_authority() as creator, creator.lock(canonical):
-        # Creator: inside the record-before-container window.
-        creator.record(nonce, canonical=target, container=container, operation="importing")
-        racer.start()
-        racer.join(timeout=1.0)
-        # The reconciler is blocked on the lock; the live record survives.
-        assert racer.is_alive()
-        assert _ledger_read(nonce) is not None
-        # Creator publishes the container, then dies (the crash releases the
-        # lock with the import unfinished).
-        (tmp_path / container).mkdir(mode=0o700)
-    racer.join(timeout=30.0)
-    assert not racer.is_alive()
-
-    # The reconciliation ran only after the container existed: it replayed
-    # the interrupted import and retired its record.
-    assert outcome["changed"] is True
-    assert not (tmp_path / container).exists()
-    assert _ledger_read(nonce) is None
-
-
-def test_ledger_root_swap_cannot_split_lock_and_record_authority(
-    tmp_path: Path,
-) -> None:
-    """The reviewer's root-replacement probe: the ledger root is renamed and
-    recreated while a publisher is inside its record-before-container
-    window. Locking and every record operation are bound to the one root
-    descriptor the publisher pinned, so a reconciler acting on the
-    replacement root can neither see nor retire the live record — and once
-    the genuine root is back, the interrupted transaction replays normally."""
-    target = tmp_path / "artifact-dir"
-    canonical = fs_ownership._ledger_canonical(target)
-    nonce = os.urandom(8).hex()
-    container = f".{target.name}.{nonce}.importing"
-    root = fs_ownership._transaction_ledger_root()
-
-    with fs_ownership._ledger_authority() as creator:
-        with pytest.raises(OSError, match="lockfile parent changed"):
-            with creator.lock(canonical):
-                creator.record(nonce, canonical=target, container=container, operation="importing")
-                # Hostile: the ledger root is renamed away and recreated.
-                stolen = root.parent / "stolen-root"
-                os.rename(root, stolen)
-                root.mkdir(mode=0o700)
-                # A reconciler on the replacement root must not retire the
-                # live record (which lives in the pinned, renamed-away
-                # authority).
-                fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-                assert creator.read(nonce) is not None
-                assert (stolen / f"{nonce}.json").exists()
-                # The publisher's container lands; then the creator dies —
-                # and releasing the lock itself detects the swapped parent,
-                # so a live publisher can never mistake the imposter root
-                # for its own authority.
-                (tmp_path / container).mkdir(mode=0o700)
-
-    # The genuine authority is restored (the imposter root moved aside);
-    # recovery replays the interrupted import and retires its record.
-    os.rename(root, root.parent / "imposter-root")
-    os.rename(stolen, root)
-    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert not (tmp_path / container).exists()
-    assert _ledger_read(nonce) is None
-
-
 def test_tree_removal_retires_generation_without_recursive_erasure(tmp_path: Path) -> None:
     target = tmp_path / "artifact-dir"
     (target / "victim").mkdir(parents=True)
@@ -1148,55 +990,3 @@ def test_failed_gjc_activation_preserves_post_validation_descendant_write(
     entry = retired[0] / "entry"
     assert (entry / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
     assert (entry / "operator.txt").read_text(encoding="utf-8") == "operator generation\n"
-
-
-def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(
-    tmp_path: Path,
-) -> None:
-    """A crash can die between the container mkdir and the intent-marker
-    write. The ledger record — written before the container ever existed —
-    is the recovery authority, so the marker-less residue is still replayed
-    and the record retired."""
-    target = tmp_path / "artifact-dir"
-    nonce = os.urandom(8).hex()
-    crashed = tmp_path / f".{target.name}.{nonce}.importing"
-    _ledger_record(nonce, canonical=target, container=crashed.name, operation="importing")
-    crashed.mkdir(mode=0o700)  # crash: no marker, no entry yet
-
-    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert not crashed.exists()
-    assert _ledger_read(nonce) is None
-
-
-def test_recovery_never_destroys_a_forged_container_with_a_matching_marker(
-    tmp_path: Path,
-) -> None:
-    """The reviewer's forged-marker probe: a same-user writer creates a
-    container matching the ``.{name}.{nonce}.importing`` shape, writes the
-    target basename into ``.ouroboros-intent``, and stores operator data
-    under ``entry``. Name shape and marker are forgeable discovery metadata;
-    without a writer-owned ledger record no recovery path — direct recovery,
-    publication, or removal — may destroy the container."""
-    target = tmp_path / "artifact-dir"
-    forged = tmp_path / f".{target.name}.0123456789abcdef.importing"
-    forged.mkdir(mode=0o700)
-    (forged / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
-    (forged / "entry").mkdir()
-    (forged / "entry" / "operator.txt").write_text("operator data\n", encoding="utf-8")
-
-    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-
-    def build(staging: Path) -> None:
-        (staging / "content.txt").write_text("next generation\n", encoding="utf-8")
-
-    publish_owned_tree(target, build, is_owned=lambda _p: True)
-    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-
-    claim_and_remove_owned(target, is_owned=lambda _p: True)
-    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-
-    forged_discarding = tmp_path / f".{target.name}.fedcba9876543210.discarding"
-    forged.rename(forged_discarding)
-    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert (forged_discarding / "entry" / "operator.txt").exists()

@@ -130,8 +130,6 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_PLUGIN_LOCKFILE",
         "OUROBOROS_PLUGIN_TRUST_ROOT",
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
-        # Destructive-recovery authority: the fs_ownership transaction ledger.
-        "OUROBOROS_FS_TRANSACTION_DIR",
         # Operator-owned telemetry preference and destination must never be
         # supplied by a cloned repository. DO_NOT_TRACK belongs here too: it
         # is the cross-tool opt-out signal get_telemetry_enabled() checks
@@ -1079,67 +1077,3 @@ class TestHostileEnvCannotBlockStartup:
         assert result.returncode == 0, result.stderr
         assert "started" in result.stdout
         assert "illegal environment variable name" not in result.stderr
-
-
-def test_untrusted_env_cannot_select_fs_transaction_dir_for_recover_owned_claims(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Loader-to-recovery path for the destructive-replay authority.
-
-    ``core/fs_ownership.py`` deletes a stale shared-directory container only
-    when the transaction ledger vouches for it, so whoever selects the ledger
-    holds destructive-recovery authority. A cloned repository's ``.env``
-    must not be able to select it: with the key denied, an
-    attacker-controlled ledger record plus a matching forged ``.importing``
-    container cannot make ``recover_owned_claims`` delete the operator
-    payload. The trusted process environment may still select an isolated
-    ledger.
-    """
-    import json
-
-    from ouroboros.core import fs_ownership
-
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    target = shared / "artifact-dir"
-    nonce = "0123456789abcdef"
-    forged = shared / f".{target.name}.{nonce}.importing"
-    forged.mkdir(mode=0o700)
-    (forged / ".ouroboros-intent").write_text(target.name, encoding="utf-8")
-    (forged / "entry").mkdir()
-    (forged / "entry" / "operator.txt").write_text("operator data\n", encoding="utf-8")
-
-    attacker_ledger = tmp_path / "attacker-ledger"
-    attacker_ledger.mkdir(mode=0o700)
-    (attacker_ledger / f"{nonce}.json").write_text(
-        json.dumps(
-            {
-                "canonical": os.path.abspath(os.fspath(target)),
-                "container": forged.name,
-                "operation": "importing",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    env_file = tmp_path / ".env"
-    env_file.write_text(f"OUROBOROS_FS_TRANSACTION_DIR={attacker_ledger}\n", encoding="utf-8")
-    monkeypatch.delenv("OUROBOROS_FS_TRANSACTION_DIR", raising=False)
-    # Keep the trusted-home fallback out of the real home directory.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
-
-    _load_env_file(env_file, trusted=False)
-
-    assert "OUROBOROS_FS_TRANSACTION_DIR" not in os.environ
-    assert fs_ownership._transaction_ledger_root() != attacker_ledger
-
-    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
-    assert (forged / "entry" / "operator.txt").read_text(encoding="utf-8") == "operator data\n"
-    assert (attacker_ledger / f"{nonce}.json").exists()
-
-    # The real process environment (and the trusted home .env, which follows
-    # the same precedence) remains free to select an isolated ledger.
-    trusted_ledger = tmp_path / "trusted-ledger"
-    monkeypatch.setenv("OUROBOROS_FS_TRANSACTION_DIR", str(trusted_ledger))
-    assert fs_ownership._transaction_ledger_root() == trusted_ledger

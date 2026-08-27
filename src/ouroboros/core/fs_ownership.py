@@ -17,15 +17,12 @@ from contextlib import contextmanager, suppress
 import ctypes
 import errno
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
 import shutil
 import stat as stat_module
 import tempfile
-
-from ouroboros.core.file_lock import file_lock
 
 
 class UnownedArtifactError(OSError):
@@ -92,187 +89,6 @@ _RENAME_NO_REPLACE = _load_rename_no_replace()
 # entry type (FIFO, socket, device, symlink) is rejected before the ownership
 # predicate runs, so content reads can never block on a special file.
 _OWNABLE_ENTRY_TYPES = (stat_module.S_IFREG, stat_module.S_IFDIR)
-
-
-_INTENT_MARKER = ".ouroboros-intent"
-
-
-def _write_intent_marker(container_fd: int, canonical_name: str, *, exist_ok: bool = False) -> None:
-    """Record which canonical artifact a container's contents belong to."""
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-    flags |= os.O_TRUNC if exist_ok else os.O_EXCL
-    try:
-        fd = os.open(_INTENT_MARKER, flags, 0o600, dir_fd=container_fd)
-    except FileExistsError:
-        return
-    try:
-        os.write(fd, canonical_name.encode("utf-8"))
-        with suppress(OSError):
-            os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _read_intent_marker(container_fd: int) -> str | None:
-    try:
-        fd = os.open(_INTENT_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=container_fd)
-    except OSError:
-        return None
-    try:
-        return os.read(fd, 4096).decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    finally:
-        os.close(fd)
-
-
-_TRANSACTION_LEDGER_ENV = "OUROBOROS_FS_TRANSACTION_DIR"
-_CONTAINER_PATTERN = re.compile(r"^\..+\.([0-9a-f]{16})\.(importing|discarding)$")
-
-
-def _transaction_ledger_root() -> Path:
-    """Return the exclusively writer-owned transaction-ledger root.
-
-    Shared-parent import/discard containers are forgeable by any same-user
-    writer. Destructive recovery authority therefore lives here instead: a
-    ledger record binds the canonical path, operation, and exact container.
-    Private erasure quarantines also live under this root and are created,
-    replayed, and retired relative to the same pinned descriptor as their
-    records, so replacing the configured pathname cannot split the authority.
-    """
-    override = os.environ.get(_TRANSACTION_LEDGER_ENV)
-    if override:
-        return Path(override)
-    return Path.home() / ".ouroboros" / "fs-transactions"
-
-
-def _container_nonce(container: str) -> str | None:
-    match = _CONTAINER_PATTERN.match(container)
-    return match.group(1) if match else None
-
-
-def _ledger_canonical(path: Path) -> str:
-    return os.path.abspath(os.fspath(path))
-
-
-class _LedgerAuthority:
-    """The pinned writer-owned transaction-ledger root.
-
-    Locking, record creation, reads, retirement, listing, and private
-    quarantine lifecycle operations all run relative to one directory
-    descriptor opened once. A ledger root renamed and recreated
-    mid-transaction can therefore never split a publisher and a reconciler
-    across different lock, record, or residue authorities: whoever opened
-    this authority keeps acting on the exact directory generation it pinned,
-    necessarily reading and retiring the same records.
-    """
-
-    def __init__(self) -> None:
-        root = _transaction_ledger_root()
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.path = root
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
-        self.fd = os.open(root, flags)
-
-    def close(self) -> None:
-        os.close(self.fd)
-
-    @contextmanager
-    def lock(self, canonical: str) -> Iterator[None]:
-        """Serialize one canonical path's ledger/container lifecycle.
-
-        Ledger-record creation and container publication are separate
-        filesystem effects, so on their own they are independently
-        interleavable. This lock turns them into one generation: a
-        cooperating publisher holds it from before its record is written
-        until its container exists (or the transaction rolled back), and
-        reconciliation acquires it before replaying or retiring anything.
-        Acquisition therefore proves no live publisher is inside its
-        record-before-container window — a directory snapshot taken under
-        the lock is evidence of completion, never a guess. The lock file is
-        opened relative to the pinned root descriptor, keyed by the
-        canonical path, so holders never touch the operator-shared parent
-        and a swapped root cannot hand out an unrelated lock. Never nest
-        acquisitions: ``flock`` conflicts across descriptors within one
-        process as well.
-        """
-        key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-        with file_lock(self.path / key, parent_fd=self.fd):
-            yield
-
-    def record(
-        self,
-        nonce: str,
-        *,
-        canonical: Path,
-        container: str,
-        operation: str,
-        identity: tuple[int, int, int] | None = None,
-    ) -> None:
-        """Durably record a transaction before its container becomes discoverable."""
-        record: dict[str, object] = {
-            "canonical": _ledger_canonical(canonical),
-            "container": container,
-            "operation": operation,
-        }
-        if identity is not None:
-            record["identity"] = list(identity)
-        payload = json.dumps(record).encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(f"{nonce}.json", flags, 0o600, dir_fd=self.fd)
-        try:
-            os.write(fd, payload)
-            with suppress(OSError):
-                os.fsync(fd)
-        finally:
-            os.close(fd)
-        with suppress(OSError):
-            os.fsync(self.fd)
-
-    def read(self, nonce: str) -> dict[str, object] | None:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        try:
-            fd = os.open(f"{nonce}.json", flags, dir_fd=self.fd)
-        except OSError:
-            return None
-        try:
-            raw = os.read(fd, 1 << 16)
-        except OSError:
-            return None
-        finally:
-            os.close(fd)
-        try:
-            record = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            return None
-        return record if isinstance(record, dict) else None
-
-    def retire(self, nonce: str) -> None:
-        with suppress(OSError):
-            os.unlink(f"{nonce}.json", dir_fd=self.fd)
-        with suppress(OSError):
-            os.fsync(self.fd)
-
-    def nonces(self) -> list[str]:
-        try:
-            names = os.listdir(self.fd)
-        except OSError:
-            return []
-        return [name[: -len(".json")] for name in names if name.endswith(".json")]
-
-
-@contextmanager
-def _ledger_authority() -> Iterator[_LedgerAuthority]:
-    authority = _LedgerAuthority()
-    try:
-        yield authority
-    finally:
-        authority.close()
 
 
 def _digest_into(digest: hashlib._Hash, path: Path, relative: bytes) -> bool:
@@ -501,88 +317,40 @@ class _PinnedParent:
         return name
 
     def import_entry(self, source: Path, name: str, *, canonical_name: str | None = None) -> None:
-        """Bring a privately built entry under the pinned parent, fd-relative only.
-
-        *source* lives in a private staging workspace nobody else can reach,
-        so reading it by pathname is safe; every write lands through the
-        pinned descriptor (``dst_dir_fd`` rename, or a descriptor-relative
-        recursive copy across filesystems), so a canonical parent renamed and
-        replaced by a symlink during a build can never redirect the import.
-        """
+        """Atomically import a private generation on the destination filesystem."""
         if self.fd is None:
-            shutil.move(os.fspath(source), self.path / name)
+            try:
+                os.rename(os.fspath(source), self.path / name)
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    raise OSError(
+                        errno.EXDEV,
+                        "cross-filesystem staging cannot be published atomically",
+                        str(self.path / name),
+                    ) from exc
+                raise
             return
         try:
             os.rename(os.fspath(source), name, dst_dir_fd=self.fd)
-            return
         except OSError as exc:
-            if exc.errno != errno.EXDEV:
-                raise
-        # Cross-filesystem: assemble inside a self-describing 0700 intent
-        # container, then commit with one atomic fd-relative rename. The
-        # ledger record written first — in the writer-owned transaction root,
-        # not the shared parent — is what authorizes recovery to reconcile
-        # this container after a crash; the in-container intent marker is
-        # discovery metadata only. The whole record-to-commit lifetime runs
-        # under the canonical path's ledger lock, so a concurrent
-        # reconciliation can never observe (and retire) the record while the
-        # container has not been published yet, nor replay the container out
-        # from under the still-running copy.
-        canonical_path = self.path / (canonical_name or name)
-        with _ledger_authority() as ledger, ledger.lock(_ledger_canonical(canonical_path)):
-            nonce = os.urandom(8).hex()
-            container = f".{name}.{nonce}.importing"
-            ledger.record(
-                nonce,
-                canonical=canonical_path,
-                container=container,
-                operation="importing",
-            )
-            try:
-                os.mkdir(container, mode=0o700, dir_fd=self.fd)
-            except OSError:
-                ledger.retire(nonce)
-                raise
-            container_flags = (
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-            )
-            container_fd = os.open(container, container_flags, dir_fd=self.fd)
-            try:
-                _write_intent_marker(container_fd, canonical_name or name)
-                try:
-                    _import_tree_fd(source, container_fd, "entry")
-                    os.rename("entry", name, src_dir_fd=container_fd, dst_dir_fd=self.fd)
-                except BaseException:
-                    with suppress(OSError):
-                        self._discard_container_entry(
-                            container,
-                            container_fd,
-                            canonical_name=canonical_name or name,
-                            ledger=ledger,
-                        )
-                    raise
-                os.unlink(_INTENT_MARKER, dir_fd=container_fd)
-            finally:
-                os.close(container_fd)
-            try:
-                os.rmdir(container, dir_fd=self.fd)
-            except OSError:
-                pass
-            else:
-                ledger.retire(nonce)
+            if exc.errno == errno.EXDEV:
+                raise OSError(
+                    errno.EXDEV,
+                    "cross-filesystem staging cannot be published atomically",
+                    str(self.path / name),
+                ) from exc
+            raise
 
     def _discard_container_entry(
-        self, container: str, container_fd: int, *, canonical_name: str, ledger: _LedgerAuthority
+        self, container: str, container_fd: int, *, canonical_name: str
     ) -> None:
         """Retire a validated tree generation without recursively mutating it."""
-        _write_intent_marker(container_fd, canonical_name, exist_ok=True)
         held = os.fstat(container_fd)
         current = os.stat(container, dir_fd=self.fd, follow_symlinks=False)
         if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
             raise UnownedArtifactError(
                 f"retirement container changed generation: {self.path / container}"
             )
-
         retired = f".{canonical_name}.{os.urandom(8).hex()}.retired"
         _rename_no_replace_between(self.fd, container, self.fd, retired)
         captured = os.stat(retired, dir_fd=self.fd, follow_symlinks=False)
@@ -591,10 +359,6 @@ class _PinnedParent:
                 f"retired generation changed identity: {self.path / retired}"
             )
         self.fsync()
-
-        source_nonce = _container_nonce(container)
-        if source_nonce is not None:
-            ledger.retire(source_nonce)
 
     def quarantined_remove(
         self,
@@ -698,25 +462,13 @@ class _PinnedParent:
                         f"claimed generation changed content before removal: {self.path / name}"
                     )
             if identity[2] == stat_module.S_IFDIR:
-                # Removal commits with the atomic move into the quarantine; a
-                # recursive deletion that fails partway must never restore a
-                # half-destroyed tree, so trees are discarded commit-first.
-                # A discard whose cleanup cannot complete leaves the residue
-                # in an intent-marked tombstone and raises, so the removal is
-                # reported truthfully instead of claiming a finished cleanup.
-                # Under the ledger lock: a failed discard hands the residue a
-                # tombstone ledger record, and that record-before-rename
-                # window must not be observable by a concurrent reconciler.
-                with (
-                    _ledger_authority() as ledger,
-                    ledger.lock(_ledger_canonical(self.path / (canonical_name or name))),
-                ):
-                    self._discard_container_entry(
-                        quarantine,
-                        quarantine_fd,
-                        canonical_name=canonical_name or name,
-                        ledger=ledger,
-                    )
+                # Logical removal ends at the atomic move into a terminal
+                # tombstone; descendants are never recursively mutated.
+                self._discard_container_entry(
+                    quarantine,
+                    quarantine_fd,
+                    canonical_name=canonical_name or name,
+                )
             else:
                 try:
                     os.unlink("entry", dir_fd=quarantine_fd)
@@ -1002,74 +754,9 @@ def _claim_siblings(parent: _PinnedParent, name: str) -> list[str]:
     return sorted(entry for entry in entries if pattern.match(entry))
 
 
-def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
-    """Reconcile interrupted import/discard containers that belong to *path*."""
-    if parent.fd is None:
-        return False
-    canonical = _ledger_canonical(path)
-    changed = False
-    container_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    with _ledger_authority() as ledger, ledger.lock(canonical):
-        try:
-            entries = os.listdir(parent.fd)
-        except OSError:
-            return False
-        for entry in sorted(entries):
-            match = _CONTAINER_PATTERN.match(entry)
-            if match is None:
-                continue
-            record = ledger.read(match.group(1))
-            if (
-                record is None
-                or record.get("container") != entry
-                or record.get("canonical") != canonical
-                or record.get("operation") != match.group(2)
-            ):
-                continue
-            try:
-                container_fd = os.open(entry, container_flags, dir_fd=parent.fd)
-            except OSError:
-                continue
-            try:
-                marker = _read_intent_marker(container_fd)
-                if marker is not None and marker != path.name:
-                    continue
-                with suppress(OSError):
-                    parent._discard_container_entry(
-                        entry, container_fd, canonical_name=path.name, ledger=ledger
-                    )
-                    changed = True
-            finally:
-                os.close(container_fd)
-
-        with suppress(OSError):
-            try:
-                remaining = frozenset(os.listdir(parent.fd))
-            except OSError:
-                return changed
-            for nonce in ledger.nonces():
-                record = ledger.read(nonce)
-                if record is None or record.get("canonical") != canonical:
-                    continue
-                operation = record.get("operation")
-                location = record.get("container")
-                if operation in ("importing", "discarding") and location not in remaining:
-                    ledger.retire(nonce)
-    return changed
-
-
 def _recover_claims(parent: _PinnedParent, path: Path, is_owned: Callable[[Path], bool]) -> bool:
-    """Reconcile interrupted claim siblings of *path* left by a crashed transaction.
-
-    Claim-name syntax is discovery metadata, not ownership evidence: any
-    shared-directory writer can forge a claim-shaped sibling, so ownership is
-    authenticated *while the entry is still under its claim name* — through a
-    pinned entry descriptor — before anything is promoted or deleted. Only an
-    owned claim is restored (no-clobber) when the canonical path is absent, or
-    deleted as a leftover when the canonical path is occupied. A claim that
-    fails authentication is left untouched as a collision for the operator.
-    """
-    changed = _reconcile_stale_containers(parent, path)
+    """Reconcile authenticated claim siblings left by interrupted mutations."""
+    changed = False
     for claim_name in _claim_siblings(parent, path.name):
         pin = parent.pin_entry(claim_name)
         if pin is None:
