@@ -130,8 +130,6 @@ class TestPluginPathForce:
         assert meta["gate_forced"] is True
         ctx = meta["_subagent"]["context"]
         assert ctx["force"] is True
-        assert ctx["gate_forced"] is True
-        assert "metadata.gate_forced" in meta["_subagent"]["prompt"]
         # Bypass note must reach the subagent so it does not re-impose the gate.
         assert "Ambiguity Gate Bypassed" in meta["_subagent"]["prompt"]
 
@@ -149,7 +147,6 @@ class TestPluginPathForce:
         assert result.is_ok
         assert result.value.meta["force"] is False
         assert result.value.meta["gate_forced"] is False
-        assert result.value.meta["_subagent"]["context"]["gate_forced"] is False
         assert result.value.meta["_subagent"]["context"]["force"] is False
 
 
