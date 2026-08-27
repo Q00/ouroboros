@@ -253,6 +253,37 @@ def test_rollout_replayed_exact_identity_after_newer_turn_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sessionId", "sess_12345678-1234-1234-1234-123456789abd"),
+        ("sessionId", None),
+        ("traceId", None),
+    ],
+)
+def test_rollout_foreign_or_malformed_history_record_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    valid = json.loads(path.read_text(encoding="utf-8"))
+    invalid = json.loads(json.dumps(valid))
+    invalid[field] = value
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (valid, invalid)) + "\n", encoding="utf-8"
+    )
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_group_or_world_writable_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.chmod(0o666)
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_loads_without_getuid_support(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
