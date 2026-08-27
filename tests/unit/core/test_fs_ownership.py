@@ -14,6 +14,7 @@ import pytest
 from ouroboros.core import fs_ownership
 from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
+    claim_and_archive_owned,
     claim_and_remove_owned,
     publish_owned_file,
     publish_owned_tree,
@@ -1128,6 +1129,30 @@ def test_concurrent_descendant_replacement_survives_terminal_retirement(tmp_path
     victim = retired[0] / "entry" / "victim"
     assert (victim / "hot").read_text(encoding="utf-8") == "operator replacement\n"
     assert (victim / "hot.original").read_text(encoding="utf-8") == "owned generation\n"
+
+
+def test_failed_gjc_activation_preserves_post_validation_descendant_write(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    def approve_then_write(claimed: Path) -> bool:
+        (claimed / "operator.txt").write_text("operator generation\n", encoding="utf-8")
+        return True
+
+    assert claim_and_archive_owned(target, is_owned=approve_then_write)
+    assert not target.exists()
+    with fs_ownership._ledger_authority() as archive:
+        archived = [
+            archive.path / name
+            for name in os.listdir(archive.fd)
+            if name.startswith("rollback-artifact-dir-")
+        ]
+    assert len(archived) == 1
+    assert (archived[0] / "content.txt").read_text(encoding="utf-8") == ("owned generation\n")
+    assert (archived[0] / "operator.txt").read_text(encoding="utf-8") == ("operator generation\n")
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(

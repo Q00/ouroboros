@@ -1201,19 +1201,13 @@ def _restore_claimed(parent: _PinnedParent, claimed_name: str, name: str) -> boo
     return True
 
 
-def claim_and_reclaim_owned(
+def claim_and_archive_owned(
     path: Path,
     *,
     is_owned: Callable[[Path], bool],
     trusted_ancestor: Path | None = None,
 ) -> bool:
-    """Reclaim an exact transaction-owned generation outside the shared namespace.
-
-    Unlike ordinary removal, this is only for rollback material authored by
-    the current transaction. The verified generation is moved whole into a
-    private temporary directory before recursive disposal; concurrent
-    generations at the canonical path are never moved or mutated.
-    """
+    """Move an exact rollback generation out of the active namespace intact."""
     claimed_name = _claim_name(path.name, "removing")
     claimed = path.with_name(claimed_name)
     try:
@@ -1242,27 +1236,34 @@ def claim_and_reclaim_owned(
                     _restore_claimed(parent, claimed_name, path.name)
                     return False
 
-                private_root = Path(tempfile.mkdtemp(prefix="ouroboros-rollback-"))
-                private_entry = private_root / "entry"
-                try:
-                    os.rename(claimed_name, private_entry, src_dir_fd=parent.fd)
-                except BaseException:
-                    with suppress(OSError):
-                        private_root.rmdir()
-                    _restore_claimed(parent, claimed_name, path.name)
-                    raise
-                isolated = os.lstat(private_entry)
-                isolated_identity = (
-                    isolated.st_dev,
-                    isolated.st_ino,
-                    stat_module.S_IFMT(isolated.st_mode),
-                )
-                if isolated_identity != pin.identity:
-                    raise UnownedArtifactError(
-                        f"transaction-owned generation changed before reclamation: {path}"
+                with _ledger_authority() as archive:
+                    archived_name = f"rollback-{path.name}-{os.urandom(8).hex()}"
+                    try:
+                        os.rename(
+                            claimed_name,
+                            archived_name,
+                            src_dir_fd=parent.fd,
+                            dst_dir_fd=archive.fd,
+                        )
+                    except BaseException:
+                        _restore_claimed(parent, claimed_name, path.name)
+                        raise
+                    archived = os.stat(
+                        archived_name,
+                        dir_fd=archive.fd,
+                        follow_symlinks=False,
                     )
-                remove_path(private_entry)
-                private_root.rmdir()
+                    archived_identity = (
+                        archived.st_dev,
+                        archived.st_ino,
+                        stat_module.S_IFMT(archived.st_mode),
+                    )
+                    if archived_identity != pin.identity:
+                        raise UnownedArtifactError(
+                            f"rollback generation changed during archival: {path}"
+                        )
+                    with suppress(OSError):
+                        os.fsync(archive.fd)
             finally:
                 if pin is not None:
                     pin.close()
