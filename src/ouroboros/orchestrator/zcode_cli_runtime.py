@@ -602,6 +602,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 if (
                     not stat.S_ISREG(fd_stat.st_mode)
                     or (current_uid is not None and fd_stat.st_uid != current_uid)
+                    or fd_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
                     or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
                     # Bind validation and reads to the same inode. This also
                     # closes the symlink/rename race on platforms lacking
@@ -635,6 +636,22 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             except json.JSONDecodeError:
                 return []
             if not isinstance(candidate, dict):
+                return []
+            record_session_id = candidate.get("sessionId")
+            record_trace_id = candidate.get("traceId")
+            record_turn_id = candidate.get("turnId")
+            # This file is the authority boundary for one ZCode session, so
+            # do not silently ignore foreign or malformed history entries.
+            # Any nonblank record without a complete filename-bound identity
+            # makes chronology ambiguous and cannot yield executable evidence.
+            if not (
+                isinstance(record_session_id, str)
+                and record_session_id == session_id
+                and isinstance(record_trace_id, str)
+                and record_trace_id.strip()
+                and isinstance(record_turn_id, str)
+                and record_turn_id.strip()
+            ):
                 return []
             records.append(candidate)
 
