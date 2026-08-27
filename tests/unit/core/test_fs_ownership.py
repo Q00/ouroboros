@@ -14,10 +14,7 @@ import pytest
 from ouroboros.core import fs_ownership
 from ouroboros.core.fs_ownership import (
     UnownedArtifactError,
-    claim_and_archive_owned,
     claim_and_remove_owned,
-    close_rollback_archive,
-    prepare_rollback_archive,
     publish_owned_file,
     publish_owned_tree,
 )
@@ -1144,71 +1141,13 @@ def test_failed_gjc_activation_preserves_post_validation_descendant_write(
         (claimed / "operator.txt").write_text("operator generation\n", encoding="utf-8")
         return True
 
-    archive = prepare_rollback_archive(target.parent / "profile")
-    assert claim_and_archive_owned(target, archive=archive, is_owned=approve_then_write)
+    assert claim_and_remove_owned(target, is_owned=approve_then_write)
     assert not target.exists()
-    archived = [
-        archive.path / name for name in os.listdir(archive.path) if name.startswith("artifact-dir-")
-    ]
-    assert len(archived) == 1
-    assert (archived[0] / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
-    assert (archived[0] / "operator.txt").read_text(encoding="utf-8") == ("operator generation\n")
-    close_rollback_archive(archive)
-
-
-def test_rollback_archive_replacement_cannot_receive_payload(tmp_path: Path) -> None:
-    target = tmp_path / "artifact-dir"
-    target.mkdir()
-    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
-    archive = prepare_rollback_archive(tmp_path / "profile")
-    displaced = archive.path.with_name(archive.path.name + ".displaced")
-    os.rename(archive.path, displaced)
-    archive.path.mkdir(mode=0o700)
-
-    with pytest.raises(UnownedArtifactError, match="rollback archive changed generation"):
-        claim_and_archive_owned(target, archive=archive, is_owned=lambda _p: True)
-
-    assert (target / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
-    assert list(archive.path.iterdir()) == []
-    assert list(displaced.iterdir()) == []
-    with pytest.raises(UnownedArtifactError, match="rollback archive changed generation"):
-        close_rollback_archive(archive)
-    assert archive.path.is_dir()
-    assert displaced.is_dir()
-
-
-def test_rollback_archive_replacement_cannot_be_removed_on_close(tmp_path: Path) -> None:
-    archive = prepare_rollback_archive(tmp_path / "profile")
-    displaced = archive.path.with_name(archive.path.name + ".displaced")
-    os.rename(archive.path, displaced)
-    archive.path.mkdir(mode=0o700)
-
-    with pytest.raises(UnownedArtifactError, match="rollback archive changed generation"):
-        close_rollback_archive(archive)
-
-    assert archive.path.is_dir()
-    assert displaced.is_dir()
-    with fs_ownership._ledger_authority() as ledger:
-        assert ledger.read(archive.record_nonce) is not None
-
-
-def test_rollback_archive_replacement_survives_crash_replay(tmp_path: Path) -> None:
-    archive = prepare_rollback_archive(tmp_path / "profile")
-    record_nonce = archive.record_nonce
-    displaced = archive.path.with_name(archive.path.name + ".displaced")
-    os.close(archive.fd)
-    os.close(archive.parent_fd)
-    archive.closed = True
-    os.rename(archive.path, displaced)
-    archive.path.mkdir(mode=0o700)
-
-    next_archive = prepare_rollback_archive(tmp_path / "profile")
-
-    assert archive.path.is_dir()
-    assert displaced.is_dir()
-    with fs_ownership._ledger_authority() as ledger:
-        assert ledger.read(record_nonce) is not None
-    close_rollback_archive(next_archive)
+    retired = list(tmp_path.glob(f".{target.name}.*.retired"))
+    assert len(retired) == 1
+    entry = retired[0] / "entry"
+    assert (entry / "content.txt").read_text(encoding="utf-8") == "owned generation\n"
+    assert (entry / "operator.txt").read_text(encoding="utf-8") == "operator generation\n"
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(

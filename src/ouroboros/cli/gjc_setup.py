@@ -486,9 +486,6 @@ def install_gjc_runtime_artifacts(
 ) -> bool:
     """Activate one complete GJC frontdoor before retiring any prior route."""
     agent_dir = gjc_agent_dir()
-    from ouroboros.core.fs_ownership import close_rollback_archive, prepare_rollback_archive
-
-    rollback_archive = prepare_rollback_archive(agent_dir)
     state = registration_state if registration_state is not None else {}
     paths = (
         *setup_owned_gjc_skill_paths(agent_dir=agent_dir),
@@ -547,7 +544,6 @@ def install_gjc_runtime_artifacts(
         succeeded = False
 
     if succeeded:
-        close_rollback_archive(rollback_archive)
         return True
     if snapshots is not None:
         rollback_gjc_activation(
@@ -556,7 +552,6 @@ def install_gjc_runtime_artifacts(
             restore_path_snapshot=host.restore_path_snapshot,
             snapshot_path=host.snapshot_path,
             registration_state=state,
-            rollback_archive=rollback_archive,
         )
         for directory in (
             agent_dir / "skills",
@@ -568,7 +563,6 @@ def install_gjc_runtime_artifacts(
                 directory.rmdir()
             except OSError:
                 pass
-    close_rollback_archive(rollback_archive)
     return False
 
 
@@ -648,7 +642,6 @@ def _restore_gjc_paths(
     expected: _PathSnapshots,
     restore_path_snapshot: Callable[..., None],
     snapshot_path: Callable[..., object],
-    rollback_archive: object | None = None,
 ) -> None:
     """Restore pre-transaction snapshots through the shared ownership primitives.
 
@@ -659,8 +652,6 @@ def _restore_gjc_paths(
     inserted at any point is preserved and that path's rollback is skipped.
     """
     from ouroboros.core.fs_ownership import (
-        RollbackArchive,
-        claim_and_archive_owned,
         claim_and_remove_owned,
         publish_owned_entry,
         recover_owned_claims,
@@ -690,17 +681,9 @@ def _restore_gjc_paths(
             if snapshot == missing:
                 if not os.path.lexists(path):
                     continue
-                if path.is_dir() and isinstance(rollback_archive, RollbackArchive):
-                    removed = claim_and_archive_owned(
-                        path,
-                        archive=rollback_archive,
-                        is_owned=_is_expected,
-                        trusted_ancestor=path.parent,
-                    )
-                else:
-                    removed = claim_and_remove_owned(
-                        path, is_owned=_is_expected, trusted_ancestor=path.parent
-                    )
+                removed = claim_and_remove_owned(
+                    path, is_owned=_is_expected, trusted_ancestor=path.parent
+                )
                 if not removed:
                     print_warning(f"Preserved concurrently changed GJC setup path: {path}")
                 continue
@@ -747,14 +730,7 @@ def rollback_gjc_activation(
     restore_path_snapshot: Callable[..., None],
     snapshot_path: Callable[..., object],
     registration_state: dict[str, object],
-    rollback_archive: object | None = None,
 ) -> None:
     """Restore unchanged owned generations and remove a registration created here."""
-    _restore_gjc_paths(
-        snapshots,
-        expected,
-        restore_path_snapshot,
-        snapshot_path,
-        rollback_archive,
-    )
+    _restore_gjc_paths(snapshots, expected, restore_path_snapshot, snapshot_path)
     _rollback_new_gjc_mcp_registration(registration_state)
