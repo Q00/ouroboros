@@ -1336,6 +1336,7 @@ class GenerateSeedHandler:
                     interview_state,
                     distillation,
                     ambiguity_score=float(effective_score if effective_score is not None else 0.15),
+                    gate_forced=force,
                 )
                 seed_yaml = yaml.dump(
                     reference_seed.to_dict(),

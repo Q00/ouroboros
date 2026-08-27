@@ -61,6 +61,7 @@ async def _create_current_session(
     seed_id: str,
     status: SessionStatus = SessionStatus.RUNNING,
     workspace_path: str | None = None,
+    gate_forced: bool | None = None,
 ) -> None:
     scoped = ProjectIdentity(
         project_id=project.project_id,
@@ -77,6 +78,7 @@ async def _create_current_session(
         seed_goal=f"goal for {session_id}",
         runtime_backend="codex_cli",
         llm_backend="openai",
+        gate_forced=gate_forced,
         execution_contract=_contract(scoped),
         project_identity=scoped,
         project_workspace=str(actual_workspace),
@@ -148,6 +150,61 @@ async def test_build_reuses_session_repository_status_and_is_read_only(
         reconstructed = await SessionRepository(event_store).reconstruct_session(run.session_id)
         assert reconstructed.is_ok
         assert run.status is reconstructed.value.status
+
+
+@pytest.mark.asyncio
+async def test_build_reports_ambiguity_gate_statistics(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="gated",
+        execution_id="execution-gated",
+        seed_id="seed-gated",
+        gate_forced=False,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="forced",
+        execution_id="execution-forced",
+        seed_id="seed-forced",
+        gate_forced=True,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="unknown",
+        execution_id="execution-unknown",
+        seed_id="seed-unknown",
+    )
+
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.gated_seed_count == 1
+    assert record.forced_seed_count == 1
+    assert record.unknown_seed_count == 1
+    assert record.override_rate == 0.5
+    assert {run.session_id: run.gate_forced for run in record.runs} == {
+        "gated": False,
+        "forced": True,
+        "unknown": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_returns_unknown_rate_when_no_gate_decisions(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.gated_seed_count == 0
+    assert record.forced_seed_count == 0
+    assert record.unknown_seed_count == 0
+    assert record.override_rate is None
 
 
 @pytest.mark.asyncio
