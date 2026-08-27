@@ -28,7 +28,11 @@ Model selection:
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import re
+import stat
 from typing import Any
 
 import structlog
@@ -94,6 +98,9 @@ _CHILD_ENV_STRIP_KEYS = (
     "ELECTRON_RUN_AS_NODE",
     "NODE_OPTIONS",
 )
+
+_ZCODE_SESSION_ID_RE = re.compile(r"sess_[0-9a-f-]{36}\Z")
+_MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
@@ -536,7 +543,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             )
             response = response[:MAX_LLM_RESPONSE_LENGTH]
 
+        receipt_messages = self._load_rollout_tool_receipts(event)
         return [
+            *receipt_messages,
             AgentMessage(
                 type="assistant",
                 content=response,
@@ -549,8 +558,217 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                     "eventCount": event.get("eventCount"),
                 },
                 resume_handle=current_handle,
-            )
+            ),
         ]
+
+    def _load_rollout_tool_receipts(self, event: dict[str, Any]) -> list[AgentMessage]:
+        """Load tool receipts bound to this exact Zcode summary.
+
+        Zcode 0.16.1 still emits only a terminal JSON summary on stdout, but it
+        persists the current turn's model/tool exchange under
+        ``~/.zcode/cli/rollout/model-io-<sessionId>.jsonl``.  The verifier must
+        not trust final assistant prose as executed evidence, so normalize only
+        a record whose session, trace, and turn identifiers all match the
+        summary returned by the child process.
+
+        Any missing, oversized, malformed, symlinked, foreign-owned, or
+        identifier-mismatched record yields no receipts and therefore preserves
+        the existing fail-closed verifier behaviour.
+        """
+        session_id = event.get("sessionId")
+        trace_id = event.get("traceId")
+        turn_id = event.get("turnId")
+        if not all(
+            isinstance(value, str) and value.strip() for value in (session_id, trace_id, turn_id)
+        ):
+            return []
+        assert isinstance(session_id, str)
+        assert isinstance(trace_id, str)
+        assert isinstance(turn_id, str)
+        if _ZCODE_SESSION_ID_RE.fullmatch(session_id) is None:
+            return []
+
+        rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
+        try:
+            path_stat = rollout_path.lstat()
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(rollout_path, flags)
+            try:
+                fd_stat = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(fd_stat.st_mode)
+                    or fd_stat.st_uid != os.getuid()
+                    or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
+                    # Bind validation and reads to the same inode. This also
+                    # closes the symlink/rename race on platforms lacking
+                    # O_NOFOLLOW.
+                    or (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino)
+                ):
+                    return []
+                chunks: list[bytes] = []
+                remaining = _MAX_ZCODE_ROLLOUT_BYTES + 1
+                while remaining:
+                    chunk = os.read(fd, min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                payload = b"".join(chunks)
+                if len(payload) > _MAX_ZCODE_ROLLOUT_BYTES:
+                    return []
+                text = payload.decode("utf-8")
+            finally:
+                os.close(fd)
+        except (OSError, UnicodeError):
+            return []
+
+        matching: dict[str, Any] | None = None
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                return []
+            if not isinstance(candidate, dict):
+                return []
+            if (
+                candidate.get("sessionId") == session_id
+                and candidate.get("traceId") == trace_id
+                and candidate.get("turnId") == turn_id
+            ):
+                matching = candidate
+        if matching is None:
+            return []
+
+        request = matching.get("request")
+        # ZCode stores the normalized conversation at request.messages.  The
+        # nested provider body is an HTTP payload and may omit tool exchanges.
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list):
+            return []
+
+        # ``messagesKind=full`` snapshots contain the whole resumed session,
+        # including tool receipts from older turns.  A terminal summary is
+        # bound to one turn, so accept only the suffix after that turn's final
+        # user message.  Without this boundary, a prior successful command
+        # could be replayed as evidence for the current AC.
+        assistant_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        ]
+        if not assistant_indexes:
+            return []
+        latest_assistant = assistant_indexes[-1]
+        user_boundaries = [
+            index
+            for index, message in enumerate(messages[: latest_assistant + 1])
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        if not user_boundaries:
+            return []
+        messages = messages[user_boundaries[-1] + 1 :]
+
+        receipts: list[AgentMessage] = []
+        pending: dict[str, tuple[str, str]] = {}
+        completed: dict[str, tuple[str, str, bool, str]] = {}
+        for message in messages:
+            if not isinstance(message, dict):
+                return []
+            tool_calls = message.get("toolCalls")
+            if "toolCalls" in message and not isinstance(tool_calls, list):
+                return []
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        return []
+                    call_id = call.get("id")
+                    tool_name = call.get("name")
+                    tool_input = call.get("input")
+                    if not (
+                        isinstance(call_id, str)
+                        and call_id.strip()
+                        and isinstance(tool_name, str)
+                        and tool_name.strip()
+                        and isinstance(tool_input, dict)
+                    ):
+                        return []
+                    input_fingerprint = json.dumps(
+                        tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    )
+                    call_signature = (tool_name, input_fingerprint)
+                    # Each model-io record is cumulative; earlier calls are
+                    # repeated in later requests. Deduplicate only byte-for-
+                    # byte equivalent normalized calls. Reusing an id with a
+                    # different name/input invalidates the whole receipt set.
+                    previous_call = pending.get(call_id)
+                    if previous_call is not None:
+                        if previous_call != call_signature:
+                            return []
+                        continue
+                    if call_id in completed:
+                        if completed[call_id][:2] != call_signature:
+                            return []
+                        continue
+                    pending[call_id] = call_signature
+                    receipts.append(
+                        AgentMessage(
+                            type="tool",
+                            content=f"{tool_name}: executed by Zcode",
+                            tool_name=tool_name,
+                            data={
+                                "tool_input": tool_input,
+                                "tool_call_id": call_id,
+                                "zcode_rollout_bound": True,
+                                "traceId": trace_id,
+                                "turnId": turn_id,
+                            },
+                        )
+                    )
+
+            if message.get("role") != "tool":
+                continue
+            call_id = message.get("toolCallId")
+            tool_name = message.get("toolName")
+            if not isinstance(call_id, str):
+                return []
+            is_error = message.get("isError")
+            if not isinstance(is_error, bool):
+                return []
+            content = str(message.get("content") or "")
+            result_signature: tuple[str, bool, str] = (str(tool_name), is_error, content)
+            if call_id in completed:
+                prior = completed[call_id]
+                if (prior[0], prior[2], prior[3]) != result_signature:
+                    return []
+                continue
+            if call_id not in pending:
+                return []
+            expected_name, input_fingerprint = pending.pop(call_id)
+            if tool_name != expected_name:
+                return []
+            completed[call_id] = (expected_name, input_fingerprint, is_error, content)
+            receipts.append(
+                AgentMessage(
+                    type="tool_result",
+                    content=content,
+                    tool_name=expected_name,
+                    data={
+                        "subtype": "tool_result",
+                        "tool_call_id": call_id,
+                        "exit_code": 1 if is_error else 0,
+                        "tool_result": {"is_error": is_error},
+                        "zcode_rollout_bound": True,
+                        "traceId": trace_id,
+                        "turnId": turn_id,
+                    },
+                )
+            )
+
+        if pending:
+            return []
+        return receipts
 
 
 __all__ = ["ZcodeCLIRuntime"]
