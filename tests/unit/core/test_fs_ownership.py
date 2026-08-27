@@ -1255,9 +1255,9 @@ def test_private_cleanup_restore_failure_retains_ledger_authority(
     assert len(erasing) == 1
     location = erasing[0]["container"]
     assert isinstance(location, str)
-    assert (Path(location) / "entry" / "content.txt").read_text(encoding="utf-8") == (
-        "owned generation\n"
-    )
+    with fs_ownership._ledger_authority() as ledger:
+        residue = ledger.path / location / "entry" / "content.txt"
+        assert residue.read_text(encoding="utf-8") == "owned generation\n"
 
     # A later transaction on the same path replays the private erasure and
     # retires the record only once the location is verifiably gone.
@@ -1269,6 +1269,145 @@ def test_private_cleanup_restore_failure_retains_ledger_authority(
         assert all(
             (ledger.read(nonce) or {}).get("operation") != "erasing" for nonce in ledger.nonces()
         )
+
+
+def test_private_quarantine_root_swap_keeps_residue_with_ledger_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing the configured ledger root during private quarantine creation
+    cannot split the residue from its record: both effects use the authority's
+    pinned descriptor and recover together when that generation is restored."""
+    target = tmp_path / "artifact-dir"
+    target.mkdir()
+    (target / "content.txt").write_text("owned generation\n", encoding="utf-8")
+
+    root = fs_ownership._transaction_ledger_root()
+    stolen = root.parent / "stolen-private-quarantine-root"
+    imposter = root.parent / "imposter-private-quarantine-root"
+    real_mkdir = fs_ownership.os.mkdir
+    real_rename = fs_ownership.os.rename
+    real_rmtree = fs_ownership.shutil.rmtree
+    state = {"swapped": False}
+
+    def swap_before_private_quarantine(
+        path: object, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> None:
+        if (
+            isinstance(path, str)
+            and path.startswith("ouroboros-discard-")
+            and dir_fd is not None
+            and not state["swapped"]
+        ):
+            state["swapped"] = True
+            real_rename(root, stolen)
+            real_mkdir(root, mode=0o700)
+        real_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+    def skip_private_erasure(path: object, *args: object, **kwargs: object) -> None:
+        if isinstance(path, str) and path.startswith("ouroboros-discard-"):
+            return
+        real_rmtree(path, *args, **kwargs)
+
+    def deny_reinsertion(
+        src: object,
+        dst: object,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if isinstance(src, str) and src.startswith("ouroboros-discard-") and dst == "entry":
+            raise OSError(errno.EIO, "simulated reinsertion failure")
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(fs_ownership.os, "mkdir", swap_before_private_quarantine)
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", skip_private_erasure)
+    monkeypatch.setattr(fs_ownership.os, "rename", deny_reinsertion)
+
+    with pytest.raises(OSError, match="ledger-backed private quarantine"):
+        claim_and_remove_owned(target, is_owned=lambda _p: True)
+
+    assert state["swapped"]
+    assert not target.exists()
+    erasing_records = sorted(stolen.glob("*.json"))
+    private_quarantines = sorted(stolen.glob("ouroboros-discard-*"))
+    assert len(erasing_records) == 1
+    assert len(private_quarantines) == 1
+    assert (private_quarantines[0] / "entry" / "content.txt").read_text(
+        encoding="utf-8"
+    ) == "owned generation\n"
+    assert list(root.glob("ouroboros-discard-*")) == []
+
+    monkeypatch.setattr(fs_ownership.os, "mkdir", real_mkdir)
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
+    monkeypatch.setattr(fs_ownership.os, "rename", real_rename)
+    real_rename(root, imposter)
+    real_rename(stolen, root)
+
+    assert fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+    assert not private_quarantines[0].exists()
+    with fs_ownership._ledger_authority() as ledger:
+        assert all(
+            (ledger.read(nonce) or {}).get("operation") != "erasing" for nonce in ledger.nonces()
+        )
+
+
+def test_private_quarantine_replay_stays_on_pinned_root_during_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay and record retirement stay on the authority opened before a
+    ledger-root replacement; the replacement root receives no cleanup effect."""
+    target = tmp_path / "artifact-dir"
+    record_nonce = os.urandom(8).hex()
+    root = fs_ownership._transaction_ledger_root()
+    stolen = root.parent / "stolen-replay-root"
+    imposter = root.parent / "imposter-replay-root"
+
+    with fs_ownership._ledger_authority() as ledger:
+        private_name = ledger.create_private_quarantine(os.urandom(8).hex())
+        ledger.record(
+            record_nonce,
+            canonical=target,
+            container=private_name,
+            operation="erasing",
+        )
+        os.mkdir(f"{private_name}/entry", mode=0o700, dir_fd=ledger.fd)
+        fd = os.open(
+            f"{private_name}/entry/content.txt",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=ledger.fd,
+        )
+        try:
+            os.write(fd, b"owned generation\n")
+        finally:
+            os.close(fd)
+
+    real_mkdir = fs_ownership.os.mkdir
+    real_rename = fs_ownership.os.rename
+    real_rmtree = fs_ownership.shutil.rmtree
+    state = {"swapped": False}
+
+    def swap_during_replay(path: object, *args: object, **kwargs: object) -> None:
+        if path == private_name and not state["swapped"]:
+            state["swapped"] = True
+            real_rename(root, stolen)
+            real_mkdir(root, mode=0o700)
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", swap_during_replay)
+
+    with pytest.raises(OSError, match="lockfile parent changed"):
+        fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
+
+    assert state["swapped"]
+    assert list(root.iterdir()) == []
+    assert not (stolen / private_name).exists()
+    assert not (stolen / f"{record_nonce}.json").exists()
+
+    monkeypatch.setattr(fs_ownership.shutil, "rmtree", real_rmtree)
+    real_rename(root, imposter)
+    real_rename(stolen, root)
+    assert not fs_ownership.recover_owned_claims(target, is_owned=lambda _p: False)
 
 
 def test_reconcile_replays_a_container_that_crashed_before_its_marker_write(

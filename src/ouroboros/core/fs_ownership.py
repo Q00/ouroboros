@@ -78,10 +78,11 @@ Threat model and defenses:
   e.g. across filesystems), or whose private destruction cannot complete,
   is *reported truthfully*: it stays quarantined under an intent-marked
   ``.{canonical}.{nonce}.discarding`` tombstone and the removal raises
-  instead of claiming a finished cleanup. The private quarantine itself
-  is ledger-recorded before the entry moves in and the record is retired
-  only after verified erasure, so even a residue stranded in the private
-  area (erasure and reinsertion both failing) stays under durable
+  instead of claiming a finished cleanup. The private quarantine is created
+  relative to the same pinned ledger descriptor that receives its record;
+  the record stores only its validated relative name and is retired only
+  after descriptor-bound verified erasure. Even a residue stranded in that
+  private area (erasure and reinsertion both failing) stays under one durable
   recovery authority and is replayed by later transactions.
   Cross-filesystem imports follow the same discipline: they assemble
   inside an intent-marked ``*.importing`` container and commit with one
@@ -259,17 +260,18 @@ def _read_intent_marker(container_fd: int) -> str | None:
 
 _TRANSACTION_LEDGER_ENV = "OUROBOROS_FS_TRANSACTION_DIR"
 _CONTAINER_PATTERN = re.compile(r"^\..+\.([0-9a-f]{16})\.(importing|discarding)$")
+_PRIVATE_QUARANTINE_PATTERN = re.compile(r"^ouroboros-discard-[0-9a-f]{16}$")
 
 
 def _transaction_ledger_root() -> Path:
-    """The exclusively writer-owned root holding durable transaction records.
+    """Return the exclusively writer-owned transaction-ledger root.
 
-    Import/discard containers live in the operator-shared parent, where any
-    same-user writer can forge their name shape and intent marker. The
-    authority to reconcile one *destructively* therefore lives outside that
-    namespace: a ledger record written here — before the container ever
-    becomes discoverable — binds the canonical path, operation, and exact
-    container name. Recovery deletes only containers this ledger vouches for.
+    Shared-parent import/discard containers are forgeable by any same-user
+    writer. Destructive recovery authority therefore lives here instead: a
+    ledger record binds the canonical path, operation, and exact container.
+    Private erasure quarantines also live under this root and are created,
+    replayed, and retired relative to the same pinned descriptor as their
+    records, so replacing the configured pathname cannot split the authority.
     """
     override = os.environ.get(_TRANSACTION_LEDGER_ENV)
     if override:
@@ -289,12 +291,12 @@ def _ledger_canonical(path: Path) -> str:
 class _LedgerAuthority:
     """The pinned writer-owned transaction-ledger root.
 
-    Locking, record creation, reads, retirement, and listing all run
-    relative to one directory descriptor opened once, so a ledger root
-    renamed and recreated mid-transaction can never split a publisher and a
-    reconciler across two different lock or record authorities: whoever
-    opened this authority keeps acting on the exact directory generation it
-    pinned, and two parties serialized by the same canonical-path lock are
+    Locking, record creation, reads, retirement, listing, and private
+    quarantine lifecycle operations all run relative to one directory
+    descriptor opened once. A ledger root renamed and recreated
+    mid-transaction can therefore never split a publisher and a reconciler
+    across different lock, record, or residue authorities: whoever opened
+    this authority keeps acting on the exact directory generation it pinned,
     necessarily reading and retiring the same records.
     """
 
@@ -386,6 +388,50 @@ class _LedgerAuthority:
         except OSError:
             return []
         return [name[: -len(".json")] for name in names if name.endswith(".json")]
+
+    @staticmethod
+    def _validated_private_quarantine(name: str) -> str:
+        if _PRIVATE_QUARANTINE_PATTERN.fullmatch(name) is None:
+            raise OSError(errno.EINVAL, "invalid private quarantine name", name)
+        return name
+
+    def create_private_quarantine(self, nonce: str) -> str:
+        """Create a private quarantine under this pinned ledger generation."""
+        name = self._validated_private_quarantine(f"ouroboros-discard-{nonce}")
+        os.mkdir(name, mode=0o700, dir_fd=self.fd)
+        with suppress(OSError):
+            os.fsync(self.fd)
+        return name
+
+    def erase_private_quarantine(self, name: str) -> bool:
+        """Erase one quarantine relative to this authority; report verified absence."""
+        name = self._validated_private_quarantine(name)
+        with suppress(Exception):
+            shutil.rmtree(name, dir_fd=self.fd, ignore_errors=True)
+        return not self.private_quarantine_exists(name)
+
+    def private_quarantine_exists(self, name: str) -> bool:
+        """Return whether *name* exists under this pinned ledger generation."""
+        name = self._validated_private_quarantine(name)
+        try:
+            os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        return True
+
+    def private_entry_exists(self, name: str) -> bool:
+        """Return whether a quarantine still contains its transaction entry."""
+        name = self._validated_private_quarantine(name)
+        try:
+            os.stat(f"{name}/entry", dir_fd=self.fd, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        return True
+
+    def restore_private_entry(self, name: str, container_fd: int) -> None:
+        """Move residue from this authority back into a pinned shared container."""
+        name = self._validated_private_quarantine(name)
+        os.rename(f"{name}/entry", "entry", src_dir_fd=self.fd, dst_dir_fd=container_fd)
 
 
 @contextmanager
@@ -700,94 +746,82 @@ class _PinnedParent:
 
         The atomic quarantine is the removal commit; physical erasure is a
         private afterstep, never part of the shared-namespace transaction.
-        The entry is atomically moved — whole — into a writer-private
-        directory and destroyed there through private pathnames no other
-        writer can reach. Nothing is ever deleted in place inside the
-        operator-reachable container: filesystems provide an atomic rename
-        for an entry but no atomic tree deletion, so any in-place recursive
-        removal would necessarily walk names a concurrent writer can swap.
-        A move that no private area can receive, or a private destruction
-        that cannot complete, is *reported*: the residue stays quarantined —
-        intent-marked — under a self-describing ``.{canonical}.{nonce}.discarding``
-        tombstone that the next transaction on the same path reconciles, and
-        :class:`OSError` is raised so removal and uninstall surfaces stay
-        truthful instead of claiming a cleanup that did not happen.
+        The entry is atomically moved whole into a directory created through
+        the same pinned ledger descriptor that owns its durable record. A
+        ledger-root pathname replacement therefore cannot split the residue
+        from the authority that will replay or retire it.
         """
         _write_intent_marker(container_fd, canonical_name, exist_ok=True)
         moved = False
         missing = False
-        private_root: str | None = None
+        private_name: str | None = None
         erase_nonce: str | None = None
-        # Candidate private destruction areas, tried in order: the
-        # writer-owned ledger root (usually the artifact's own filesystem),
-        # then the system temporary directory. The move must be atomic — a
-        # candidate on another filesystem simply fails with EXDEV and the
-        # next is tried; when none can receive the entry, nothing is
-        # destroyed in place: the residue is retained in a truthful
-        # tombstone instead. Physical erasure is not part of the ownership
-        # transaction — the atomic quarantine is the removal commit. The
-        # private quarantine itself is ledger-recorded *before* the entry
-        # moves in, so the residue is never outside durable recovery
-        # authority: the record is retired only after verified erasure.
-        for candidate in (str(_transaction_ledger_root()), None):
-            try:
-                private_root = tempfile.mkdtemp(prefix="ouroboros-discard-", dir=candidate)
-            except OSError:
-                continue
+
+        # The private quarantine and its record belong to one descriptor-pinned
+        # ledger generation. There is intentionally no independently resolved
+        # temporary-directory fallback: if this authority cannot atomically
+        # receive the entry, the shared container becomes a truthful tombstone.
+        private_nonce = os.urandom(8).hex()
+        try:
+            private_name = ledger.create_private_quarantine(private_nonce)
+        except OSError:
+            private_name = None
+        if private_name is not None:
             erase_nonce = os.urandom(8).hex()
             try:
                 ledger.record(
                     erase_nonce,
                     canonical=self.path / canonical_name,
-                    container=os.path.abspath(private_root),
+                    container=private_name,
                     operation="erasing",
                 )
             except OSError:
-                shutil.rmtree(private_root, ignore_errors=True)
-                private_root = None
+                ledger.erase_private_quarantine(private_name)
+                private_name = None
                 erase_nonce = None
-                continue
-            try:
-                os.rename("entry", os.path.join(private_root, "entry"), src_dir_fd=container_fd)
-                moved = True
-                break
-            except FileNotFoundError:
-                missing = True
-                break
-            except OSError:
-                ledger.retire(erase_nonce)
-                shutil.rmtree(private_root, ignore_errors=True)
-                private_root = None
-                erase_nonce = None
+            else:
+                try:
+                    os.rename(
+                        "entry",
+                        f"{private_name}/entry",
+                        src_dir_fd=container_fd,
+                        dst_dir_fd=ledger.fd,
+                    )
+                    moved = True
+                except FileNotFoundError:
+                    missing = True
+                except OSError:
+                    ledger.retire(erase_nonce)
+                    ledger.erase_private_quarantine(private_name)
+                    private_name = None
+                    erase_nonce = None
+
         if not moved and not missing:
-            if private_root is not None:
-                shutil.rmtree(private_root, ignore_errors=True)
+            if private_name is not None:
+                ledger.erase_private_quarantine(private_name)
             self._retain_tombstone(container, canonical_name, ledger)
             raise OSError(
                 errno.ENOTEMPTY,
                 "cleanup residue retained in a discoverable tombstone",
                 str(self.path / container),
             )
-        if moved:
-            with suppress(Exception):
-                shutil.rmtree(private_root, ignore_errors=True)
-            if os.path.lexists(os.path.join(private_root, "entry")):
-                # The private destruction failed: bring the residue back into
-                # the pinned container so it stays discoverable, and report.
-                try:
-                    os.rename(os.path.join(private_root, "entry"), "entry", dst_dir_fd=container_fd)
-                except OSError as exc:
-                    # The residue cannot rejoin the container, but it never
-                    # left durable authority: its "erasing" record is kept
-                    # (not retired), so recovery replays the private
-                    # quarantine later — and the failure is reported instead
-                    # of being swallowed as a success.
-                    raise OSError(
-                        errno.ENOTEMPTY,
-                        "cleanup residue retained in a ledger-backed private quarantine",
-                        private_root,
-                    ) from exc
-                else:
+
+        if moved and private_name is not None:
+            erased = ledger.erase_private_quarantine(private_name)
+            if not erased:
+                if ledger.private_entry_exists(private_name):
+                    # Physical erasure failed. Reinsert only through the pinned
+                    # ledger and container descriptors; if that fails, keep the
+                    # erasing record so recovery can replay the exact residue.
+                    try:
+                        ledger.restore_private_entry(private_name, container_fd)
+                    except OSError as exc:
+                        raise OSError(
+                            errno.ENOTEMPTY,
+                            "cleanup residue retained in a ledger-backed private quarantine",
+                            private_name,
+                        ) from exc
+                    ledger.erase_private_quarantine(private_name)
                     if erase_nonce is not None:
                         ledger.retire(erase_nonce)
                         erase_nonce = None
@@ -797,13 +831,19 @@ class _PinnedParent:
                         "cleanup residue retained in a discoverable tombstone",
                         str(self.path / container),
                     )
-        if private_root is not None:
-            shutil.rmtree(private_root, ignore_errors=True)
+                # Unexpected quarantine residue still means cleanup is not
+                # complete. Keep the record and report the durable location.
+                raise OSError(
+                    errno.ENOTEMPTY,
+                    "cleanup residue retained in a ledger-backed private quarantine",
+                    private_name,
+                )
+
+        if private_name is not None:
+            ledger.erase_private_quarantine(private_name)
         if erase_nonce is not None and (
-            private_root is None or not os.path.lexists(os.path.join(private_root, "entry"))
+            private_name is None or not ledger.private_quarantine_exists(private_name)
         ):
-            # Verified erasure (or the entry never moved in): the private
-            # quarantine's recovery authority can be retired.
             ledger.retire(erase_nonce)
         with suppress(OSError):
             os.unlink(_INTENT_MARKER, dir_fd=container_fd)
@@ -1339,17 +1379,15 @@ def _reconcile_stale_containers(parent: _PinnedParent, path: Path) -> bool:
                 operation = record.get("operation")
                 location = record.get("container")
                 if operation == "erasing":
-                    # A private-quarantine erasure that was interrupted (or
-                    # whose residue could not rejoin its container) is
-                    # replayed here: the location is writer-private, so
-                    # destroying it by its recorded pathname is safe, and
-                    # the record is retired only after verified absence.
-                    if isinstance(location, str) and os.path.basename(location).startswith(
-                        "ouroboros-discard-"
-                    ):
-                        if os.path.lexists(location):
-                            shutil.rmtree(location, ignore_errors=True)
-                        if not os.path.lexists(location):
+                    # Private quarantine names are relative capabilities under
+                    # this pinned ledger generation. Replay never resolves the
+                    # configured ledger root again by pathname.
+                    if isinstance(location, str):
+                        try:
+                            erased = ledger.erase_private_quarantine(location)
+                        except OSError:
+                            erased = False
+                        if erased:
                             ledger.retire(nonce)
                             changed = True
                     continue
