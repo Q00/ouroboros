@@ -328,8 +328,8 @@ _telemetry_config_allows() {
   # requires a Python environment with Ouroboros' real schema available;
   # otherwise collection fails closed. A genuinely absent config retains the
   # documented default-on behavior after the notice below.
-  # Standalone `curl | bash` runs have no sourced file path; nounset must not
-  # turn the optional local-source optimization into an installer error.
+  # `curl | bash` has no sourced file path; nounset must not break this
+  # optional local-source optimization.
   script_path="${BASH_SOURCE[0]-}"
   script_dir=""
   if [ -n "$script_path" ]; then
@@ -361,9 +361,8 @@ try:
 except Exception:
     raise SystemExit(1)
 
-# Older installed Ouroboros schemas may validate successfully without the
-# telemetry section. Treat that as unavailable and fail closed rather than
-# dereferencing a field that is not present.
+# Older installed schemas may validate without a telemetry field. Fail closed
+# instead of dereferencing an attribute the schema does not have.
 enabled = getattr(getattr(config, "telemetry", None), "enabled", False)
 raise SystemExit(0 if enabled is True else 1)
 PY
@@ -755,20 +754,12 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
 # _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
 _telemetry_ping() {
   _telemetry_enabled || return 0
-  local event="$1" id os arch py body kv k v props api_key_safe event_safe id_safe
+  local event="$1" id os py body kv k v props api_key_safe event_safe id_safe
   shift
   id=$(_telemetry_distinct_id) || return 0
 
-  # Token-constrain os/arch at the source: a hostile executable earlier on
-  # PATH (or a nonstandard uname) can emit anything, including embedded
-  # quotes that would otherwise mutate the JSON structure below -- neither
-  # os nor arch legitimately needs more than this charset (darwin, linux,
-  # arm64, x86_64, ...), so anything that doesn't fullmatch is discarded
-  # outright rather than partially trusted.
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   [[ "$os" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || os="unknown"
-  arch=$(uname -m)
-  [[ "$arch" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || arch="unknown"
 
   py=$(command -v python3 2>/dev/null || true)
   body=""
@@ -785,10 +776,11 @@ _telemetry_ping() {
     body=$("$py" -c '
 import json, re, sys
 
-event, distinct_id, api_key, os_name, arch = sys.argv[1:6]
-props = {"source": "install_sh", "os": os_name, "arch": arch}
 key_re = re.compile(r"^[A-Za-z0-9_]+$")
-for kv in sys.argv[6:]:
+
+event, distinct_id, api_key, os_name = sys.argv[1:5]
+props = {"os": os_name}
+for kv in sys.argv[5:]:
     key, sep, value = kv.partition("=")
     if sep and key_re.match(key):
         props[key] = value
@@ -801,7 +793,7 @@ print(json.dumps(
     },
     separators=(",", ":"),
 ))
-' "$event" "$id" "$PH_API_KEY" "$os" "$arch" "$@" 2>/dev/null)
+' "$event" "$id" "$PH_API_KEY" "$os" "$@" 2>/dev/null)
   fi
 
   if [ -z "$body" ]; then
@@ -814,7 +806,7 @@ print(json.dumps(
     # doesn't is stripped down to it (then length-capped) or falls back to
     # `unknown` -- best-effort, consistent with the identity/notice
     # readers' own NO_PYTHON3 fallback posture elsewhere in this file.
-    props='"source":"install_sh","os":"'"$os"'","arch":"'"$arch"'"'
+    props='"os":"'"$os"'"'
     for kv in "$@"; do
       k=$(printf '%s' "${kv%%=*}" | tr -cd 'A-Za-z0-9_')
       [ -n "$k" ] || continue
@@ -879,41 +871,18 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
-# Optional install-channel attribution. A docs page or listing can prepend
-# OUROBOROS_INSTALL_REF=<channel> to the install command so install_started /
-# install_completed carry which surface the install came from. Same privacy
-# contract as every other property here: a short opaque token chosen by us,
-# never derived from the machine. Token-constrained like os/arch above so a
-# hostile value cannot ride into the payload; anything else becomes "direct".
-INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
-[[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
-
-# Preserve a coarse onboarding hint for the first MCP session. This is not a
-# user identifier and is never sent as an install property; telemetry reads
-# only the fixed enum after install, until setup creates config.yaml. Existing
-# setup or an existing hint wins, so re-running the installer cannot
-# relabel a user's first documented install surface.
-_persist_first_command_surface_hint() {
-  local surface=""
-  case "$INSTALL_REF" in
-    readme|readme-*) surface="readme_quickstart" ;;
-    getting-started|getting_started|getting-started-*|docs-getting-started) surface="getting_started" ;;
-    *) return 0 ;;
-  esac
-  local dir="$HOME/.ouroboros" tmp="$HOME/.ouroboros/first_command_surface.$$"
-  [ -f "$dir/config.yaml" ] && return 0
-  [ -s "$dir/first_command_surface" ] && return 0
-  if mkdir -p "$dir" 2>/dev/null; then
-    (umask 077; printf '%s\n' "$surface" > "$tmp" && mv -f "$tmp" "$dir/first_command_surface") \
-      2>/dev/null || rm -f "$tmp" 2>/dev/null || true
-  fi
-}
-_persist_first_command_surface_hint
+# Closed install-channel vocabulary. Unknown values may contain private slugs,
+# customer names, or account identifiers, so they always fold to `direct`.
+case "${OUROBOROS_INSTALL_REF:-direct}" in
+  direct|readme|readme-hero|readme-ko|readme-hero-ko|readme-zh|readme-hero-zh|docs-getting-started)
+    INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+    ;;
+  *) INSTALL_REF="direct" ;;
+esac
 
 _banner
 
 _telemetry_notice
-_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -1466,8 +1435,8 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
-_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
-  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
+_telemetry_ping install_completed "runtime=${RUNTIME:-none}" \
+  "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
