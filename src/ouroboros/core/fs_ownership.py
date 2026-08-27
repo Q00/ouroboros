@@ -1,146 +1,25 @@
-"""Claim-then-verify primitives for publishing and removing owned artifacts.
+"""Generation-bound filesystem publication and removal primitives.
 
-A component that installs artifacts into directories it shares with operators
-(runtime skill registries, bridge extensions, instruction guides) may replace
-or delete only the exact generations it produced. These primitives are the
-single security boundary for that contract; callers must not reimplement any
-part of the claim/verify/publish sequence.
+These functions mutate artifact directories shared with operators. Every
+destructive boundary therefore claims the exact generation, pins relevant
+directory and entry descriptors with ``O_NOFOLLOW``, verifies ownership after
+isolation, and publishes with a no-replace rename. Concurrently recreated or
+modified generations are preserved rather than overwritten.
 
-Threat model and defenses:
+Tree deletion commits by atomically moving the validated generation out of the
+shared namespace. Physical erasure happens only in a writer-owned quarantine.
+The transaction ledger records the canonical path plus the device, inode, and
+type of both the private quarantine and its moved ``entry`` child. Immediate
+cleanup and replay atomically claim and re-verify those recorded generations
+before recursive erasure; replacements survive untouched and records retire
+only after exact-generation absence is proven.
 
-* **Stale ownership checks.** A check and a later destructive operation
-  cannot be safely separated in time. Every mutation first *claims* the
-  existing entry with an atomic rename to an unpredictable sibling name,
-  re-validates the claimed generation, and only then deletes or replaces it.
-* **Symlinked artifacts.** A symlink planted at the canonical path is
-  detected on the claimed entry (rename moves the link itself, never its
-  target), so a link can never route a write to its target.
-* **Symlinked parent directories.** Mutations run relative to a pinned
-  directory descriptor. The caller-supplied *trusted ancestor* is pinned by
-  walking every component of its absolute path from the filesystem root
-  with ``O_NOFOLLOW`` — a symlink at the configured root itself or anywhere
-  on the way to it (a redirected ``GJC_CODING_AGENT_DIR``, or a
-  ``/profile-link/agent`` whose ``profile-link`` is a symlink) is rejected
-  outright — and the chain from it down to the artifact's parent is opened
-  one component at a time with ``O_NOFOLLOW``, so an operator-controlled
-  symlink such as ``<profile>/ouroboros -> /external`` cannot redirect
-  publication or removal outside the profile. A profile that legitimately
-  lives behind a symlink must be configured by its resolved path. On
-  platforms without ``*at`` support the chain is validated with
-  per-component ``lstat`` best effort instead.
-* **Publication clobbering and staging swaps.** The final publish rename
-  is no-replace: ``renameat2(RENAME_NOREPLACE)`` on Linux,
-  ``renameatx_np(RENAME_EXCL)`` on macOS, native no-replace ``rename`` on
-  Windows, and an existence-guarded rename as a last resort. A generation
-  recreated at the canonical path after ownership validation is preserved
-  and the publication fails instead of overwriting it. The staged
-  generation itself is a pinned capability from the moment it is authored
-  (the write descriptor for files, an ``O_NOFOLLOW`` pin after the
-  descriptor-bound import for trees) *and* a content digest computed from
-  the authored bytes — structure plus every descendant — in the private
-  workspace: both the identity and the digest are re-verified immediately
-  before and immediately after the final rename, so neither a swap onto
-  the random staging name nor a same-inode in-place mutation of the
-  staged file or a staged tree's descendants ever becomes canonical — an
-  unauthored generation that races the commit is pulled back out of the
-  canonical name untouched and the publication fails. Failed-publication
-  staging cleanup is bound to the same authored identity.
-* **Restoration clobbering.** When another process recreates the canonical
-  path while a claim is held, restoring the claim must not overwrite the
-  new generation: both are preserved — the recreated entry stays canonical
-  and the claimed generation remains beside it under its claim name.
-* **Claim-identity races and inode reuse.** The claimed entry is held open
-  through an ``O_NOFOLLOW`` descriptor from immediately after the claim
-  rename until the final mutation. While that descriptor is open the
-  filesystem cannot recycle the inode, so a writer that unlinks and
-  recreates the claimed sibling necessarily produces a different identity
-  — the re-checks after the ownership predicate therefore detect every
-  replacement, including an immediate inode-number reuse that would defeat
-  a bare ``(device, inode)`` tuple. Destruction never runs as a bare
-  pathname ``unlink``: the validated entry is atomically renamed into a
-  fresh, unpredictable ``0700`` quarantine directory that is itself held
-  open through an ``O_NOFOLLOW`` descriptor (so the container cannot be
-  swapped either), re-validated *there* against the pinned identity, and
-  the ownership predicate runs once more on the isolated entry — binding
-  tree destruction to descendant content, not just the top-level inode.
-  Only an entry that passes every re-check is destroyed. A replacement or
-  a tree modified after the original read is moved back out untouched.
-  Removal commits with the atomic isolation: a single-file ``unlink``
-  that fails leaves the file intact and restores it for a retry, while
-  trees are discarded commit-first — moved whole into a writer-private
-  directory and destroyed there through private pathnames. Physical
-  erasure is never part of the shared-namespace transaction: filesystems
-  provide an atomic rename for an entry but no atomic tree deletion, so
-  nothing is ever recursively destroyed through names in an
-  operator-reachable location — a later substitution therefore cannot be
-  deleted, and a half-destroyed tree can never leak back to the canonical
-  path. A residue no private area can receive (every private move fails,
-  e.g. across filesystems), or whose private destruction cannot complete,
-  is *reported truthfully*: it stays quarantined under an intent-marked
-  ``.{canonical}.{nonce}.discarding`` tombstone and the removal raises
-  instead of claiming a finished cleanup. The private quarantine is created
-  relative to the same pinned ledger descriptor that receives its record;
-  both the quarantine directory and moved ``entry`` child identities are
-  recorded and pinned through recursive erasure. Replacements at either
-  generation are preserved, and the record is retired only after the exact
-  attributed generations are verified absent. Even stranded residue remains
-  under durable recovery authority for later replay.
-  Cross-filesystem imports follow the same discipline: they assemble
-  inside an intent-marked ``*.importing`` container and commit with one
-  atomic rename. Container names and intent markers live in the shared
-  parent and are therefore forgeable — they are discovery metadata, not
-  recovery authority. That authority is a *transaction ledger* record in
-  an exclusively writer-owned state root, written before the container
-  ever becomes discoverable and binding the canonical path, operation,
-  and exact container name. Record creation, container publication,
-  replay, and orphan retirement are serialized per canonical path by a
-  lock in the same writer-owned root, so reconciliation can never
-  observe — let alone revoke — a live transaction inside its
-  record-before-container window. Every later transaction on the same path
-  reconciles interrupted ``*.importing``/``*.discarding`` containers the
-  ledger vouches for (and whose marker, when present, agrees) — completing
-  the discard
-  is the correct replay of an interrupted transaction, retiring the
-  record with it — while any container the ledger does not vouch for,
-  marker-bearing or not, is operator state and is left untouched.
-* **Builder redirection.** Tree and entry builders never write through a
-  pathname under the shared parent: they build in a private workspace, and
-  the finished generation is imported beside the canonical path through
-  descriptor-bound writes only (a ``dst_dir_fd`` rename, or a
-  descriptor-relative recursive copy across filesystems). A canonical
-  parent renamed away and replaced by a symlink during a build therefore
-  cannot receive — or redirect — a single builder write.
-* **Special-file entries.** Every pin is acquired without blocking
-  (``O_PATH`` where available, ``O_NONBLOCK`` otherwise) and only regular
-  files and directories are ownable: a FIFO, socket, or device planted at
-  a managed path is classified by type and rejected *before* any content
-  read, so it can neither stall a transaction indefinitely nor pass an
-  ownership predicate — it is claimed, refused, and restored like any
-  other unowned generation.
-* **Crash, partial state, and forged claims.** A claim name is a durable,
-  self-describing intent record (``.{name}.{nonce}.{removing|replacing}``)
-  — but claim-name syntax is *discovery metadata, not ownership evidence*:
-  any shared-directory writer can forge a claim-shaped sibling. A process
-  that dies mid-transaction leaves the generation under that sibling name;
-  every later transaction on the same path — and
-  :func:`recover_owned_claims` directly — first reconciles such orphans,
-  authenticating ownership while the entry is still under its claim name
-  (through the pinned entry descriptor) before anything is promoted: only
-  an owned claim is restored (no-clobber) when the canonical path is
-  absent or deleted as a leftover when it is occupied, and a claim that
-  fails authentication is left untouched as a collision for the operator
-  rather than restored into a live artifact path. Parent-directory
-  ``fsync`` after the claim, restoration, and publication is best effort
-  (errors are suppressed); on filesystems that lose the rename, recovery
-  simply finds the pre-claim state, so crash consistency never depends on
-  the fsync.
-
-This adapts the journaled swap-intent/recovery design of
-:mod:`ouroboros.hermes.artifacts` — the claim name *is* the intent record —
-without its separate journal files. Fully consolidating hermes and the
-fingerprint-gated replacement in :mod:`ouroboros.codex.artifacts` onto these
-primitives is a candidate follow-up, not something callers should assume has
-happened.
+Trusted-root ancestry and every descendant parent are opened component by
+component without following symlinks. Cross-filesystem imports use durable,
+ledger-vouched intent containers. Claim names and shared-parent markers are
+discovery metadata only, never ownership evidence. On platforms lacking the
+required ``*at`` primitives, behavior is explicitly best effort and fails
+closed where safe attribution cannot be established.
 """
 
 from __future__ import annotations
