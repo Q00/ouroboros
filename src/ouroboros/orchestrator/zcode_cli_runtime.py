@@ -563,6 +563,82 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             ),
         ]
 
+    def _read_trusted_rollout_history(
+        self, session_id: str
+    ) -> list[dict[str, Any]] | None:
+        """Return one immutable, filename-bound ZCode session history.
+
+        Rollout records cross a verification-authority boundary.  Keep every
+        file and record provenance check in this primitive so callers cannot
+        accidentally select a plausible receipt from an otherwise ambiguous
+        history.  ``None`` means the complete file failed trust validation.
+        """
+        rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
+        try:
+            path_stat = rollout_path.lstat()
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(rollout_path, flags)
+            try:
+                fd_stat = os.fstat(fd)
+                getuid = getattr(os, "getuid", None)
+                current_uid = getuid() if callable(getuid) else None
+                if (
+                    not stat.S_ISREG(fd_stat.st_mode)
+                    or (current_uid is not None and fd_stat.st_uid != current_uid)
+                    or fd_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
+                    # Bind validation and reads to the same inode. This also
+                    # closes the symlink/rename race on platforms lacking
+                    # O_NOFOLLOW.
+                    or (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino)
+                ):
+                    return None
+                chunks: list[bytes] = []
+                remaining = _MAX_ZCODE_ROLLOUT_BYTES + 1
+                while remaining:
+                    chunk = os.read(fd, min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                payload = b"".join(chunks)
+                if len(payload) > _MAX_ZCODE_ROLLOUT_BYTES:
+                    return None
+                text = payload.decode("utf-8")
+            finally:
+                os.close(fd)
+        except (OSError, UnicodeError):
+            return None
+
+        records: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(candidate, dict):
+                return None
+            record_session_id = candidate.get("sessionId")
+            record_trace_id = candidate.get("traceId")
+            record_turn_id = candidate.get("turnId")
+            # This file is the authority boundary for one ZCode session, so
+            # do not silently ignore foreign or malformed history entries.
+            # Any nonblank record without a complete filename-bound identity
+            # makes chronology ambiguous and cannot yield executable evidence.
+            if not (
+                isinstance(record_session_id, str)
+                and record_session_id == session_id
+                and isinstance(record_trace_id, str)
+                and record_trace_id.strip()
+                and isinstance(record_turn_id, str)
+                and record_turn_id.strip()
+            ):
+                return None
+            records.append(candidate)
+        return records
+
     def _load_rollout_tool_receipts(self, event: dict[str, Any]) -> list[AgentMessage]:
         """Load tool receipts bound to this exact Zcode summary.
 
@@ -590,70 +666,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         if _ZCODE_SESSION_ID_RE.fullmatch(session_id) is None:
             return []
 
-        rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
-        try:
-            path_stat = rollout_path.lstat()
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(rollout_path, flags)
-            try:
-                fd_stat = os.fstat(fd)
-                getuid = getattr(os, "getuid", None)
-                current_uid = getuid() if callable(getuid) else None
-                if (
-                    not stat.S_ISREG(fd_stat.st_mode)
-                    or (current_uid is not None and fd_stat.st_uid != current_uid)
-                    or fd_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                    or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
-                    # Bind validation and reads to the same inode. This also
-                    # closes the symlink/rename race on platforms lacking
-                    # O_NOFOLLOW.
-                    or (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino)
-                ):
-                    return []
-                chunks: list[bytes] = []
-                remaining = _MAX_ZCODE_ROLLOUT_BYTES + 1
-                while remaining:
-                    chunk = os.read(fd, min(64 * 1024, remaining))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-                payload = b"".join(chunks)
-                if len(payload) > _MAX_ZCODE_ROLLOUT_BYTES:
-                    return []
-                text = payload.decode("utf-8")
-            finally:
-                os.close(fd)
-        except (OSError, UnicodeError):
+        records = self._read_trusted_rollout_history(session_id)
+        if records is None:
             return []
-
-        records: list[dict[str, Any]] = []
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                candidate = json.loads(line)
-            except json.JSONDecodeError:
-                return []
-            if not isinstance(candidate, dict):
-                return []
-            record_session_id = candidate.get("sessionId")
-            record_trace_id = candidate.get("traceId")
-            record_turn_id = candidate.get("turnId")
-            # This file is the authority boundary for one ZCode session, so
-            # do not silently ignore foreign or malformed history entries.
-            # Any nonblank record without a complete filename-bound identity
-            # makes chronology ambiguous and cannot yield executable evidence.
-            if not (
-                isinstance(record_session_id, str)
-                and record_session_id == session_id
-                and isinstance(record_trace_id, str)
-                and record_trace_id.strip()
-                and isinstance(record_turn_id, str)
-                and record_turn_id.strip()
-            ):
-                return []
-            records.append(candidate)
 
         matching_indexes = [
             index
