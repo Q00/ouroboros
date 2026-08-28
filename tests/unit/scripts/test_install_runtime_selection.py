@@ -111,6 +111,7 @@ def _run_installer(
     *,
     include_uv: bool = True,
     local_repo: bool = True,
+    piped: bool = False,
     env: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     fake_commands: dict[str, str] | None = None,
@@ -181,10 +182,12 @@ exit 0
     for key in drop_env:
         run_env.pop(key, None)
 
+    command = ["bash"] if piped else ["bash", str(install_sh)]
     return subprocess.run(
-        ["bash", str(install_sh)],
+        command,
         cwd=cwd,
         env=run_env,
+        input=install_sh.read_text(encoding="utf-8") if piped else None,
         text=True,
         capture_output=True,
         check=False,
@@ -271,46 +274,64 @@ def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
 
 
-@pytest.mark.parametrize(
-    ("install_ref", "expected_surface"),
-    (("readme", "readme_quickstart"), ("docs-getting-started", "getting_started")),
-)
-def test_installer_persists_first_command_surface_hint(
-    tmp_path: Path, install_ref: str, expected_surface: str
-) -> None:
-    result = _run_installer(
-        tmp_path,
-        local_repo=False,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": install_ref},
-        fake_commands=_telemetry_fake_commands(),
-    )
-
-    assert result.returncode == 0, result.stderr
-    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
-    assert hint.read_text(encoding="utf-8") == f"{expected_surface}\n"
-
-
-def test_installer_does_not_relabel_existing_first_command_surface_hint(
-    tmp_path: Path,
-) -> None:
-    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
-    hint.parent.mkdir(parents=True)
-    hint.write_text("readme_quickstart\n", encoding="utf-8")
+def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
 
     result = _run_installer(
         tmp_path,
         local_repo=False,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "docs-getting-started"},
+        piped=True,
+        env={"OUROBOROS_TELEMETRY": ""},
         fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
-    assert hint.read_text(encoding="utf-8") == "readme_quickstart\n"
+    assert "BASH_SOURCE" not in result.stderr
+
+
+def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    old_package = tmp_path / "old-package" / "ouroboros" / "config"
+    old_package.mkdir(parents=True)
+    (old_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "models.py").write_text(
+        "class OuroborosConfig:\n"
+        "    @classmethod\n"
+        "    def model_validate(cls, raw):\n"
+        "        return cls()\n",
+        encoding="utf-8",
+    )
+    python_wrapper = (
+        "#!/bin/sh\n"
+        "shift\n"
+        f"PYTHONPATH={shlex.quote(str(old_package.parents[1]))} "
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={
+            "curl": _telemetry_probe_curl(),
+            "python3": python_wrapper,
+            "python": python_wrapper,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "AttributeError" not in result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
@@ -971,7 +992,6 @@ def test_installer_notice_is_persisted_before_first_capture(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
     state = (tmp_path / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
@@ -1411,7 +1431,6 @@ def test_installer_ping_escapes_hostile_uname_output_with_python3(tmp_path: Path
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["properties"]["is_local"] == "true"
 
 
@@ -1455,7 +1474,6 @@ def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: P
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["distinct_id"] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 
 
@@ -1483,23 +1501,10 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties"}
         events[payload["event"]] = payload
 
-    assert set(events) == {"install_started", "install_completed"}
-    assert set(events["install_started"]["properties"].keys()) == {
-        "source",
-        "os",
-        "arch",
-        "is_local",
-        "pre",
-        "version",
-        "ref",
-    }
+    assert set(events) == {"install_completed"}
     assert set(events["install_completed"]["properties"].keys()) == {
-        "source",
         "os",
-        "arch",
-        "method",
         "runtime",
-        "detected_runtimes",
         "version",
         "ref",
     }
@@ -1532,18 +1537,13 @@ def test_installer_ping_ref_defaults_to_direct_when_unset(tmp_path: Path) -> Non
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "direct"
     assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
-def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
-    """A well-formed `OUROBOROS_INSTALL_REF` (matches `^[A-Za-z0-9._-]{1,32}$`)
-    is carried through to both events verbatim -- this is the actual
-    attribution path a docs page or listing is meant to use.
-    """
+def test_installer_ping_ref_carries_approved_channel_token(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "hellogithub"},
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "readme-hero"},
         fake_commands={
             **_telemetry_fake_commands(),
             "curl": _capture_dashd_curl(),
@@ -1559,18 +1559,28 @@ def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "hellogithub"
-    assert events["install_completed"]["properties"]["ref"] == "hellogithub"
+    assert events["install_completed"]["properties"]["ref"] == "readme-hero"
+
+
+def test_installer_ping_ref_folds_valid_shaped_unknown_to_direct(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "private-project-2278"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    payload = json.loads(next(line for line in captures.splitlines() if line))
+    assert payload["properties"]["ref"] == "direct"
+    assert "private-project-2278" not in captures
 
 
 def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> None:
-    """A value outside `^[A-Za-z0-9._-]{1,32}$` (shell metacharacters, spaces,
-    or over-length) must never reach the telemetry payload -- it degrades to
-    `direct` exactly like an unset value. `[[ =~ ]]` never executes its
-    operand, so this is a payload-shape guarantee, not a shell-injection
-    probe; the point is that a hostile value chosen by whoever writes the
-    install command cannot ride into what we record.
-    """
+    """Invalid shell-shaped values also fold to the closed `direct` token."""
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "evil; rm -rf /"},
@@ -1589,7 +1599,6 @@ def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> 
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "direct"
     assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
