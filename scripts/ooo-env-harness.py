@@ -19,7 +19,13 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import tomllib
 from typing import Any
+
+_REPO_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+from ouroboros.codex import resolve_codex_home  # noqa: E402
 
 REQUIRED_MCP_TOOLS = {
     "ouroboros_generate_seed",
@@ -36,6 +42,9 @@ class Check:
     status: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.details = redact_secrets(self.details)
 
 
 @dataclass
@@ -62,6 +71,24 @@ def _text_output(value: str | bytes | None) -> str:
         return ""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
+    return value
+
+
+_SECRET_KEY_RE = __import__("re").compile(
+    r"(token|secret|password|api[_-]?key|credential|authorization|private[_-]?key)",
+    __import__("re").I,
+)
+
+
+def redact_secrets(value: Any) -> Any:
+    """Project diagnostic evidence without credential-bearing values."""
+    if isinstance(value, dict):
+        return {
+            str(key): "<redacted>" if _SECRET_KEY_RE.search(str(key)) else redact_secrets(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple | set):
+        return [redact_secrets(item) for item in value]
     return value
 
 
@@ -102,7 +129,7 @@ def run_command(
         return CommandResult(command, None, str(stdout_path), str(stderr_path))
 
 
-def read_mcp_entry(path: Path) -> dict[str, Any]:
+def read_mcp_entry(path: Path, *, sanitize: bool = True) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "path": str(path),
         "exists": path.exists(),
@@ -114,15 +141,17 @@ def read_mcp_entry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return entry
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        server = data.get("mcpServers", {}).get("ouroboros")
+        raw = path.read_text(encoding="utf-8")
+        data = tomllib.loads(raw) if path.suffix == ".toml" else json.loads(raw)
+        servers = data.get("mcp_servers" if path.suffix == ".toml" else "mcpServers", {})
+        server = servers.get("ouroboros")
         if not isinstance(server, dict):
             entry["error"] = "missing mcpServers.ouroboros object"
             return entry
         entry["command"] = server.get("command")
         entry["args"] = server.get("args") if isinstance(server.get("args"), list) else []
         entry["env"] = server.get("env") if isinstance(server.get("env"), dict) else {}
-        return entry
+        return redact_secrets(entry) if sanitize else entry
     except Exception as exc:  # pragma: no cover - defensive diagnostics
         entry["error"] = str(exc)
         return entry
@@ -148,9 +177,11 @@ def classify_mcp_entry(entry: dict[str, Any], expected_script: Path) -> tuple[st
     return "warn", f"uses non-local MCP command: {command!r}"
 
 
-def discover_mcp_config_paths(repo: Path) -> list[Path]:
+def discover_mcp_config_paths(repo: Path, codex_home: Path | None = None) -> list[Path]:
     home = Path.home()
     paths = [repo / ".mcp.json"]
+    if codex_home is not None:
+        paths.append(codex_home / "config.toml")
     paths.extend(sorted((home / ".codex/plugins/cache/personal/ouroboros").glob("*/.mcp.json")))
     paths.append(home / ".codex/.tmp/marketplaces/ouroboros/.mcp.json")
     seen: set[Path] = set()
@@ -163,19 +194,63 @@ def discover_mcp_config_paths(repo: Path) -> list[Path]:
     return unique
 
 
-def mcp_stdio_smoke(repo: Path, log_dir: Path, timeout: int) -> tuple[Check, CommandResult]:
-    python = repo / ".venv/bin/python"
-    script = repo / "scripts/mcp-serve.sh"
+def effective_codex_entry() -> dict[str, Any]:
+    """Resolve the authoritative Codex MCP entry using Codex's home resolver."""
+    path = resolve_codex_home() / "config.toml"
+    entry = read_mcp_entry(path, sanitize=False)
+    entry["effective"] = True
+    if not entry.get("exists") or entry.get("error"):
+        return entry
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+        server = config["mcp_servers"]["ouroboros"]
+        from ouroboros.cli.commands.codex import (
+            _check_mcp_activation_surface,
+            _check_mcp_execution_surface,
+            _check_mcp_runtime_dependency_surface,
+            _check_mcp_schema_surface,
+        )
+
+        failures: list[str] = []
+        _check_mcp_schema_surface(server, failures)
+        _check_mcp_activation_surface(server, failures)
+        _check_mcp_execution_surface(server, failures)
+        if isinstance(entry.get("command"), str):
+            _check_mcp_runtime_dependency_surface(
+                entry["command"], entry.get("args", []), entry.get("env", {}), failures
+            )
+        if failures:
+            entry["error"] = "; ".join(failures)
+    except (KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        entry["error"] = str(exc)
+    return entry
+
+
+def mcp_stdio_smoke(
+    repo: Path, log_dir: Path, timeout: int, entry: dict[str, Any] | None = None
+) -> tuple[Check, CommandResult]:
+    # Use the interpreter that successfully loaded this harness and its doctor
+    # machinery; a stale checkout-local venv is itself separate diagnostic data.
+    python = Path(sys.executable)
+    configured = entry or {"command": str(repo / "scripts/mcp-serve.sh"), "args": [], "env": {}}
+    if configured.get("error") or not isinstance(configured.get("command"), str):
+        details = redact_secrets(configured)
+        result = CommandResult([], None, "", "")
+        return Check(
+            "mcp_stdio_smoke", "fail", "effective Codex MCP launcher is invalid", details
+        ), result
+    launcher = [str(configured["command"]), *(str(arg) for arg in configured.get("args", []))]
     code = f"""
 import asyncio
 import json
+import os
 from ouroboros.cli.commands.codex import _list_stdio_mcp_tool_names
 
 async def main():
     tools = await _list_stdio_mcp_tool_names(
-        {str(script)!r},
-        (),
-        {{"OUROBOROS_AGENT_RUNTIME": "codex", "OUROBOROS_LLM_BACKEND": "codex"}},
+        {launcher[0]!r},
+        {tuple(launcher[1:])!r},
+        dict(os.environ),
     )
     print(json.dumps({{"tool_count": len(tools), "tools": sorted(tools)}}))
 
@@ -183,9 +258,16 @@ asyncio.run(main())
 """
     command = [str(python), "-c", code]
     result = run_command(
-        command, cwd=repo, log_dir=log_dir, name="mcp_stdio_smoke", timeout=timeout
+        command,
+        cwd=repo,
+        log_dir=log_dir,
+        name="mcp_stdio_smoke",
+        timeout=timeout,
+        env={str(k): str(v) for k, v in (configured.get("env") or {}).items()},
     )
-    details: dict[str, Any] = {"command_result": _jsonable(result.__dict__)}
+    details: dict[str, Any] = redact_secrets(
+        {"launcher": launcher, "command_result": _jsonable(result.__dict__)}
+    )
     if result.timed_out:
         return Check("mcp_stdio_smoke", "fail", "MCP stdio probe timed out", details), result
     if result.returncode != 0:
@@ -391,12 +473,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    codex_home = resolve_codex_home()
+    effective_entry = effective_codex_entry()
     config_entries: list[dict[str, Any]] = []
-    for path in discover_mcp_config_paths(repo):
+    for path in discover_mcp_config_paths(repo, codex_home):
         entry = read_mcp_entry(path)
         status, message = classify_mcp_entry(entry, expected_script)
         config_entries.append(entry)
-        checks.append(Check(f"mcp_config:{path}", status, message, entry))
+        checks.append(Check(f"mcp_config:{path}", status, message, redact_secrets(entry)))
 
     unique_signatures = {
         (entry.get("command"), tuple(entry.get("args") or []))
@@ -418,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_mcp_smoke:
         checks.append(Check("mcp_stdio_smoke", "warn", "skipped by flag"))
     else:
-        check, _ = mcp_stdio_smoke(repo, log_dir, args.mcp_timeout)
+        check, _ = mcp_stdio_smoke(repo, log_dir, args.mcp_timeout, effective_entry)
         checks.append(check)
 
     if args.include_run_smoke:

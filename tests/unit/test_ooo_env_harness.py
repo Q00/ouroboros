@@ -128,3 +128,91 @@ def test_run_command_records_missing_executable(tmp_path: Path) -> None:
     assert result.returncode is None
     assert Path(result.stdout_path).read_text(encoding="utf-8") == ""
     assert "No such file or directory" in Path(result.stderr_path).read_text(encoding="utf-8")
+
+
+def test_reports_redact_mcp_environment_secrets(tmp_path: Path) -> None:
+    harness = _load_harness()
+    secret = "sk-review-secret"
+    config = tmp_path / ".mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": "ouroboros",
+                        "args": ["mcp", "serve"],
+                        "env": {"OPENAI_API_KEY": secret, "SAFE_SETTING": "visible"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entry = harness.read_mcp_entry(config)
+    check = harness.Check("config", "pass", "loaded", entry)
+    report = harness.write_markdown_report(tmp_path, [check])
+    checks_path = tmp_path / "checks.json"
+    checks_path.write_text(json.dumps([harness._jsonable(check.__dict__)]), encoding="utf-8")
+
+    combined = report.read_text(encoding="utf-8") + checks_path.read_text(encoding="utf-8")
+    assert secret not in combined
+    assert "<redacted>" in combined
+    assert "visible" in combined
+
+
+def test_effective_codex_entry_uses_codex_home_and_configured_launcher(
+    tmp_path: Path, monkeypatch
+) -> None:
+    harness = _load_harness()
+    codex_home = tmp_path / "custom-codex"
+    codex_home.mkdir()
+    config = codex_home / "config.toml"
+    config.write_text(
+        f'''\
+[mcp_servers.ouroboros]
+command = "{sys.executable}"
+args = ["-m", "ouroboros", "mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]
+env = {{ OUROBOROS_AGENT_RUNTIME = "codex", OUROBOROS_LLM_BACKEND = "codex" }}
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    with patch(
+        "ouroboros.cli.commands.codex._check_mcp_runtime_dependency_surface"
+    ) as dependency_check:
+        entry = harness.effective_codex_entry()
+
+    assert entry["path"] == str(config)
+    assert entry["command"] == sys.executable
+    dependency_check.assert_called_once()
+
+
+def test_stdio_smoke_probes_configured_launcher(tmp_path: Path) -> None:
+    harness = _load_harness()
+    entry = {"command": "/configured/ouroboros", "args": ["mcp", "serve"], "env": {}}
+    observed: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        observed["code"] = command[-1]
+        stdout_path = tmp_path / "smoke.stdout.log"
+        stderr_path = tmp_path / "smoke.stderr.log"
+        stdout_path.write_text(
+            json.dumps(
+                {
+                    "tool_count": len(harness.REQUIRED_MCP_TOOLS),
+                    "tools": sorted(harness.REQUIRED_MCP_TOOLS),
+                }
+            ),
+            encoding="utf-8",
+        )
+        stderr_path.write_text("", encoding="utf-8")
+        return harness.CommandResult(command, 0, str(stdout_path), str(stderr_path))
+
+    with patch.object(harness, "run_command", side_effect=fake_run):
+        check, _ = harness.mcp_stdio_smoke(tmp_path, tmp_path, 1, entry)
+
+    assert check.status == "pass"
+    assert "'/configured/ouroboros'" in str(observed["code"])
+    assert "('mcp', 'serve')" in str(observed["code"])
