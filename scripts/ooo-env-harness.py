@@ -78,6 +78,10 @@ _SECRET_KEY_RE = __import__("re").compile(
     r"(token|secret|password|api[_-]?key|credential|authorization|private[_-]?key)",
     __import__("re").I,
 )
+_SECRET_VALUE_RE = __import__("re").compile(
+    r"(sk-[A-Za-z0-9][A-Za-z0-9._-]{7,}|(?:api[_-]?key|token|secret|password|credential)[=:][^\s,]+)",
+    __import__("re").I,
+)
 
 
 def redact_secrets(value: Any) -> Any:
@@ -88,8 +92,39 @@ def redact_secrets(value: Any) -> Any:
             for key, item in value.items()
         }
     if isinstance(value, list | tuple | set):
-        return [redact_secrets(item) for item in value]
+        items = list(value)
+        redacted: list[Any] = []
+        redact_next = False
+        for item in items:
+            if redact_next:
+                redacted.append("<redacted>")
+                redact_next = False
+                continue
+            redacted.append(redact_secrets(item))
+            if isinstance(item, str) and _SECRET_KEY_RE.search(item.lstrip("-")):
+                redact_next = True
+        return redacted
+    if isinstance(value, str):
+        return _SECRET_VALUE_RE.sub("<redacted>", value)
     return value
+
+
+def _sensitive_values(command: list[str], env: dict[str, str]) -> set[str]:
+    values = {value for key, value in env.items() if value and _SECRET_KEY_RE.search(key)}
+    for index, item in enumerate(command[:-1]):
+        if _SECRET_KEY_RE.search(item.lstrip("-")):
+            values.add(command[index + 1])
+    return values
+
+
+def _redact_text(value: str, sensitive_values: set[str]) -> str:
+    for secret in sorted(sensitive_values, key=len, reverse=True):
+        value = value.replace(secret, "<redacted>")
+    return redact_secrets(value)
+
+
+def _redact_command(command: list[str], sensitive_values: set[str]) -> list[str]:
+    return [_redact_text(item, sensitive_values) for item in command]
 
 
 def run_command(
@@ -106,6 +141,8 @@ def run_command(
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
+    sensitive_values = _sensitive_values(command, merged_env)
+    persisted_command = _redact_command(command, sensitive_values)
     try:
         completed = subprocess.run(
             command,
@@ -116,17 +153,25 @@ def run_command(
             timeout=timeout,
             check=False,
         )
-        stdout_path.write_text(completed.stdout, encoding="utf-8")
-        stderr_path.write_text(completed.stderr, encoding="utf-8")
-        return CommandResult(command, completed.returncode, str(stdout_path), str(stderr_path))
+        stdout_path.write_text(_redact_text(completed.stdout, sensitive_values), encoding="utf-8")
+        stderr_path.write_text(_redact_text(completed.stderr, sensitive_values), encoding="utf-8")
+        return CommandResult(
+            persisted_command, completed.returncode, str(stdout_path), str(stderr_path)
+        )
     except subprocess.TimeoutExpired as exc:
-        stdout_path.write_text(_text_output(exc.stdout), encoding="utf-8")
-        stderr_path.write_text(_text_output(exc.stderr), encoding="utf-8")
-        return CommandResult(command, None, str(stdout_path), str(stderr_path), timed_out=True)
+        stdout_path.write_text(
+            _redact_text(_text_output(exc.stdout), sensitive_values), encoding="utf-8"
+        )
+        stderr_path.write_text(
+            _redact_text(_text_output(exc.stderr), sensitive_values), encoding="utf-8"
+        )
+        return CommandResult(
+            persisted_command, None, str(stdout_path), str(stderr_path), timed_out=True
+        )
     except OSError as exc:
         stdout_path.write_text("", encoding="utf-8")
-        stderr_path.write_text(str(exc), encoding="utf-8")
-        return CommandResult(command, None, str(stdout_path), str(stderr_path))
+        stderr_path.write_text(_redact_text(str(exc), sensitive_values), encoding="utf-8")
+        return CommandResult(persisted_command, None, str(stdout_path), str(stderr_path))
 
 
 def read_mcp_entry(path: Path, *, sanitize: bool = True) -> dict[str, Any]:

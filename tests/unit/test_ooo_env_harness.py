@@ -161,6 +161,29 @@ def test_reports_redact_mcp_environment_secrets(tmp_path: Path) -> None:
     assert "visible" in combined
 
 
+def test_redacts_launcher_arguments_and_process_output(tmp_path: Path) -> None:
+    harness = _load_harness()
+    arg_secret = "sk-arg-current-head-2289"
+    output_secret = "sk-process-current-head-2289"
+    result = harness.run_command(
+        [sys.executable, "-c", f"print('{output_secret}')", "--api-key", arg_secret],
+        cwd=tmp_path,
+        log_dir=tmp_path,
+        name="secret_probe",
+        timeout=2,
+    )
+    persisted = "\n".join(
+        [
+            str(result.command),
+            Path(result.stdout_path).read_text(),
+            Path(result.stderr_path).read_text(),
+        ]
+    )
+    assert arg_secret not in persisted
+    assert output_secret not in persisted
+    assert "<redacted>" in persisted
+
+
 def test_effective_codex_entry_uses_codex_home_and_configured_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
