@@ -2909,3 +2909,62 @@ async def test_final_settlement_classifies_missing_artifact_not_as_mutation(
 
     assert results[0].success is False
     assert captured == ["artifacts_missing"]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_revalidation_missing_artifact_emits_cause_analytics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The artifacts-only post-coordinator rejection owns its failure
+    (settlement skips non-successful results), so it must emit the local
+    verify-failed event and the closed-cause analytics like every other
+    deterministic gate rejection."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    artifact = tmp_path / "target.txt"
+    artifact.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    emitted: list[Any] = []
+
+    async def record_event(event: Any) -> None:
+        emitted.append(event)
+
+    executor._safe_emit_event = record_event
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",))
+    )
+    passing = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    assert passing.passed is True
+
+    artifact.unlink()  # the coordinator's reconciliation removed the artifact
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=passing,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert revalidated[0].success is False
+    assert captured == ["artifacts_missing"]
+    failures = [event for event in emitted if event.type == "execution.verify.failed"]
+    assert len(failures) == 1
+    assert failures[0].data["verify_cause"] == "artifacts_missing"
+    assert failures[0].data["missing_artifacts"] == ["target.txt"]

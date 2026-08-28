@@ -5226,6 +5226,30 @@ class ParallelACExecutor:
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
             if missing_artifacts:
                 reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+                # This branch owns the rejection (settlement skips
+                # already-failed results), so it must record the same durable
+                # diagnostics and closed-cause analytics as every other
+                # deterministic gate rejection.
+                verify_cause = _missing_artifacts_cause(missing_artifacts, cwd)
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "missing_artifacts": list(missing_artifacts),
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                            "verify_cause": verify_cause,
+                        },
+                    )
+                )
+                usage_telemetry.capture_ac_verify_failed(cause=verify_cause)
                 revalidated.append(
                     replace(
                         result,
