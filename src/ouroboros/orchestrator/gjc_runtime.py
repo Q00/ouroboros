@@ -143,9 +143,11 @@ class GjcRuntime:
             skill_dispatch=True,
             targeted_resume=False,
             structured_output=True,
-            # GJC RPC mode is already headless, but exposes no per-invocation
-            # approval/permission flag. Keep the requested mode in runtime
-            # metadata without claiming that the subprocess enforces it.
+            # GJC RPC mode is already headless, but exposes neither a
+            # disable-all-tools control nor a per-invocation approval flag.
+            # Non-empty tool names are prompt guidance only, so an explicit
+            # empty allow-list cannot be enforced.
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             permission_mode_support=ParamSupport.IGNORED,
         )
 

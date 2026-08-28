@@ -11,12 +11,17 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config._model_defaults import (
+    DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 import ouroboros.config.loader as loader_module
 from ouroboros.config.loader import (
     config_exists,
     create_default_config,
     credentials_file_secure,
+    default_execution_efficiency_mode,
     ensure_config_dir,
     get_agent_permission_mode,
     get_agent_runtime_backend,
@@ -27,6 +32,7 @@ from ouroboros.config.loader import (
     get_consensus_advocate_model,
     get_consensus_models,
     get_context_compression_model,
+    get_cross_harness_redispatch_enabled,
     get_dependency_analysis_model,
     get_gemini_cli_path,
     get_gjc_cli_path,
@@ -1945,6 +1951,53 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend=backend) == "default"
             assert get_assertion_extraction_model(backend=backend) == "default"
 
+    @pytest.mark.parametrize("backend", ["claude", None])
+    def test_legacy_shipped_defaults_normalize_on_claude_backends(
+        self, backend: str | None
+    ) -> None:
+        """Regression for #2069: the #1324 normalization only fired for
+        Claude-incapable backends, so a persisted legacy shipped default
+        (``claude-sonnet-4-20250514``) reached the Claude API verbatim and
+        was rejected as retired. Claude-capable backends must normalize
+        recognized legacy shipped defaults to the current default pin.
+        """
+        legacy_config = OuroborosConfig(
+            llm=LLMConfig(
+                qa_model="claude-sonnet-4-20250514",
+                dependency_analysis_model="claude-opus-4-6",
+                ontology_analysis_model="claude-sonnet-4-20250514",
+            ),
+            evaluation=EvaluationConfig(
+                assertion_extraction_model="claude-sonnet-4-20250514",
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_qa_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # dependency_analysis recognizes the retired Opus family as
+            # shipped defaults and its current pin is the Sonnet default.
+            assert get_dependency_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_ontology_analysis_model(backend=backend) == DEFAULT_SONNET_MODEL
+            assert get_assertion_extraction_model(backend=backend) == DEFAULT_SONNET_MODEL
+            # The explicit legacy per-role field takes precedence over stage
+            # models (#2069) and resolves through the same getter, so the
+            # precedence path can no longer leak the retired id either.
+            assert get_llm_model_for_role("qa", backend=backend) == DEFAULT_SONNET_MODEL
+
+    def test_never_shipped_ids_survive_claude_normalization(self) -> None:
+        """A never-shipped id is a deliberate user pin and stays verbatim
+        on Claude-capable backends (#2069)."""
+        custom_config = OuroborosConfig(
+            llm=LLMConfig(qa_model="my-proxy/claude-custom-build"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=custom_config),
+        ):
+            assert get_qa_model(backend="claude") == "my-proxy/claude-custom-build"
+
     def test_consensus_advocate_legacy_shipped_default_normalizes_to_sentinel(self) -> None:
         """A persisted legacy consensus advocate slug normalizes for Codex (#1324)."""
         legacy_config = OuroborosConfig(
@@ -2002,6 +2055,30 @@ class TestLLMHelperLookups:
                 "default",
             )
 
+    @pytest.mark.parametrize("backend", ["claude", None])
+    def test_consensus_legacy_roster_normalizes_on_claude_backends(
+        self, backend: str | None
+    ) -> None:
+        """A shipped Opus 4.8 roster must advance to the current Opus pin."""
+        legacy_config = OuroborosConfig(
+            consensus=ConsensusConfig(
+                models=(
+                    "openrouter/openai/gpt-4o",
+                    "openrouter/anthropic/claude-opus-4.8",
+                    "openrouter/google/gemini-2.5-pro",
+                ),
+            ),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=legacy_config),
+        ):
+            assert get_consensus_models(backend=backend) == (
+                "openrouter/openai/gpt-4o",
+                DEFAULT_CONSENSUS_OPUS_MODEL,
+                "openrouter/google/gemini-2.5-pro",
+            )
+
     def test_consensus_roster_preserved_for_claude_backend(self) -> None:
         """Claude can run shipped OpenRouter ids, so the roster must NOT be
         sentinel-normalized. Guards against over-broadening the CLI-backend
@@ -2013,7 +2090,7 @@ class TestLLMHelperLookups:
         ):
             assert get_consensus_models(backend="claude") == (
                 "openrouter/openai/gpt-4o",
-                "openrouter/anthropic/claude-opus-4.8",
+                "openrouter/anthropic/claude-opus-5",
                 "openrouter/google/gemini-2.5-pro",
             )
 
@@ -2392,6 +2469,15 @@ class TestGetAgentReasoningEffort:
             OrchestratorConfig(reasoning_effort="minimal")
 
 
+def test_cross_harness_ignores_legacy_generated_true_config() -> None:
+    config = OuroborosConfig(execution=ExecutionConfig(cross_harness_redispatch=True))
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("ouroboros.config.loader.load_config", return_value=config),
+    ):
+        assert get_cross_harness_redispatch_enabled() is False
+
+
 class TestGetExecutionModel:
     """Execute model pins come from env first, then the persisted settings UI value."""
 
@@ -2529,3 +2615,28 @@ class TestConfigEncodingLocaleIndependence:
 
         with pytest.raises(ValueError, match="invalid EventStore configuration"):
             resolve_event_store_path(config_path)
+
+
+class TestDefaultExecutionEfficiencyMode:
+    """#1733: persistent default execution policy for fresh starts."""
+
+    @pytest.mark.parametrize(
+        ("policy", "expected"),
+        [("ask", None), ("efficient", "adaptive"), ("quality_first", "quality_first")],
+    )
+    def test_policy_maps_to_fresh_start_efficiency_mode(
+        self, policy: str, expected: str | None
+    ) -> None:
+        config = OuroborosConfig(execution=ExecutionConfig(default_policy=policy))
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert default_execution_efficiency_mode() == expected
+
+    def test_unreadable_config_preserves_the_ask_contract(self) -> None:
+        with patch(
+            "ouroboros.config.loader.load_config",
+            side_effect=ConfigError("unreadable"),
+        ):
+            assert default_execution_efficiency_mode() is None

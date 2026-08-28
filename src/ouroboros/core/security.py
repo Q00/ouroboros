@@ -184,6 +184,7 @@ _STABLE_AUTHORITY_LABELS = frozenset(
         "codex",
         "copilot",
         "default",
+        "dsh",
         "gemini",
         "gjc",
         "goose",

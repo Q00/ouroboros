@@ -19,7 +19,10 @@ from ouroboros.mcp.tools.evolution_handlers import (
     EvolveStepHandler,
     _resolve_conductor_directive,
 )
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_ralph_subagent,
@@ -523,6 +526,10 @@ class RalphHandler:
             opencode_mode=self.opencode_mode,
         )
 
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+        )
         text = (
             "Started background Ralph loop.\n\n"
             f"Job ID: {snapshot.job_id}\n"
@@ -531,16 +538,14 @@ class RalphHandler:
             "Use ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, "
             "or ouroboros_cancel_job to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "lineage_id": config.lineage_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
             "max_generations": config.max_generations,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

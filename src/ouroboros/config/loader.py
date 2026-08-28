@@ -728,21 +728,15 @@ def _env_flag(name: str) -> bool | None:
 
 
 def get_cross_harness_redispatch_enabled() -> bool:
-    """Whether a terminally failing AC may redispatch onto an alternative harness.
+    """Return explicit process-level opt-in for cross-harness mutation.
 
-    Priority:
-        1. OUROBOROS_CROSS_HARNESS_REDISPATCH environment variable
-        2. config.yaml execution.cross_harness_redispatch
-        3. True (default: meta-harness recovery is on, but a no-op unless a
-           second runtime backend is actually installed)
+    Historical releases materialized ``true`` into generated config files, so
+    a persisted scalar cannot distinguish operator consent from the old default.
+    Only the environment flag is therefore authoritative during the deprecation
+    window; absent explicit process consent, one run keeps one runtime.
     """
     env = _env_flag("OUROBOROS_CROSS_HARNESS_REDISPATCH")
-    if env is not None:
-        return env
-    try:
-        return load_config().execution.cross_harness_redispatch
-    except ConfigError:
-        return True
+    return env if env is not None else False
 
 
 def get_n_version_tournament_enabled() -> bool:
@@ -1103,6 +1097,28 @@ def get_auto_evolve_enabled() -> bool:
         return True
 
 
+def default_execution_efficiency_mode() -> str | None:
+    """Map ``execution.default_policy`` to a fresh-start efficiency mode.
+
+    ``None`` — for ``ask`` or an unreadable config — preserves the
+    interactive-prompt contract exactly (#1733). ``efficient`` and
+    ``quality_first`` return the efficiency mode whose documented coupling
+    supplies the paired frugality default (adaptive/observe and
+    quality_first/off); strict assurance never derives from here. Explicit
+    invocation arguments take precedence at the call sites, and resumed
+    sessions never consult this.
+    """
+    try:
+        policy = load_config().execution.default_policy
+    except ConfigError:
+        return None
+    if policy == "efficient":
+        return "adaptive"
+    if policy == "quality_first":
+        return "quality_first"
+    return None
+
+
 def get_auto_evolve_max_generations() -> int:
     """Return the bounded generation budget for automatic Ralph chaining."""
 
@@ -1343,6 +1359,31 @@ def get_goose_cli_path() -> str | None:
     return None
 
 
+def get_configured_verify_bash_path() -> str | None:
+    """Get ``orchestrator.verify_bash_path`` — config only, never the env.
+
+    The usual env-then-config accessor shape is deliberately not used here.
+    :func:`ouroboros.orchestrator.verify_shell.resolve_verify_shell` reads
+    ``OUROBOROS_VERIFY_BASH`` itself, and reaches this function only after
+    finding that value stale; an accessor that returned the environment first
+    would hand back the same stale path and hide the configured shell entirely.
+    Executability is checked by that caller, which falls through to its own
+    candidate list when the configured value no longer resolves.
+
+    Returns:
+        Configured shell path or None.
+    """
+    try:
+        config = load_config()
+        verify_bash_path = getattr(config.orchestrator, "verify_bash_path", None)
+        if verify_bash_path:
+            return str(Path(verify_bash_path).expanduser())
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_pi_cli_path() -> str | None:
     """Get Pi CLI path from environment variable or config file.
 
@@ -1412,6 +1453,56 @@ def get_ourocode_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.ourocode_cli_path:
             return config.orchestrator.ourocode_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_cli_path() -> str | None:
+    """Get the DeepSeek Harness ACP server path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CLI_PATH environment variable
+        2. config.yaml orchestrator.dsh_cli_path
+        3. None (resolve ``dsh-acp-demo`` from PATH at runtime)
+
+    Returns:
+        Path to the ``dsh-acp-demo`` executable or None.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_cli_path:
+            return config.orchestrator.dsh_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_dsh_config_path() -> str | None:
+    """Get the dsh Cordis composition file path from env or config file.
+
+    Priority:
+        1. OUROBOROS_DSH_CONFIG_PATH environment variable
+        2. config.yaml orchestrator.dsh_config_path
+        3. None (the dsh client fails closed before spawning)
+
+    Returns:
+        Path to the trusted composition YAML, or None when dsh is not configured.
+    """
+    env_path = os.environ.get("OUROBOROS_DSH_CONFIG_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.dsh_config_path:
+            return config.orchestrator.dsh_config_path
     except ConfigError:
         pass
 
@@ -2030,34 +2121,23 @@ def _normalize_configured_model_for_backend(
     if not candidate:
         return _default_model_for_backend(default_model, backend=backend)
 
-    resolved = _resolve_llm_backend_for_models(backend)
     # Recognize the current shipped default AND prior-release shipped defaults
     # (#1324): a config persisted before a pin bump still holds the old literal,
-    # and for Claude-incapable backends it must normalize to the sentinel just
-    # like the current default would. Genuinely explicit, never-shipped ids are
-    # absent from this set and fall through to be preserved verbatim.
+    # and it must normalize exactly like the current default would. Genuinely
+    # explicit, never-shipped ids are absent from this set and are preserved
+    # verbatim.
     is_shipped_default = candidate in (
         *recognized_shipped_defaults(default_model),
         *extra_shipped_defaults,
     )
-    if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
-        return _CODEX_DEFAULT_MODEL
-    if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
-        return _KIRO_DEFAULT_MODEL
-    if resolved in _COPILOT_LLM_BACKENDS and is_shipped_default:
-        return _COPILOT_DEFAULT_MODEL
-    if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
-        return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
-        return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
-        return _GJC_DEFAULT_MODEL
-    if resolved in _ANTIGRAVITY_LLM_BACKENDS and is_shipped_default:
-        return _ANTIGRAVITY_DEFAULT_MODEL
-    if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
-        return _GROK_DEFAULT_MODEL
-    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
-        return _ZCODE_DEFAULT_MODEL
+    if is_shipped_default:
+        # A recognized shipped default — current or prior-release — is a pin
+        # the user never chose, so every backend maps it to its own default:
+        # Claude-incapable backends keep their sentinel as before, and
+        # Claude-capable backends now take the current default pin instead of
+        # leaking a retired id to the API (#2069). Never-shipped ids are
+        # deliberate user pins and fall through verbatim.
+        return _default_model_for_backend(default_model, backend=backend)
 
     return candidate
 
@@ -2075,14 +2155,15 @@ def _normalize_configured_models_for_backend(
 
     # Match the shipped roster element-wise against current + legacy shipped
     # defaults (#1324), so a roster persisted before a pin bump (e.g. the old
-    # OpenRouter Opus slug in the consensus slot) still normalizes to the
-    # backend-safe sentinel for Claude-incapable backends instead of leaking an
-    # unrunnable id.
+    # OpenRouter Opus slug in the consensus slot) resolves exactly like the
+    # current shipped roster. Claude-incapable backends receive their safe
+    # sentinel; Claude-capable backends receive the current provider pin rather
+    # than replaying a retired model id.
     is_shipped_roster = len(normalized) == len(default_models) and all(
         candidate in recognized_shipped_defaults(default)
         for candidate, default in zip(normalized, default_models, strict=True)
     )
-    if _resolve_llm_backend_for_models(backend) in _SENTINEL_DEFAULT_BACKENDS and is_shipped_roster:
+    if is_shipped_roster:
         return _default_models_for_backend(default_models, backend=backend)
 
     return normalized

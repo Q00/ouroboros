@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -18,6 +19,7 @@ from ouroboros.orchestrator.claude_worker_runtime import (
     ClaudeWorkerTransport,
     build_claude_worker_runtime,
 )
+from ouroboros.orchestrator.frugality_evidence import harvest_token_spend
 from ouroboros.orchestrator.worker_runtime import WorkerTurn
 
 
@@ -45,6 +47,7 @@ class TestParseTurn:
             "input_tokens": 10,
             "output_tokens": 2,
             "cache_read_input_tokens": 40,
+            "total_tokens": 52,
         }
 
     def test_is_error_flag_propagates(self) -> None:
@@ -69,6 +72,153 @@ class TestParseTurn:
         turn = ClaudeWorkerTransport._parse_turn(out, "", 0)
         assert turn.text == "ok"
         assert turn.session_id == "z"
+
+    def test_parses_top_level_stream_event_array(self) -> None:
+        out = json.dumps(
+            [
+                {"type": "system", "subtype": "init", "session_id": "array-session"},
+                {
+                    "type": "assistant",
+                    "session_id": "array-session",
+                    "message": {"content": [{"type": "text", "text": "draft"}]},
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "final",
+                    "session_id": "array-session",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                },
+            ]
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 0)
+
+        assert turn == WorkerTurn(
+            text="final",
+            session_id="array-session",
+            usage={"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        )
+
+    def test_structured_error_uses_result_when_stderr_is_empty(self) -> None:
+        out = json.dumps(
+            {
+                "type": "result",
+                "is_error": True,
+                "result": "maximum turns reached",
+            }
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 0)
+
+        assert turn.is_error is True
+        assert turn.error == "maximum turns reached"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "result": None,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="typed-null",
+            ),
+            pytest.param(
+                {
+                    "is_error": True,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="untyped-omitted",
+            ),
+        ],
+    )
+    def test_empty_structured_error_preserves_metadata(self, payload: dict[str, object]) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(json.dumps(payload), "", 0)
+
+        assert turn == WorkerTurn(
+            text="",
+            session_id="error-session",
+            is_error=True,
+            error="error_max_turns",
+            usage={"input_tokens": 9, "output_tokens": 2, "total_tokens": 11},
+        )
+
+    @pytest.mark.parametrize(
+        ("stdout", "message"),
+        [
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done","trace":' + "9" * 4301 + "}",
+                "integer exceeds",
+                id="oversized-integer",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":1e9999}}',
+                "non-finite JSON number",
+                id="non-finite-secondary-usage",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}",
+                "bounded non-negative integer",
+                id="thousand-digit-secondary-usage",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":' + "9" * 1000 + "}}",
+                "bounded non-negative integer",
+                id="thousand-digit-primary-alias",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                "bounded non-negative integer",
+                id="malformed-primary-alias",
+            ),
+        ],
+    )
+    def test_hostile_number_becomes_structured_worker_error(
+        self, stdout: str, message: str
+    ) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0)
+
+        assert turn.is_error is True
+        assert turn.session_id is None
+        assert message in (turn.error or "")
+
+    def test_nonzero_exit_cannot_be_overridden_by_success_payload(self) -> None:
+        out = json.dumps({"type": "result", "is_error": False, "result": "looks okay"})
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "process failed", 7)
+
+        assert turn.is_error is True
+        assert turn.text == ""
+        assert turn.error == "process failed"
+
+    def test_nonzero_exit_without_stderr_rejects_stale_success_diagnostic(self) -> None:
+        out = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "stale success",
+                "session_id": "stale-session",
+            }
+        )
+
+        turn = ClaudeWorkerTransport._parse_turn(out, "", 7)
+
+        assert turn.is_error is True
+        assert turn.text == ""
+        assert turn.error == "claude exited with status 7"
 
 
 class TestPermissionArgs:
@@ -100,6 +250,32 @@ class TestRuntimeWiring:
     def test_persisted_runtime_declares_targeted_resume(self) -> None:
         rt = build_claude_worker_runtime(cwd="/tmp", persist_sessions=True)
         assert rt.capabilities.targeted_resume is True
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_stderr_is_public_provider_error_message(
+        self, tmp_path: Path
+    ) -> None:
+        runtime = build_claude_worker_runtime(cli_path="claude", cwd=tmp_path)
+        process = AsyncMock()
+        process.returncode = 7
+        process.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "stale success",
+                    "session_id": "stale-session",
+                }
+            ).encode(),
+            b"error: authentication required",
+        )
+
+        with patch("asyncio.create_subprocess_exec", return_value=process):
+            result = await runtime.execute_task_to_result("do the work")
+
+        assert result.is_err
+        assert result.error.message == "error: authentication required"
 
     def test_normalizes_path_cwd(self, tmp_path: Path) -> None:
         rt = build_claude_worker_runtime(cwd=tmp_path, persist_sessions=True)
@@ -258,6 +434,173 @@ class TestRuntimeWiring:
             "output_tokens": 1,
             "cache_creation_input_tokens": 20,
         }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}",
+                id="huge-secondary",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":' + "9" * 1000 + "}}",
+                id="huge-alias",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                id="malformed-alias",
+            ),
+        ],
+    )
+    async def test_hostile_usage_never_reaches_frugality_consumer(self, stdout: str) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0)
+        assert turn.is_error is True
+        assert turn.usage is None
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].is_error is True
+        assert "usage" not in messages[-1].data
+        assert harvest_token_spend(messages) is None
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_cli_usage_reaches_frugality_as_request_total(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                [
+                    {
+                        "type": "assistant",
+                        "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+                    },
+                    {
+                        "type": "assistant",
+                        "message": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+                    },
+                    {
+                        "type": "result",
+                        "is_error": False,
+                        "result": "ok",
+                    },
+                ]
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == {
+            "input_tokens": 110,
+            "output_tokens": 22,
+            "total_tokens": 132,
+        }
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == {
+            "input_tokens": 110,
+            "output_tokens": 22,
+            "total_tokens": 132,
+        }
+        assert harvest_token_spend(messages) == (
+            132.0,
+            {"input_tokens": 110.0, "output_tokens": 22.0, "total_tokens": 132.0},
+        )
+
+    @pytest.mark.asyncio
+    async def test_total_only_cli_usage_reaches_final_receipt_without_allocation(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "ok",
+                    "usage": {"total_tokens": 132},
+                }
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == {"total_tokens": 132}
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == {"total_tokens": 132}
+        assert harvest_token_spend(messages) == (
+            132.0,
+            {"total_tokens": 132.0},
+        )
+
+    @pytest.mark.asyncio
+    async def test_bounded_all_counter_usage_preserves_spend_semantics(self) -> None:
+        usage = {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 40,
+            "cached_input_tokens": 7,
+            "total_tokens": 66,
+        }
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "ok",
+                    "usage": usage,
+                }
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == usage
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == usage
+        assert harvest_token_spend(messages) == (
+            66.0,
+            {
+                "input_tokens": 5.0,
+                "output_tokens": 1.0,
+                "cache_creation_input_tokens": 20.0,
+                "cache_read_input_tokens": 40.0,
+                "cached_input_tokens": 7.0,
+                "total_tokens": 66.0,
+            },
+        )
 
     def test_resume_is_cwd_pinned(self) -> None:
         # The transport must pin cwd so --resume targets the session's store.

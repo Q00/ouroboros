@@ -34,6 +34,11 @@ RUNTIME_PROFILE_TO_CODEX_PROFILE: dict[str, str] = {
     "worker": "ouroboros-worker",
 }
 
+# Grace period for the ``codex --help`` contract probe. A slow or wedged CLI
+# must not stall command building indefinitely; exceeding it is uncertainty
+# (``None``), never evidence of a legacy CLI.
+HELP_PROBE_TIMEOUT_SECONDS = 5.0
+
 
 def codex_uses_profile_v2(
     codex_path: str | None,
@@ -55,7 +60,7 @@ def codex_uses_profile_v2(
             [codex_path, "--help"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=HELP_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

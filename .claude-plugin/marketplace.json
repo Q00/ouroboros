@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "ouroboros",
-  "description": "Requirement crystallization engine — Socratic interviews, seed generation, and 3-stage evaluation",
+  "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is, and a score above the bar blocks spec generation until you pass force explicitly. When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back, so the worker is asked for the outcome rather than handed the assertion. Redaction of those values elsewhere is literal over five encodings, so a reshaped copy can still get through; that gap is tracked in a public issue.",
   "owner": {
     "name": "Q00",
     "email": "jqyu.lee@gmail.com"
@@ -9,8 +9,8 @@
   "plugins": [
     {
       "name": "ouroboros",
-      "description": "Transform vague ideas into validated seed specifications through Socratic questioning and ontological analysis",
-      "version": "0.51.1",
+      "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is, and a score above the bar blocks spec generation until you pass force explicitly. When an acceptance criterion defines a verify command or an expected-output assertion, those values are omitted from the worker's contract block, with no flag to put them back, so the worker is asked for the outcome rather than handed the assertion. Redaction of those values elsewhere is literal over five encodings, so a reshaped copy can still get through; that gap is tracked in a public issue.",
+      "version": "0.51.16",
       "author": {
         "name": "Q00",
         "email": "jqyu.lee@gmail.com"
@@ -26,7 +26,9 @@
         "socratic",
         "interview",
         "seed",
-        "evaluation"
+        "evaluation",
+        "agentic-loop",
+        "loop-engineering"
       ],
       "tags": [
         "requirement-engineering",

@@ -50,6 +50,7 @@ from ouroboros.providers.profiles import (
 @dataclass
 class _Adapter:
     tokens: int | None
+    unallocated_tokens: int = 0
     response_model: str = "test-model"
     llm_backend: str | None = None
     api_base: str = "https://provider.example/v1"
@@ -115,6 +116,7 @@ class _Adapter:
                     prompt_tokens=self.tokens,
                     completion_tokens=0,
                     total_tokens=self.tokens,
+                    unallocated_tokens=self.unallocated_tokens,
                 ),
             )
         )
@@ -197,6 +199,59 @@ async def _codex_runtime_summary(runtime: CodexCliRuntime):  # noqa: ANN202
 
 
 @pytest.fixture(autouse=True)
+def _answer_fake_cli_version_probes_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve ``--version`` for the fake codex CLIs by parsing the script.
+
+    Every ``CodexCliRuntime`` attestation probe spawns ``<cli> --version``
+    (~45ms of subprocess wait each, dozens per fingerprint test). The fake
+    CLIs written by :func:`_write_fake_codex_cli` only echo a constant, so
+    answering from the script text preserves the probed identity — including
+    the version drift between fixtures — without the process spawns. Any
+    other invocation (real binaries, failure-shape fixtures) still executes.
+    """
+    import re
+    import subprocess
+
+    from ouroboros.orchestrator import cli_version_attestation
+
+    real_run = subprocess.run
+
+    def _run(args, **kwargs):  # noqa: ANN001, ANN202
+        if isinstance(args, list) and len(args) == 2 and args[1] == "--version":
+            try:
+                script = Path(args[0]).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                script = ""
+            match = re.search(r"echo 'codex ([^']+)'", script)
+            if match is not None:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=f"codex {match.group(1)}\n", stderr=""
+                )
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(cli_version_attestation.subprocess, "run", _run)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_project_identity_without_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the attestation's semantic-cwd resolution to a constant.
+
+    ``resolve_project_identity`` shells out to git several times per
+    ``CodexCliRuntime`` construction; the fingerprint tests here only need
+    the resolved ``workspace_path`` to be deterministic and identical across
+    variants. Tests that exercise cwd-relative identity re-patch this and
+    win (see the repository-relative cwd test below).
+    """
+    monkeypatch.setattr(
+        frugality_attestation_module,
+        "resolve_project_identity",
+        lambda _cwd: SimpleNamespace(workspace_path="."),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _register_test_completion_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         frugality_attestation_module,
@@ -257,6 +312,58 @@ async def test_generation_provider_usage_sums_every_tracked_call() -> None:
     assert summary.configuration_fingerprint is not None
     assert summary.configuration_assignments
     assert summary.issues == ()
+
+
+@pytest.mark.parametrize(
+    ("allocated_tokens", "unallocated_tokens"),
+    [
+        pytest.param(0, 132, id="total-only"),
+        pytest.param(120, 12, id="cache-inclusive"),
+    ],
+)
+async def test_generation_provider_usage_accounts_explicit_unallocated_authority(
+    allocated_tokens: int,
+    unallocated_tokens: int,
+) -> None:
+    config = CompletionConfig(model="test-model", role="reflect")
+    with capture_generation_provider_usage() as capture:
+        await tracked_complete(
+            _Adapter(allocated_tokens, unallocated_tokens=unallocated_tokens),
+            [],
+            config,
+        )
+
+    summary = capture.summary(instrumentation_complete=True)
+
+    assert summary.complete is True
+    assert summary.token_spend == 132
+    assert summary.issues == ()
+
+
+@pytest.mark.parametrize(
+    "unallocated_tokens",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(-1, id="negative"),
+        pytest.param(10**400, id="overflow"),
+    ],
+)
+async def test_generation_provider_usage_rejects_invalid_unallocated_authority(
+    unallocated_tokens: int,
+) -> None:
+    config = CompletionConfig(model="test-model", role="reflect")
+    with capture_generation_provider_usage() as capture:
+        await tracked_complete(
+            _Adapter(0, unallocated_tokens=unallocated_tokens),
+            [],
+            config,
+        )
+
+    summary = capture.summary(instrumentation_complete=True)
+
+    assert summary.complete is False
+    assert summary.token_spend is None
+    assert "missing or invalid" in "; ".join(summary.issues)
 
 
 async def test_generation_provider_usage_rejects_any_missing_runtime_usage() -> None:

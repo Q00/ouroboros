@@ -637,7 +637,36 @@ class AgentProcessHandle:
         """
         if store is None:
             return False, None
-        seed_id = cls._cancel_checkpoint_seed(process_id)
+        found, reason = cls._read_cancel_under_seed(
+            store, cls._cancel_checkpoint_seed(process_id), decided=None
+        )
+        if found is not None:
+            return found, reason
+        # Nothing under this version's key.  A cancellation written before the
+        # key changed is still a cancellation, and it is honoured only when the
+        # checkpoint names this exact process: the released seed embedded the id
+        # in a filename that folded ``:`` and ``/`` onto ``_``, so a lookalike
+        # can reach this file, and the stored ``cancel_key`` is what tells the
+        # two apart.  Older still, written before that field existed, is not
+        # honoured -- an unidentifiable cancel marker fails closed.
+        legacy = cls._legacy_cancel_checkpoint_seed(process_id)
+        found, reason = cls._read_cancel_under_seed(store, legacy, decided=process_id)
+        return (found or False), reason
+
+    @classmethod
+    def _read_cancel_under_seed(
+        cls,
+        store: CheckpointStore,
+        seed_id: str,
+        *,
+        decided: str | None,
+    ) -> tuple[bool | None, str | None]:
+        """Read one seed's cancel state.  ``None`` means the seed said nothing.
+
+        ``decided`` names the process whose identity the checkpoint must claim
+        before its cancellation counts; ``None`` skips that check, which is
+        right for the digest seed because no other id can reach it.
+        """
         for level in range(store.MAX_ROLLBACK_DEPTH + 1):
             if not cls._checkpoint_artifact_exists(store, seed_id, level=level):
                 continue
@@ -655,29 +684,52 @@ class AgentProcessHandle:
                     )
                 return False, None
             if checkpoint.phase == _CANCELLED_PHASE:
+                if decided is not None and checkpoint.state.get("cancel_key") != decided:
+                    return False, None
                 reason = checkpoint.state.get("reason")
                 return True, reason if isinstance(reason, str) else None
-        return False, None
+        return None, None
 
     @staticmethod
     def _cancel_checkpoint_seed(process_id: str) -> str:
-        """Return the reserved durable checkpoint seed for cancel control state."""
-        AgentProcessHandle._validate_process_id_namespace(process_id)
-        return f"{_CANCEL_CONTROL_SEED_PREFIX}{process_id}"
+        """Return the reserved durable checkpoint seed for cancel control state.
+
+        The id is digested rather than embedded, because the seed becomes a
+        filename and :meth:`CheckpointStore._sanitize_seed_id` maps several
+        distinct characters onto ``_``.  Embedded verbatim, ``a:b`` and ``a_b``
+        -- and ``mcp_job:x`` and ``mcp_job_x`` -- named one checkpoint, so one
+        process could read another's durable cancel authority.  A digest is
+        injective for every id any caller can hold, which is what an identity
+        has to be; :func:`_pause_checkpoint_seed_id` already derives the other
+        control-plane key this way.
+
+        This also retires the namespace check that stood here.  It rejected
+        process ids beginning with the control prefix, which mattered only
+        while a caller's bytes reached the seed's structure.  They no longer
+        do: an id equal to the prefix digests like any other.
+
+        Only writes use this seed alone.  A read falls back to
+        :meth:`_legacy_cancel_checkpoint_seed` so a cancellation persisted by
+        the released derivation is still found.
+        """
+        return f"{_CANCEL_CONTROL_SEED_PREFIX}{hashlib.sha256(process_id.encode()).hexdigest()}"
 
     @staticmethod
-    def _validate_process_id_namespace(process_id: str) -> None:
-        """Reject caller process IDs that collide with control-plane seeds."""
-        sanitized_process_id = CheckpointStore._sanitize_seed_id(process_id)  # noqa: SLF001
-        sanitized_prefix = CheckpointStore._sanitize_seed_id(  # noqa: SLF001
-            _CANCEL_CONTROL_SEED_PREFIX
-        )
-        if process_id.startswith(_CANCEL_CONTROL_SEED_PREFIX) or sanitized_process_id.startswith(
-            sanitized_prefix
-        ):
-            raise ValueError(
-                "process_id uses the reserved agent-process cancel checkpoint namespace"
-            )
+    def _legacy_cancel_checkpoint_seed(process_id: str) -> str:
+        """Return the seed the released derivation wrote, for reading only.
+
+        A cancel checkpoint is durable state that shipped, so an upgrade that
+        stopped finding it would resume work an operator had cancelled -- the
+        one thing durability was for.  Unlike the artifact database, which has
+        never shipped and therefore owes no migration, this state exists on
+        machines that will run the new code.
+
+        Never written.  A cancellation observed under this seed is consumed
+        under the digest seed by the path that already consumes it, and a
+        consumed marker there ends every later read before it reaches back
+        here -- so the old key retires itself and nothing has to migrate it.
+        """
+        return f"{_CANCEL_CONTROL_SEED_PREFIX}{process_id}"
 
     @classmethod
     def _consume_persisted_cancel(
@@ -1071,8 +1123,6 @@ class AgentProcess:
         """
         pid = process_id or _new_process_id()
         cancel_key = self.cancel_key or pid
-        AgentProcessHandle._validate_process_id_namespace(pid)
-        AgentProcessHandle._validate_process_id_namespace(cancel_key)
         emit = self._make_emitter(intent=intent, process_id=pid)
         replay_store: _ReplayableEventStore | None = (
             self.event_store  # type: ignore[assignment]

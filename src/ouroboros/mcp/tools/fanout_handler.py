@@ -7,13 +7,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_submitted
 from ouroboros.mcp.tools.fanout import (
+    FANOUT_KIND_HOST_EXECUTION,
     FanoutRegistry,
     PreparedFanoutSynthesis,
     prepare_fanout_results,
@@ -29,7 +31,11 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.orchestrator.host_dispatch import HOST_EXECUTION_RESULT_KEY
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
 log = structlog.get_logger(__name__)
 
@@ -61,9 +67,33 @@ class SubmitFanoutResultsHandler:
 
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     disposable_memory: DisposableMemory | None = field(default=None, repr=False)
+    # HostDispatchBridge from the MCP composition root. Execution-kind
+    # submissions wake the parked runtime waiter through it instead of running
+    # advisory synthesis; ``None`` (a root with no bridge) fails them closed.
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._registry = self.fanout_registry or FanoutRegistry()
+
+    @property
+    def artifact_store(self) -> ArtifactStore | None:
+        """Return the store this handler publishes into, or ``None`` if it cannot.
+
+        Handed to advisory producers so a reader asks the same store that wrote,
+        rather than deriving a path from the workspace both were built from.
+        Two derivations are not one address: this side resolves when it is
+        constructed and a producer would resolve when a question is asked, so a
+        relative workspace and a change of process directory in between would
+        put the reader and the writer in different places.
+
+        The store rather than its root, because what a reader needs from it is
+        not only where to look: publication time, membership and bounded reads
+        are all things the store already answers, and re-deriving them beside it
+        is what produced the review round this replaced.
+        """
+        if self.disposable_memory is None:
+            return None
+        return self.disposable_memory.artifact_store
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -79,8 +109,10 @@ class SubmitFanoutResultsHandler:
                 "correlation field for that child. A child you could not spawn "
                 "at all is exactly {key, undispatched: true}; never invent output. "
                 "Missing required keys return `status=partial`; retry with EVERY lane. "
-                "A complete submission returns a bounded disposable artifact envelope; "
-                "fetch its body with the MCP tool `ouroboros_fetch_artifact`."
+                "Completed advisory fan-outs return a bounded disposable artifact "
+                "envelope for `ouroboros_fetch_artifact`. Host-execution submissions "
+                "instead acknowledge delivery to the execution engine; keep polling "
+                "`ouroboros_job_wait` for verification and further dispatches."
             ),
             parameters=(
                 MCPToolParameter(
@@ -146,9 +178,39 @@ class SubmitFanoutResultsHandler:
             results=list(raw_results),
             fanout_id=fanout_id,
         )
+        record = self._registry.load(fanout_id)
+        expected_count = len(record.expected_keys) if record is not None else 0
+        received_count = sum(
+            1
+            for item in raw_results
+            if isinstance(item, dict) and "content" in item and "undispatched" not in item
+        )
+        undispatched_count = sum(
+            1 for item in raw_results if isinstance(item, dict) and item.get("undispatched") is True
+        )
         outcome = await self._publish_or_synthesize(prepared, fanout_id=fanout_id)
+        fanout_kind = record.kind if record is not None else "unknown"
         if isinstance(outcome, MCPToolError):
+            record_subagent_dispatch_submitted(
+                fanout_kind=fanout_kind,
+                submission_status="publication_failed",
+                expected_count=expected_count,
+                received_count=received_count,
+                undispatched_count=undispatched_count,
+            )
             return Result.err(outcome)
+        submission_status = (
+            "complete"
+            if isinstance(prepared, PreparedFanoutSynthesis)
+            else str(outcome.get("status") or "unknown_kind")
+        )
+        record_subagent_dispatch_submitted(
+            fanout_kind=fanout_kind,
+            submission_status=submission_status,
+            expected_count=expected_count,
+            received_count=received_count,
+            undispatched_count=undispatched_count,
+        )
         if outcome.get("status") == "unknown_fanout_id":
             return Result.err(
                 MCPToolError(
@@ -177,6 +239,23 @@ class SubmitFanoutResultsHandler:
     ) -> dict[str, Any] | MCPToolError:
         if not isinstance(prepared, PreparedFanoutSynthesis):
             return prepared
+        if prepared.record.kind == FANOUT_KIND_HOST_EXECUTION:
+            # Execution submissions are transport, not synthesis: deliver the
+            # validated lane to the parked HostDispatchRuntime waiter. The
+            # server-side verify gate — not this reply — judges the work.
+            if self.host_dispatch_bridge is None:
+                return MCPToolError(
+                    "execution dispatch submission requires a composed "
+                    "host-dispatch bridge (start the run through the MCP "
+                    "server that issued this dispatch)",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            undispatched_keys = prepared.completion_report.get("undispatched_keys") or ()
+            return self.host_dispatch_bridge.submit(
+                fanout_id,
+                prepared.provided,
+                undispatched=HOST_EXECUTION_RESULT_KEY in undispatched_keys,
+            )
         if self.disposable_memory is None:
             return MCPToolError(
                 "terminal fan-out synthesis requires a configured disposable artifact service",
@@ -220,16 +299,34 @@ class FetchArtifactHandler:
             name="ouroboros_fetch_artifact",
             description=(
                 "Fetch and integrity-check a disposable Ouroboros artifact by the "
-                "contract_id returned in an artifact envelope. For fan-out completion, "
-                "continue from the synthesis in the returned `body`. This is an explicit "
-                "read and never re-executes the originating work."
+                "contract_id returned in an artifact envelope, or offered to an "
+                "advisory lane beside the lane_id that produced it. For fan-out "
+                "completion, continue from the synthesis in the returned `body`. "
+                "This is an explicit read and never re-executes the originating work."
             ),
             parameters=(
                 MCPToolParameter(
                     name="contract_id",
                     type=ToolInputType.STRING,
-                    description="The contract_id from a disposable artifact envelope.",
-                    required=True,
+                    description=(
+                        "The contract_id from a disposable artifact envelope. Omit it "
+                        "and pass lane_id alone to list instead: that lane's own "
+                        "recent findings in this project, newest first, as "
+                        "contract_ids to read back with this same tool."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="lane_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Optional. Narrows a fan-out artifact to the output of one "
+                        "lane, returning that lane's body alone. Pass the lane_id "
+                        "offered beside the contract_id; omit it to read the whole "
+                        "artifact. A supplied lane the artifact does not carry is "
+                        "an error, never a broader read."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -238,13 +335,49 @@ class FetchArtifactHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Fetch one verified body without requiring shell access."""
+        """Fetch one verified body, or list what a lane published recently."""
         contract_id = str(arguments.get("contract_id") or "").strip()
         if not contract_id:
-            return Result.err(
-                MCPToolError(
-                    "contract_id is required",
-                    tool_name="ouroboros_fetch_artifact",
+            # A lane on its own is the listing: which of its own findings exist
+            # to be read. Sending that list in every prompt spent a fifth of it
+            # on identifiers nothing could choose between, and a lane that
+            # wants none of them paid for it anyway. The window and the cap are
+            # the query's, not the caller's, so a wider read cannot be asked
+            # for (RFC Q00/ouroboros#2167).
+            lane = str(arguments.get("lane_id") or "").strip()
+            if not lane:
+                return Result.err(
+                    MCPToolError(
+                        "pass a contract_id to read one artifact, or a lane_id alone "
+                        "to list what that lane published here recently",
+                        tool_name="ouroboros_fetch_artifact",
+                    )
+                )
+            if self.disposable_memory is None:
+                return Result.err(
+                    MCPToolError(
+                        "artifact fetch requires a configured project artifact service",
+                        tool_name="ouroboros_fetch_artifact",
+                    )
+                )
+            from ouroboros.mcp.tools.recent_findings import recent_findings_by_lane
+
+            found = await asyncio.to_thread(
+                recent_findings_by_lane,
+                self.disposable_memory.artifact_store,
+                lanes={lane},
+            )
+            listing = {"lane_id": lane, "recent": found.get(lane, [])}
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=json.dumps(listing, ensure_ascii=False, sort_keys=True),
+                        ),
+                    ),
+                    is_error=False,
+                    meta=listing,
                 )
             )
         if self.disposable_memory is None:
@@ -254,8 +387,23 @@ class FetchArtifactHandler:
                     tool_name="ouroboros_fetch_artifact",
                 )
             )
+        # Presence decides the path; the value is never coerced toward the
+        # broader read.  Normalizing the argument first ("strip, then branch on
+        # truthiness") turned a supplied-but-blank lane into an unscoped fetch
+        # -- a malformed request quietly granted every sibling's output.  Here
+        # only an absent or JSON-null argument means the legacy whole-artifact
+        # read; anything supplied is looked up verbatim, and a lane no fan-out
+        # ever dispatched (blank included) fails as not-found rather than
+        # falling open.
+        lane_argument = arguments.get("lane_id")
+        lane_id = None if lane_argument is None else str(lane_argument)
         try:
-            fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
+            if lane_id is None:
+                fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
+            else:
+                fetched = await asyncio.to_thread(
+                    self.disposable_memory.fetch_lane, contract_id, lane_id
+                )
         except (ArtifactStoreError, OSError, ValueError) as exc:
             return Result.err(
                 MCPToolError(
@@ -264,11 +412,12 @@ class FetchArtifactHandler:
                 )
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "contract_id": fetched.envelope.contract_id,
-            "artifact_ref": fetched.envelope.artifact_ref,
             "body": fetched.body,
         }
+        if lane_id is not None:
+            payload["lane_id"] = lane_id
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -291,12 +440,12 @@ def create_fanout_handler(
     ensure_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> SubmitFanoutResultsHandler:
     """Build the production fan-out boundary for a resolved workspace."""
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
     return SubmitFanoutResultsHandler(
         fanout_registry=fanout_registry,
         disposable_memory=DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+            artifact_store=ArtifactStore.for_project(project_dir),
             event_store=event_store,
             ensure_ready=ensure_ready,
         ),
@@ -305,11 +454,11 @@ def create_fanout_handler(
 
 def create_artifact_fetch_handler(project_dir: Any) -> FetchArtifactHandler:
     """Build the production explicit-fetch boundary for a resolved workspace."""
-    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.artifact_store import ArtifactStore
 
     return FetchArtifactHandler(
         disposable_memory=DisposableMemory(
-            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+            artifact_store=ArtifactStore.for_project(project_dir),
         )
     )
 

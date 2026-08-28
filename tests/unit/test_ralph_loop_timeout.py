@@ -108,6 +108,8 @@ async def test_ralph_loop_timeout_surfaces_in_tool_result_meta() -> None:
     assert tool_result.meta["status"] == "failed"
     assert tool_result.meta["stop_reason"] == "iteration_timeout"
     assert tool_result.meta["actions"] == ["iteration_timeout"]
+    assert tool_result.meta["failure_reason_code"] == "timeout"
+    assert tool_result.meta["recovery_action"] == "retry"
 
 
 @dataclass

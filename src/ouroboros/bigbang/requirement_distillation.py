@@ -326,8 +326,12 @@ def build_promoted_reference_seed(
 ) -> Seed:
     """Build a Seed without exposing reference-aware sessions to LLM extraction."""
     applied = apply_requirement_distillation({}, distillation)
-    if applied.promotion.blockers:
-        raise ValueError(seed_readiness_details(applied.promotion))
+    readiness = seed_readiness_details(
+        applied.promotion,
+        require_promoted_acceptance_criteria=True,
+    )
+    if readiness["blockers"]:
+        raise ValueError(readiness)
     requirements = applied.requirements
     constraints = _normalized_requirement_values(requirements.get("constraints"))
     criteria = _normalized_requirement_values(requirements.get("acceptance_criteria"))
@@ -374,8 +378,12 @@ def build_promoted_reference_seed(
     )
 
 
-def seed_readiness_details(promotion: PromotionResult) -> dict[str, Any]:
-    """Return typed caller metadata for a blocking promotion result."""
+def seed_readiness_details(
+    promotion: PromotionResult,
+    *,
+    require_promoted_acceptance_criteria: bool = False,
+) -> dict[str, Any]:
+    """Return typed caller metadata for Seed readiness blockers."""
     blockers = []
     for decision in promotion.blockers:
         candidate = decision.candidate
@@ -392,6 +400,23 @@ def seed_readiness_details(promotion: PromotionResult) -> dict[str, Any]:
                 "reason": decision.reason,
                 "section": candidate.section.value,
                 "reference_ids": list(candidate.reference_ids),
+            }
+        )
+    if (
+        not blockers
+        and require_promoted_acceptance_criteria
+        and not any(
+            candidate.section is RequirementSection.ACCEPTANCE_CRITERION
+            for candidate in promotion.promoted
+        )
+    ):
+        blockers.append(
+            {
+                "candidate_id": "promoted-acceptance-criteria",
+                "code": "no_promoted_acceptance_criteria",
+                "reason": "no_promoted_acceptance_criteria",
+                "section": RequirementSection.ACCEPTANCE_CRITERION.value,
+                "reference_ids": [],
             }
         )
     return {

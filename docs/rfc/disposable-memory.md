@@ -1,5 +1,14 @@
 # RFC — Disposable Memory process model and `artifact_ref`
 
+> **Storage superseded by [#2168](https://github.com/Q00/ouroboros/issues/2168).**
+> The discipline this RFC accepted still holds: a child's output stays out of
+> the parent's context, the ledger carries a bounded envelope, and a body is
+> reached only by explicit fetch. What no longer holds is section C2 — the
+> content-addressed filesystem backend, `artifact_ref`, and the per-contract
+> manifest and lifecycle records — which existed because the store was a
+> filesystem. Bodies now live one row per contract in SQLite, and the envelope
+> names the contract rather than a content address.
+>
 > Status: **Accepted** (Phase 2 of #476 Agent OS roadmap).
 > Closes [#512](https://github.com/Q00/ouroboros/issues/512).
 > Related: [#476](https://github.com/Q00/ouroboros/issues/476) M3 (I/O Journal payload policy), [#492](https://github.com/Q00/ouroboros/pull/492) (`agent_process` target_type forward declaration), [#511](https://github.com/Q00/ouroboros/issues/511), [#518](https://github.com/Q00/ouroboros/issues/518) (M6 AgentProcess lifecycle).

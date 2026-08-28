@@ -11,7 +11,8 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 4
+CURRENT_EXECUTION_SEMANTICS_VERSION = 7
+PRE_VERIFY_SHELL_EXECUTION_SEMANTICS_VERSION = 4
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
 
 
@@ -27,6 +28,7 @@ _CURRENT_KEYS = frozenset(
         "version",
         "run_verify_commands",
         "verify_command_timeout_seconds",
+        "verify_shell_identity",
         "ac_retry_attempts",
         "cross_harness_redispatch",
         "enable_decomposition",
@@ -84,6 +86,25 @@ def _has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     return False
 
 
+def _valid_verify_shell_identity(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping) or set(value) != {"path", "realpath", "sha256"}:
+        return False
+    path = value.get("path")
+    realpath = value.get("realpath")
+    digest = value.get("sha256")
+    return bool(
+        isinstance(path, str)
+        and path
+        and isinstance(realpath, str)
+        and realpath
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
+
+
 def valid_execution_semantics_contract(value: object) -> bool:
     """Validate the exact current scalar executor schema."""
     if not isinstance(value, Mapping) or not _has_exact_keys(value, _CURRENT_KEYS):
@@ -95,6 +116,7 @@ def valid_execution_semantics_contract(value: object) -> bool:
     ):
         return False
     timeout = value.get("verify_command_timeout_seconds")
+    verify_shell_identity = value.get("verify_shell_identity")
     retries = value.get("ac_retry_attempts")
     max_depth = value.get("max_decomposition_depth")
     max_workers = value.get("max_parallel_workers")
@@ -117,6 +139,7 @@ def valid_execution_semantics_contract(value: object) -> bool:
     return bool(
         type(timeout) is int
         and timeout >= 1
+        and _valid_verify_shell_identity(verify_shell_identity)
         and type(retries) is int
         and retries >= 0
         and type(max_depth) is int
@@ -142,6 +165,37 @@ def valid_execution_semantics_contract(value: object) -> bool:
         and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
         and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
     )
+
+
+def migrated_pre_verify_shell_execution_semantics(
+    value: object,
+) -> dict[str, object] | None:
+    """Migrate v4/v5 shell authority to conservative unavailable verification.
+
+    V4 had no shell authority; V5 sealed only a lexical path. Neither can prove
+    the canonical executable that should judge pending criteria, so both resume
+    with a durable ``None`` identity instead of selecting a new live target.
+    """
+    if not isinstance(value, Mapping) or "verify_shell_identity" in value:
+        return None
+    version = value.get("version")
+    if version == 4:
+        if "verify_shell_path" in value:
+            return None
+    elif version == 5:
+        if "verify_shell_path" not in value:
+            return None
+    else:
+        return None
+    migrated = dict(value)
+    migrated.pop("verify_shell_path", None)
+    migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+    migrated["verify_shell_identity"] = None
+    if valid_execution_semantics_contract(
+        migrated
+    ) or valid_legacy_preflight_execution_semantics_contract(migrated):
+        return migrated
+    return None
 
 
 def valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
@@ -180,6 +234,7 @@ def pre_adaptive_execution_semantics_rejection(
         initial_limit=initial_limit,
         max_limit=max_limit,
     )
+    candidate["verify_shell_identity"] = None
     if not valid_execution_semantics_contract(candidate):
         return None
     if not isinstance(persisted_fingerprint, str) or persisted_fingerprint != fingerprint(
@@ -203,6 +258,7 @@ def pre_adaptive_execution_semantics_rejection(
 __all__ = [
     "CURRENT_EXECUTION_SEMANTICS_VERSION",
     "ExecutionSemanticsRejection",
+    "migrated_pre_verify_shell_execution_semantics",
     "pre_adaptive_execution_semantics_rejection",
     "valid_execution_semantics_contract",
     "valid_legacy_preflight_execution_semantics_contract",

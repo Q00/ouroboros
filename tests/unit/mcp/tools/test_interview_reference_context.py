@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
+from ouroboros.core.errors import ValidationError
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
@@ -142,7 +143,7 @@ def test_seed_subagent_payload_separates_promoted_and_omitted_candidates() -> No
 
 
 @pytest.mark.asyncio
-async def test_plugin_reference_seed_is_built_server_side_without_child_leakage() -> None:
+async def test_plugin_reference_seed_reopens_when_no_acs_are_promoted() -> None:
     cue = ReferenceCue(
         reference_id="linear",
         label="Linear-like",
@@ -186,7 +187,7 @@ async def test_plugin_reference_seed_is_built_server_side_without_child_leakage(
         patch(
             "ouroboros.mcp.tools.authoring_handlers._plugin_save_state",
             AsyncMock(return_value=Result.ok(MagicMock())),
-        ),
+        ) as save_state,
         patch(
             "ouroboros.mcp.tools.authoring_handlers.dispatch_plugin_terminal",
             AsyncMock(),
@@ -194,10 +195,21 @@ async def test_plugin_reference_seed_is_built_server_side_without_child_leakage(
     ):
         result = await handler.handle({"session_id": state.interview_id})
 
-    assert result.is_ok
-    assert "Seed Generated Successfully" in result.value.text_content
-    assert "Keyboard-first command menu" not in result.value.text_content
-    assert result.value.meta["requirement_distillation"]
+    assert result.is_err
+    assert result.error.error_code == "interview_reopen_required"
+    assert result.error.details == {
+        "code": "interview_reopen_required",
+        "blockers": [
+            {
+                "candidate_id": "promoted-acceptance-criteria",
+                "code": "no_promoted_acceptance_criteria",
+                "reason": "no_promoted_acceptance_criteria",
+                "section": "acceptance_criterion",
+                "reference_ids": [],
+            }
+        ],
+    }
+    save_state.assert_not_awaited()
     dispatch.assert_not_awaited()
 
 
@@ -238,5 +250,136 @@ async def test_plugin_seed_reopens_interview_for_queued_unresolved_reference() -
         result = await handler.handle({"session_id": state.interview_id})
 
     assert result.is_err
-    assert "reference_confirmation_required" in str(result.error)
+    assert result.error.error_code == "interview_reopen_required"
+    assert result.error.details == {
+        "code": "interview_reopen_required",
+        "blockers": [
+            {
+                "candidate_id": "reference-0:contrast-required",
+                "code": "reference_confirmation_required",
+                "reason": "required_unknown",
+                "section": "context",
+                "reference_ids": ["linear"],
+            }
+        ],
+    }
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_in_process_seed_preserves_typed_reopen_error() -> None:
+    details = {
+        "code": "interview_reopen_required",
+        "blockers": [
+            {
+                "candidate_id": "reference-0:contrast-required",
+                "code": "reference_confirmation_required",
+                "reason": "required_unknown",
+                "section": "context",
+                "reference_ids": ["linear"],
+            }
+        ],
+    }
+    state = InterviewState(
+        interview_id="session-in-process-reference",
+        initial_context="Build an issue tool",
+        status=InterviewStatus.COMPLETED,
+        ambiguity_score=0.1,
+    )
+    engine = MagicMock()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    generator = MagicMock()
+    generator.generate = AsyncMock(
+        return_value=Result.err(
+            ValidationError(
+                "Interview must be reopened before Seed generation",
+                field="requirement_distillation",
+                details=details,
+            )
+        )
+    )
+    handler = GenerateSeedHandler(
+        interview_engine=engine,
+        seed_generator=generator,
+        llm_adapter=MagicMock(),
+    )
+
+    result = await handler.handle({"session_id": state.interview_id})
+
+    assert result.is_err
+    assert result.error.error_code == "interview_reopen_required"
+    assert result.error.details is details
+
+
+@pytest.mark.asyncio
+async def test_plugin_reference_seed_succeeds_for_confirmed_requirement() -> None:
+    cue = ReferenceCue(
+        reference_id="linear",
+        label="Linear-like",
+        origin=ReferenceOrigin.USER_TEXT,
+    )
+    question = build_reference_contrast_question(cue)
+    confirmed_requirement = "For the Linear-like reference, keyboard-first navigation is required."
+    state = InterviewState(
+        interview_id="session-confirmed-reference",
+        initial_context="Build a Linear-like issue tool",
+        status=InterviewStatus.COMPLETED,
+        ambiguity_score=0.1,
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What outcome matters most?",
+                user_response="Fast triage.",
+            ),
+            InterviewRound(
+                round_number=2,
+                question=question,
+                user_response="Copy speed, not keyboard menus.",
+            ),
+            InterviewRound(
+                round_number=3,
+                question="Which reference traits are actual requirements?",
+                user_response=confirmed_requirement,
+            ),
+        ],
+        reference_cues=(cue,),
+        reference_resolutions=(
+            ReferenceContrastResolution(
+                reference_id="linear",
+                status=ReferenceResolutionStatus.RESOLVED,
+                asked_question=question,
+                answer="Copy speed, not keyboard menus.",
+            ),
+        ),
+    )
+    handler = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+
+    with (
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+            AsyncMock(return_value=Result.ok(state)),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_save_state",
+            AsyncMock(return_value=Result.ok(MagicMock())),
+        ) as save_state,
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.dispatch_plugin_terminal",
+            AsyncMock(),
+        ) as dispatch,
+    ):
+        result = await handler.handle({"session_id": state.interview_id})
+
+    assert result.is_ok
+    assert confirmed_requirement in result.value.content[0].text
+    requirement_distillation = result.value.meta["requirement_distillation"]
+    assert isinstance(requirement_distillation, dict)
+    candidates = requirement_distillation["candidates"]
+    assert isinstance(candidates, list)
+    confirmed = candidates[-1]
+    assert isinstance(confirmed, dict)
+    assert confirmed["content_source"] == "reference_derived"
+    assert confirmed["resolution"] == "confirmed"
+    assert confirmed["confirmation_authority"] == "user"
+    save_state.assert_awaited_once()
     dispatch.assert_not_awaited()

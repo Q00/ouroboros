@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
     CheckResult,
@@ -114,11 +115,8 @@ class TestDirectEvaluateSingleACTelemetry:
         event, props = capture.call_args.args
         assert event == "workflow_outcome"
         assert props["command"] == "evaluate"
-        assert props["phase"] == "terminal"
         assert props["terminal_status"] == "completed"
-        assert props["ok"] is True
         assert props["verified"] is True
-        assert props["final_approved"] is True
 
     async def test_success_not_approved_emits_unverified(self) -> None:
         mock_pipeline = _install_pipeline_mock(Result.ok(_eval_result("s2", final_approved=False)))
@@ -144,9 +142,7 @@ class TestDirectEvaluateSingleACTelemetry:
         assert result.is_ok
         capture.assert_called_once()
         _, props = capture.call_args.args
-        assert props["ok"] is True
         assert props["verified"] is False
-        assert props["final_approved"] is False
 
     async def test_pipeline_failure_emits_failed_terminal_status(self) -> None:
         mock_pipeline = _install_pipeline_mock(Result.err(ValueError("semantic stage exploded")))
@@ -173,16 +169,14 @@ class TestDirectEvaluateSingleACTelemetry:
         capture.assert_called_once()
         _, props = capture.call_args.args
         assert props["terminal_status"] == "failed"
-        assert props["ok"] is False
         assert props["verified"] is False
-        assert props["final_approved"] is None
 
     async def test_config_error_before_pipeline_runs_emits_failed(self) -> None:
         """RuntimeError raised while wiring the adapter still counts as an attempt."""
         with (
             patch(
                 "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
-                side_effect=RuntimeError("unsupported backend"),
+                side_effect=ConfigError("unsupported backend"),
             ),
             patch(
                 "ouroboros.persistence.event_store.EventStore",
@@ -203,8 +197,60 @@ class TestDirectEvaluateSingleACTelemetry:
         capture.assert_called_once()
         _, props = capture.call_args.args
         assert props["terminal_status"] == "failed"
-        assert props["ok"] is False
-        assert props["final_approved"] is None
+        assert props["failure_reason_code"] == "config"
+
+    async def test_generic_factory_runtime_error_is_not_config(self) -> None:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
+                side_effect=RuntimeError("provider construction failed"),
+            ),
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+            patch(_CAPTURE_TARGET) as capture,
+        ):
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s4c",
+                    "artifact": "def f(): pass",
+                    "acceptance_criterion": "Only AC",
+                }
+            )
+
+        assert result.is_err
+        _, props = capture.call_args.args
+        assert props["failure_reason_code"] == "unknown"
+
+    async def test_pipeline_runtime_error_falls_back_to_unknown(self) -> None:
+        mock_pipeline = _install_pipeline_mock(  # type: ignore[arg-type]
+            Result.ok(_eval_result("s4b", final_approved=True))
+        )
+        mock_pipeline.evaluate = AsyncMock(side_effect=RuntimeError("pipeline bug"))
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+            patch(_CAPTURE_TARGET) as capture,
+        ):
+            MockPipeline.return_value = mock_pipeline
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s4b",
+                    "artifact": "def f(): pass",
+                    "acceptance_criterion": "Only AC",
+                }
+            )
+
+        assert result.is_err
+        _, props = capture.call_args.args
+        assert props["failure_reason_code"] == "unknown"
 
 
 class TestDirectEvaluateMultiACTelemetry:
@@ -243,7 +289,6 @@ class TestDirectEvaluateMultiACTelemetry:
         _, props = capture.call_args.args
         assert props["terminal_status"] == "completed"
         assert props["verified"] is True
-        assert props["final_approved"] is True
 
     async def test_mixed_outcomes_emit_unverified(self) -> None:
         mock_pipeline = AsyncMock()
@@ -277,7 +322,6 @@ class TestDirectEvaluateMultiACTelemetry:
         capture.assert_called_once()
         _, props = capture.call_args.args
         assert props["verified"] is False
-        assert props["final_approved"] is False
 
     async def test_pipeline_error_mid_checklist_emits_failed(self) -> None:
         mock_pipeline = AsyncMock()
@@ -310,7 +354,6 @@ class TestDirectEvaluateMultiACTelemetry:
         capture.assert_called_once()
         _, props = capture.call_args.args
         assert props["terminal_status"] == "failed"
-        assert props["final_approved"] is None
 
 
 class TestDirectEvaluateArgumentValidationDoesNotEmit:
@@ -342,7 +385,6 @@ class TestRecordDirectEvaluationOutcome:
 
         _, props = capture.call_args.args
         assert props["verified"] is True
-        assert props["ok"] is True
         assert props["terminal_status"] == "completed"
 
     def test_not_verified_when_approved_but_failed(self) -> None:
@@ -352,7 +394,6 @@ class TestRecordDirectEvaluationOutcome:
 
         _, props = capture.call_args.args
         assert props["verified"] is False
-        assert props["ok"] is False
         assert props["terminal_status"] == "failed"
 
     def test_not_verified_when_not_approved(self) -> None:
@@ -361,14 +402,13 @@ class TestRecordDirectEvaluationOutcome:
 
         _, props = capture.call_args.args
         assert props["verified"] is False
-        assert props["final_approved"] is False
 
     def test_none_approval_is_preserved_not_coerced(self) -> None:
         with patch(_CAPTURE_TARGET) as capture:
             record_direct_evaluation_outcome(final_approved=None, failed=True)
 
         _, props = capture.call_args.args
-        assert props["final_approved"] is None
+        assert props["verified"] is False
 
     def test_never_raises_when_capture_explodes(self) -> None:
         with patch(_CAPTURE_TARGET, side_effect=RuntimeError("posthog down")):

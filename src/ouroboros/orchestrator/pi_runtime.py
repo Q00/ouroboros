@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 from typing import Any
 
 from ouroboros.core.errors import ProviderError
@@ -45,6 +46,53 @@ log = get_logger(__name__)
 
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Ouroboros speaks a Claude-style capitalized tool vocabulary while Pi's
+# built-in tools are lowercase (``read``, ``bash``, ``edit``, ``write``,
+# ``grep``, ``find``, ``ls``).  Unknown names pass through unchanged so
+# extension/custom tool names keep working; unmatched allow-list entries
+# are inert for Pi.
+_PI_TOOL_FLAG_NAMES: dict[str, str] = {
+    "Read": "read",
+    "Write": "write",
+    "Edit": "edit",
+    "Bash": "bash",
+    "Command": "bash",
+    "Execute": "bash",
+    "Glob": "find",
+    "Grep": "grep",
+    "LS": "ls",
+    "Ls": "ls",
+}
+
+_NATIVE_PARAM_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _probe_pi_native_param_flags(cli_path: str) -> tuple[bool, bool, bool]:
+    """Detect whether the Pi CLI accepts native parameter flags.
+
+    Returns ``(has_append_system_prompt, has_tools, has_no_tools)``. Preserve
+    each help-probe result independently so safety checks can distinguish a
+    tools-capable CLI from a legacy CLI even when the paired native parameter
+    path is unavailable.
+    """
+    try:
+        result = subprocess.run(  # noqa: ASYNC100 - one-shot startup probe
+            [cli_path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_NATIVE_PARAM_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return (False, False, False)
+    if result.returncode != 0:
+        return (False, False, False)
+    help_text = f"{result.stdout}\n{result.stderr}"
+    return (
+        "--append-system-prompt" in help_text,
+        "--tools" in help_text,
+        "--no-tools" in help_text,
+    )
 
 
 class PiRuntime:
@@ -87,6 +135,12 @@ class PiRuntime:
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
+        # Capability discovery is deliberately completed during synchronous
+        # runtime construction.  execute_task() runs on the orchestration
+        # event loop and must never invoke blocking subprocess APIs there.
+        self._native_param_flags: tuple[bool, bool, bool] | None = _probe_pi_native_param_flags(
+            self._cli_path
+        )
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
@@ -144,15 +198,27 @@ class PiRuntime:
 
     @property
     def capabilities(self) -> RuntimeCapabilities:
+        native_params = self._supports_native_param_flags()
+        # Pi exposes positive allow-list and disable-all authority as independent
+        # flags. Preserve that distinction publicly: either flag can exist without
+        # the other and changes which concrete tools request is enforceable.
         return RuntimeCapabilities(
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
-            # System prompt and tool guidance are composed into the user
-            # message, not passed as native runtime parameters. Pi also has no
-            # permission-mode flag.
-            system_prompt_support=ParamSupport.TRANSLATED,
-            tool_restriction_support=ParamSupport.TRANSLATED,
+            # ``--append-system-prompt`` and ``--tools`` deliver the system
+            # prompt and a non-empty tool allow-list natively only when the
+            # installed Pi supports the paired parameter path; older binaries
+            # fall back to user-message composition.
+            system_prompt_support=(
+                ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
+            ),
+            tool_restriction_support=(
+                ParamSupport.NATIVE if native_params else ParamSupport.TRANSLATED
+            ),
+            empty_tool_restriction_support=(
+                ParamSupport.NATIVE if self._supports_no_tools_flag() else ParamSupport.IGNORED
+            ),
             permission_mode_support=ParamSupport.IGNORED,
             session_signals=SessionSignalCapabilities(
                 inform_delivery=True,
@@ -160,6 +226,21 @@ class PiRuntime:
                 after_turn_delivery=True,
             ),
         )
+
+    def _supports_native_param_flags(self) -> bool:
+        """Return whether the paired system-prompt and tools flags are available."""
+        flags = self._native_param_flags
+        return flags is not None and flags[0] and flags[1]
+
+    def _supports_tools_flag(self) -> bool:
+        """Return whether the Pi CLI supports a non-empty tools allow-list."""
+        flags = self._native_param_flags
+        return flags is not None and flags[1]
+
+    def _supports_no_tools_flag(self) -> bool:
+        """Return whether the Pi CLI supports ``--no-tools``."""
+        flags = self._native_param_flags
+        return flags is not None and flags[2]
 
     # -- CLI resolution ----------------------------------------------------
 
@@ -178,12 +259,17 @@ class PiRuntime:
         *,
         prompt: str,
         resume_session_id: str | None = None,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
     ) -> list[str]:
         """Assemble the CLI argument list for ``pi --mode json <prompt>``.
 
         Pi's documented JSON mode accepts the task as a positional message
         argument. Keep that contract explicit instead of relying on stdin
-        behavior that is not documented for JSON mode.
+        behavior that is not documented for JSON mode. When the installed Pi
+        supports them, ``--append-system-prompt`` and ``--tools`` carry the
+        system prompt and the tool allow-list as native runtime parameters
+        instead of prompt text.
         """
         command = [self._cli_path, "--mode", "json"]
 
@@ -194,6 +280,18 @@ class PiRuntime:
             if not _SAFE_SESSION_ID_PATTERN.match(resume_session_id):
                 raise ValueError(f"Invalid resume_session_id: {resume_session_id!r}")
             command.extend(["--session", resume_session_id])
+
+        if self._supports_native_param_flags():
+            if system_prompt:
+                command.extend(["--append-system-prompt", system_prompt])
+            if tools:
+                pi_names = ",".join(_PI_TOOL_FLAG_NAMES.get(tool, tool) for tool in tools)
+                command.extend(["--tools", pi_names])
+
+        if tools == [] and self._supports_no_tools_flag():
+            # Empty-list enforcement is independent of the paired native
+            # system-prompt/non-empty-tools path.
+            command.append("--no-tools")
 
         command.append(prompt)
         return command
@@ -426,18 +524,45 @@ class PiRuntime:
             current_handle.native_session_id if current_handle is not None else resume_session_id
         )
 
+        native_params = self._supports_native_param_flags()
         composed_parts = []
-        if system_prompt:
+        if system_prompt and not native_params:
             composed_parts.append(f"## System Instructions\n{system_prompt}")
-        if tools:
+        if tools and not native_params:
             tool_list = "\n".join(f"- {t}" for t in tools)
             composed_parts.append(f"## Tooling Guidance\nPrefer these tools:\n{tool_list}")
+
+        # An explicit empty allow-list is a security boundary. Enforce it with
+        # the independently probed --no-tools flag or refuse execution; no
+        # prompt translation can make unrestricted Pi defaults equivalent.
+        if tools == [] and not self._supports_no_tools_flag():
+            yield AgentMessage(
+                type="result",
+                content=(
+                    f"{self._display_name} cannot enforce tools=[] (no-tools restriction): "
+                    "installed Pi CLI lacks --no-tools flag. "
+                    "Refusing to execute with silently unrestricted tool access."
+                ),
+                data={
+                    "subtype": "error",
+                    "error_type": "ToolRestrictionUnenforced",
+                    "parameter": "tools",
+                    "requested": [],
+                    "effective": "unrestricted",
+                },
+                resume_handle=current_handle,
+            )
+            return
+
         composed_parts.append(prompt)
         composed_prompt = "\n\n".join(p for p in composed_parts if p.strip())
 
         try:
             command = self._build_command(
-                prompt=composed_prompt, resume_session_id=attempted_resume
+                prompt=composed_prompt,
+                resume_session_id=attempted_resume,
+                system_prompt=system_prompt,
+                tools=tools,
             )
         except Exception as e:
             yield AgentMessage(

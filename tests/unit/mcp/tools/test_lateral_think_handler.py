@@ -16,6 +16,15 @@ import json
 
 import pytest
 
+from ouroboros.mcp.host_context import (
+    DispatchAuthority,
+    HostCapabilitySource,
+    HostFamily,
+    HostIdentityStatus,
+    HostSubagentCapability,
+    MCPHostContext,
+    use_mcp_host_context,
+)
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.subagent import (
     continue_interview_after_lateral_persona_synthesis,
@@ -467,6 +476,92 @@ async def test_claude_code_runtime_emits_host_driven_spawn_directive() -> None:
     assert payload.meta["result_correlation_key"] == "context.persona"
     assert len(payload.meta["payloads"]) == 2
     assert "Host action — spawn subagents" in payload.text_content
+
+
+@pytest.mark.asyncio
+async def test_external_unknown_host_emits_capability_neutral_contract() -> None:
+    """A worker backend cannot make a capability claim about an MCP host."""
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", opencode_mode=None)
+    host = MCPHostContext(
+        host_family=HostFamily.CLAUDE_CODE,
+        identity_status=HostIdentityStatus.KNOWN,
+        dispatch_authority=DispatchAuthority.MCP_HOST,
+    )
+
+    with use_mcp_host_context(host):
+        result = await handler.handle(
+            {
+                "problem_context": "stuck on X",
+                "current_approach": "tried Y",
+                "persona": "all",
+            }
+        )
+
+    assert result.is_ok
+    payload = result.unwrap()
+    assert payload.meta["dispatch_mode"] == "host_decides"
+    assert payload.meta["host_action"] == "dispatch_subagents_if_supported"
+    assert payload.meta["delivery_mode"] == "inline_host"
+    assert payload.meta["execution_preference"] == "parallel"
+    assert payload.meta["fallback_strategy"] == "sequential"
+    assert payload.meta["host_capability"] == "undeclared"
+    assert "no native parallel subagent primitive" not in payload.text_content
+    assert "did not declare whether parallel subagents are available" in payload.text_content
+
+
+@pytest.mark.asyncio
+async def test_external_declared_parallel_overrides_sequential_worker() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", opencode_mode=None)
+    host = MCPHostContext(
+        host_family=HostFamily.CODEX,
+        identity_status=HostIdentityStatus.KNOWN,
+        subagent_capability=HostSubagentCapability.PARALLEL,
+        capability_source=HostCapabilitySource.MCP_EXTENSION,
+        dispatch_authority=DispatchAuthority.MCP_HOST,
+    )
+
+    with use_mcp_host_context(host):
+        result = await handler.handle(
+            {
+                "problem_context": "stuck on X",
+                "current_approach": "tried Y",
+                "personas": ["researcher", "simplifier"],
+            }
+        )
+
+    assert result.is_ok
+    assert result.unwrap().meta["dispatch_mode"] == "host_driven"
+    assert result.unwrap().meta["host_action"] == "spawn_subagents"
+
+
+@pytest.mark.asyncio
+async def test_external_declared_sequential_overrides_host_driven_worker() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend="claude", opencode_mode=None)
+    host = MCPHostContext(
+        host_family=HostFamily.CLAUDE_CODE,
+        identity_status=HostIdentityStatus.KNOWN,
+        subagent_capability=HostSubagentCapability.SEQUENTIAL,
+        capability_source=HostCapabilitySource.MCP_EXTENSION,
+        dispatch_authority=DispatchAuthority.MCP_HOST,
+    )
+
+    with use_mcp_host_context(host):
+        result = await handler.handle(
+            {
+                "problem_context": "stuck on X",
+                "current_approach": "tried Y",
+                "personas": ["researcher", "simplifier"],
+            }
+        )
+
+    assert result.is_ok
+    payload = result.unwrap()
+    assert payload.meta["dispatch_mode"] == "sequential"
+    assert payload.meta["host_action"] == "process_payloads_sequentially"
+    assert (
+        "selected execution authority has no native parallel"
+        in payload.meta["subagent_orchestration_instruction"]
+    )
 
 
 @pytest.mark.asyncio

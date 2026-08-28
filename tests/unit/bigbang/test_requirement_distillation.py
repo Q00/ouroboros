@@ -257,6 +257,13 @@ def test_promoted_reference_seed_preserves_literal_pipe_in_constraint() -> None:
     state = _reference_state(
         confirmation="The CLI must accept only --lang ko|en as the language flag."
     )
+    state.rounds.append(
+        InterviewRound(
+            round_number=4,
+            question="How is successful language selection confirmed?",
+            user_response="The confirmed requirement is that the selected language is printed.",
+        )
+    )
     distillation = build_requirement_distillation(state)
 
     seed = build_promoted_reference_seed(state, distillation, ambiguity_score=0.1)
@@ -275,6 +282,14 @@ def test_promoted_reference_seed_preserves_literal_pipe_in_acceptance_criterion(
     assert tuple(str(item) for item in seed.acceptance_criteria) == (
         "The confirmed requirement is that output must show ko|en verbatim.",
     )
+
+
+def test_promoted_reference_seed_rejects_empty_contract() -> None:
+    state = _reference_state()
+    distillation = build_requirement_distillation(state)
+
+    with pytest.raises(ValueError, match="no_promoted_acceptance_criteria"):
+        build_promoted_reference_seed(state, distillation, ambiguity_score=0.1)
 
 
 def test_reference_cue_merge_changes_fingerprint_and_revision() -> None:
@@ -298,7 +313,7 @@ def test_reference_cue_merge_changes_fingerprint_and_revision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_generator_filters_unconfirmed_reference_acs(tmp_path) -> None:
+async def test_seed_generator_reopens_when_no_reference_acs_are_promoted(tmp_path) -> None:
     adapter = AsyncMock()
     adapter.complete.return_value = Result.ok(_extraction_response())
     generator = SeedGenerator(
@@ -309,8 +324,74 @@ async def test_seed_generator_filters_unconfirmed_reference_acs(tmp_path) -> Non
 
     result = await generator.generate(_reference_state(), _low_ambiguity())
 
-    assert result.is_ok
-    assert result.value.acceptance_criteria == ()
+    assert result.is_err
+    assert result.error.details["code"] == "interview_reopen_required"
+    assert result.error.details["blockers"][0]["code"] == "no_promoted_acceptance_criteria"
+    adapter.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reference_seed_never_succeeds_with_an_empty_contract(tmp_path) -> None:
+    cue = ReferenceCue(
+        reference_id="dashboard-shot",
+        label="dashboard reference screenshot",
+        origin=ReferenceOrigin.FILE_REFERENCE,
+        excerpt="A dense desktop dashboard with a sidebar and review queue.",
+    )
+    contrast_question = build_reference_contrast_question(cue)
+    contrast_answer = (
+        "Copy the compact hierarchy and sidebar placement; avoid the reference colors and branding."
+    )
+    rounds = [
+        InterviewRound(
+            round_number=1,
+            question=contrast_question,
+            user_response=contrast_answer,
+        )
+    ]
+    rounds.extend(
+        InterviewRound(
+            round_number=index,
+            question=f"Clarify dashboard behavior {index}.",
+            user_response=f"""[from-user][refined]
+Decision: Panel {index} stays visible after refresh.
+
+Constraints (user-stated):
+- Panel {index} uses the shared spacing scale.
+
+Out of scope (user-stated):
+- Custom themes for panel {index}.""",
+        )
+        for index in range(2, 12)
+    )
+    state = InterviewState(
+        interview_id="synthetic-reference-refined",
+        initial_context="Create a responsive review dashboard from a reference screenshot.",
+        rounds=rounds,
+        reference_cues=(cue,),
+        reference_resolutions=(
+            ReferenceContrastResolution(
+                reference_id=cue.reference_id,
+                status=ReferenceResolutionStatus.RESOLVED,
+                asked_question=contrast_question,
+                answer=contrast_answer,
+            ),
+        ),
+    )
+    adapter = AsyncMock()
+    generator = SeedGenerator(
+        llm_adapter=adapter,
+        model="test-model",
+        output_dir=tmp_path,
+    )
+
+    result = await generator.generate(state, _low_ambiguity())
+
+    assert len(state.rounds) == 11
+    assert result.is_err
+    assert result.error.details["code"] == "interview_reopen_required"
+    assert result.error.details["blockers"][0]["code"] == "no_promoted_acceptance_criteria"
+    adapter.complete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,8 @@ def seed_command(
             "--llm-backend",
             help=(
                 "LLM backend for ambiguity scoring and seed generation "
-                "(claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
+                "(claude_code, litellm, codex, copilot, opencode, gemini, goose, "
+                "kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),

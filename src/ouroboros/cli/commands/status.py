@@ -34,12 +34,14 @@ from ouroboros.cli.formatters.tables import (
     create_table,
     print_table,
 )
-from ouroboros.config.loader import load_config
+from ouroboros.config.loader import get_zcode_cli_path, load_config
 from ouroboros.config.models import resolve_event_store_path
+from ouroboros.config.zcode_model_config import inspect_zcode_model_config
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.project_status_handler import ProjectStatusHandler
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+from ouroboros.zcode_cli_launcher import resolve_zcode_command_prefix
 
 app = typer.Typer(
     name="status",
@@ -692,6 +694,10 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
     """Return CLI path candidates using the same precedence as runtime launchers."""
     candidates: list[str] = []
+    if backend == "zcode":
+        zcode_path = get_zcode_cli_path()
+        if zcode_path:
+            candidates.append(zcode_path)
     env_key = _CLI_PATH_ENV_BY_BACKEND.get(backend)
     if env_key is not None:
         env_path = os.environ.get(env_key, "").strip()
@@ -741,15 +747,51 @@ def _check_runtime_backend(data: dict) -> dict[str, str]:
             continue
         expanded = Path(candidate).expanduser()
         if expanded.is_absolute() or len(expanded.parts) > 1:
-            if expanded.exists() and expanded.is_file() and os.access(expanded, os.X_OK):
-                return _health_row("Runtime backend", "ok", f"{backend}: {expanded}")
+            script = backend == "zcode" and expanded.suffix.lower() in {".cjs", ".js", ".mjs"}
+            if (
+                expanded.exists()
+                and expanded.is_file()
+                and (os.access(expanded, os.R_OK) if script else os.access(expanded, os.X_OK))
+            ):
+                if backend == "zcode":
+                    try:
+                        resolve_zcode_command_prefix(expanded)
+                    except RuntimeError as exc:
+                        return _health_row("Runtime backend", "error", str(exc))
+                return _runtime_backend_health_row(backend, f"{backend}: {expanded}")
             continue
         resolved = shutil.which(candidate)
         if resolved:
-            return _health_row("Runtime backend", "ok", f"{backend}: {resolved}")
+            if backend == "zcode":
+                try:
+                    resolve_zcode_command_prefix(resolved)
+                except RuntimeError as exc:
+                    return _health_row("Runtime backend", "error", str(exc))
+            return _runtime_backend_health_row(backend, f"{backend}: {resolved}")
 
     expected = candidates[0] if candidates else (capability.cli_name if capability else backend)
     return _health_row("Runtime backend", "error", f"{backend} CLI not found: {expected}")
+
+
+def _runtime_backend_health_row(backend: str, detail: str) -> dict[str, str]:
+    """Augment the zcode runtime row with the CLI's own model readiness.
+
+    Finding the zcode executable is necessary but not sufficient: every
+    headless invocation also needs ``model.main`` in ``~/.zcode/cli/config.json``
+    or the vendor CLI exits with ``Model config is missing`` after Ouroboros
+    has already launched it.
+    """
+
+    if backend != "zcode":
+        return _health_row("Runtime backend", "ok", detail)
+    zcode_model = inspect_zcode_model_config()
+    if not zcode_model.ok:
+        return _health_row(
+            "Runtime backend",
+            "warning",
+            f"{detail}; model config: {zcode_model.detail}",
+        )
+    return _health_row("Runtime backend", "ok", detail)
 
 
 def _credential_provider_for_backend(backend: str) -> str | None:
@@ -812,6 +854,19 @@ def _check_credentials(data: dict, config_path: Path) -> dict[str, str]:
 
     provider = _credential_provider_for_backend(canonical_backend)
     if provider is None:
+        if canonical_backend == "zcode":
+            zcode_model = inspect_zcode_model_config()
+            if not zcode_model.ok:
+                return _health_row(
+                    "Credentials",
+                    "warning",
+                    f"zcode model config: {zcode_model.detail}",
+                )
+            return _health_row(
+                "Credentials",
+                "ok",
+                f"zcode uses local CLI authentication; {zcode_model.detail}",
+            )
         return _health_row(
             "Credentials", "ok", f"{canonical_backend} uses local CLI authentication"
         )

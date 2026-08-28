@@ -130,6 +130,11 @@ def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[
             cwd=cwd,
             capture_output=True,
             text=True,
+            # Git for Windows emits repository paths as UTF-8. Relying on the
+            # process ANSI code page (commonly cp949 on Korean Windows) can
+            # make subprocess' reader thread fail and leave stdout as None.
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )
@@ -637,19 +642,19 @@ def prepare_task_workspace(
     allow_dirty: bool = False,
     allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace:
-    """Create or reuse a task worktree and acquire its active lock."""
+    """Create or reuse a clean task worktree without touching caller changes."""
     source_path = Path(source_cwd).expanduser().resolve()
     repo_root = _resolve_repo_root(source_path)
     if allow_untracked_evidence and not allow_dirty:
         _ensure_only_untracked_evidence(repo_root)
-    elif not allow_dirty:
-        _ensure_clean_checkout(repo_root)
 
     repo_name = repo_root.name
     branch = _managed_branch_name(repo_root, durable_id)
     worktree_path = _worktree_root() / repo_name / durable_id
     effective_cwd = worktree_path / _relative_subdir(repo_root, source_path)
     _ensure_worktree(repo_root, worktree_path, branch)
+    if not allow_dirty:
+        _ensure_clean_checkout(worktree_path)
 
     workspace = TaskWorkspace(
         durable_id=durable_id,

@@ -729,6 +729,14 @@ class TestBuildInterviewSubagent:
         assert "answer_simplifier" in p.prompt
         assert p.context["question_advisory_strategy"] == "plugin_child_question_first_advisory"
 
+    def test_plugin_interview_prompt_preserves_hard_facts_closure_contract(self) -> None:
+        p = build_interview_subagent(session_id="sess-123", action="start")
+
+        assert "## HARD FACTS BEFORE CLOSURE" in p.prompt
+        assert "What is the exact path?" in p.prompt
+        assert "Every external service the work touches has its access story stated" in p.prompt
+        assert "verification expectations" in p.prompt
+
 
 class TestBuildInterviewQuestionAdvisorySubagents:
     """Test per-question advisory fanout payloads."""

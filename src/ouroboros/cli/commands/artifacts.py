@@ -11,8 +11,8 @@ from typing import Annotated
 import typer
 
 from ouroboros.persistence.artifact_store import (
+    ArtifactStore,
     ArtifactStoreError,
-    ContentAddressedArtifactStore,
 )
 
 app = typer.Typer(
@@ -43,8 +43,8 @@ def parse_ttl(value: str) -> timedelta:
         raise ValueError("ttl is too large") from exc
 
 
-def _store(project_dir: Path) -> ContentAddressedArtifactStore:
-    return ContentAddressedArtifactStore.for_project(project_dir)
+def _store(project_dir: Path) -> ArtifactStore:
+    return ArtifactStore.for_project(project_dir)
 
 
 @app.command("prune")
@@ -90,14 +90,13 @@ def prune(
         return
     verb = "removed" if apply else "would remove"
     for candidate in report.candidates:
-        contracts = ",".join(candidate.contract_ids) if candidate.contract_ids else "unreferenced"
         typer.echo(
-            f"{verb} {candidate.artifact_ref} {candidate.size_bytes}B "
-            f"contracts={contracts} reason={candidate.reason}"
+            f"{verb} {candidate.contract_id} {candidate.body_bytes}B reason={candidate.reason}"
         )
     if apply:
         typer.echo(
-            f"Removed {len(report.removed_refs)} artifact body(s), {report.removed_bytes} byte(s)."
+            f"Removed {len(report.removed_contract_ids)} artifact body(s), "
+            f"{report.removed_bytes} byte(s)."
         )
     else:
         typer.echo("Dry run only. Re-run with --apply to tombstone and delete these bodies.")
@@ -115,13 +114,13 @@ def _print_contract_body(project_dir: Path, contract_id: str, *, replay: bool) -
 
 @app.command("fetch")
 def fetch(
-    contract_id: Annotated[str, typer.Argument(help="Contract id holding the artifact ref.")],
+    contract_id: Annotated[str, typer.Argument(help="Contract id the artifact is bound to.")],
     project_dir: Annotated[
         Path,
         typer.Option("--project-dir", file_okay=False, dir_okay=True),
     ] = Path("."),
 ) -> None:
-    """Explicitly fetch and hash-verify one artifact body."""
+    """Explicitly fetch one artifact body."""
     _print_contract_body(project_dir, contract_id, replay=False)
 
 

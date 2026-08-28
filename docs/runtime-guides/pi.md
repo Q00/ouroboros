@@ -83,7 +83,8 @@ orchestrator:
 For a normal execution task, Ouroboros launches:
 
 ```text
-pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
+pi --mode json [--model <MODEL>] [--session <SESSION_ID>]
+  [--append-system-prompt <SYSTEM>] [--tools <TOOLS>] [--no-tools] <PROMPT>
 ```
 
 | Argument | Why |
@@ -91,7 +92,22 @@ pi --mode json [--model <MODEL>] [--session <SESSION_ID>] <PROMPT>
 | `--mode json` | Requests Pi's headless JSONL event stream |
 | `--model` | Optional model override passed by the caller |
 | `--session` | Optional native Pi session id for targeted resume |
+| `--append-system-prompt` | Native delivery of Ouroboros' `system_prompt` parameter (appended to Pi's base coding prompt) |
+| `--tools` | Native tool allow-list: Pi's own flag enables only the listed tools. Claude-style names (`Read`, `Bash`, `Glob`, …) are mapped to Pi's lowercase built-ins (`read`, `bash`, `find`, …); unknown names pass through for extension tools |
+| `--no-tools` | Explicit tool-free mode: emitted when Ouroboros requests `tools=[]` (no tools allowed). Distinguishes "use defaults" (`tools=None`, flag omitted) from "disable all tools" |
 | `<PROMPT>` | The composed task prompt from Ouroboros |
+
+The native parameter flags are probed once via `pi --help` and retained
+independently. Native system-prompt and non-empty allow-list delivery still
+requires the paired `--append-system-prompt` / `--tools` path; otherwise those
+parameters are composed into the user message and reported as `translated`.
+Empty-list enforcement is exposed separately as
+`empty_tool_restriction_support` and included in the durable runtime capability
+contract, so a Pi binary with only `--no-tools` has different negotiation and
+execution-semantics fingerprints from one that cannot disable tools. If
+`--no-tools` is unavailable, Ouroboros returns `ToolRestrictionUnenforced`
+before spawning Pi rather than silently widening `tools=[]` to unrestricted
+defaults.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal
@@ -161,6 +177,17 @@ to Pi with a deterministic unsupported-dispatch exit code so the normal Pi
 session can continue handling the input instead of receiving a hard bridge
 failure.
 
+The registered `/ooo` command also provides TAB argument completion through Pi's
+native `getArgumentCompletions` surface: `/ooo <TAB>` lists the dispatchable
+subcommands with one-line descriptions, and `ooo run <TAB>` lists Seed files
+from `~/.ouroboros/seeds/` as absolute store paths, so the completed value
+executes regardless of the Pi session directory (relative seed paths resolve
+against the session cwd). Completion is deterministic and offline — the
+subcommand list mirrors the skills the dispatcher itself deems eligible, and a
+unit test derives that set through `resolve_skill_dispatch` so the two cannot
+drift. Seed names containing whitespace are skipped because the dispatcher
+tokenizes the dispatched command on whitespace.
+
 For `ooo auto`, the dispatcher owns the background job lifecycle. After
 `ouroboros_start_auto` returns a `job_id`, the dispatch process polls
 `ouroboros_job_wait` and fetches `ouroboros_job_result` when the job reaches a
@@ -175,10 +202,6 @@ because the command entered through Pi.
 | Command shape | What completes | Pi involvement |
 |---------------|----------------|----------------|
 | `ouroboros auto --runtime pi ...` | Interview, Seed generation, Seed QA, and run handoff | Starts an execution handoff for the Pi runtime; the final product may still be pending |
-| `ouroboros auto --runtime pi --complete-product ...` | Interview, Seed generation, Seed QA, Pi execution, and product completion | Runs `ouroboros_execute_seed` inline and waits for Pi-backed AC execution to finish |
-
-Use `--complete-product` when you need a foreground/manual smoke test that
-proves Pi actually executed the Seed task before the command exits.
 
 Pi model selection comes from Pi's own default unless the execution path passes
 a model override. For reproducible smoke tests, set:

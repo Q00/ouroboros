@@ -141,11 +141,41 @@ class TestVerifierVerdict:
             VerifierVerdict(passed=True, retry_admission="RETRY")
 
     def test_fail_cannot_use_accept_retry_admission(self) -> None:
-        with pytest.raises(ValueError, match="cannot have retry_admission ACCEPT"):
+        with pytest.raises(ValueError, match="UNAVAILABLE requires"):
             VerifierVerdict(
                 passed=False,
                 reasons=("bad",),
                 retry_admission="ACCEPT",
+            )
+
+    def test_transcript_missing_defaults_to_unavailable_accept(self) -> None:
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=("transcript missing",),
+            failure_class="TRANSCRIPT_MISSING_INFRASTRUCTURE",
+        )
+
+        assert verdict.status is VerifierStatus.UNAVAILABLE
+        assert verdict.retry_admission is RetryAdmission.ACCEPT
+
+    @pytest.mark.parametrize(
+        ("failure_class", "status", "retry_admission"),
+        [
+            ("EVIDENCE_MISSING", "UNAVAILABLE", "ACCEPT"),
+            ("TRANSCRIPT_MISSING_INFRASTRUCTURE", "FAIL", "ACCEPT"),
+            ("TRANSCRIPT_MISSING_INFRASTRUCTURE", "UNAVAILABLE", "RETRY"),
+        ],
+    )
+    def test_unavailable_contract_rejects_inconsistent_triplets(
+        self, failure_class: str, status: str, retry_admission: str
+    ) -> None:
+        with pytest.raises(ValueError, match="UNAVAILABLE requires"):
+            VerifierVerdict(
+                passed=False,
+                reasons=("bad",),
+                failure_class=failure_class,
+                status=status,
+                retry_admission=retry_admission,
             )
 
     @pytest.mark.parametrize(

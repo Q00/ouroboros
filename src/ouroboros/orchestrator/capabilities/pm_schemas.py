@@ -1,33 +1,36 @@
 """Schemas for the PM interview's advisory lanes (RFC Q00/ouroboros#1937).
 
 The PM interview fans out the same way the regular interview does, with two
-deliberate differences that both fall out of one sentence: *a confirmed fact may
-occupy a round of its own; an unconfirmed one may not become anything.*
+deliberate differences that both fall out of one sentence: *a finding is
+evidence the PM reads before answering; it is never an answer.*
 
 **Two lanes, not six.** Only the lanes that fetch evidence carry over — what the
 code does today, and what the data says. A lane that critiques the question or
 narrows it into options produces a draft judgment, not evidence, and a draft
 wears the face of material while standing in for the decision.
 
-**One answer path, and no exception to its confirmation.** The regular
-interview's code-fact contract carries an ``answer_prefix``, and a chain follows
-it: a confirmation flag, an exception to that flag
-(``[from-code][auto-confirmed]``), and a confidence grade deciding which answers
-earn the exception. That exception is justified there — the person being asked
-usually wrote the code — and PM has no such premise, so PM does not inherit it.
+**Findings are shown, not recorded** (RFC #2222 decision 4). An earlier design
+let a confirmed finding occupy a round of its own, carried into the transcript
+by an ``answer_prefix`` the lane declared and gated by a confirmation the PM had
+to give. Both are retired: the round duplicated the published fan-out, which is
+already addressable and re-offered, and the gate spent a turn to record what the
+store already held. The v2 code-lane contract has no ``answer_prefix``, no
+``requires_user_confirmation`` and no ``user_confirmation_prompt`` — with
+nothing recorded there is nothing to gate, and the closed shape rejects an
+answer that still carries them. Interview rounds carry the PM's own words.
 
-What PM inherits is the rest: the same ``answer_prefix`` field, under an enum
-holding exactly one element. ``[from-code][auto-confirmed]`` is therefore not
-forbidden here; it is unspellable. The prohibition is retired by removing the
-place rather than by growing the list of things forbidden — the same move the
-data lane made when a typed read request replaced its free-text query field
-(#1754/#1825).
+What each claim gains instead is a lane-authored ``plain_statement``: the
+product-language sentence the screen renders, in the question's own language,
+with no paths or identifiers. Citations stay in the published fan-out, which is
+where the record belongs. The prohibition is enforced by removing the place
+rather than by growing a list of forbidden values — the same move the data lane
+made when a typed read request replaced its free-text query field (#1754/#1825).
 
 Two doors were the alternative, and the cost was measured. PM originally kept
 no answer path at all and grew a second entrance for findings — an ``evidence``
 parameter no sibling tool has. Two entrances meant two sets of rules for the
 same payload, and seven review rounds found the same class of silent loss at a
-new address each time. One door with a one-element enum is what closed it.
+new address each time. Removing the entrance is what closed it.
 
 **What holds when a host skips the confirmation anyway.** The prompt is shown by
 the host, so the contract can ask for it but not perform it. The guarantee that
@@ -186,7 +189,7 @@ def _pm_policy_claim_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["path", "policy_claim"],
+        "required": ["path", "policy_claim", "plain_statement"],
         "properties": {
             "path": {
                 "type": "string",
@@ -209,6 +212,18 @@ def _pm_policy_claim_schema() -> dict[str, Any]:
                 "description": (
                     "What this source shows the system does today. Descriptive "
                     "only: what exists, never what the PRD should decide."
+                ),
+            },
+            "plain_statement": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300,
+                "description": (
+                    "The same claim as one plain sentence for the PM, written "
+                    "in the question's language: what the system does, in "
+                    "product terms — no file paths, no code identifiers. The "
+                    "citation stays in policy_claim; this is what the user is "
+                    "shown (RFC #2222)."
                 ),
             },
         },
@@ -287,22 +302,17 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
       implements policy bearing on the question. Every entry carries no claim,
       which is what keeps "found nothing across two of five" different from
       "found nothing across all five".
-    - ``PolicyCarried`` -- at least one entry carries a claim, and the three
-      forwarding fields are required. ``contains`` is what makes this state
-      unreachable without a claim, so "confirm my finding" with nothing to
-      confirm has no spelling, and neither has a claim that arrives with no
-      confirmation asked for.
+    - ``PolicyCarried`` -- at least one entry carries a claim. ``contains`` is
+      what makes this state unreachable without one.
 
-    ``answer_prefix`` exists only in the carried state, under an enum of one
-    element, and there is no confidence grade beside it. The enum is the
-    enforcement: a child cannot mark this output as skipping confirmation
-    because ``[from-code][auto-confirmed]`` is not a value this field can hold,
-    and the shape is closed, so it cannot add a field that says so another way.
-    A rule forbidding the prefix would read as authoritative while being
-    enforced by nothing -- three of #1825's findings were guarantees stated
-    where nothing made them true. The other two states have no ``answer_prefix``
-    property at all, for the same reason they carry no claim: there is nothing
-    to forward.
+    No forwarding fields (RFC #2222). A finding is evidence shown beside the
+    question, never an answer recorded on the user's behalf: the published
+    fan-out is already the durable record of what was found, and the interview
+    rounds carry only what the user themselves wrote. The v1 contract carried
+    ``answer_prefix`` / ``requires_user_confirmation`` /
+    ``user_confirmation_prompt`` to gate a recorded adopted fact; with nothing
+    recorded there is nothing to gate, and the closed shape means an answer
+    carrying those fields is rejected rather than quietly honoured.
 
     ``examined`` is required in all three states, empty list included. It is
     what keeps the lane's reporting about itself: "no policy found" means
@@ -393,53 +403,15 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
         "title": "PolicyCarried",
         "type": "object",
         "additionalProperties": False,
-        "required": [
-            "question_identity",
-            "lane_id",
-            "examined",
-            "answer_prefix",
-            "requires_user_confirmation",
-            "user_confirmation_prompt",
-        ],
+        "required": ["question_identity", "lane_id", "examined"],
         "properties": {
             "question_identity": identity_property,
             "lane_id": {"const": "code_context"},
             "examined": examined_property(max_claims=_PM_CLAIMS_MAX_PER_REPOSITORY),
-            "answer_prefix": {
-                "type": "string",
-                "enum": ["[from-code]"],
-                "description": (
-                    "The prefix the host puts on this finding when the user "
-                    "confirms it. One value, and that is the whole of the "
-                    "confirmation policy: the interview's "
-                    "'[from-code][auto-confirmed]' cannot be spelled here, so "
-                    "no output of this lane can declare itself exempt from "
-                    "being confirmed."
-                ),
-            },
-            "requires_user_confirmation": {
-                "const": True,
-                "description": (
-                    "Always true. Named as the interview names it so one host "
-                    "code path serves both tools, and constant because the "
-                    "premise that earns an exception there -- the person being "
-                    "asked usually wrote the code -- is not a premise a PRD has."
-                ),
-            },
-            "user_confirmation_prompt": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 600,
-                "description": (
-                    "What to ask the user before forwarding this finding. "
-                    "Required, because a confirmation step with no text to show "
-                    "is one the host is free to skip silently."
-                ),
-            },
         },
     }
     return {
-        "contract_id": "pm_code_context_answer.v1",
+        "contract_id": "pm_code_context_answer.v2",
         "scope": "single_pm_question_code_context",
         # Two things, and deliberately no third -- the schema re-entry enforces,
         # and the instruction the child must follow. A claim *about* the system
@@ -457,12 +429,11 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
             "If two repositories implement different policies, carry both; the "
             "disagreement is what the PM most needs to see. Evidence from outside "
             "the roster is not evidence: say so in your finding so the PM can add "
-            "the repository, and do not give it an entry. When you carry a "
-            "policy, set answer_prefix to [from-code] and write "
-            "user_confirmation_prompt as the question the user should be asked "
-            "before your finding is recorded on their behalf -- the finding is "
-            "recorded as an adopted fact, never as their decision, and the "
-            "decision is what they write on the question that follows."
+            "the repository, and do not give it an entry. Beside each claim, "
+            "write plain_statement in the question's language: the same fact as "
+            "one product-language sentence, no paths or identifiers — it is what "
+            "the user sees. Your finding is evidence beside the question, "
+            "recorded nowhere else; the decision is what the user writes."
         ),
     }
 
@@ -519,27 +490,22 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
         "allowed_capabilities": ["inspect_code", "read_data"],
         "question_heading": "## PM Question",
         # The counterpart of the interview's, and the sentence that differs: no
-        # quality of evidence lets a finding here skip the user.
+        # quality of evidence lets a finding here stand in for the user.
         "task_preamble": (
             "You are an Ouroboros PM interview advisory subagent.\n"
             "\n"
             "The parent session has already shown the PM question to the user. "
-            "Your job is to\nreport what the system does today. Never decide on "
-            "behalf of the user, however\nclear your finding is: a PRD asks what "
-            "the system should do and you can only\nreport what it does. Your "
-            "finding is shown to the user for confirmation, and it\nis recorded "
-            "as an adopted fact -- never as their decision."
+            "Report what the system does today. Never decide on behalf of the "
+            "user: your finding is shown beside the question as evidence, and "
+            "the decision is what they write in their own words."
         ),
-        # Unconditional, unlike the interview's. There is no configuration of
-        # evidence quality that lets a finding here reach the record without the
-        # user seeing it, so the rule the child reads must not be phrased as a
-        # condition it evaluates.
+        # Unconditional, unlike the interview's: no quality of evidence turns
+        # a finding into an answer here (RFC #2222 — findings are display-only).
         "child_answer_rule": (
             "Never decide on behalf of the user, however clear your finding is. "
-            "A PRD asks what the system should do and you can only report what "
-            "it does. Your finding is confirmed by the user and then recorded as "
-            "an adopted fact; the decision is what they write in their own words "
-            "on the question that follows."
+            "A PRD asks what the system should do; you report what it does. "
+            "Your finding is evidence beside the question, recorded nowhere "
+            "else; the decision is what the user writes."
         ),
         "dispatch_timing": "after_question_is_visible_to_user",
         "parallel_preference": "parallel_when_runtime_supports_subagents",
@@ -565,14 +531,10 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "runtime_instruction": (
             "Show the PM question to the user first, then fan out the code-policy "
-            "and data lanes. A code lane that carries a policy returns "
-            "answer_prefix [from-code] and a confirmation prompt: show that "
-            "prompt, and only if the user confirms, send the finding as the "
-            "answer with its [from-code] prefix. It is recorded as an adopted "
-            "fact -- withheld from requirement extraction, not counted toward "
-            "completion -- and the server returns the next question, which is "
-            "the one the user answers in their own words. There is no prefix "
-            "that skips the confirmation."
+            "and data lanes. Render each claim's plain_statement beside the "
+            "question as evidence — findings are never sent as answers and "
+            "never recorded on the user's behalf. The user answers every "
+            "question in their own words."
         ),
     }
 

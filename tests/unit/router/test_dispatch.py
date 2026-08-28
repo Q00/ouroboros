@@ -535,7 +535,9 @@ def test_packaged_auto_resolves_documented_chat_dispatch_flags(tmp_path: Path) -
     assert result.mcp_tool == "ouroboros_start_auto"
     assert result.mcp_args["goal"] == "Build a hello CLI"
     assert result.mcp_args["cwd"] == str(runtime_cwd)
-    assert result.mcp_args["complete_product"] is True
+    # `complete_product` is no longer a packaged placeholder — the run job owns
+    # run -> evaluate -> ralph, so Auto has nothing to drive with it.
+    assert "complete_product" not in result.mcp_args
     assert result.mcp_args["pipeline_timeout_seconds"] == 600.5
     assert isinstance(result.mcp_args["pipeline_timeout_seconds"], float)
     assert result.mcp_args["max_interview_rounds"] == 3
@@ -549,7 +551,6 @@ def test_packaged_auto_absent_new_flags_default_false_compatible(tmp_path: Path)
 
     assert isinstance(result, Resolved)
     assert result.mcp_args["goal"] == "Build a hello CLI"
-    assert result.mcp_args["complete_product"] == ""
     assert result.mcp_args["pipeline_timeout_seconds"] == ""
     assert result.mcp_args["skip_run"] == ""
 
@@ -569,7 +570,6 @@ def test_packaged_auto_preserves_unknown_flags_and_literal_control_text(
         "Build docs mentioning --complete-product and "
         "--pipeline-timeout-seconds 600.5 --unknown flag"
     )
-    assert result.mcp_args["complete_product"] == ""
     assert result.mcp_args["pipeline_timeout_seconds"] == ""
 
 

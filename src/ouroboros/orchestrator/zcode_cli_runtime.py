@@ -48,7 +48,7 @@ from ouroboros.orchestrator.codex_cli_runtime import (
 )
 from ouroboros.runtime.child_env import build_child_env
 from ouroboros.zcode_cli_launcher import (
-    build_zcode_command_prefix,
+    resolve_zcode_command_prefix,
     resolve_zcode_electron_node_path,
 )
 
@@ -356,7 +356,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         if cli_path is None:
             msg = "zcode CLI path could not be resolved (set OUROBOROS_ZCODE_CLI_PATH or orchestrator.zcode_cli_path)"
             raise RuntimeError(msg)
-        prefix = build_zcode_command_prefix(cli_path, self._electron_node_path)
+        prefix = resolve_zcode_command_prefix(cli_path)
         command = prefix + [
             "--json",
             "--prompt",
@@ -419,6 +419,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Zcode-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             # Reasoning effort is advised, not enforced: no per-invocation effort
             # flag has been verified. Declared IGNORED (also the default) until a
             # real per-call mechanism is confirmed — revisit if the CLI exposes one.

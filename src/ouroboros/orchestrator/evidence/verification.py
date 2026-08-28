@@ -17,6 +17,7 @@ from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
@@ -35,16 +36,9 @@ def _verify_atomic_evidence_against_runtime_messages(
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
-    The verifier deliberately ignores the final result message so the
-    accepted evidence cannot be supported only by the leaf's self-report.
-
-    ``has_success_contract`` (the AC declares a ``verify_command``) drops
-    ``commands_run`` and ``tests_passed`` from the required set, and contract
-    ACs with declared artifacts also drop ``files_touched`` — but only when
-    ``verify_gate_active`` (``run_verify_commands`` is enabled) so the
-    orchestrator's authoritative ``_run_ac_verify_gate`` execution actually runs
-    to replace those checks. With the gate disabled the transcript-backed evidence
-    is retained.
+    The verifier deliberately ignores the final result message so accepted
+    evidence cannot be supported only by the leaf's self-report. A declared
+    verify command is additive and does not remove transcript obligations.
     """
     effective_schema = _effective_evidence_schema_for_ac(
         execution_profile,
@@ -57,10 +51,19 @@ def _verify_atomic_evidence_against_runtime_messages(
     if not support_messages:
         if not effective_schema.required:
             return VerifierVerdict(passed=True)
+        # A completely empty transcript is an infrastructure signal, not a
+        # gaming signal: a leaf trying to game the verifier leaves
+        # plausible-looking messages, not none. Naming it separately keeps a
+        # lost transcript from being reported as a worker rejection — and from
+        # being read as evidence the leaf did nothing.
         return VerifierVerdict(
             passed=False,
-            reasons=("no runtime transcript evidence supports the typed evidence claims",),
-            failure_class="EVIDENCE_MISSING",
+            reasons=(
+                "transcript_missing_infrastructure: the runtime transcript reached "
+                "the verifier empty, so no claim could be checked; the leaf's work "
+                "was not evaluated",
+            ),
+            failure_class=FailureClass.TRANSCRIPT_MISSING_INFRASTRUCTURE.value,
         )
 
     unsupported: list[str] = []

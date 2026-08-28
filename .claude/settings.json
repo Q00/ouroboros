@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$PWD}\"; python3 \"$ROOT/scripts/keyword-detector.py\" || python \"$ROOT/scripts/keyword-detector.py\"",
+            "command": "ROOT=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$PWD}}\"; SCRIPT=\"$ROOT/scripts/keyword-detector.py\"; if [ ! -r \"$SCRIPT\" ]; then printf '%s\\n' \"Ouroboros hook skipped: $SCRIPT is unavailable.\" >&2; exit 0; fi; if command -v python3 >/dev/null 2>&1; then PYTHON=python3; elif command -v python >/dev/null 2>&1; then PYTHON=python; else printf '%s\\n' 'Ouroboros hook skipped: Python is unavailable.' >&2; exit 0; fi; \"$PYTHON\" \"$SCRIPT\" || { STATUS=$?; printf '%s\\n' \"Ouroboros hook failed open: $SCRIPT exited with code $STATUS.\" >&2; exit 0; }",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$PWD}\"; python3 \"$ROOT/scripts/drift-monitor.py\" || python \"$ROOT/scripts/drift-monitor.py\"",
+            "command": "ROOT=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$PWD}}\"; SCRIPT=\"$ROOT/scripts/drift-monitor.py\"; if [ ! -r \"$SCRIPT\" ]; then printf '%s\\n' \"Ouroboros hook skipped: $SCRIPT is unavailable.\" >&2; exit 0; fi; if command -v python3 >/dev/null 2>&1; then PYTHON=python3; elif command -v python >/dev/null 2>&1; then PYTHON=python; else printf '%s\\n' 'Ouroboros hook skipped: Python is unavailable.' >&2; exit 0; fi; \"$PYTHON\" \"$SCRIPT\" || { STATUS=$?; printf '%s\\n' \"Ouroboros hook failed open: $SCRIPT exited with code $STATUS.\" >&2; exit 0; }",
             "timeout": 3
           }
         ]

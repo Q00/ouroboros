@@ -83,6 +83,16 @@ class TestCommandGroups:
         assert result.exit_code == 0
         assert "Seed" in result.output
 
+    def test_seed_command_accepts_and_forwards_dsh_backend(self) -> None:
+        run_seed = AsyncMock(return_value=Path("seed.yaml"))
+
+        with patch("ouroboros.cli.commands.seed._run_seed_generation", new=run_seed):
+            result = runner.invoke(app, ["seed", "interview_1", "--llm-backend", "dsh"])
+
+        assert result.exit_code == 0, result.output
+        assert run_seed.await_args.args == ("interview_1",)
+        assert run_seed.await_args.kwargs["llm_backend"] == "dsh"
+
 
 class TestRunCommands:
     """Tests for run command group."""
@@ -587,5 +597,8 @@ class TestWorkflowIRCommands:
 
         result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
 
+        # The blank-AC boundary is enforced by the Seed schema itself, so the
+        # command now fails during seed load rather than in the IR adapter.
         assert result.exit_code == 1
-        assert "must be non-blank" in result.output
+        assert "Workflow IR inspection failed" in result.output
+        assert "acceptance_criteria.0.description" in result.output

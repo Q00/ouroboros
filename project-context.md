@@ -50,7 +50,7 @@ async def bad():
 
 | Component | Format | Example |
 |-----------|--------|---------|
-| Files | `snake_case.py` | `pal_router.py` |
+| Files | `snake_case.py` | `command_parser.py` |
 | Classes | `PascalCase` | `EffectiveOntology` |
 | Functions | `snake_case` | `calculate_drift` |
 | Variables | `snake_case` | `current_context` |
@@ -65,27 +65,27 @@ async def bad():
 # DO: Absolute imports only
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
-from ouroboros.routing.router import PALRouter
+from ouroboros.router import resolve_skill_dispatch
 
 # DON'T: Relative imports across packages
 from ..core.seed import Seed  # FORBIDDEN
-from .router import PALRouter  # Only within same package
+from .dispatch import resolve_skill_dispatch  # Only within same package
 ```
 
 **Layered Dependencies:**
 ```
 CLI Layer (cli/)
     ↓ can import
-Application Layer (execution/, bigbang/, secondary/)
+Application Layer (orchestrator/, bigbang/, pm/, auto/)
     ↓ can import
-Domain Layer (core/, routing/, evaluation/, resilience/, consensus/)
+Domain Layer (core/, router/, evaluation/, evolution/, resilience/, verification/)
     ↓ can import
 Infrastructure Layer (providers/, persistence/, observability/, config/)
 ```
 
 - Lower layers NEVER import upper layers
 - Domain phases NEVER import each other directly
-- Communication between phases via ExecutionEngine orchestrator
+- Communication between phases goes through the `orchestrator/` package
 
 ---
 

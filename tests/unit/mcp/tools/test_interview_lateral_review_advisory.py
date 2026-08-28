@@ -222,7 +222,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     panel = orchestration["panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["dispatch_modes"] == ["plugin", "host_driven", "host_decides", "sequential"]
     assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {
@@ -349,6 +349,22 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     # Advisory lanes correlate by lane_id (persona is None on some lanes).
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
     assert "subagent_orchestration_instruction" in meta
+
+
+def test_question_advisory_host_decides_contract_is_capability_neutral() -> None:
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DECIDES, runtime_backend="gemini")
+
+    assert meta["question_advisory_dispatch_mode"] == "host_decides"
+    assert meta["question_advisory_host_action"] == "dispatch_subagents_if_supported"
+    assert meta["question_advisory_delivery_mode"] == "inline_host"
+    assert meta["question_advisory_execution_preference"] == "parallel"
+    assert meta["question_advisory_fallback_strategy"] == "sequential"
+    assert "did not declare whether" in meta["subagent_orchestration_instruction"]
+
+    text = append_question_advisory_dispatch("Session sess-render\n\nQ?", meta)
+    assert "dispatch_subagents_if_supported" in text
+    assert "when available" in text
+    assert "otherwise process every payload below sequentially" in text
 
 
 def test_question_advisory_sequential_runtime_emits_processing_contract() -> None:
@@ -1075,12 +1091,10 @@ def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> N
     and skipped-only banners start with their own words — so a gatekeeper
     matching on that would have been wrong on arrival.
 
-    The constants live in two languages and cannot import each other, so this
-    pins them equal. That is what "written once so emitter and stripper cannot
-    drift" has to mean across a language boundary.
+    The constants live in two languages and cannot import each other. Their
+    source-level parity is pinned by ``test_bridge_literal_contract.py``; this
+    test exercises recognition of the bridge shape that parity protects.
     """
-    from pathlib import Path
-
     from ouroboros.mcp.tools.advisory_dispatch import (
         _BRIDGE_NOTICE_OPENING,
         echo_carries_dispatch,
@@ -1088,12 +1102,6 @@ def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> N
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
     )
-
-    bridge_source = (
-        Path(__file__).resolve().parents[4] / "src/ouroboros/opencode/plugin/ouroboros-bridge.ts"
-    ).read_text(encoding="utf-8")
-    assert f'export const OUROBOROS_DISPATCH_MARKER = "{marker}"' in bridge_source
-    assert f'export const BRIDGE_NOTICE_OPENING = "{_BRIDGE_NOTICE_OPENING}"' in bridge_source
 
     # The shape the bridge actually stamps, banner and identifiers and all.
     bridge_echo = (

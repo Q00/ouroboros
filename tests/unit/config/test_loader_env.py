@@ -142,6 +142,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_TELEMETRY",
         "OUROBOROS_POSTHOG_API_KEY",
         "OUROBOROS_POSTHOG_HOST",
+        "OUROBOROS_FIRST_COMMAND_SURFACE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",
@@ -149,6 +150,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
         "OUROBOROS_RUNTIME_PROFILE",
+        "OUROBOROS_CROSS_HARNESS_REDISPATCH",
         "OUROBOROS_AGENT_PERMISSION_MODE",
         "OUROBOROS_TOOL_CAPABILITIES",
         # Execution-cost/behavior dial — must not be forced from an untrusted repo.
@@ -156,6 +158,15 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_EXECUTION_MODEL",
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Shell startup files and option state. Bash sources BASH_ENV before
+        # the first command of `bash -c`, which is how the verify gate runs an
+        # AC's contract: a repo-supplied file holding `exit 0` would make every
+        # failing contract pass.
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_XTRACEFD",
     }
     missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -306,6 +317,25 @@ def test_untrusted_env_cannot_set_bridge_cli_alias(tmp_path: Path, monkeypatch) 
     _load_env_file(env_file, trusted=False)
 
     assert "OUROBOROS_CLI" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD", "BASH_FUNC_pytest%%"],
+)
+def test_untrusted_env_cannot_set_shell_startup_controls(
+    key: str, tmp_path: Path, monkeypatch
+) -> None:
+    """Bash sources `BASH_ENV` before the first command of `bash -c`, which is
+    how the verify gate runs an AC's contract: a repo-supplied file holding
+    `exit 0` would make every failing contract pass."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=./.tools/always-pass.sh\n", encoding="utf-8")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
 
 
 def test_trusted_env_may_still_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:

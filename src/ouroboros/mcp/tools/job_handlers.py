@@ -23,6 +23,7 @@ from ouroboros.mcp.job_manager import (
     JobSnapshot,
     JobStatus,
 )
+from ouroboros.mcp.tools import host_dispatch_status
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
@@ -1109,6 +1110,25 @@ async def _render_job_snapshot_inner(
             ]
         )
 
+    if snapshot.is_terminal:
+        next_step = snapshot.result_meta.get("next_step")
+        reason_code = snapshot.result_meta.get("failure_reason_code")
+        recovery_action = snapshot.result_meta.get("recovery_action")
+        if (
+            isinstance(next_step, str)
+            and isinstance(reason_code, str)
+            and isinstance(recovery_action, str)
+        ):
+            lines.extend(
+                [
+                    "",
+                    "### Recovery",
+                    f"**Failure reason**: {reason_code}",
+                    f"**Recommended action**: {recovery_action}",
+                    f"**Next step**: {next_step}",
+                ]
+            )
+
     if snapshot.error:
         lines.extend(["", f"**Error**: {snapshot.error}"])
 
@@ -1205,6 +1225,8 @@ class JobStatusHandler:
 
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    # See ``host_dispatch_status``: open dispatches ride along in ``meta``.
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -1261,6 +1283,14 @@ class JobStatusHandler:
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
 
+        pending_host_dispatches = host_dispatch_status.pending_host_dispatches(
+            self.host_dispatch_bridge,
+            snapshot,
+            announce=False,
+        )
+        if pending_host_dispatches:
+            text += host_dispatch_status.pending_host_dispatch_suffix(pending_host_dispatches)
+
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -1269,6 +1299,9 @@ class JobStatusHandler:
                     **_job_snapshot_meta(snapshot),
                     "view": view,
                     **progress,
+                    **host_dispatch_status.pending_host_dispatches_meta_field(
+                        pending_host_dispatches
+                    ),
                 },
             )
         )
@@ -1281,6 +1314,8 @@ class JobWaitHandler:
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
     available_conductor_tools: frozenset[str] = field(default_factory=frozenset, repr=False)
+    # See JobStatusHandler.host_dispatch_bridge — same bridge, same contract.
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -1426,6 +1461,13 @@ class JobWaitHandler:
                         "\n\nLive snapshot returned without long-polling; "
                         f"poll again with cursor={cached_snapshot.cursor}."
                     )
+                live_pending_dispatches = host_dispatch_status.pending_host_dispatches(
+                    self.host_dispatch_bridge, cached_snapshot
+                )
+                if live_pending_dispatches:
+                    text += host_dispatch_status.pending_host_dispatch_suffix(
+                        live_pending_dispatches
+                    )
                 result = MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                     is_error=_job_is_error(cached_snapshot),
@@ -1444,6 +1486,9 @@ class JobWaitHandler:
                         "stream_events": [],
                         "stream_has_more": False,
                         **progress,
+                        **host_dispatch_status.pending_host_dispatches_meta_field(
+                            live_pending_dispatches
+                        ),
                     },
                 )
                 log.debug(
@@ -1775,8 +1820,15 @@ class JobWaitHandler:
             )
         )
         stream_changed = bool(stream_items)
+        pending_host_dispatches = host_dispatch_status.pending_host_dispatches(
+            self.host_dispatch_bridge, snapshot
+        )
         response_changed = (
-            changed or execution_progress_changed or stream_changed or bool(relay_events)
+            changed
+            or execution_progress_changed
+            or stream_changed
+            or bool(relay_events)
+            or bool(pending_host_dispatches)
         )
         if not changed:
             if (
@@ -1820,6 +1872,8 @@ class JobWaitHandler:
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
             text += _compact_stream_suffix(stream_items, snapshot.cursor, has_more=stream_has_more)
+        if pending_host_dispatches:
+            text += host_dispatch_status.pending_host_dispatch_suffix(pending_host_dispatches)
         result = MCPToolResult(
             content=(MCPContentItem(type=ContentType.TEXT, text=text),),
             is_error=_job_is_error(snapshot),
@@ -1838,6 +1892,7 @@ class JobWaitHandler:
                 "relay_events": relay_events,
                 "stream_has_more": stream_has_more,
                 **progress,
+                **host_dispatch_status.pending_host_dispatches_meta_field(pending_host_dispatches),
             },
         )
         log.debug(

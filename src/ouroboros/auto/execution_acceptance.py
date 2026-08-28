@@ -245,13 +245,14 @@ def _carries_explicit_contract(criterion: AcceptanceCriterionInput) -> bool:
 
     ``Seed`` materializes every criterion — including legacy strings — into an
     ``AcceptanceCriterionSpec`` with an auto-derived ``semantic_ac_key``.  That
-    derived key is not, on its own, a contract.  But an explicit verification
-    command/artifact/assertion, a declared investment, *or* an explicitly
-    supplied semantic identity all carry authority a canonicalizing rewrite
-    would silently discard.
+    derived key is not, on its own, a contract. But an explicit verification
+    command/artifact/assertion, a verification exemption, a declared investment,
+    or an explicitly supplied semantic identity all carry authority a
+    canonicalizing rewrite must never discard.
     """
     return isinstance(criterion, AcceptanceCriterionSpec) and (
         criterion.has_success_contract
+        or criterion.verify_exemption_reason is not None
         or criterion.investment is not None
         or _has_explicit_semantic_key(criterion)
     )
@@ -268,6 +269,7 @@ def _identity_signature(criterion: AcceptanceCriterionSpec) -> tuple[object, ...
         criterion.verify_command,
         criterion.expected_artifacts,
         criterion.output_assertion,
+        criterion.verify_exemption_reason,
         criterion.investment,
         criterion.semantic_ac_key if _has_explicit_semantic_key(criterion) else None,
     )
@@ -536,6 +538,7 @@ def _build_transferred_spec(
         verify_command=source.verify_command,
         expected_artifacts=source.expected_artifacts,
         output_assertion=source.output_assertion,
+        verify_exemption_reason=source.verify_exemption_reason,
         investment=source.investment,
     )
 
@@ -600,6 +603,7 @@ def _autoresearch_identity_matches(
         existing.verify_command == candidate.verify_command
         and existing.expected_artifacts == candidate.expected_artifacts
         and existing.output_assertion == candidate.output_assertion
+        and existing.verify_exemption_reason == candidate.verify_exemption_reason
         and existing.investment == candidate.investment
         and _explicit_semantic_key(existing) == _explicit_semantic_key(candidate)
     )

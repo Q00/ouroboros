@@ -62,7 +62,11 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
 
-Before a fresh start with no user choice, ask in outcome language: **Efficient
+Before a fresh start with no user choice, first check the persistent default:
+when `execution.default_policy` in `~/.ouroboros/config.yaml` is `efficient` or
+`quality_first`, do not ask — omit both arguments and the server applies the
+configured default (the handoff still reports the resolved policy). Otherwise
+ask in outcome language: **Efficient
 execution** maps to `adaptive/observe`; **Quality-first execution** maps to
 `quality_first/off`. `strict` assurance is separate explicit consent because it
 may spend extra work on proof. Do not send these arguments on resume; the server
@@ -93,12 +97,18 @@ After a start response, show `dashboard_url` when present or mention
 mode, and frugality assurance. Say that the exact active model and execution
 plan will arrive from configuration/routing events rather than guessing.
 
-When `response.meta.job_observer` is present and a Task/Agent child exists,
-spawn exactly one read-only observer and pass the contract unchanged. It owns
-job wait/result and the cursor exclusively; the main session must not poll the
-same job. Keep the conversation available for requirement refinement, read-only
-review, explicit control, or unrelated work in an isolated worktree. Check
-active-worker overlap before writing to the Auto workspace. Without a child,
+If `response.meta.job_observer` is unavailable, recover it from the final
+`<!-- ouroboros-job-observer-v1 base64 ... -->` content sentinel. Fail closed
+unless the single bounded payload passes canonical v1 validation and its job/
+session identity matches the visible start receipt. Visible IDs are identity
+anchors only; never reconstruct tools or arguments from them.
+
+When a structured or validated recovered `job_observer` is present and a
+Task/Agent child exists, spawn exactly one read-only observer and pass the
+contract unchanged. It owns wait/result and the cursor exclusively. The main
+session must not poll the same job. Keep the conversation available for
+read-only review, explicit control, or unrelated work in an isolated worktree.
+Check active-worker overlap before writing to the Auto workspace. Without a child,
 use the declared linked `ouroboros_job_wait` fallback and never run both owners.
 Do not claim an observer until Task/Agent returns a live child handle. If child
 creation succeeds on Codex, keep the parent turn open with `wait_agent` calls of

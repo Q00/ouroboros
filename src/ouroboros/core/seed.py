@@ -364,6 +364,18 @@ class BrownfieldContext(BaseModel, frozen=True):
     )
 
 
+_DEFAULT_GENERATION_MODE = "normal"
+"""``SeedMetadata.generation_mode`` for the legacy ledger-complete path."""
+
+_PARTIAL_SEED_GENERATION_MODE = "partial_seed_from_evidence"
+"""``SeedMetadata.generation_mode`` for incomplete-ledger recovery Seeds.
+
+Mirrors ``ouroboros.auto.ledger_seed.PARTIAL_SEED_GENERATION_MODE``; duplicated
+here because ``ledger_seed`` imports this module. The two are pinned equal by a
+regression test.
+"""
+
+
 class SeedMetadata(BaseModel, frozen=True):
     """Metadata about the Seed generation.
 
@@ -409,11 +421,45 @@ class SeedMetadata(BaseModel, frozen=True):
     ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)
-    generation_mode: str = Field(default="normal", min_length=1)
+    generation_mode: str = Field(default=_DEFAULT_GENERATION_MODE, min_length=1)
     degraded: bool = Field(default=False)
     unresolved_slots: tuple[str, ...] = Field(default_factory=tuple)
     recovery_reason: str | None = Field(default=None)
     decision_provenance: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_recovery_invariants(self) -> SeedMetadata:
+        """Enforce the degraded-provenance invariants stated in the docstring.
+
+        Without these checks a Seed synthesized on a recovery path could carry
+        ``degraded`` unset and still pass the run gate, auto-RUNning a partial
+        product — the exact outcome the field exists to prevent. Also freezes
+        ``decision_provenance`` so the only mutable collection on this
+        ``frozen=True`` model cannot be edited in place.
+        """
+        if self.degraded and self.generation_mode == _DEFAULT_GENERATION_MODE:
+            raise ValueError(
+                "degraded seeds must declare a non-default generation_mode "
+                f"(got {_DEFAULT_GENERATION_MODE!r})"
+            )
+        if (
+            self.degraded
+            and self.generation_mode == _PARTIAL_SEED_GENERATION_MODE
+            and not self.unresolved_slots
+        ):
+            raise ValueError(
+                f"generation_mode {_PARTIAL_SEED_GENERATION_MODE!r} with degraded=True "
+                "requires at least one unresolved_slots entry"
+            )
+        if self.unresolved_slots and not self.degraded:
+            raise ValueError("unresolved_slots requires degraded=True")
+        if not isinstance(self.decision_provenance, _FrozenDict):
+            object.__setattr__(
+                self,
+                "decision_provenance",
+                _FrozenDict(self.decision_provenance),
+            )
+        return self
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -432,6 +478,33 @@ class SeedMetadata(BaseModel, frozen=True):
 InvestmentLevel = Literal["low", "medium", "high"]
 InvestmentProvenance = Literal["declared", "measured", "inferred", "absent"]
 InvestmentConfidence = Literal["low", "medium", "high"]
+
+BUILTIN_TASK_TYPES: frozenset[str] = frozenset(
+    {
+        "code",
+        "research",
+        "analysis",
+        "artifact",
+        "document",
+        "documentation",
+        "presentation",
+    }
+)
+"""Built-in execution task types.
+
+Typos against these values are rejected unconditionally.  Custom identifiers
+registered via ``register_strategy()`` are also accepted so the Seed schema
+stays compatible with the documented pluggable strategy contract.
+"""
+
+TaskType = str
+"""Execution task type identifier.
+
+Built-in values are the seven keys in :data:`BUILTIN_TASK_TYPES`.  Additional
+identifiers are valid if and only if they have been registered via
+``ouroboros.orchestrator.execution_strategy.register_strategy`` before Seed
+construction.
+"""
 
 
 class InvestmentSpec(BaseModel, frozen=True):
@@ -457,7 +530,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     execution verifier resolves every entry literally and requires it to exist.
     """
 
-    description: str
+    description: str = Field(..., min_length=1)
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
     expected_artifacts: tuple[str, ...] = Field(
@@ -472,6 +545,15 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     output_assertion: str | None = Field(
         default=None,
         description="Literal string required in verify_command combined stdout and stderr",
+    )
+    verify_exemption_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why this criterion cannot carry a verify_command. Required by the "
+            "seed verify-command gate for criteria the orchestrator cannot "
+            "judge deterministically; it is a per-AC, explicit escape hatch, "
+            "never a blanket opt-out"
+        ),
     )
     investment: InvestmentSpec | None = Field(default=None)
 
@@ -499,8 +581,32 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     @field_validator("description", mode="before")
     @classmethod
     def _strip_description(cls, value: Any) -> Any:
+        """Normalize and reject blank criterion text.
+
+        ``description`` is the only input to :func:`derive_semantic_ac_key` for
+        legacy string ACs and the dominant term for structured ones, so a
+        whitespace-only value would collapse every such criterion onto one
+        identical ``semantic_ac_key`` and cross-contaminate AC-keyed retry and
+        successor state. Mirrors ``Seed.goal``'s ``min_length=1`` while
+        producing a message that names the field.
+        """
         if isinstance(value, str):
-            return value.strip()
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError(
+                    "acceptance criterion description cannot be empty or whitespace-only"
+                )
+            return stripped
+        return value
+
+    @field_validator("verify_exemption_reason", mode="before")
+    @classmethod
+    def _strip_verify_exemption_reason(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or _is_none_sentinel(stripped):
+                return None
+            return stripped
         return value
 
     @field_validator("verify_command", mode="before")
@@ -549,6 +655,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _validate_success_contract(self) -> AcceptanceCriterionSpec:
+        if self.verify_command and self.verify_exemption_reason:
+            raise ValueError("verify_exemption_reason is mutually exclusive with verify_command")
         if self.output_assertion and not self.verify_command:
             raise ValueError("output_assertion requires verify_command")
         invalid_artifacts = tuple(
@@ -570,7 +678,11 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     @property
     def has_success_contract(self) -> bool:
-        """Return True when explicit evidence fields are populated."""
+        """Return whether the criterion declares deterministic verification fields.
+
+        A contract adds evidence but never removes transcript obligations or
+        overrides the worker execution outcome.
+        """
         return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
 
     def with_materialized_semantic_key(self) -> AcceptanceCriterionSpec:
@@ -585,6 +697,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             not self.has_success_contract
             and self.investment is None
             and self.semantic_ac_key is None
+            and self.verify_exemption_reason is None
         ):
             return self.description
         data: dict[str, Any] = {"description": self.description}
@@ -596,6 +709,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:
             data["output_assertion"] = self.output_assertion
+        if self.verify_exemption_reason:
+            data["verify_exemption_reason"] = self.verify_exemption_reason
         if self.investment is not None:
             data["investment"] = self.investment.model_dump(mode="json", exclude_none=True)
         return data
@@ -706,11 +821,12 @@ class Seed(BaseModel, frozen=True):
     model_config = {"extra": "allow"}
 
     goal: str = Field(..., min_length=1, description="Primary objective of the workflow")
-    task_type: str = Field(
+    task_type: TaskType = Field(
         default="code",
         description=(
-            "Type of task execution: 'code', 'research', 'analysis', "
-            "'artifact', 'document', 'documentation', or 'presentation'"
+            "Execution strategy identifier. Built-in types: 'code', 'research', "
+            "'analysis', 'artifact', 'document', 'documentation', 'presentation'. "
+            "Custom identifiers are accepted if registered via register_strategy()."
         ),
     )
     brownfield_context: BrownfieldContext = Field(
@@ -749,6 +865,43 @@ class Seed(BaseModel, frozen=True):
         ...,
         description="Generation metadata (version, timestamp, etc.)",
     )
+
+    @field_validator("task_type", mode="before")
+    @classmethod
+    def _normalize_task_type(cls, value: Any) -> Any:
+        """Normalize and validate task_type against the strategy registry.
+
+        Folds case and surrounding whitespace for hand-authored seeds, then
+        rejects identifiers that are neither a built-in task type nor a
+        dynamically registered custom strategy.  This preserves typo rejection
+        for the seven built-in types while honouring the documented
+        ``register_strategy()`` extension contract.
+        """
+        if not isinstance(value, str):
+            return value
+        # Late import to avoid circular dependency (core -> orchestrator).
+        from ouroboros.orchestrator.execution_strategy import (
+            _canonicalize_task_type,
+            is_registered_task_type,
+        )
+
+        normalized = _canonicalize_task_type(value)
+        if not normalized:
+            msg = "task_type must be a non-empty string"
+            raise ValueError(msg)
+        if normalized in BUILTIN_TASK_TYPES:
+            return normalized
+
+        if is_registered_task_type(normalized):
+            return normalized
+        valid = ", ".join(sorted(BUILTIN_TASK_TYPES))
+        msg = (
+            f"Unknown task_type: {value!r}. "
+            f"Built-in types: {valid}. "
+            f"Custom types must be registered via register_strategy() "
+            f"before Seed construction."
+        )
+        raise ValueError(msg)
 
     @field_validator("evaluation_principles", mode="before")
     @classmethod

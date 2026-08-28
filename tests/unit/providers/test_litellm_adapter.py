@@ -41,6 +41,18 @@ def create_mock_response(
 class TestLiteLLMAdapterInit:
     """Test LiteLLMAdapter initialization."""
 
+    def test_registers_minimax_m27_model_metadata(self) -> None:
+        """The pinned LiteLLM registry includes the current MiniMax model."""
+        model_info = litellm.model_cost["minimax/MiniMax-M2.7"]
+
+        assert model_info["litellm_provider"] == "minimax"
+        assert model_info["max_input_tokens"] == 204800
+        assert model_info["input_cost_per_token"] == 3e-7
+        assert model_info["output_cost_per_token"] == 1.2e-6
+        assert model_info["cache_read_input_token_cost"] == 6e-8
+        assert model_info["cache_creation_input_token_cost"] == 3.75e-7
+        assert model_info["supports_reasoning"] is True
+
     def test_init_defaults(self) -> None:
         """LiteLLMAdapter initializes with sensible defaults."""
         adapter = LiteLLMAdapter()

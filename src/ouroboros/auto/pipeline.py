@@ -19,6 +19,7 @@ import yaml
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
+from ouroboros.auto.artifact_state import artifact_state_for_result as _artifact_state_for_result
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
@@ -44,22 +45,33 @@ from ouroboros.auto.ledger_seed import (
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
 )
-from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
+from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
+from ouroboros.auto.ralph_resume import reconcile_ralph_checkpoint
 from ouroboros.auto.recovery_plan import (
     AutoRecoveryPlan,
     RecoveryPlanAction,
-    build_lateral_recovery_plan,
-    build_manual_recovery_plan,
 )
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
+)
+from ouroboros.auto.resume_routing import (
+    recoverable_phase_for_tool as _recoverable_phase_for_tool,
+)
+from ouroboros.auto.retired_phases import (
+    mark_retired_complete_product_run,
+    mark_retired_phase,
+)
+from ouroboros.auto.seed_preflight_gate import enforce_seed_preflight
+from ouroboros.auto.seed_qa_advisory import (
+    clear_seed_qa_verdict,
+    publish_advisory,
+    seed_qa_advisory_progress,
 )
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
-    MAX_EVALUATE_ROUNDS,
     AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
@@ -69,6 +81,7 @@ from ouroboros.auto.state import (
     utc_now_iso,
 )
 from ouroboros.auto.task_class_application import apply_default_ac_template
+from ouroboros.auto.terminal_events import emit_blocked_session_event
 from ouroboros.auto.trace_export import best_effort_export_trace
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
@@ -225,6 +238,8 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # recovery decisions and surfaces can detect "deadline-expired" vs ordinary
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
+_TRANSIENT_TOOL_ATTEMPTS = 3
+_TRANSIENT_RETRY_BACKOFF_SECONDS = (1.0, 5.0)
 DETACHED_STATUS = "detached"
 _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
 # Mirrors RalphHandler.MIN_MAX_TOTAL_SECONDS. The auto layer checks this before
@@ -433,29 +448,7 @@ class AutoPipeline:
     )
     run_start_timeout_seconds: float = 60.0
     progress_callback: AutoProgressCallback | None = None
-    # Q00/ouroboros#773: chain RUN → RALPH_HANDOFF when ``complete_product``
-    # is true and a ``ralph_starter`` is configured. ``complete_product``
-    # defaults to False (opt-in safety) so existing callers see no behavior
-    # change.
-    ralph_starter: RalphStarter | None = None
-    # Q00/ouroboros#773 (review-5): poller invoked by ``_resume_ralph_handoff``
-    # to translate a persisted ``ralph_job_id`` back into a terminal status
-    # dict so a session interrupted in ``RALPH_HANDOFF`` (e.g. MCP client
-    # disconnects while the background Ralph job keeps running) actually
-    # reconciles to ``COMPLETE`` / ``BLOCKED`` / ``FAILED`` on resume instead
-    # of staying stranded in the non-terminal handoff state. Defaults to
-    # None for backward compatibility — when unset, resume falls back to
-    # the legacy guidance-only behavior.
     ralph_resumer: RalphStarter | None = None
-    complete_product: bool = False
-    # RFC #809 Phase 2.1 — when set AND ``complete_product`` is True, the
-    # pipeline inserts an EVALUATE phase between the Ralph terminal verdict
-    # and the COMPLETE transition. The evaluator grades the Ralph artifact
-    # against the Seed's acceptance criteria via ``ouroboros_qa``. On QA
-    # pass the pipeline still reaches COMPLETE; on QA fail it transitions
-    # to BLOCKED with the QA differences/suggestions in ``last_error``.
-    # See :class:`HandlerEvaluator` in adapters.py for the production wiring.
-    evaluator: Evaluator | None = None
     # Optional pre-run Seed QA gate backed by ``ouroboros_qa``. Deterministic
     # grading still owns cheap structural repair; this gate prevents a Seed
     # that fails the same QA contract users run manually from reaching RUN.
@@ -477,26 +470,12 @@ class AutoPipeline:
     # event has already been appended to the EventStore by the watchdog
     # itself, so the pipeline does no further side effect on fire.
     watchdog: Watchdog | None = None
-    # L3-2 / #1176: optional async callback that invokes runtime probes
-    # for the active task class after the artifact exists. Signature:
-    # ``async (state) -> tuple[RuntimeEvidence, ...]``. When ``None``,
-    # the pipeline does not invoke probes — the L0 manual harness owns
-    # probe invocation in the test fixture. When configured, probe FAIL
-    # blocks PRODUCT_COMPLETE before the result envelope is returned.
-    probe_runner: RuntimeProbeRunner | None = None
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
     _last_emitted_repair: int | None = field(default=None, init=False, repr=False)
-    # L3-2 / #1176: per-``run()`` cache for the runtime probe evidence
-    # surfaced on ``AutoPipelineResult``. Populated on first invocation
-    # of the ``probe_runner`` callback so multiple ``_result()`` returns
-    # within a single run share the same evidence tuple.
     _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
-    # A2 / run-metaharness trace artifact. ``run()`` recurses (resume paths do
-    # ``return await self.run(state)``); the depth counter fires the finalize
-    # trace export exactly once, at the outermost terminal return.
-    # ``_active_ledger`` is the live ledger the deepest ``_run_pipeline`` frame
-    # actually mutated, so the export projects the freshest decisions/history.
+    # Recursive resume paths export the trace exactly once at the outermost
+    # terminal return.
     _run_depth: int = field(default=0, init=False, repr=False)
     _active_ledger: SeedDraftLedger | None = field(default=None, init=False, repr=False)
 
@@ -526,6 +505,7 @@ class AutoPipeline:
                 ),
                 event_store=getattr(self.interview_driver, "event_store", None),
             )
+            await emit_blocked_session_event(self._emit_runtime_event, state, result)
         return result
 
     async def _run_pipeline(self, state: AutoPipelineState) -> AutoPipelineResult:
@@ -533,23 +513,21 @@ class AutoPipeline:
         self._last_emitted_phase = None
         self._last_emitted_grade = None
         self._last_emitted_repair = None
-        # L3-2 / #1176: clear any cached probe evidence from a prior
-        # run so a re-used ``AutoPipeline`` instance does not leak
-        # the previous session's evidence onto a new ``_result()``.
+        # Prevent a reused pipeline from leaking prior runtime-probe evidence.
         self._last_probe_evidence = _runtime_probe_evidence_from_state(state)
-        # Push the same progress callback down into the interview driver so
-        # the longest-running phase (auto interview rounds) emits live
-        # snapshots through the same observer contract instead of forcing
-        # consumers to scrape persisted state for per-round updates.
+        # Share the progress observer with the long-running interview driver.
         self.interview_driver.progress_callback = self.progress_callback
         ledger = (
             SeedDraftLedger.from_dict(state.ledger)
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
-        # A2 trace export: expose the live ledger to the outermost ``run()``
-        # wrapper so the finalize projection uses the freshest decisions.
         self._active_ledger = ledger
+        # Compatibility migration runs before a fired watchdog can
+        # must not turn an obsolete persisted phase into an unrelated timeout.
+        if mark_retired_phase(state):
+            self._save(state)
+            return self._result(state, ledger, blocker=state.last_error)
         # L2-2 / #1172: wall-clock watchdog check.
         # Runs once per ``run()`` entry — both fresh sessions whose
         # ``created_at`` is too long ago (resume after budget elapsed)
@@ -562,18 +540,6 @@ class AutoPipeline:
             return watchdog_result
         if self.skip_run and not state.skip_run:
             state.skip_run = True
-        # Q00/ouroboros#773 (review-3): ``complete_product`` is durable session
-        # intent, not a per-invocation flag. On a fresh session the constructor
-        # writes the operator's choice into the state; on resume we honor the
-        # persisted value even when the caller forgot to re-pass the flag, so
-        # a session originally started with ``--complete-product`` keeps
-        # chaining RUN → RALPH_HANDOFF after restart. Lowering is intentional:
-        # explicit ``complete_product=True`` raises the bound; absence keeps
-        # the persisted truth.
-        if self.complete_product and not state.complete_product:
-            state.complete_product = True
-        elif state.complete_product and not self.complete_product:
-            self.complete_product = True
         # Q00/ouroboros#809 P3 PR-4: active domain profile injection is gated
         # to the interview phases below, where ``interview_driver.answerer`` is
         # actually used.  Later resume/result paths must not depend on the
@@ -600,24 +566,8 @@ class AutoPipeline:
             if state.seed_origin is SeedOrigin.NONE:
                 state.seed_origin = SeedOrigin.AUTO_PIPELINE
         _arm_legacy_missing_deadline(state)
-        # Top-level deadline check on resume (#779). When ``deadline_at`` is
-        # already set and has passed before this process even starts work,
-        # immediately transition to BLOCKED so no phase work is invoked. The
-        # message is the literal one the issue contract requires so external
-        # surfaces can distinguish a resume-expired session from a freshly
-        # tripped deadline mid-run.
-        #
-        # Q00/ouroboros#782 review-12 BLOCKING #1: never gate ``RALPH_HANDOFF``
-        # resume on the deadline-expired early returns when there is a
-        # persisted Ralph job / confirmed plugin dispatch waiting on
-        # reconciliation. Falling through to ``_resume_ralph_handoff`` lets
-        # the poller (or plugin-confirmed transition) finalize the auto
-        # phase if Ralph already finished in the background while the
-        # client was disconnected. If the job is still running, the
-        # poller's own deadline-aware wait fires the same ``pipeline_timeout``
-        # BLOCKED state via ``_enforce_deadline``. Same exception applies
-        # to the second ``_enforce_deadline`` gate after the BLOCKED/FAILED
-        # recovery branch below.
+        # Preserve a dispatched Ralph checkpoint across an expired deadline;
+        # all other resumed work remains subject to the top-level gate.
         if (
             state.deadline_at is not None
             and not state.is_terminal()
@@ -652,7 +602,12 @@ class AutoPipeline:
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-            resume_phase = _recoverable_phase_for_tool(state.last_tool_name)
+            resume_phase = (
+                AutoPhase.RALPH_HANDOFF
+                if state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+                and _has_reconciliable_ralph_resume_checkpoint(state)
+                else _recoverable_phase_for_tool(state.last_tool_name)
+            )
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
@@ -695,6 +650,11 @@ class AutoPipeline:
             state.arm_deadline()
             self._save(state)
 
+        if state.phase is AutoPhase.RALPH_HANDOFF and _has_reconciliable_ralph_resume_checkpoint(
+            state
+        ):
+            return await reconcile_ralph_checkpoint(self, state, ledger)
+
         review: SeedReview | None = None
         interview_result = await self._run_interview_phase(state, ledger)
         if interview_result is not None:
@@ -730,13 +690,7 @@ class AutoPipeline:
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
     ) -> AutoPipelineResult | None:
-        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception as the
-        # early-return above — let RALPH_HANDOFF resume reach
-        # ``_resume_ralph_handoff`` so an already-terminal Ralph job can be
-        # reconciled. The poller's deadline-aware ``wait_for`` (and
-        # subsequent ``_enforce_deadline`` call inside ``_poll_ralph_job``)
-        # still fires ``pipeline_timeout`` if the job is genuinely still
-        # running after the persisted budget has expired.
+        # A dispatched Ralph checkpoint is reconciled before deadline blocking.
         if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
@@ -858,13 +812,6 @@ class AutoPipeline:
             AutoPhase.REVIEW,
             AutoPhase.RUN,
             AutoPhase.RALPH_HANDOFF,
-            # RFC #809 Phase 2.1/2.2 — EVALUATE and UNSTUCK_LATERAL are
-            # resumable phases. Their dedicated resume handlers below
-            # (around lines 505 / 519) re-enter ``_run_evaluate`` /
-            # ``_run_lateral`` which are idempotent via persisted artifact
-            # hashes. Without these entries in the allowlist, a session
-            # recovered to either phase from BLOCKED/FAILED would be
-            # immediately re-blocked here before reaching its handler.
             AutoPhase.EVALUATE,
             AutoPhase.UNSTUCK_LATERAL,
         }:
@@ -884,9 +831,6 @@ class AutoPipeline:
         *,
         resume_tool_name: str | None,
     ) -> AutoPipelineResult | Seed:
-        # Q00/ouroboros#782 review-12 BLOCKING #1: same exception — let
-        # ``RALPH_HANDOFF`` resume reach ``_resume_ralph_handoff`` so the
-        # poller can reconcile an already-terminal Ralph job.
         if not _has_reconciliable_ralph_resume_checkpoint(state) and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
@@ -1108,84 +1052,9 @@ class AutoPipeline:
         *,
         review: SeedReview | None,
     ) -> AutoPipelineResult | None:
-        if state.phase == AutoPhase.RALPH_HANDOFF:
-            if (
-                state.run_handoff_status == "ralph_retry_after_blocker"
-                and self.ralph_starter is not None
-            ):
-                return await self._handoff_to_ralph(
-                    state,
-                    ledger,
-                    seed,
-                    review,
-                    run_subagent=None,
-                    reattach_terminal=False,
-                    reuse_existing=False,
-                )
-            return await self._resume_ralph_handoff(state, ledger, review=review, seed=seed)
-
-        if state.phase == AutoPhase.EVALUATE:
-            # Re-enter the evaluator. ``_run_evaluate`` is idempotent via the
-            # artifact-hash cache, so a resumed session with the same artifact
-            # and a persisted verdict short-circuits without re-calling QA.
-            #
-            # If the current process does not wire an evaluator (e.g. the
-            # MCP handler skipped wiring in plugin mode), we cannot re-enter
-            # ``_run_evaluate`` — it asserts ``self.evaluator is not None``.
-            # Fall back to a Phase-2.1-shaped BLOCKED summary using the
-            # persisted QA fields so a session that ran EVALUATE in a
-            # previous process can resume without a top-level tool crash.
-            # Matches the symmetric guard the UNSTUCK_LATERAL branch below
-            # already has for ``self.lateral_thinker``.
-            if self.evaluator is None:
-                state.mark_blocked(
-                    state.last_error
-                    or (
-                        "EVALUATE resume found no evaluator wired in this process; "
-                        "complete-product chains in plugin mode skip the auto-pipeline "
-                        "evaluator (the existing Ralph plugin delegation handles QA "
-                        "out-of-band). Re-run in non-plugin mode to grade the artifact "
-                        "inline."
-                    ),
-                    tool_name="evaluator",
-                )
-                self._save(state)
-                return self._result(state, ledger, review=review, blocker=state.last_error)
-            return await self._run_evaluate(
-                state,
-                ledger,
-                seed,
-                review=review,
-                run_subagent=None,
-                ralph_result_text=None,
-                stop_reason=None,
-            )
-
-        if state.phase == AutoPhase.UNSTUCK_LATERAL:
-            # Re-enter the lateral advisor. ``_run_lateral`` is idempotent
-            # via ``lateral_input_hash``: matching hash + cached persona text
-            # short-circuits without re-invoking the lateral_think tool.
-            if self.lateral_thinker is None:
-                # Lateral not wired on this process — fall back to the
-                # Phase 2.1 BLOCKED summary using the persisted QA fields.
-                state.mark_blocked(
-                    state.last_error or "EVALUATE failed; lateral thinker not configured",
-                    tool_name="evaluator",
-                )
-                self._save(state)
-                return self._result(state, ledger, review=review, blocker=state.last_error)
-            return await self._run_lateral(
-                state,
-                ledger,
-                seed,
-                qa_score=state.last_qa_score or 0.0,
-                qa_verdict=state.last_qa_verdict or "fail",
-                qa_differences=tuple(state.last_qa_differences),
-                qa_suggestions=tuple(state.last_qa_suggestions),
-                cache_suffix="",
-                review=review,
-                run_subagent=None,
-            )
+        if mark_retired_phase(state):
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
 
         return None
 
@@ -1312,11 +1181,20 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
+            if preflight_blocker := await enforce_seed_preflight(
+                seed, state, self._emit_runtime_event
+            ):
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=preflight_blocker)
             seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
             if seed_qa is not None:
                 return seed_qa
 
             if self.skip_run or state.skip_run:
+                # The only COMPLETE transition with no deadline check of its
+                # own; RUN enforces it at ``_run_execution_phase`` entry.
+                if self._enforce_deadline(state):
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
                 state.transition(
                     AutoPhase.COMPLETE,
                     f"Seed grade {review.grade_result.grade.value} ready; skip-run requested",
@@ -1349,201 +1227,8 @@ class AutoPipeline:
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                 state.run_handoff_guidance = None
-                # Q00/ouroboros#773 (review-5 finding 2): honor the durable
-                # ``complete_product`` intent on RUN resume. Without this
-                # branch, a crash between run handoff and ``_handoff_to_ralph``
-                # would silently bypass Ralph on resume even though the
-                # operator explicitly opted into RUN → RALPH_HANDOFF — a
-                # regression of the persisted-session contract added in
-                # this PR.
-                if self.complete_product:
-                    if self.ralph_starter is None:
-                        state.mark_blocked(
-                            "Cannot resume complete-product Ralph handoff without ralph starter configured",
-                            tool_name="ralph_starter",
-                        )
-                        self._save(state)
-                        return self._result(state, ledger, review=review, blocker=state.last_error)
-                    # Persisted run handles prove the execute_seed job was
-                    # *dispatched*, not that it reached terminal success.
-                    # On resume, persisted handles are dispatch evidence
-                    # only. A previous run may have blocked while the owned
-                    # job was paused, queued, running, cancel-requested, or
-                    # otherwise unreconcilable. Without re-polling here,
-                    # that resume would walk past the RUN gate and start
-                    # Ralph against a still-pending product run. Require
-                    # terminal-success evidence before resuming Ralph.
-                    if state.job_id:
-                        terminal_run_meta = await _wait_owned_run_job_terminal(
-                            self.run_starter,
-                            state.job_id,
-                            timeout_seconds=self._deadline_capped_timeout(
-                                state, state.phase_timeout_seconds(AutoPhase.RUN)
-                            ),
-                        )
-                        if self._enforce_deadline(state):
-                            return self._result(
-                                state, ledger, review=review, blocker=state.last_error
-                            )
-                        # If no snapshot channel is available, a persisted
-                        # ``job_id`` remains dispatch evidence only. Resume
-                        # cannot prove terminal success, so refuse Ralph
-                        # handoff just as the jobless-synchronous branch
-                        # below does for ``execution_id``-only handles.
-                        if terminal_run_meta is None:
-                            state.mark_blocked(
-                                "Cannot resume complete-product Ralph handoff: "
-                                "the owned run job snapshot is unavailable "
-                                f"(job_id={state.job_id!r}) so the persisted run "
-                                "handle cannot be confirmed as terminal-success. "
-                                "Resolve the run job to a terminal state, or clear "
-                                "the persisted handle before retrying.",
-                                tool_name="run_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=None,
-                            )
-                        run_status_resume = _optional_str(terminal_run_meta.get("status"))
-                        run_success_resume = terminal_run_meta.get("success")
-                        failed_run_statuses = {"failed", "cancelled", "interrupted"}
-                        if run_success_resume is False or (
-                            run_status_resume in failed_run_statuses
-                        ):
-                            resolved_status = run_status_resume or "failed"
-                            state.mark_blocked(
-                                "resumed run execution finished unsuccessfully "
-                                f"before Ralph handoff: {resolved_status}",
-                                tool_name="run_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=None,
-                            )
-                        incomplete_run_statuses = {
-                            "queued",
-                            "running",
-                            "cancel_requested",
-                        }
-                        if run_status_resume in incomplete_run_statuses:
-                            state.mark_blocked(
-                                "resumed run execution did not finish "
-                                f"before Ralph handoff: {run_status_resume}",
-                                tool_name="run_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=None,
-                            )
-                        if run_status_resume == "paused":
-                            state.mark_blocked(
-                                "resumed run execution paused before Ralph handoff; "
-                                "resume the paused run before continuing",
-                                tool_name="run_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=None,
-                            )
-                        # Allowlist-style terminal-success check: a poll
-                        # that returned terminal metadata but does not
-                        # advertise an explicit success signal (e.g. the
-                        # snapshot's ``result_meta`` is empty or carries
-                        # an unknown status) is NOT evidence the product
-                        # run reached terminal success. Refuse the
-                        # handoff just like the unreconcilable cases
-                        # above so a malformed or unfamiliar snapshot
-                        # cannot pass the gate by omission.
-                        if run_success_resume is not True and run_status_resume != "completed":
-                            state.mark_blocked(
-                                "Cannot resume complete-product Ralph handoff: "
-                                "owned run job snapshot did not confirm terminal "
-                                f"success (status={run_status_resume!r}, "
-                                f"success={run_success_resume!r}). Resolve the run "
-                                "to terminal-success or clear the persisted handle "
-                                "before retrying.",
-                                tool_name="run_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=None,
-                            )
-                    else:
-                        # Synchronous starters
-                        # (``HandlerSynchronousRunStarter``) return
-                        # ``job_id=None`` while still persisting
-                        # ``execution_id`` / ``run_session_id``, so the
-                        # fresh-path terminal-success validation relies on
-                        # the starter's returned dict — there is no
-                        # job-manager snapshot to reconcile against on
-                        # resume. A resume that reaches this branch with no
-                        # persisted ``job_id`` is therefore unreconcilable:
-                        # the most common cause is a fresh-path BLOCK on
-                        # paused/failed/non-terminal synchronous
-                        # execution, after which
-                        # ``_recoverable_phase_for_tool("run_starter")``
-                        # returns ``AutoPhase.RUN`` and re-enters the
-                        # persisted-handle branch. Dispatching Ralph from
-                        # ``execution_id``/``run_session_id`` alone would
-                        # advertise a non-terminal product run as ready
-                        # for the persistence loop, breaking the same
-                        # contract the fresh-path paused guard enforces.
-                        # Block with actionable guidance instead — the
-                        # operator must resolve the synchronous run
-                        # itself (resume it, or wipe the persisted handle)
-                        # before complete-product can continue.
-                        state.mark_blocked(
-                            "Cannot resume complete-product Ralph handoff for "
-                            "jobless synchronous execution: no job-manager "
-                            "snapshot is available to verify the persisted "
-                            "execution_id/run_session_id reached terminal "
-                            "success. Resume the synchronous run to completion "
-                            "or clear the persisted handle before retrying.",
-                            tool_name="run_starter",
-                        )
-                        self._save(state)
-                        return self._result(
-                            state,
-                            ledger,
-                            review=review,
-                            blocker=state.last_error,
-                            run_subagent=None,
-                        )
-                    return await self._handoff_to_ralph(
-                        state, ledger, seed, review, run_subagent=None
-                    )
-                # Non-complete-product RUN resume with a persisted run handle.
-                # A persisted handle proves the execute job was *dispatched*,
-                # not that it reached terminal success (Q00/ouroboros#1590):
-                # the owning process may have exited (deadline/Ctrl-C/kill)
-                # leaving the job cancelled, or the run may have paused
-                # (usage-limit) or failed. Reconcile the owned job's terminal
-                # state before declaring COMPLETE so ``--resume`` cannot return
-                # a stale product-complete for an incomplete run. When no poll
-                # channel is available (plain-function run starter, pruned job,
-                # etc.) fall back to the historical "trust the handle" behavior
-                # so genuinely-complete sessions and legacy handles are
-                # unaffected.
+                # A handle proves dispatch, not success (#1590). Reconcile when
+                # possible; unpollable legacy handles retain historical trust.
                 run_verdict = (
                     await _wait_owned_run_job_terminal(
                         self.run_starter,
@@ -1557,6 +1242,9 @@ class AutoPipeline:
                 )
                 blocked = self._block_resume_if_run_not_successful(state, run_verdict)
                 if blocked is not None:
+                    self._save(state)
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
+                if mark_retired_complete_product_run(state):
                     self._save(state)
                     return self._result(state, ledger, review=review, blocker=state.last_error)
                 state.transition(
@@ -1766,72 +1454,6 @@ class AutoPipeline:
                 if any((state.job_id, state.execution_id, state.run_session_id)):
                     state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                     state.run_handoff_guidance = None
-                    run_success = run_meta.get("success")
-                    if (
-                        self.complete_product
-                        and bool(getattr(self.run_starter, "synchronous_execution", False))
-                        and run_success is True
-                    ):
-                        if state.is_deadline_expired() and not (
-                            _allows_synchronous_completion_grace(run_meta)
-                            and _within_synchronous_completion_grace(state)
-                        ):
-                            if self._enforce_deadline(state):
-                                return self._result(
-                                    state,
-                                    ledger,
-                                    review=review,
-                                    blocker=state.last_error,
-                                    run_subagent=run_subagent,
-                                )
-                        state.run_handoff_status = "completed"
-                        state.run_handoff_guidance = None
-                        # RFC #1256 §I4 (#1254): emit the typed
-                        # ``auto.product.emitted`` terminal for the synchronous
-                        # complete-product success path — the branch
-                        # ``cli/commands/auto.py`` wires via
-                        # ``HandlerSynchronousRunStarter``, which completes
-                        # inline at RUN without RALPH_HANDOFF/EVALUATE. Without
-                        # this, a successful synchronous CLI run left no
-                        # queryable terminal event (ouroboros-agent[bot]
-                        # req_1780072861_321 blocker). There is no ralph/QA
-                        # stop_reason on this path, so ``stop_reason=None``.
-                        await self._emit_product_emitted_terminal(
-                            state,
-                            review=review,
-                            stop_reason=None,
-                        )
-                        state.transition(
-                            AutoPhase.COMPLETE,
-                            "synchronous execution completed for complete-product run",
-                        )
-                        self._save(state)
-                        return self._result(
-                            state,
-                            ledger,
-                            review=review,
-                            run_subagent=run_subagent,
-                        )
-                    # Q00/ouroboros#773: when ``--complete-product`` is set
-                    # and a ralph starter is configured, chain RUN →
-                    # RALPH_HANDOFF instead of going straight to COMPLETE.
-                    if self.complete_product:
-                        if self.ralph_starter is None:
-                            state.mark_blocked(
-                                "Cannot continue complete-product run without ralph starter configured",
-                                tool_name="ralph_starter",
-                            )
-                            self._save(state)
-                            return self._result(
-                                state,
-                                ledger,
-                                review=review,
-                                blocker=state.last_error,
-                                run_subagent=run_subagent,
-                            )
-                        return await self._handoff_to_ralph(
-                            state, ledger, seed, review, run_subagent
-                        )
                     state.transition(
                         AutoPhase.COMPLETE,
                         f"execution started for grade "
@@ -1916,22 +1538,7 @@ class AutoPipeline:
     def _block_resume_if_run_not_successful(
         self, state: AutoPipelineState, run_verdict: dict[str, Any] | None
     ) -> bool | None:
-        """Block a non-complete-product RUN resume unless the owned job succeeded.
-
-        ``run_verdict`` is the owned execute job's terminal ``result_meta``
-        (from :func:`_wait_owned_run_job_terminal`), or ``None`` when no poll
-        channel was available. Returns ``True`` when the state was marked
-        BLOCKED (the run did not reach terminal success), or ``None`` to let the
-        caller proceed to COMPLETE.
-
-        Conservative on ambiguity: ``None`` verdict (unpollable / pruned /
-        plain-function starter) or a non-terminal ``running``/``queued`` status
-        preserves the historical "trust the persisted handle" behavior, so
-        genuinely-complete and legacy sessions are unaffected. Only an
-        *observed* non-success terminal (paused / failed / cancelled /
-        interrupted / unknown) blocks — resumably, via ``run_starter`` — so a
-        later ``--resume`` re-reconciles instead of returning stale COMPLETE.
-        """
+        """Block an observed non-success terminal; preserve ambiguous legacy handles."""
         if run_verdict is None:
             return None
         status = _optional_str(run_verdict.get("status"))
@@ -1984,13 +1591,6 @@ class AutoPipeline:
         use a synchronous starter that owns the actual execution; treat that as
         RUN phase work and let the top-level pipeline deadline bound it.
         """
-        if self.complete_product and bool(
-            getattr(self.run_starter, "synchronous_execution", False)
-        ):
-            remaining = self._remaining_deadline_seconds(state)
-            if remaining is not None:
-                return remaining
-            return float(state.phase_timeout_seconds(AutoPhase.RUN))
         return self._deadline_capped_timeout(state, self.run_start_timeout_seconds)
 
     async def _drain_interview_observer_events(
@@ -2384,410 +1984,6 @@ class AutoPipeline:
                 error=str(exc),
             )
 
-    async def _handoff_to_ralph(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-        *,
-        reattach_terminal: bool = True,
-        reuse_existing: bool = True,
-    ) -> AutoPipelineResult:
-        """Run the RUN → RALPH_HANDOFF → terminal-phase chain.
-
-        Builds a deterministic ``lineage_id``, forwards the remaining
-        pipeline budget as ``max_total_seconds``, and maps the ralph
-        terminal status back into one of ``COMPLETE`` / ``BLOCKED`` /
-        ``FAILED`` per the contract pinned by
-        :data:`_RALPH_BLOCKED_STOP_REASONS`. Plugin-mode dispatches
-        transition to COMPLETE immediately and surface the OpenCode Task
-        widget guidance to the operator.
-        """
-        assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        # Preserve a previously persisted lineage on resume so the re-dispatch
-        # remains correlated with prior ``mcp.job.*`` events; only mint a fresh
-        # one when this is the first handoff attempt for the session.
-        if state.ralph_lineage_id:
-            lineage_id = state.ralph_lineage_id
-        else:
-            lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
-            if state.run_handoff_status == "ralph_retry_after_blocker":
-                # A resumable Ralph blocker (for example iteration_timeout)
-                # means the previous Ralph attempt has already produced a
-                # blocker for this auto session. Retrying must enqueue fresh
-                # Ralph work, not reattach to a still-running or terminal job
-                # with the original deterministic lineage. Persist the new
-                # retry lineage before dispatch so a crash after this point
-                # resumes the same retry attempt instead of minting another.
-                lineage_id = f"{lineage_id}-retry-{int(time.time() * 1000)}"
-        state.ralph_lineage_id = lineage_id
-        if state.phase != AutoPhase.RALPH_HANDOFF:
-            state.transition(
-                AutoPhase.RALPH_HANDOFF,
-                f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
-            )
-        else:
-            state.mark_progress(
-                "re-entering Ralph handoff after resume",
-                tool_name="ralph_starter",
-            )
-        self._save(state)
-        max_total_seconds: float | None = None
-        per_iteration_timeout_seconds: float | None = None
-        if state.deadline_at is not None:
-            remaining = state.deadline_at - time.monotonic()
-            if remaining < _MIN_RALPH_MAX_TOTAL_SECONDS:
-                message = (
-                    "pipeline_timeout: remaining deadline budget "
-                    f"{max(0.0, remaining):.1f}s is below Ralph minimum "
-                    f"{_MIN_RALPH_MAX_TOTAL_SECONDS:.0f}s during {state.phase.value}"
-                )
-                state.mark_blocked(message, tool_name=PIPELINE_DEADLINE_TOOL_NAME)
-                self._save(state)
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            max_total_seconds = remaining
-            # Size per-iteration to the remaining pipeline budget so a single
-            # ``evolve_step`` cannot block past ``deadline_at`` while ALSO not
-            # being capped below that budget. ``RalphLoopRunner`` checks
-            # ``max_total_seconds`` only at iteration boundaries, so the upper
-            # bound here is what stops a single iteration from overshooting the
-            # deadline. The ceiling is the Ralph-supported maximum (7200s), NOT
-            # the standalone default (1800s): a ``complete_product`` gen-1
-            # iteration does implementation + evolve verification in one step
-            # and the 1800s default was killing it mid-verification with
-            # pipeline budget still remaining (cli-todo live R2). Floored at the
-            # Ralph minimum (30s) — when the remaining budget is itself below
-            # that floor we still cap at 30s rather than rejecting at the auto
-            # layer, since the pre-dispatch ``MIN_RALPH_MAX_TOTAL_SECONDS`` check
-            # already protects against a sub-second budget; ``max_total_seconds``
-            # then aborts the loop before any follow-up iteration starts, so the
-            # worst-case overshoot is one iteration of up to 30 seconds.
-            per_iteration_timeout_seconds = max(
-                _MIN_RALPH_PER_ITERATION_SECONDS,
-                min(_MAX_RALPH_PER_ITERATION_SECONDS, remaining),
-            )
-
-        ralph_mirror_task: asyncio.Task[None] | None = None
-
-        # Q00/ouroboros#773 (review-6): persist the Ralph dispatch handle as
-        # soon as the background job exists, BEFORE we await terminal
-        # completion. Without this checkpoint, a process restart, deadline
-        # trip, or client disconnect after dispatch but before terminal
-        # would leave the persisted state with only ``ralph_lineage_id`` —
-        # ``_resume_ralph_handoff`` then cannot call ``ralph_resumer``
-        # (which keys off ``ralph_job_id``) and falls back to guidance-only
-        # text, reintroducing the stranded-resume bug this PR is meant to
-        # solve. The starter callable invokes this hook BEFORE blocking on
-        # the terminal-status poll.
-        def _checkpoint_dispatch(envelope: dict[str, Any]) -> None:
-            nonlocal ralph_mirror_task
-            state.ralph_job_id = _optional_str(envelope.get("job_id"))
-            state.ralph_dispatch_mode = _optional_str(envelope.get("dispatch_mode"))
-            persisted_lineage = _optional_str(envelope.get("lineage_id"))
-            if persisted_lineage:
-                state.ralph_lineage_id = persisted_lineage
-            state.last_tool_name = "ralph_starter"
-            self._save(state)
-            if (
-                self.store is not None
-                and state.ralph_job_id is not None
-                and state.ralph_dispatch_mode != "plugin"
-                and ralph_mirror_task is None
-            ):
-                event_store = getattr(self.ralph_starter, "job_event_store", None)
-                if event_store is not None:
-                    ralph_mirror_task = asyncio.create_task(
-                        mirror_ralph_job_events(
-                            state,
-                            self.store,
-                            event_store,
-                            state.ralph_job_id,
-                        )
-                    )
-
-        # Q00/ouroboros#773 (review-7): decide compatibility BEFORE invocation,
-        # never by retrying on a post-dispatch ``TypeError``. ``RalphHandler``
-        # creates a brand-new background job on every call and has no
-        # idempotency key (unlike the run starter's ``idempotency_key`` path),
-        # so a second invocation after a real ``TypeError`` thrown post-dispatch
-        # would create a duplicate Ralph loop mutating the same lineage.
-        # Inspect the callable's signature once and route the kwargs through
-        # the right shape on a single attempt.
-        starter_kwargs: dict[str, Any] = {
-            "lineage_id": lineage_id,
-            "max_total_seconds": max_total_seconds,
-            "per_iteration_timeout_seconds": per_iteration_timeout_seconds,
-        }
-        if _accepts_keyword(self.ralph_starter, "on_dispatched"):
-            starter_kwargs["on_dispatched"] = _checkpoint_dispatch
-        if _accepts_keyword(self.ralph_starter, "reattach_terminal"):
-            starter_kwargs["reattach_terminal"] = reattach_terminal
-        if _accepts_keyword(self.ralph_starter, "reuse_existing"):
-            starter_kwargs["reuse_existing"] = reuse_existing
-        if _accepts_keyword(self.ralph_starter, "commit_policy"):
-            starter_kwargs["commit_policy"] = state.commit_policy.value
-        if _accepts_keyword(self.ralph_starter, "auto_session_id"):
-            starter_kwargs["auto_session_id"] = state.auto_session_id
-        if _accepts_keyword(self.ralph_starter, "execution_id"):
-            starter_kwargs["execution_id"] = state.execution_id
-        if _accepts_keyword(self.ralph_starter, "checkpoint_commits"):
-            starter_kwargs["checkpoint_commits"] = state.checkpoint_commits
-        if _accepts_keyword(self.ralph_starter, "checkpoint_attempted_ac_ids"):
-            starter_kwargs["checkpoint_attempted_ac_ids"] = state.checkpoint_attempted_ac_ids
-        try:
-            ralph_call = self.ralph_starter(seed, **starter_kwargs)
-            if state.deadline_at is None:
-                ralph_meta = await ralph_call
-            else:
-                ralph_timeout = max(0.0, state.deadline_at - time.monotonic())
-                ralph_meta = await asyncio.wait_for(ralph_call, timeout=ralph_timeout)
-        except TimeoutError:
-            # Even if the deadline trips, the Ralph job may already exist
-            # server-side (the dispatch checkpoint above persisted its
-            # handle). Resume will then poll it via ``_resume_ralph_handoff``
-            # rather than treating the session as terminally lost.
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            state.mark_blocked(
-                "ralph handoff timed out before terminal status",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            await _cancel_ralph_status_mirror(ralph_mirror_task)
-            state.mark_failed(f"ralph handoff failed: {exc}", tool_name="ralph_starter")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        await _drain_ralph_status_mirror(ralph_mirror_task)
-        if not isinstance(ralph_meta, dict):
-            state.mark_failed(
-                f"ralph starter returned {type(ralph_meta).__name__}, expected dict",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        state.ralph_job_id = _optional_str(ralph_meta.get("job_id"))
-        ralph_checkpoint_commits = ralph_meta.get("checkpoint_commits")
-        if isinstance(ralph_checkpoint_commits, list):
-            state.checkpoint_commits = [
-                item for item in ralph_checkpoint_commits if isinstance(item, dict)
-            ]
-        ralph_checkpoint_attempts = ralph_meta.get("checkpoint_attempted_ac_ids")
-        if isinstance(ralph_checkpoint_attempts, list):
-            state.checkpoint_attempted_ac_ids = [
-                item for item in ralph_checkpoint_attempts if isinstance(item, str)
-            ]
-        state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
-        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
-        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _ralph_current_generation_from_meta(ralph_meta)
-        mirror_terminal_status = state.run_handoff_status != "ralph_retry_after_blocker"
-        if mirror_terminal_status and terminal_status is not None:
-            state.ralph_job_status = terminal_status
-        if mirror_terminal_status and stop_reason is not None:
-            state.ralph_stop_reason = stop_reason
-        if mirror_terminal_status and current_generation is not None:
-            state.ralph_current_generation = current_generation
-        # Plugin delegation: nothing to await, transition straight to
-        # COMPLETE and surface the OpenCode Task widget guidance.
-        if state.ralph_dispatch_mode == "plugin":
-            state.run_handoff_guidance = (
-                "Ralph loop delegated to the OpenCode plugin child session. "
-                "Track progress through the OpenCode Task widget; this auto "
-                "session will not block on the loop's completion."
-            )
-            # Q00/ouroboros#782 review-5 BLOCKING #1: surface Ralph's
-            # ``_subagent`` envelope so the OpenCode bridge actually spawns
-            # the child session. In ``--complete-product`` plugin mode the
-            # Ralph subagent supersedes the run-handoff subagent — the run
-            # already kicked off and the loop is what the plugin must own.
-            ralph_subagent = (
-                ralph_meta.get("_subagent")
-                if isinstance(ralph_meta.get("_subagent"), dict)
-                else None
-            )
-            effective_subagent = ralph_subagent or run_subagent
-            if ralph_subagent is not None:
-                state.run_subagent = ralph_subagent
-            state.transition(
-                AutoPhase.COMPLETE,
-                "ralph loop delegated to OpenCode plugin child session",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, run_subagent=effective_subagent)
-        if terminal_status == "completed":
-            return await self._evaluate_or_complete(
-                state,
-                ledger,
-                seed,
-                review=review,
-                run_subagent=run_subagent,
-                stop_reason=stop_reason,
-                ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
-            )
-        if terminal_status == "cancelled":
-            if state.phase is not AutoPhase.BLOCKED:
-                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
-                self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
-                state,
-                ledger,
-                stop_reason=stop_reason,
-                seed=seed,
-                review=review,
-                run_subagent=run_subagent,
-            )
-            if lateral_result is not None:
-                return lateral_result
-            state.mark_blocked(stop_reason, tool_name="ralph_starter")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        if terminal_status == "running_async":
-            state.mark_progress(
-                "background Ralph job is still tracked",
-                tool_name=PIPELINE_DEADLINE_TOOL_NAME,
-            )
-            self._save(state)
-            return self._result(
-                state,
-                ledger,
-                review=review,
-                run_subagent=run_subagent,
-                status_override=DETACHED_STATUS,
-            )
-        # Any other failure (terminal failure action, exception bubbled up,
-        # or an unrecognized status) is a hard FAILED.
-        message = (
-            f"ralph loop failed: {stop_reason}"
-            if stop_reason
-            else f"ralph loop failed: terminal_status={terminal_status or 'unknown'}"
-        )
-        state.mark_failed(message, tool_name="ralph_starter")
-        self._save(state)
-        return self._result(
-            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-        )
-
-    async def _evaluate_or_complete(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-        stop_reason: str | None,
-        ralph_result_text: str | None,
-        resumed: bool = False,
-    ) -> AutoPipelineResult:
-        """Branch between EVALUATE and COMPLETE after a Ralph terminal verdict.
-
-        Inserted by RFC #809 Phase 2.1. When ``self.evaluator`` is wired AND
-        the session is in complete-product mode AND Ralph produced a
-        ``result_text`` artifact, transitions to EVALUATE and invokes
-        :meth:`_run_evaluate`. Otherwise falls back to the pre-Phase-2.1
-        behaviour: transition to COMPLETE directly.
-        """
-        if self.evaluator is not None and state.complete_product and ralph_result_text is not None:
-            # ``is not None`` not truthiness: an empty-but-valid Ralph
-            # artifact is still a graded artifact. Skipping EVALUATE on
-            # ``""`` would produce a silent false-pass for runs whose output
-            # is intentionally empty, violating the
-            # "complete_product + evaluator → graded COMPLETE" contract.
-            state.transition(AutoPhase.EVALUATE, "evaluating ralph artifact against seed AC")
-            self._save(state)
-            return await self._run_evaluate(
-                state,
-                ledger,
-                seed,
-                review=review,
-                run_subagent=run_subagent,
-                ralph_result_text=ralph_result_text,
-                stop_reason=stop_reason,
-            )
-        probe_blocker = await self._complete_runtime_probe_blocker(state)
-        if probe_blocker is not None:
-            return self._result(
-                state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
-            )
-        message_prefix = "resumed ralph loop completed" if resumed else "ralph loop completed"
-        # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted`` terminal
-        # for the direct ralph-completed success path (no evaluator wired, or
-        # plugin mode). The evaluator-pass path emits the same event from
-        # :meth:`_finalize_evaluate`; both share
-        # :meth:`_emit_product_emitted_terminal`.
-        await self._emit_product_emitted_terminal(
-            state,
-            review=review,
-            stop_reason=stop_reason,
-            resumed=resumed,
-        )
-        state.transition(
-            AutoPhase.COMPLETE,
-            f"{message_prefix} ({stop_reason or 'qa passed'})",
-        )
-        self._save(state)
-        return self._result(state, ledger, review=review, run_subagent=run_subagent)
-
-    async def _complete_runtime_probe_blocker(self, state: AutoPipelineState) -> str | None:
-        """Run configured runtime probes and return a PRODUCT_COMPLETE blocker.
-
-        L3-2 / #1176 makes runtime evidence a completion-grade input: when
-        a runner is wired, each PRODUCT_COMPLETE transition first captures
-        runtime evidence and any explicit probe FAIL downgrades the terminal
-        from COMPLETE to BLOCKED. Missing runner remains a backwards-compatible
-        no-op because binding/command-source ownership lives outside this
-        envelope slice. Runner exceptions are treated as infrastructure
-        blockers instead of false PRODUCT_COMPLETE success.
-        """
-        if self.probe_runner is None or self._last_probe_evidence:
-            return None
-        try:
-            evidence = await self.probe_runner(state)
-        except Exception as exc:  # noqa: BLE001 - surface probe infrastructure failure
-            msg = f"runtime probe runner failed: {exc}"
-            state.mark_blocked(msg, tool_name="probe_runner")
-            self._save(state)
-            return msg
-        self._last_probe_evidence = tuple(evidence) if evidence else ()
-        state.runtime_probe_evidence = [item.to_dict() for item in self._last_probe_evidence]
-        self._save(state)
-        failures = tuple(item for item in self._last_probe_evidence if not item.passed)
-        if not failures:
-            return None
-        summary = "; ".join(item.summary for item in failures[:3])
-        msg = f"runtime probe failed: {summary}" if summary else "runtime probe failed"
-        state.mark_blocked(msg, tool_name="probe_runner")
-        self._save(state)
-        return msg
-
     async def _run_seed_qa_gate(
         self,
         state: AutoPipelineState,
@@ -2803,55 +1999,75 @@ class AutoPipeline:
         current_seed = seed
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
-        for attempt in range(1, max_attempts + 1):
-            timeout = self._deadline_capped_timeout(
-                state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-            )
-            try:
-                qa_result = await asyncio.wait_for(
-                    self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
-                )
-            except TimeoutError:
-                if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
-                    )
-                state.mark_blocked(
-                    f"Seed QA timed out after {timeout:.0f}s",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
-            except Exception as exc:
-                state.mark_blocked(
-                    f"Seed QA raised {type(exc).__name__}",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
 
-            if qa_result.error:
-                state.mark_blocked(
-                    "Seed QA reported a transient evaluator error",
-                    tool_name="seed_qa",
+        def deadline_result() -> tuple[AutoPipelineResult, Seed, SeedReview | None]:
+            return (
+                self._result(state, ledger, review=current_review, blocker=state.last_error),
+                current_seed,
+                current_review,
+            )
+
+        async def advisory(
+            reason: str, detail: str, *, score: float | None = None
+        ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+            # Reads the loop-carried Seed / review / attempt at call time.
+            return await self._seed_qa_advisory_continue(
+                state,
+                ledger,
+                current_seed,
+                current_review,
+                reason=reason,
+                detail=detail,
+                attempts=attempt,
+                score=score,
+            )
+
+        for attempt in range(1, max_attempts + 1):
+            clear_seed_qa_verdict(state)  # a stale verdict must not outlive its attempt
+            self._save(state)  # ...including across an interruption mid-attempt
+            qa_result: EvaluateResult | None = None
+            transient_reason = "evaluator_error"
+            transient_detail = "Seed QA evaluator failed"
+            for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+                timeout = self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
                 )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
+                try:
+                    candidate = await asyncio.wait_for(
+                        self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
+                    )
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return deadline_result()
+                    transient_reason = "evaluator_timeout"
+                    transient_detail = f"Seed QA timed out after {timeout:.0f}s"
+                except Exception as exc:
+                    transient_reason = "evaluator_error"
+                    transient_detail = f"Seed QA raised {type(exc).__name__}"
+                else:
+                    if not candidate.error:
+                        qa_result = candidate
+                        break
+                    detail = _safe_seed_qa_error_detail(candidate.error)
+                    transient_reason = "evaluator_transient_error"
+                    transient_detail = f"Seed QA reported a transient evaluator error: {detail}"
+                if transient_attempt < _TRANSIENT_TOOL_ATTEMPTS:
+                    backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                        min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
+                    if self._enforce_deadline(state):
+                        return deadline_result()
+            if qa_result is None:
+                return await self._seed_qa_advisory_continue(
+                    state,
+                    ledger,
                     current_seed,
                     current_review,
+                    reason=transient_reason,
+                    detail=transient_detail,
+                    attempts=_TRANSIENT_TOOL_ATTEMPTS,
+                    score=None,
                 )
 
             state.last_qa_score = float(qa_result.score)
@@ -2877,40 +2093,39 @@ class AutoPipeline:
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
+                if _requests_seed_qa_ambiguity_repair(qa_result):
+                    blocker = (
+                        "seed_qa_ambiguity_unrepairable: Seed QA found unresolved ambiguity; "
+                        "new interview evidence is required before execution"
+                    )
+                    state.mark_blocked(
+                        blocker,
+                        tool_name="seed_qa",
+                        error_code="seed_qa_ambiguity_unrepairable",
+                    )
+                    self._save(state)
+                    return (
+                        self._result(state, ledger, review=current_review, blocker=blocker),
+                        current_seed,
+                        current_review,
+                    )
                 try:
                     current_seed = normalize_execution_acceptance(
                         await self._repair_seed_after_qa(
                             state, current_seed, qa_result, attempt=attempt
                         )
                     )
+                except TimeoutError:
+                    return deadline_result()
                 except SeedQaRepairMappingError as exc:
-                    await self._emit_runtime_event(
-                        "auto.seed_qa.blocked",
-                        state.auto_session_id,
-                        {
-                            "schema_version": 1,
-                            "auto_session_id": state.auto_session_id,
-                            "seed_id": current_seed.metadata.seed_id,
-                            "attempts": attempt,
-                            "verdict": state.last_qa_verdict,
-                            "score": float(qa_result.score),
-                            "differences": state.last_qa_differences[:5],
-                            "suggestions": state.last_qa_suggestions[:5],
-                            "reason": "seed_qa_feedback_unmapped",
-                        },
-                    )
-                    state.mark_blocked(
-                        str(exc),
-                        tool_name="seed_qa",
-                        error_code="seed_qa_feedback_unmapped",
-                    )
-                    self._save(state)
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
+                    # The repair mapper only understands a bounded vocabulary of
+                    # QA findings. Unmapped feedback means "this pipeline cannot
+                    # mechanically repair the Seed", not "this Seed must never
+                    # run" — re-judging the *unchanged* Seed would only produce
+                    # the same unmapped feedback, so stop repairing and hand the
+                    # verdict to run → evaluate.
+                    return await advisory(
+                        "seed_qa_feedback_unmapped", str(exc), score=float(qa_result.score)
                     )
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
@@ -2942,36 +2157,52 @@ class AutoPipeline:
                 self._save(state)
                 continue
 
-            details = [
+            return await advisory(
+                "repair_budget_exhausted",
                 f"Seed QA did not pass after {attempt} attempt(s): "
-                f"{state.last_qa_verdict} (score {qa_result.score:.2f})"
-            ]
-            details.extend(state.last_qa_differences)
-            details.extend(state.last_qa_suggestions)
-            await self._emit_runtime_event(
-                "auto.seed_qa.blocked",
-                state.auto_session_id,
-                {
-                    "schema_version": 1,
-                    "auto_session_id": state.auto_session_id,
-                    "seed_id": current_seed.metadata.seed_id,
-                    "attempts": attempt,
-                    "verdict": state.last_qa_verdict,
-                    "score": float(qa_result.score),
-                    "differences": state.last_qa_differences[:5],
-                    "suggestions": state.last_qa_suggestions[:5],
-                    "reason": "repair_budget_exhausted",
-                },
-            )
-            state.mark_blocked("; ".join(details), tool_name="seed_qa")
-            self._save(state)
-            return (
-                self._result(state, ledger, review=current_review, blocker=state.last_error),
-                current_seed,
-                current_review,
+                f"{state.last_qa_verdict} (score {qa_result.score:.2f})",
+                score=float(qa_result.score),
             )
 
         return None, current_seed, current_review
+
+    async def _seed_qa_advisory_continue(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        review: SeedReview | None,
+        *,
+        reason: str,
+        detail: str,
+        attempts: int,
+        score: float | None,
+    ) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+        """Advisory continuation — see :mod:`ouroboros.auto.seed_qa_advisory`."""
+
+        def stop(blocker: str | None) -> tuple[AutoPipelineResult | None, Seed, SeedReview | None]:
+            return self._result(state, ledger, review=review, blocker=blocker), seed, review
+
+        # Gates first, event second — see the module docstring for why.
+        review_blocker = self._seed_review_gate_blocker(state, review)
+        if review_blocker is not None:
+            state.mark_blocked(review_blocker, tool_name="grade_gate")
+            self._save(state)
+            return stop(review_blocker)
+        if self._enforce_deadline(state):
+            return stop(state.last_error)
+        await publish_advisory(
+            state=state,
+            seed=seed,
+            reason=reason,
+            detail=detail,
+            attempts=attempts,
+            score=score,
+            emit=self._emit_runtime_event,
+        )
+        state.mark_progress(seed_qa_advisory_progress(reason, detail), tool_name="seed_qa")
+        self._save(state)
+        return None, seed, review
 
     async def _repair_seed_after_qa(
         self,
@@ -2987,8 +2218,7 @@ class AutoPipeline:
         mapped repair constraints into one *concrete decision* and fold that
         decision into the Seed — this resolves substance blockers (e.g. "no
         binding contract chosen; a section is missing") that the mechanical
-        feedback echo cannot, because the echo only restates the gap. Falls
-        back to the deterministic :func:`_seed_with_seed_qa_feedback` when no
+        feedback echo cannot, because the echo only restates the gap. Falls back when no
         lateral handle is wired, the persona chain is exhausted, or the lateral
         attempt fails (timeout / transient / plugin-delegation), so prior
         behaviour and the ``seed_qa`` → REVIEW resume contract are preserved.
@@ -3010,22 +2240,35 @@ class AutoPipeline:
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )
-        try:
-            lateral_result = await asyncio.wait_for(
-                self.lateral_thinker(
-                    persona=persona,
-                    qa_differences=safe_feedback,
-                    qa_suggestions=(),
-                    run_artifact=seed_yaml,
-                ),
-                timeout=self._deadline_capped_timeout(
-                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-                ),
-            )
-        except Exception:  # noqa: BLE001 — lateral is best-effort; degrade gracefully
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
-
-        if lateral_result.error or not lateral_result.text.strip():
+        lateral_result: LateralResult | None = None
+        for transient_attempt in range(1, _TRANSIENT_TOOL_ATTEMPTS + 1):
+            try:
+                candidate = await asyncio.wait_for(
+                    self.lateral_thinker(
+                        persona=persona,
+                        qa_differences=safe_feedback,
+                        qa_suggestions=(),
+                        run_artifact=seed_yaml,
+                    ),
+                    timeout=self._deadline_capped_timeout(
+                        state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — bounded best-effort retry
+                candidate = None
+            if self._enforce_deadline(state):
+                raise TimeoutError
+            if candidate is not None and not candidate.error and candidate.text.strip():
+                lateral_result = candidate
+                break
+            if transient_attempt < _TRANSIENT_TOOL_ATTEMPTS:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(self._deadline_capped_timeout(state, backoff))
+                if self._enforce_deadline(state):
+                    raise TimeoutError
+        if lateral_result is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 
         state.last_lateral_persona = lateral_result.persona or persona.value
@@ -3059,797 +2302,6 @@ class AutoPipeline:
             return "Seed review did not clear the Seed for execution"
         return None
 
-    async def _run_evaluate(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-        ralph_result_text: str | None,
-        stop_reason: str | None,
-    ) -> AutoPipelineResult:
-        """Run the EVALUATE phase: grade the run artifact against the Seed AC.
-
-        Idempotent on resume — when ``state.evaluate_artifact_hash`` matches a
-        freshly-computed hash of the current artifact AND a verdict was
-        already persisted, the cached verdict is reused without re-invoking
-        the LLM judge. A different artifact (e.g. Ralph re-ran on resume)
-        forces re-evaluation.
-
-        On QA pass → COMPLETE with the verdict in the progress message.
-        On QA fail → BLOCKED with the verdict + top-3 differences/suggestions
-        in the blocker text. On timeout / handler error → BLOCKED with
-        ``tool_name="evaluator"`` so the session remains resumable.
-        """
-        assert self.evaluator is not None  # noqa: S101 — guarded by caller
-
-        # Capture the prior round's score BEFORE any subsequent step
-        # mutates ``state.last_qa_score`` — specifically the cache
-        # invalidation below (``state.last_qa_score = None`` when the
-        # artifact hash changes). The duplicate-fingerprint guard later
-        # in this method needs the genuine previous score to decide
-        # whether "same wording" was accompanied by score progress
-        # (bot review #8 fix). First-ever round has ``None`` here,
-        # which the guard treats as "cannot judge progress" and skips.
-        previous_qa_score = state.last_qa_score
-
-        # Resolve the artifact:
-        # 1. Fresh call from the Ralph terminal path → use ``ralph_result_text``
-        #    (``is not None`` so an empty-but-valid artifact still grades)
-        # 2. EVALUATE-phase resume after a prior call → use the persisted
-        #    ``state.evaluate_artifact`` so a timeout/transient-error path is
-        #    genuinely recoverable (without persistence, ``--resume`` had no
-        #    artifact to grade and dropped into a permanent BLOCKED).
-        import hashlib
-
-        artifact: str | None = None
-        if ralph_result_text is not None:
-            artifact = ralph_result_text
-        elif state.evaluate_artifact is not None:
-            artifact = state.evaluate_artifact
-        if artifact is None:
-            artifact_hash = state.evaluate_artifact_hash
-        else:
-            artifact_hash = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
-
-        # RFC #809 Phase 2.2b — fresh-artifact reset. A new run output
-        # (artifact_hash differs from the persisted one) means the
-        # failure surface changed; any prior recovery exhaustion no
-        # longer applies and must be cleared BEFORE the sticky-guard
-        # check below — otherwise ``recovery_guard_tripped`` would be a
-        # permanent poison pill that no operator-driven workflow could
-        # escape within the same session. The reset is conditional on
-        # ``state.evaluate_artifact_hash`` already being populated so
-        # the first evaluator call of a session does not trip it on
-        # default-None state. This is the same "fresh artifact = fresh
-        # budget" contract the ``recovery_guard_tripped`` field
-        # docstring on AutoPipelineState promises; Stack 2's automated
-        # re-dispatch will be the most common producer of fresh
-        # artifacts arriving at EVALUATE.
-        if (
-            state.evaluate_artifact_hash is not None
-            and artifact_hash is not None
-            and state.evaluate_artifact_hash != artifact_hash
-        ):
-            if not _is_active_recovery_redispatch(state):
-                state.recovery_guard_tripped = None
-                state.evaluate_round = 0
-                state.failure_fingerprints = []
-                state.personas_invoked = []
-
-        # RFC #809 Phase 2.2b — sticky guard check (post-reset). If the
-        # previous round exhausted a recovery guard AND the artifact
-        # has not changed, this resume MUST NOT re-enter the
-        # cache-fast-path or fall through to ``_finalize_evaluate``:
-        # doing so would honour a cached ``passed=False`` verdict and
-        # spend another lateral persona slot for a surface already
-        # declared exhausted. Re-mark the session BLOCKED (the
-        # ``--resume`` transition above flipped the phase back to
-        # EVALUATE for re-entry; flip it back) and surface the
-        # original exhaustion reason verbatim.
-        if state.recovery_guard_tripped is not None:
-            state.mark_blocked(
-                state.last_error
-                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
-                tool_name=state.last_tool_name or "evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state,
-                ledger,
-                review=review,
-                blocker=state.last_error,
-                run_subagent=run_subagent,
-            )
-
-        # Cache hit requires the persisted ``last_qa_passed`` boolean — the
-        # canonical pass decision derived from ``score >= pass_threshold``
-        # by the QA handler. Using ``last_qa_verdict == "pass"`` as the
-        # cache key would silently reclassify a ``passed=True`` /
-        # ``verdict="revise"`` result as BLOCKED on resume, breaking
-        # idempotent resume behaviour.
-        cache_hit = (
-            artifact_hash is not None
-            and state.evaluate_artifact_hash == artifact_hash
-            and state.last_qa_passed is not None
-        )
-        if cache_hit:
-            return await self._finalize_evaluate(
-                state,
-                ledger,
-                review=review,
-                run_subagent=run_subagent,
-                passed=bool(state.last_qa_passed),
-                score=state.last_qa_score or 0.0,
-                verdict=state.last_qa_verdict or "fail",
-                differences=tuple(state.last_qa_differences),
-                suggestions=tuple(state.last_qa_suggestions),
-                stop_reason=stop_reason,
-                from_cache=True,
-                seed=seed,
-            )
-
-        if artifact is None:
-            # Resume in EVALUATE with no cached verdict and no fresh artifact —
-            # we cannot move forward deterministically. Mark blocked so an
-            # operator can attach or re-supply context.
-            state.mark_blocked(
-                "EVALUATE resume found no cached verdict and no run artifact to re-grade",
-                tool_name="evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-
-        # Persist the artifact + hash BEFORE invoking the evaluator so any
-        # subsequent timeout / exception / transient QA error leaves a
-        # recoverable trail on disk. The artifact must be stored verbatim
-        # (no truncation) so the recomputed hash on resume matches the one
-        # persisted here — truncation would silently invalidate the cache.
-        #
-        # Critical: when the artifact has CHANGED (hash differs from the
-        # previously persisted one), the stale verdict from the previous
-        # artifact MUST be cleared. Otherwise, if the evaluator times out
-        # or transiently errors after persisting the new hash, ``--resume``
-        # would see ``hash(new) == hash(new)`` paired with the cached pass
-        # flag from ``hash(old)`` and incorrectly take the cache-hit path.
-        if state.evaluate_artifact_hash != artifact_hash:
-            state.last_qa_score = None
-            state.last_qa_verdict = None
-            state.last_qa_passed = None
-            state.last_qa_differences = []
-            state.last_qa_suggestions = []
-            # The lateral cache also references this artifact (its
-            # ``current_approach`` payload includes the run artifact), so a
-            # stale persona suggestion produced for the old artifact must
-            # not be reused. Invalidating here keeps the lateral and QA
-            # caches in lockstep — a fresh EVALUATE on a new artifact will
-            # transition through a fresh UNSTUCK_LATERAL too.
-            state.last_lateral_persona = None
-            state.last_lateral_approach_summary = None
-            state.last_lateral_text = None
-            state.lateral_input_hash = None
-            state.last_recovery_plan = None
-        state.evaluate_artifact = artifact
-        state.evaluate_artifact_hash = artifact_hash
-
-        # RFC #809 Phase 2.2b — recovery-loop round budget guard. Check
-        # BEFORE the evaluator call; the counter is incremented AFTER a
-        # real evaluation result is in hand (post ``eval_result.error``
-        # filter, below). This split matters because transient
-        # infrastructure failures (timeout, exception, transient adapter
-        # error) must NOT consume the finite recovery budget — otherwise
-        # a streak of infra-only failures would trip ``round_budget``
-        # and permanently block a session that has not actually
-        # completed any QA round.
-        if state.evaluate_round >= MAX_EVALUATE_ROUNDS:
-            state.mark_blocked(
-                f"recovery loop: evaluate_round budget exhausted "
-                f"(MAX_EVALUATE_ROUNDS={MAX_EVALUATE_ROUNDS}); "
-                f"{_RECOVERY_BLOCKED_CHOICES}",
-                tool_name="evaluator",
-            )
-            state.recovery_guard_tripped = "round_budget"
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        self._save(state)
-
-        phase_timeout = state.phase_timeout_seconds(AutoPhase.EVALUATE)
-        # Cap the per-phase budget by the remaining top-level pipeline
-        # deadline (Q00/ouroboros#779). Without this cap a late EVALUATE
-        # entry could block past ``deadline_at`` and report
-        # ``"evaluator timed out"`` instead of the canonical
-        # ``pipeline_timeout`` blocker every other long-running phase
-        # produces.
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            eval_result = await asyncio.wait_for(
-                self.evaluator(seed, artifact), timeout=capped_timeout
-            )
-        except TimeoutError:
-            # If the deadline expired during the call, surface the canonical
-            # pipeline-timeout blocker so resume / status surfaces see the
-            # same shape as every other deadline trip in the pipeline.
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            state.mark_blocked(
-                f"evaluator timed out after {capped_timeout:.0f}s",
-                tool_name="evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"evaluator raised: {exc}", tool_name="evaluator")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-
-        if eval_result.error:
-            state.mark_blocked(
-                f"evaluator reported transient error: {eval_result.error}",
-                tool_name="evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-
-        # RFC #809 Phase 2.2b — only consume a round once a real QA
-        # result is in hand. Transient evaluator failures (timeout,
-        # exception, ``eval_result.error``) returned above must not
-        # decrement the recovery budget; resuming through them is part
-        # of normal infrastructure recovery, not loop progress.
-        state.evaluate_round += 1
-
-        state.last_qa_score = float(eval_result.score)
-        state.last_qa_verdict = str(eval_result.verdict)
-        # Persist the canonical pass flag explicitly (score >= threshold
-        # per the QA contract). Resume reuses this boolean rather than
-        # re-deriving ``passed`` from the verdict string — verdicts and
-        # the passed flag can diverge (e.g. score 0.85, threshold 0.80
-        # ⇒ passed=True but verdict="revise" when the LLM is conservative).
-        state.last_qa_passed = bool(eval_result.passed)
-        state.last_qa_differences = list(eval_result.differences)
-        state.last_qa_suggestions = list(eval_result.suggestions)
-        state.evaluate_artifact_hash = artifact_hash
-
-        # RFC #809 Phase 2.2b — progress-sensitive duplicate-fingerprint
-        # guard. When two consecutive EVALUATE rounds produce the same
-        # textual failure shape, that is *evidence* of stagnation but
-        # not proof: the QA judge can return identical
-        # differences/suggestions wording on two artifacts whose
-        # numeric score materially improved (e.g. 0.30 → 0.79 while
-        # still below pass threshold). The guard therefore checks
-        # BOTH the textual fingerprint AND whether the numeric score
-        # advanced; the loop only blocks when both signals agree the
-        # session is not making progress.
-        if not bool(eval_result.passed):
-            fingerprint_input = (
-                "|".join(eval_result.differences) + "::" + "|".join(eval_result.suggestions)
-            )
-            failure_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:16]
-            same_text = bool(
-                state.failure_fingerprints and state.failure_fingerprints[-1] == failure_fingerprint
-            )
-            # ``previous_qa_score`` is the score from the PRIOR round
-            # captured before this round overwrote ``state.last_qa_score``.
-            # First-ever round has ``previous_qa_score is None`` and
-            # cannot trip the guard.
-            score_did_not_advance = previous_qa_score is not None and float(
-                eval_result.score
-            ) <= float(previous_qa_score)
-            if same_text and score_did_not_advance:
-                state.mark_blocked(
-                    f"recovery loop: same QA-fail fingerprint twice "
-                    f"({failure_fingerprint}) with no score progress "
-                    f"({previous_qa_score:.2f} → {eval_result.score:.2f}); "
-                    f"{_RECOVERY_BLOCKED_CHOICES}",
-                    tool_name="evaluator",
-                )
-                state.recovery_guard_tripped = "duplicate_fingerprint"
-                self._save(state)
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            state.failure_fingerprints.append(failure_fingerprint)
-        self._save(state)
-
-        return await self._finalize_evaluate(
-            state,
-            ledger,
-            review=review,
-            run_subagent=run_subagent,
-            passed=eval_result.passed,
-            score=eval_result.score,
-            verdict=eval_result.verdict,
-            differences=eval_result.differences,
-            suggestions=eval_result.suggestions,
-            stop_reason=stop_reason,
-            from_cache=False,
-            seed=seed,
-        )
-
-    async def _finalize_evaluate(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        *,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-        passed: bool,
-        score: float,
-        verdict: str,
-        differences: tuple[str, ...],
-        suggestions: tuple[str, ...],
-        stop_reason: str | None,
-        from_cache: bool,
-        seed: Seed | None = None,
-    ) -> AutoPipelineResult:
-        """Transition out of EVALUATE based on the resolved QA verdict.
-
-        On QA pass → COMPLETE. On QA fail, if a lateral thinker is wired
-        and ``state.complete_product`` is true, transition to UNSTUCK_LATERAL
-        and invoke the persona-driven advisor (RFC #809 Phase 2.2); the
-        final transition to BLOCKED carries the persona's summary in
-        addition to the raw QA differences. Otherwise fall back to the
-        Phase 2.1 behaviour: BLOCKED with QA differences only.
-        """
-        cache_suffix = " [cached]" if from_cache else ""
-        if passed:
-            state.last_recovery_plan = None
-            probe_blocker = await self._complete_runtime_probe_blocker(state)
-            if probe_blocker is not None:
-                return self._result(
-                    state, ledger, review=review, blocker=probe_blocker, run_subagent=run_subagent
-                )
-            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
-            # terminal for the evaluator-pass success path — the branch MCP
-            # wires for normal non-plugin complete-product runs. Without this,
-            # the production path transitioned to COMPLETE with no queryable
-            # terminal event (ouroboros-agent[bot] req_1780070213_316 blocker).
-            await self._emit_product_emitted_terminal(
-                state,
-                review=review,
-                stop_reason=stop_reason,
-            )
-            state.transition(
-                AutoPhase.COMPLETE,
-                f"evaluator passed: {verdict} (score {score:.2f}){cache_suffix}"
-                + (f"; ralph stop_reason={stop_reason}" if stop_reason else ""),
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, run_subagent=run_subagent)
-
-        if self.lateral_thinker is not None and state.complete_product and seed is not None:
-            state.transition(
-                AutoPhase.UNSTUCK_LATERAL,
-                "QA failed; invoking lateral persona for verification reframing",
-            )
-            self._save(state)
-            return await self._run_lateral(
-                state,
-                ledger,
-                seed,
-                qa_score=score,
-                qa_verdict=verdict,
-                qa_differences=differences,
-                qa_suggestions=suggestions,
-                cache_suffix=cache_suffix,
-                review=review,
-                run_subagent=run_subagent,
-            )
-
-        state.last_recovery_plan = build_manual_recovery_plan(
-            qa_score=score,
-            qa_verdict=verdict,
-            differences=tuple(differences),
-            suggestions=tuple(suggestions),
-        ).to_dict()
-        diff_preview = "; ".join(differences[:3]) if differences else ""
-        sug_preview = "; ".join(suggestions[:3]) if suggestions else ""
-        summary_parts = [f"evaluator did not pass: {verdict} (score {score:.2f}){cache_suffix}"]
-        if diff_preview:
-            summary_parts.append(f"differences: {diff_preview}")
-        if sug_preview:
-            summary_parts.append(f"suggestions: {sug_preview}")
-        state.mark_blocked("; ".join(summary_parts), tool_name="evaluator")
-        self._save(state)
-        return self._result(
-            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-        )
-
-    def _recover_seed_for_lateral(
-        self,
-        state: AutoPipelineState,
-        seed: Seed | None,
-    ) -> Seed | None:
-        if seed is not None:
-            return seed
-        if not state.seed_artifact:
-            return None
-        return self._normalize_execution_seed(state, Seed.from_dict(state.seed_artifact))
-
-    async def _maybe_route_ralph_oscillation_to_lateral(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        *,
-        stop_reason: str | None,
-        seed: Seed | None,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-    ) -> AutoPipelineResult | None:
-        """Apply the L5-a Ralph oscillation → UNSTUCK_LATERAL contract.
-
-        Ralph terminal status is consumed in three places: fresh handoff,
-        resume polling, and re-attach observation. L5-a is a producer/consumer
-        contract over the terminal ``stop_reason``, so all three consumers
-        must route ``oscillation_detected`` through the same existing lateral
-        recovery substrate when the session is complete-product and a lateral
-        thinker is wired. Other blocked stop reasons remain direct BLOCKED
-        terminals because they represent budget exhaustion, not a spec
-        reframe candidate.
-        """
-        if (
-            stop_reason != "oscillation_detected"
-            or self.lateral_thinker is None
-            or not (state.complete_product or self.complete_product)
-        ):
-            return None
-        if self.complete_product and not state.complete_product:
-            state.complete_product = True
-        recovered_seed = self._recover_seed_for_lateral(state, seed)
-        if recovered_seed is None:
-            return None
-
-        state.transition(
-            AutoPhase.UNSTUCK_LATERAL,
-            "Ralph oscillation_detected; invoking lateral persona for reframing",
-        )
-        self._save(state)
-        return await self._run_lateral(
-            state,
-            ledger,
-            recovered_seed,
-            qa_score=0.0,
-            qa_verdict="oscillation_detected",
-            qa_differences=(
-                "Ralph oscillated between grade states without converging on A grade.",
-            ),
-            qa_suggestions=(
-                "Reframe the Seed acceptance criteria so the grade oscillation pattern cannot recur.",
-            ),
-            cache_suffix="",
-            review=review,
-            run_subagent=run_subagent,
-        )
-
-    async def _run_lateral(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        qa_score: float,
-        qa_verdict: str,
-        qa_differences: tuple[str, ...],
-        qa_suggestions: tuple[str, ...],
-        cache_suffix: str,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-    ) -> AutoPipelineResult:
-        """Invoke the persona-driven lateral advisor and consume its plan.
-
-        Phase 2.2 recovery layer — when ``ouroboros_qa`` rules the run
-        artifact did not satisfy the Seed AC, this method picks a persona
-        deterministically from the QA-failure shape (via
-        :func:`select_persona_for_qa_failure`) and asks
-        ``ouroboros_lateral_think`` for a reframing prompt. The persona's
-        output is persisted on :class:`AutoPipelineState` as a typed
-        recovery plan. Dispatchable plans re-enter Ralph; manual or unsafe
-        plans surface actionable BLOCKED guidance instead of raw QA
-        differences.
-
-        Resume is intentionally not a cache replay: previous personas are
-        stored in ``state.personas_invoked`` so a recovered UNSTUCK_LATERAL
-        phase selects a different angle unless a guard has already tripped.
-
-        On timeout / handler error / transient adapter error → BLOCKED with
-        ``tool_name="lateral_thinker"`` so the resume contract (mapped by
-        ``_recoverable_phase_for_tool``) lets ``--resume`` re-enter
-        UNSTUCK_LATERAL.
-        """
-        import hashlib
-
-        assert self.lateral_thinker is not None  # noqa: S101 — guarded by caller
-        state.last_recovery_plan = None
-
-        # RFC #809 Phase 2.2b — sticky guard check (mirrors ``_run_evaluate``).
-        # If a previous round exhausted any recovery guard, a resume that
-        # lands directly in ``UNSTUCK_LATERAL`` (via
-        # ``_recoverable_phase_for_tool("lateral_thinker")``) must not
-        # spend another persona slot or hit the lateral cache; re-mark
-        # the session BLOCKED and surface the original exhaustion
-        # blocker verbatim instead.
-        if state.recovery_guard_tripped is not None:
-            state.mark_blocked(
-                state.last_error
-                or f"recovery guard '{state.recovery_guard_tripped}' already exhausted",
-                tool_name=state.last_tool_name or "lateral_thinker",
-            )
-            self._save(state)
-            return self._result(
-                state,
-                ledger,
-                review=review,
-                blocker=state.last_error,
-                run_subagent=run_subagent,
-            )
-
-        # RFC #809 Phase 2.2b — exclude personas already routed in this
-        # session so a resumed --resume picks a different angle rather
-        # than re-emitting the same advice. Each persisted string is a
-        # ``ThinkingPersona.value``; map back through the enum so an
-        # unrecognized legacy value raises explicitly instead of
-        # silently disabling the exclusion guard.
-        already_tried: tuple[ThinkingPersona, ...] = tuple(
-            ThinkingPersona(value) for value in state.personas_invoked
-        )
-        persona = select_persona_for_qa_failure(
-            qa_differences, qa_suggestions, already_tried_personas=already_tried
-        )
-        if persona is None:
-            # All five personas exhausted across this session. No further
-            # persona-driven reframing is available; surface the operator
-            # choices so the human resolves the spec instead.
-            state.mark_blocked(
-                f"recovery loop: all lateral personas exhausted "
-                f"(tried {', '.join(state.personas_invoked) or 'none'}); "
-                f"{_RECOVERY_BLOCKED_CHOICES}",
-                tool_name="lateral_thinker",
-            )
-            state.recovery_guard_tripped = "personas_exhausted"
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        # Include the evaluate artifact hash in the cache key. The lateral
-        # prompt's ``current_approach`` payload incorporates the run
-        # artifact, so two EVALUATE rounds that grade different artifacts
-        # but produce the same QA differences/suggestions must NOT share a
-        # lateral cache entry — the persona's advice references the
-        # specific artifact, and stale advice for the wrong artifact would
-        # mislead the operator. The evaluate-artifact hash is the same one
-        # ``_run_evaluate`` already uses to invalidate the QA cache; adding
-        # it here keeps the two caches in lockstep.
-        cache_key = "|".join(
-            (
-                persona.value,
-                state.evaluate_artifact_hash or "",
-                "::".join(qa_differences),
-                "::".join(qa_suggestions),
-            )
-        )
-        input_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-
-        # RFC #809 Phase 2.2b — the P2.2 lateral cache short-circuit
-        # (input_hash match → return cached advisory) was removed here as
-        # dead code in the multi-persona world. Two factors make the
-        # short-circuit unreachable on a real resume:
-        #
-        # 1. ``state.personas_invoked`` is appended *before* the next
-        #    resume can reach this point, so ``select_persona_for_qa_failure``
-        #    deterministically picks a *different* persona than the one
-        #    whose advice was cached. The cache key includes
-        #    ``persona.value``, so a different persona always produces a
-        #    different ``input_hash`` and the cache misses.
-        # 2. The sticky ``recovery_guard_tripped`` short-circuit at the
-        #    top of this method already handles the "session was
-        #    declared exhausted, do not spend another slot" case before
-        #    cache lookup. Combined with (1) the cache path was
-        #    architectural dead weight that confused both reviewers and
-        #    operators (it implied "--resume replays the same advice"
-        #    which is the opposite of P2.2b's intent).
-        #
-        # ``input_hash`` and the persisted ``last_lateral_*`` fields
-        # remain wired so a timeout / error mid-call still leaves a
-        # recoverable trail of *which* persona+QA-shape we were
-        # processing (used by the final BLOCKED summary and by Stack 2's
-        # future re-dispatch logging), even though that trail is no
-        # longer consulted for a cache hit on the happy path.
-        state.lateral_input_hash = input_hash
-        state.last_lateral_persona = persona.value
-        state.last_lateral_approach_summary = None
-        state.last_lateral_text = None
-        self._save(state)
-
-        run_artifact = state.evaluate_artifact or ""
-        phase_timeout = state.phase_timeout_seconds(AutoPhase.UNSTUCK_LATERAL)
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            lateral_result = await asyncio.wait_for(
-                self.lateral_thinker(
-                    persona=persona,
-                    qa_differences=qa_differences,
-                    qa_suggestions=qa_suggestions,
-                    run_artifact=run_artifact,
-                ),
-                timeout=capped_timeout,
-            )
-        except TimeoutError:
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            state.mark_blocked(
-                f"lateral_thinker timed out after {capped_timeout:.0f}s",
-                tool_name="lateral_thinker",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"lateral_thinker raised: {exc}", tool_name="lateral_thinker")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-
-        if lateral_result.error:
-            state.mark_blocked(
-                f"lateral_thinker reported transient error: {lateral_result.error}",
-                tool_name="lateral_thinker",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-
-        state.last_lateral_persona = lateral_result.persona or persona.value
-        state.last_lateral_approach_summary = lateral_result.approach_summary
-        state.last_lateral_text = lateral_result.text
-        # RFC #809 Phase 2.2b — record the persona we just routed so the
-        # next ``_run_lateral`` (after --resume) skips it. Use the canonical
-        # ``persona.value`` (not ``lateral_result.persona``) so the
-        # exclusion set matches what ``select_persona_for_qa_failure``
-        # returns, even when the lateral handler echoes a different
-        # display name back.
-        if persona.value not in state.personas_invoked:
-            state.personas_invoked.append(persona.value)
-        self._save(state)
-
-        return await self._finalize_lateral(
-            state,
-            ledger,
-            seed,
-            review=review,
-            run_subagent=run_subagent,
-            qa_score=qa_score,
-            qa_verdict=qa_verdict,
-            qa_differences=qa_differences,
-            qa_suggestions=qa_suggestions,
-            cache_suffix=cache_suffix,
-            from_cache=False,
-        )
-
-    async def _finalize_lateral(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        review: SeedReview | None,
-        run_subagent: dict[str, Any] | None,
-        qa_score: float,
-        qa_verdict: str,
-        qa_differences: tuple[str, ...],
-        qa_suggestions: tuple[str, ...],
-        cache_suffix: str,
-        from_cache: bool,
-    ) -> AutoPipelineResult:
-        """Consume a lateral recovery plan or block with manual guidance.
-
-        Safe ``ralph_redispatch`` plans are the closed-loop Stack 2 path:
-        the persona's advice is persisted, added to a dispatch-only Seed
-        constraint, and sent through a fresh Ralph handoff that returns to
-        EVALUATE. Manual / unsafe plans remain terminal BLOCKED guidance.
-        """
-        lateral_suffix = " [lateral cached]" if from_cache else ""
-        persona_name = state.last_lateral_persona or "unknown"
-        approach = state.last_lateral_approach_summary or ""
-        recovery_plan = build_lateral_recovery_plan(
-            qa_score=qa_score,
-            qa_verdict=qa_verdict,
-            differences=tuple(qa_differences),
-            suggestions=tuple(qa_suggestions),
-            persona=persona_name,
-            approach_summary=approach,
-            lateral_text=state.last_lateral_text or "",
-        )
-        state.last_recovery_plan = recovery_plan.to_dict()
-        self._save(state)
-
-        if self._can_redispatch_recovery_plan(recovery_plan):
-            if self.ralph_starter is None:
-                _prepare_recovery_redispatch(state)
-                state.mark_blocked(
-                    "recovery plan requested Ralph redispatch but no ralph starter is configured; "
-                    f"{_RECOVERY_BLOCKED_CHOICES}",
-                    tool_name="ralph_starter",
-                )
-                self._save(state)
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
-                )
-            recovery_seed = _seed_with_recovery_constraint(seed, recovery_plan)
-            _prepare_recovery_redispatch(state)
-            state.mark_progress(
-                "consuming lateral recovery plan via fresh Ralph redispatch",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return await self._handoff_to_ralph(
-                state,
-                ledger,
-                recovery_seed,
-                review,
-                run_subagent=run_subagent,
-                reattach_terminal=False,
-                reuse_existing=False,
-            )
-
-        summary_parts = [
-            f"evaluator did not pass: {qa_verdict} (score {qa_score:.2f}){cache_suffix}",
-            f"lateral persona {persona_name}{lateral_suffix}: {approach}"
-            if approach
-            else f"lateral persona {persona_name}{lateral_suffix} consulted",
-        ]
-        diff_preview = "; ".join(qa_differences[:3]) if qa_differences else ""
-        if diff_preview:
-            summary_parts.append(f"differences: {diff_preview}")
-        sug_preview = "; ".join(qa_suggestions[:3]) if qa_suggestions else ""
-        if sug_preview:
-            summary_parts.append(f"suggestions: {sug_preview}")
-        # RFC #809 Phase 2.2b — surface the operator-choice cue alongside
-        # the persona's advisory so a session that BLOCKED here points the
-        # operator at the next move (re-interview / abandon, as advertised
-        # by ``_RECOVERY_BLOCKED_CHOICES``) rather than leaving them
-        # parsing the QA differences in isolation.
-        summary_parts.append(_RECOVERY_BLOCKED_CHOICES)
-        state.mark_blocked("; ".join(summary_parts), tool_name="lateral_thinker")
-        self._save(state)
-        return self._result(
-            state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-        )
-
-    @staticmethod
     def _can_redispatch_recovery_plan(plan: AutoRecoveryPlan) -> bool:
         """Return True when a persisted plan is safe to consume automatically."""
         return (
@@ -3857,260 +2309,6 @@ class AutoPipeline:
             and plan.safe_to_redispatch
             and bool(plan.instruction.strip())
         )
-
-    async def _resume_ralph_handoff(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        *,
-        review: SeedReview | None,
-        seed: Seed | None = None,
-    ) -> AutoPipelineResult:
-        """Resume a persisted Ralph handoff checkpoint.
-
-        Plugin-mode dispatches transition straight to COMPLETE (the plugin
-        child session is fire-and-forget — there is no in-process job to
-        await). Job-mode dispatches with a configured ``ralph_resumer``
-        poll the persisted ``ralph_job_id`` and map the terminal status
-        back onto the same auto phase as :meth:`_handoff_to_ralph`, so a
-        session interrupted between dispatch and terminal status (review-5
-        finding 1) is actually reconciled instead of stranded in
-        ``RALPH_HANDOFF`` forever. When no ``ralph_resumer`` is wired (or
-        no ``ralph_job_id`` was persisted) the method falls back to
-        guidance-only behavior so callers without a job-manager handle
-        still get a coherent message instead of a polling failure.
-
-        ``seed`` is required to recover from an unconfirmed plugin dispatch
-        (``ralph_dispatch_mode == "plugin_pending"``); the dispatch is
-        retried via :meth:`_handoff_to_ralph` so a crash *before* the bridge
-        actually received the ``_subagent`` envelope does not falsely
-        transition the auto session to COMPLETE
-        (Q00/ouroboros#782 review-12 BLOCKING #2).
-        """
-        # Q00/ouroboros#782 review-12 BLOCKING #2: retry an interrupted
-        # plugin dispatch BEFORE trusting the confirmed-plugin marker. A
-        # ``"plugin_pending"`` checkpoint means the auto pipeline persisted
-        # the dispatch intent but the actual ``ouroboros_ralph`` handler
-        # call did not return a delegated_to_plugin response, so the bridge
-        # may never have received the child-session envelope. Redispatch
-        # with the same persisted lineage so any half-emitted events stay
-        # correlated.
-        if state.ralph_dispatch_mode == "plugin_pending":
-            if seed is not None and self.ralph_starter is not None:
-                state.ralph_dispatch_mode = None
-                state.ralph_job_id = None
-                self._save(state)
-                return await self._handoff_to_ralph(
-                    state, ledger, seed, review=review, run_subagent=None
-                )
-            state.mark_blocked(
-                "ralph plugin dispatch was interrupted before confirmation; "
-                "resume could not retry without a persisted Seed",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        if state.ralph_dispatch_mode == "plugin":
-            state.run_handoff_guidance = (
-                state.run_handoff_guidance
-                or "Ralph loop delegated to the OpenCode plugin child session. "
-                "Track progress through the OpenCode Task widget; this auto "
-                "session will not block on the loop's completion."
-            )
-            # Q00/ouroboros#782 review-13 BLOCKING #1: a confirmed plugin
-            # dispatch is a one-shot side effect — the bridge already received
-            # the ``_subagent`` envelope and may have already spawned the
-            # child session. Re-emitting the persisted ``state.run_subagent``
-            # on resume can trigger a duplicate OpenCode child session via
-            # ``meta["_subagent"]`` in :class:`AutoHandler.handle`. Clear the
-            # persisted envelope here so neither this ``_result(...)`` call
-            # nor any future re-resume replays it. ``state.run_subagent``
-            # is typed as a dict, so we reset to ``{}`` rather than ``None``;
-            # ``_result()`` treats the empty dict as falsy and emits ``None``.
-            state.run_subagent = {}
-            state.transition(
-                AutoPhase.COMPLETE,
-                "resumed OpenCode plugin Ralph delegation checkpoint",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review)
-
-        if self.ralph_resumer is not None and state.ralph_job_id:
-            return await self._poll_ralph_job(state, ledger, seed, review=review)
-
-        if not state.ralph_job_id and state.ralph_lineage_id and self.ralph_starter is not None:
-            seed = self._normalize_execution_seed(state, Seed.from_dict(state.seed_artifact))
-            return await self._handoff_to_ralph(
-                state,
-                ledger,
-                seed,
-                review,
-                run_subagent=None,
-                reattach_terminal=True,
-            )
-
-        if (
-            state.run_handoff_status == "ralph_retry_after_blocker"
-            and self.ralph_starter is None
-            and not state.ralph_job_id
-            and not state.ralph_lineage_id
-        ):
-            state.mark_blocked(
-                "Ralph handoff retry requires a configured ralph starter; "
-                f"{_RECOVERY_BLOCKED_CHOICES}",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-
-        handle = state.ralph_job_id or state.ralph_lineage_id
-        if handle:
-            state.run_handoff_guidance = (
-                "Ralph handoff already has a persisted tracking handle; resume did "
-                "not start duplicate run or Ralph work. Track the existing Ralph "
-                f"lineage/job: {handle}."
-            )
-        else:
-            state.run_handoff_guidance = (
-                "Ralph handoff checkpoint has no persisted Ralph job handle; resume "
-                "did not start duplicate run or Ralph work. Inspect the Ralph runtime "
-                "before dispatching manually."
-            )
-        state.mark_progress(state.run_handoff_guidance, tool_name="ralph_starter")
-        self._save(state)
-        return self._result(state, ledger, review=review)
-
-    async def _poll_ralph_job(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-        seed: Seed,
-        *,
-        review: SeedReview | None,
-    ) -> AutoPipelineResult:
-        """Poll a persisted Ralph job and map its terminal status onto an auto phase.
-
-        Used only by :meth:`_resume_ralph_handoff` when ``ralph_resumer`` is
-        wired and ``state.ralph_job_id`` is present. The polling shape mirrors
-        :meth:`_handoff_to_ralph` so the COMPLETE / BLOCKED / FAILED contract
-        pinned by :data:`_RALPH_BLOCKED_STOP_REASONS` stays single-sourced.
-        """
-        assert self.ralph_resumer is not None  # noqa: S101 - guarded by caller
-        assert state.ralph_job_id is not None  # noqa: S101 - guarded by caller
-        ralph_mirror_task: asyncio.Task[None] | None = None
-        if (
-            self.store is not None
-            and state.ralph_dispatch_mode != "plugin"
-            and state.ralph_job_id is not None
-        ):
-            event_store = getattr(self.ralph_resumer, "job_event_store", None)
-            if event_store is not None:
-                ralph_mirror_task = asyncio.create_task(
-                    mirror_ralph_job_events(
-                        state,
-                        self.store,
-                        event_store,
-                        state.ralph_job_id,
-                    )
-                )
-        try:
-            poll_call = self.ralph_resumer(job_id=state.ralph_job_id)
-            if state.deadline_at is None:
-                ralph_meta = await poll_call
-            else:
-                # Q00/ouroboros#782 review-12 BLOCKING #1: floor at
-                # ``_RALPH_RESUME_PEEK_SECONDS`` so an already-terminal Ralph
-                # job can be reconciled even when the top-level deadline has
-                # expired. ``asyncio.wait_for`` with timeout=0 cancels the
-                # coroutine before it can read the first snapshot, which
-                # would silently turn a completed loop into ``pipeline_timeout``.
-                remaining = state.deadline_at - time.monotonic()
-                poll_timeout = max(remaining, _RALPH_RESUME_PEEK_SECONDS)
-                ralph_meta = await asyncio.wait_for(poll_call, timeout=poll_timeout)
-        except TimeoutError:
-            await _cancel_ralph_status_mirror(ralph_mirror_task)
-            if self._enforce_deadline(state):
-                return self._result(state, ledger, review=review, blocker=state.last_error)
-            state.mark_blocked(
-                "ralph resume poll timed out before terminal status",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        except Exception as exc:
-            await _cancel_ralph_status_mirror(ralph_mirror_task)
-            state.mark_failed(f"ralph resume poll failed: {exc}", tool_name="ralph_starter")
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        await _drain_ralph_status_mirror(ralph_mirror_task)
-        if not isinstance(ralph_meta, dict):
-            state.mark_failed(
-                f"ralph resumer returned {type(ralph_meta).__name__}, expected dict",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
-        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _ralph_current_generation_from_meta(ralph_meta)
-        if terminal_status is not None:
-            state.ralph_job_status = terminal_status
-        if stop_reason is not None:
-            state.ralph_stop_reason = stop_reason
-        if current_generation is not None:
-            state.ralph_current_generation = current_generation
-        if terminal_status == "completed":
-            return await self._evaluate_or_complete(
-                state,
-                ledger,
-                seed,
-                review=review,
-                run_subagent=None,
-                stop_reason=stop_reason,
-                ralph_result_text=_artifact_text(ralph_meta.get("result_text")),
-                resumed=True,
-            )
-        if terminal_status == "running_async":
-            state.mark_progress(
-                "background Ralph job is still tracked",
-                tool_name=PIPELINE_DEADLINE_TOOL_NAME,
-            )
-            self._save(state)
-            return self._result(state, ledger, review=review, status_override=DETACHED_STATUS)
-        # Q00/ouroboros#782 review-10 BLOCKING #2: ``terminal_status ==
-        # "cancelled"`` must map to BLOCKED with the pinned
-        # ``RALPH_CANCEL_BLOCKER_REASON`` — same as the live ``_handoff_to_ralph``
-        # path. Falling through to the generic failure branch would mark a
-        # user-cancelled session FAILED on resume, regressing the live-path
-        # contract for a normal user action.
-        if terminal_status == "cancelled":
-            if state.phase is not AutoPhase.BLOCKED:
-                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
-                self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
-                state,
-                ledger,
-                stop_reason=stop_reason,
-                seed=seed,
-                review=review,
-                run_subagent=None,
-            )
-            if lateral_result is not None:
-                return lateral_result
-            state.mark_blocked(stop_reason, tool_name="ralph_starter")
-            self._save(state)
-            return self._result(state, ledger, review=review, blocker=state.last_error)
-        # Any other failure is a hard FAILED, mirroring _handoff_to_ralph.
-        message = (
-            f"ralph loop failed: {stop_reason}"
-            if stop_reason
-            else f"ralph loop failed: terminal_status={terminal_status or 'unknown'}"
-        )
-        state.mark_failed(message, tool_name="ralph_starter")
-        self._save(state)
-        return self._result(state, ledger, review=review, blocker=state.last_error)
 
     def _remaining_deadline_seconds(self, state: AutoPipelineState) -> float | None:
         """Return remaining pipeline budget in seconds, if a deadline is armed."""
@@ -4139,122 +2337,6 @@ class AutoPipeline:
         state.last_tool_name = PIPELINE_DEADLINE_TOOL_NAME
         state.mark_blocked(message, tool_name=PIPELINE_DEADLINE_TOOL_NAME)
         self._save(state)
-
-    async def _reattach_ralph_job(
-        self,
-        state: AutoPipelineState,
-        ledger: SeedDraftLedger,
-    ) -> AutoPipelineResult:
-        """Wait on an already-dispatched Ralph job rather than dispatching a duplicate.
-
-        Q00/ouroboros#782 review-6 BLOCKING #2. Resume after a crash that
-        happened between ``persist_started_ralph`` saving ``ralph_job_id``
-        and the original ``HandlerRalphStarter`` finishing its terminal
-        wait. Calls ``ralph_starter`` with ``attach_job_id=state.ralph_job_id``
-        so no fresh ``mcp.subagent.dispatched`` / job-create side effect
-        runs; the same terminal-status mapping handles the result.
-
-        Intentionally does NOT call ``_enforce_deadline`` first
-        (Q00/ouroboros#782 review-7 BLOCKING #1): re-attach is just
-        observing an already-dispatched job's terminal state, so a long
-        offline gap that pushed past ``deadline_at`` must NOT strand a
-        successfully completed Ralph job as a false ``pipeline_timeout``.
-        """
-        assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        ralph_mirror_task: asyncio.Task[None] | None = None
-        if (
-            self.store is not None
-            and state.ralph_dispatch_mode != "plugin"
-            and state.ralph_job_id is not None
-        ):
-            event_store = getattr(self.ralph_starter, "job_event_store", None)
-            if event_store is not None:
-                ralph_mirror_task = asyncio.create_task(
-                    mirror_ralph_job_events(
-                        state,
-                        self.store,
-                        event_store,
-                        state.ralph_job_id,
-                    )
-                )
-        try:
-            ralph_meta = await self.ralph_starter(
-                None,  # type: ignore[arg-type]
-                lineage_id=state.ralph_lineage_id or "",
-                attach_job_id=state.ralph_job_id,
-            )
-        except Exception as exc:
-            await _cancel_ralph_status_mirror(ralph_mirror_task)
-            state.mark_failed(
-                f"ralph re-attach failed: {exc}",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, blocker=state.last_error)
-        await _drain_ralph_status_mirror(ralph_mirror_task)
-        if not isinstance(ralph_meta, dict):
-            state.mark_failed(
-                f"ralph re-attach returned {type(ralph_meta).__name__}, expected dict",
-                tool_name="ralph_starter",
-            )
-            self._save(state)
-            return self._result(state, ledger, blocker=state.last_error)
-        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
-        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _ralph_current_generation_from_meta(ralph_meta)
-        if terminal_status is not None:
-            state.ralph_job_status = terminal_status
-        if stop_reason is not None:
-            state.ralph_stop_reason = stop_reason
-        if current_generation is not None:
-            state.ralph_current_generation = current_generation
-        if terminal_status == "completed":
-            # RFC #1256 §I4 (#1254): emit the typed ``auto.product.emitted``
-            # terminal for the ralph re-attach success path — resume after a
-            # crash between persisting ``ralph_job_id`` and the original wait
-            # finishing. This observes an already-dispatched job's terminal and
-            # transitions straight to COMPLETE (no ``_evaluate_or_complete``),
-            # so without this a re-attached successful run left no queryable
-            # terminal event. ``review`` is not in scope on the re-attach
-            # observer, so ``grade`` resolves to ``None``.
-            await self._emit_product_emitted_terminal(
-                state,
-                review=None,
-                stop_reason=stop_reason,
-            )
-            state.transition(
-                AutoPhase.COMPLETE,
-                f"ralph loop completed on re-attach ({stop_reason or 'qa passed'})",
-            )
-            self._save(state)
-            return self._result(state, ledger)
-        if terminal_status == "cancelled":
-            if state.phase is not AutoPhase.BLOCKED:
-                state.mark_blocked(RALPH_CANCEL_BLOCKER_REASON, tool_name="ralph_starter")
-                self._save(state)
-            return self._result(state, ledger, blocker=state.last_error)
-        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
-            lateral_result = await self._maybe_route_ralph_oscillation_to_lateral(
-                state,
-                ledger,
-                stop_reason=stop_reason,
-                seed=None,
-                review=None,
-                run_subagent=None,
-            )
-            if lateral_result is not None:
-                return lateral_result
-            state.mark_blocked(stop_reason, tool_name="ralph_starter")
-            self._save(state)
-            return self._result(state, ledger, blocker=state.last_error)
-        message = (
-            f"ralph loop failed on re-attach: {stop_reason}"
-            if stop_reason
-            else f"ralph loop failed on re-attach: terminal_status={terminal_status or 'unknown'}"
-        )
-        state.mark_failed(message, tool_name="ralph_starter")
-        self._save(state)
-        return self._result(state, ledger, blocker=state.last_error)
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.
@@ -4642,41 +2724,6 @@ class AutoPipeline:
             pass
 
 
-def _artifact_state_for_result(
-    *,
-    status: str,
-    phase: AutoPhase,
-    seed_path: str | None,
-    execution_id: str | None,
-    job_id: str | None,
-    run_session_id: str | None,
-    partial_product: bool,
-    run_handoff_status: str | None = None,
-    product_verified: bool = False,
-) -> str:
-    """Classify the generated-artifact outcome separately from orchestration.
-
-    ``status`` remains the authoritative orchestration state. This companion
-    value prevents final renderers from implying completion when a BLOCKED or
-    FAILED run still left useful generated files behind.
-    """
-
-    has_generated_artifact = bool(seed_path or execution_id or job_id or run_session_id)
-    if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
-        return "partial_artifact_generated" if has_generated_artifact else status
-    if status == AutoPhase.COMPLETE.value:
-        if partial_product:
-            return "complete_unverified"
-        if product_verified:
-            return "complete_verified"
-        if run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
-            return "complete_unverified"
-        return "complete_verified"
-    if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-        return "partial_artifact_generated" if has_generated_artifact else phase.value
-    return "artifact_in_progress" if has_generated_artifact else "not_generated"
-
-
 def _has_verified_product_completion(state: AutoPipelineState) -> bool:
     """Return True when COMPLETE represents a verified product terminal.
 
@@ -4691,8 +2738,6 @@ def _has_verified_product_completion(state: AutoPipelineState) -> bool:
     if state.ralph_job_status == "completed":
         return True
     if state.last_qa_passed is True:
-        return True
-    if state.complete_product and state.ralph_stop_reason is not None:
         return True
     return state.run_handoff_status == "completed"
 
@@ -4758,46 +2803,6 @@ def _is_seed_generation_blocker(exc: Exception) -> bool:
     return "Ambiguity score" in message and "exceeds threshold" in message
 
 
-def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
-    if tool_name in {
-        "interview.start",
-        "interview.resume",
-        "interview.answer",
-        "auto_answerer",
-        "domain_profile_registry",
-        "interview_driver",
-    }:
-        return AutoPhase.INTERVIEW
-    if tool_name == "seed_generator":
-        return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer", "seed_qa"}:
-        # ``seed_repairer`` joins this set so a repair-phase timeout (the
-        # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
-        # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
-        # restart is the REVIEW phase, which re-invokes the bounded repairer.
-        # Without this entry a transient timeout becomes a permanent dead end.
-        return AutoPhase.REVIEW
-    if tool_name == "run_starter":
-        return AutoPhase.RUN
-    if tool_name == "ralph_starter":
-        return AutoPhase.RALPH_HANDOFF
-    if tool_name == "evaluator":
-        # RFC #809 Phase 2.1: when the evaluator times out or the QA handler
-        # returns a transient infrastructure error, the session is marked
-        # BLOCKED with this tool name. ``--resume`` must dispatch back into
-        # EVALUATE so the cached verdict (if present) or a fresh evaluator
-        # call (if not) can drive the session forward instead of leaving it
-        # stranded in a non-resumable BLOCKED state.
-        return AutoPhase.EVALUATE
-    if tool_name == "lateral_thinker":
-        # RFC #809 Phase 2.2: timeout / transient error in the lateral
-        # advisor blocks with this tool name. Resume re-enters
-        # UNSTUCK_LATERAL where the cached persona suggestion (if any)
-        # short-circuits or a fresh lateral_think call retries.
-        return AutoPhase.UNSTUCK_LATERAL
-    return None
-
-
 def _arm_legacy_missing_deadline(state: AutoPipelineState) -> bool:
     """Arm #779 deadline for legacy resumed sessions already past CREATED."""
     if state.phase in {AutoPhase.CREATED, AutoPhase.COMPLETE}:
@@ -4844,7 +2849,9 @@ def _has_reconciliable_ralph_resume_checkpoint(state: AutoPipelineState) -> bool
     unconfirmed ``plugin_pending`` checkpoint must still obey normal deadline
     enforcement because resume has to retry the side-effecting plugin dispatch.
     """
-    if state.phase is not AutoPhase.RALPH_HANDOFF:
+    if state.phase is not AutoPhase.RALPH_HANDOFF and not (
+        state.phase is AutoPhase.BLOCKED and state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    ):
         return False
     return state.ralph_job_id is not None or state.ralph_dispatch_mode == "plugin"
 
@@ -4911,7 +2918,7 @@ def _seed_with_seed_qa_lateral_feedback(
     binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
-    del attempt
+    del attempt, qa_result
     normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
     existing_constraints = tuple(
         constraint
@@ -4923,10 +2930,6 @@ def _seed_with_seed_qa_lateral_feedback(
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4949,10 +2952,6 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4973,7 +2972,6 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
-_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,
@@ -5162,6 +3160,28 @@ def _safe_seed_qa_verdict(verdict: str) -> str:
     if normalized in {"fail", "pass", "revise"}:
         return normalized
     return "unknown"
+
+
+def _safe_seed_qa_error_detail(error: object) -> str:
+    """Classify an evaluator error without persisting provider output.
+
+    Provider errors can embed stderr, paths, credentials, and user content in
+    their message. Only these allowlisted categories cross the durable event
+    and progress-message boundary.
+    """
+    lowered = str(error).casefold()
+    categories = (
+        (("rate limit", "too many requests", "429"), "provider rate limit"),
+        (
+            ("unauthorized", "authentication", "api key", "credential"),
+            "provider authentication failure",
+        ),
+        (("connection", "network", "unavailable", "timed out"), "provider connectivity failure"),
+    )
+    for markers, summary in categories:
+        if any(marker in lowered for marker in markers):
+            return summary
+    return "provider evaluator failure"
 
 
 def _first_nonempty(*values: str | None) -> str | None:

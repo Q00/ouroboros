@@ -44,6 +44,13 @@ uv run ouroboros --version   # verify
 uv run pytest tests/unit/ -q # run tests
 ```
 
+> **`uv sync` is not the whole loop.** The checked-in `.mcp.json` points at the
+> **published PyPI package**, so a clone that you edit is not the code your
+> client runs. Before your first change, read
+> [The Development Loop](./docs/contributing/developing.md) — it covers pointing
+> the tooling at your working tree, where config and state live, and the fastest
+> way to verify each kind of change.
+
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
 This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Core and non-LiteLLM contributor environments support Python 3.12-3.14. LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
@@ -137,11 +144,28 @@ the PR description.
 
 ### 6. Submit PR
 
+`main` is protected — direct pushes are rejected for everyone, owner included.
+Every change lands through a squash-merged PR.
+
 - Write a clear PR description explaining **what** and **why**
 - Include the structured boundary required by [Review Boundary Contract](#review-boundary-contract)
-- Reference the related issue (e.g., `Closes #123`)
+- Reference the related issue (e.g., `Closes #123`, or a plain `Refs #123`) —
+  the `Issue link present` gate requires it
 - Ensure all tests pass and linting is clean
 - Wait for code review and address feedback
+
+Four checks are required to merge (`Ruff Lint`, `MyPy Type Check`,
+`Test Python 3.12`, `Bridge TypeScript`), and several more fire conditionally
+on the paths you touched. Every gate, its local reproduction command, and its
+legitimate escape hatch are documented in
+[CI Gates and Branch Protection](./docs/contributing/ci-gates.md).
+
+`ouroboros-agent[bot]` ties each review verdict to the commit it checked. It
+grades your PR against the linked issue's requirements and reproduces the
+defects it reports. Confirm the applicable verdict belongs to the current head,
+then read
+[Review Conventions](./docs/contributing/review-conventions.md) before your first
+push — most review rounds are lost to objections you can preempt.
 
 ### Release Maintenance
 
@@ -153,7 +177,20 @@ python scripts/sync-plugin-version.py --require-canonical --version 0.50.7
 git diff --check
 ```
 
-Commit the metadata changes before creating `v0.50.7`. The tag-triggered release workflow repeats the read-only check and refuses to build when the tag version and tracked metadata differ.
+The metadata change must be committed before the tag exists, and because `main`
+is protected it can only get there through a PR. Squash-merging mints a new
+commit SHA, so create `v0.50.7` on the **merged** `main` commit — tagging the
+pre-merge commit produces a tag that points at a commit `main` never contained:
+
+```bash
+git checkout main && git pull origin main --ff-only
+git tag -a v0.50.7 -m "Release v0.50.7" && git push origin v0.50.7
+```
+
+The tag-triggered release workflow repeats the read-only check and refuses to build when the tag version and tracked metadata differ. It also owns the PyPI publish — never run `uv publish` locally.
+
+The full sequence, including the release-notes convention, is in
+[CI Gates and Branch Protection](./docs/contributing/ci-gates.md#releases).
 
 ---
 
@@ -882,7 +919,10 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 
 - [Architecture Overview](./docs/contributing/architecture-overview.md) - How the system fits together
 - [Testing Guide](./docs/contributing/testing-guide.md) - How to write and run tests
+- [The Development Loop](./docs/contributing/developing.md) - Run your own code: local MCP, config, state, per-change verification
+- [Review Conventions](./docs/contributing/review-conventions.md) - What the review bot demands, and how to preempt a round
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
+- [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
 
 ---
 

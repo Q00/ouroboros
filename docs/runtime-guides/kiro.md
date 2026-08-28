@@ -78,6 +78,18 @@ server receives the MCP 2 dependency profile in an isolated package
 environment. Kiro may need a longer timeout on the first `uvx` launch;
 setup never substitutes a faster global binary with an unknown MCP major.
 
+### Model discovery
+
+The settings UI queries the models available to the currently authenticated
+Kiro account instead of shipping a global Kiro model list. It runs
+`kiro-cli chat --listmodels -f json` and retries the newer
+`--list-models --format json` spelling for compatible CLI releases. The
+returned ids are merged into the picker without replacing Kiro's `default`
+sentinel, so account tier, region, and enterprise model allow-list changes are
+reflected locally. If discovery fails or Kiro is offline, the picker keeps
+`default` and the custom-model entry rather than guessing from a third-party
+catalog.
+
 ## Usage
 
 Open a Kiro session from the directory you want to work in:

@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+import structlog
+
+log = structlog.get_logger()
+
 
 @dataclass(frozen=True, slots=True)
 class GitWorkflowConfig:
@@ -114,14 +118,34 @@ def detect_git_workflow(project_root: Path) -> GitWorkflowConfig:
 
 
 def is_on_protected_branch(project_root: Path, config: GitWorkflowConfig) -> bool:
-    """Check if the current git branch is protected.
+    """Check whether the current git branch must be treated as protected.
+
+    This is a safety guard whose only purpose is to stop automation from
+    committing to a branch the user declared off-limits. It therefore **fails
+    closed**: whenever the branch cannot be positively determined, the branch
+    is reported as protected so that automation declines to commit.
+
+    Returns ``True`` when:
+
+    * git reports a branch listed in ``config.protected_branches``;
+    * HEAD is detached -- ``git rev-parse --abbrev-ref HEAD`` prints the
+      literal ``HEAD`` and exits 0 -- because an automated commit there would
+      not be reachable from any branch;
+    * the branch cannot be determined at all: git is missing, the call times
+      out, ``project_root`` is not a git repository, git exits non-zero, or
+      git returns empty output. Each of these is logged as a warning with the
+      reason.
+
+    Returns ``False`` only when git successfully reports a concrete branch name
+    that is not in ``config.protected_branches``.
 
     Args:
         project_root: Root directory of the project.
         config: Git workflow configuration.
 
     Returns:
-        True if on a protected branch.
+        True if the branch is protected or could not be determined, False only
+        when git confirms a concrete non-protected branch.
     """
     import subprocess  # noqa: S404
 
@@ -133,10 +157,60 @@ def is_on_protected_branch(project_root: Path, config: GitWorkflowConfig) -> boo
             cwd=project_root,
             timeout=5,
         )
-        if result.returncode == 0:
-            current_branch = result.stdout.strip()
-            return current_branch in config.protected_branches
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "git_workflow.protected_branch_undetermined",
+            project_root=str(project_root),
+            reason="timeout",
+            detail="git rev-parse did not complete within 5s",
+            fail_closed=True,
+        )
+        return True
+    except OSError as exc:
+        # Covers FileNotFoundError (git not installed, or project_root does
+        # not exist) and other OS-level failures spawning the subprocess.
+        log.warning(
+            "git_workflow.protected_branch_undetermined",
+            project_root=str(project_root),
+            reason="git_spawn_failed",
+            detail=f"{type(exc).__name__}: {exc}",
+            project_root_exists=project_root.is_dir(),
+            fail_closed=True,
+        )
+        return True
 
-    return False
+    if result.returncode != 0:
+        # Most commonly: project_root is not a git repository.
+        log.warning(
+            "git_workflow.protected_branch_undetermined",
+            project_root=str(project_root),
+            reason="git_error",
+            returncode=result.returncode,
+            detail=(result.stderr or "").strip()[:200],
+            fail_closed=True,
+        )
+        return True
+
+    current_branch = result.stdout.strip()
+
+    if not current_branch:
+        log.warning(
+            "git_workflow.protected_branch_undetermined",
+            project_root=str(project_root),
+            reason="empty_output",
+            detail="git rev-parse succeeded but reported no branch name",
+            fail_closed=True,
+        )
+        return True
+
+    if current_branch == "HEAD":
+        log.warning(
+            "git_workflow.protected_branch_undetermined",
+            project_root=str(project_root),
+            reason="detached_head",
+            detail="HEAD is detached; automated commits would be unreachable",
+            fail_closed=True,
+        )
+        return True
+
+    return current_branch in config.protected_branches

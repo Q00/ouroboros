@@ -1,7 +1,7 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Specification-first workflow engine for AI coding agents -- works across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok."
+description = "Pins an acceptance spec and omits any verify command or expected output from the worker's contract. Works with Claude Code, Codex CLI, OpenCode and 10 more runtimes."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }
@@ -9,12 +9,14 @@ authors = [
 requires-python = ">=3.12"
 keywords = [
     "agent-os",
+    "agentic-loop",
     "ai-agent",
     "ai-coding-agent",
     "claude-code",
     "cli",
     "developer-tools",
     "llm-orchestration",
+    "loop-engineering",
     "mcp",
     "prompt-engineering",
     "socratic-method",
@@ -29,7 +31,6 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Build Tools",
     "Topic :: Software Development :: Code Generators",
 ]
@@ -70,11 +71,11 @@ Sponsor = "https://github.com/sponsors/Q00"
 # Claude's default runtime preserves the Agent SDK and its MCP 1.x graph. The
 # MCP 2 server runs in a separate process/profile; these extras must never be
 # selected in one interpreter.
-claude = ["claude-agent-sdk==0.2.128", "anthropic==0.120.2"]
+claude = ["claude-agent-sdk==0.2.139", "anthropic==0.122.0"]
 claude-cli = []
 # Explicit alias for automation and migrations that want to spell out the SDK
 # transport rather than rely on the historical `[claude]` name.
-claude-sdk = ["claude-agent-sdk==0.2.128", "anthropic==0.120.2"]
+claude-sdk = ["claude-agent-sdk==0.2.139", "anthropic==0.122.0"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
@@ -224,6 +225,7 @@ python_functions = ["test_*"]
 markers = [
     "integration: integration tests that exercise cross-component behavior",
     "slow: integration tests that build artifacts or call subprocesses",
+    "performance: isolated performance budgets; exclude from parallel correctness suites",
 ]
 
 [tool.ruff]

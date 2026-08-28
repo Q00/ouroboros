@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-import json
 import os
 from pathlib import Path
-from typing import Any
 
 from ouroboros.config import get_cli_path
 from ouroboros.observability.logging import get_logger
@@ -33,6 +31,10 @@ from ouroboros.orchestrator.worker_runtime import (
     ResolvedWorkerCwd,
     WorkerTurn,
     resolve_worker_cwd,
+)
+from ouroboros.providers.claude_cli_output import (
+    ClaudeCliOutputError,
+    normalize_claude_cli_output,
 )
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -230,38 +232,47 @@ class ClaudeWorkerTransport:
 
     @staticmethod
     def _parse_turn(stdout: str, stderr: str, returncode: int | None) -> WorkerTurn:
-        payload: dict[str, Any] | None = None
-        # --output-format json emits one JSON object (last non-empty line is safest).
-        for line in reversed(stdout.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                candidate = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(candidate, dict):
-                payload = candidate
-                break
-
-        if payload is None:
+        try:
+            payload = normalize_claude_cli_output(stdout)
+        except ClaudeCliOutputError as exc:
+            diagnostic = stderr or stdout[:200]
             return WorkerTurn(
                 text="",
                 is_error=True,
-                error=f"claude returned no JSON (rc={returncode}): {stderr or stdout[:200]}",
+                error=(
+                    f"claude returned no valid JSON result (rc={returncode}; {exc}): {diagnostic}"
+                ),
             )
 
-        session_id = payload.get("session_id")
-        result_text = payload.get("result")
-        raw_usage = payload.get("usage")
-        usage = dict(raw_usage) if isinstance(raw_usage, dict) else None
-        is_error = bool(payload.get("is_error")) or returncode not in (0, None)
+        process_failed = returncode not in (0, None)
+        is_error = payload.is_error or process_failed
+        error: str | None = None
+        if process_failed:
+            # A success-looking envelope is not an error diagnostic when the
+            # outer process status says the invocation failed.  Use envelope
+            # detail only when the envelope itself also reports an error.
+            error = (
+                stderr
+                or (payload.result if payload.is_error else None)
+                or (payload.subtype if payload.is_error else None)
+                or f"claude exited with status {returncode}"
+            )
+        elif payload.is_error:
+            error = (
+                stderr
+                or payload.result
+                or payload.subtype
+                or f"claude exited with status {returncode}"
+            )
         return WorkerTurn(
-            text=str(result_text) if result_text is not None else "",
-            session_id=session_id if isinstance(session_id, str) and session_id else None,
+            # A nonzero process status is authoritative over a stale success
+            # envelope.  Do not let its ``result`` outrank the stderr diagnostic
+            # when LeaderDrivenWorkerRuntime collects this turn.
+            text="" if process_failed else payload.result,
+            session_id=payload.session_id,
             is_error=is_error,
-            error=(stderr or None) if is_error else None,
-            usage=usage,
+            error=error,
+            usage=payload.usage,
         )
 
     async def spawn(

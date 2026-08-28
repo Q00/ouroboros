@@ -19,6 +19,7 @@ import structlog
 import yaml
 
 from ouroboros.config.loader import (
+    default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
     get_auto_evolve_enabled,
     get_max_parallel_workers,
@@ -51,7 +52,10 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -68,7 +72,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator import create_agent_runtime
+from ouroboros.orchestrator import create_agent_runtime, create_agent_runtime_async
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_CWD_ARG,
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -236,6 +240,12 @@ def _resolve_execution_preferences_request(
         raise ValueError("efficiency_mode must be adaptive or quality_first")
     if raw_assurance is not None and not isinstance(raw_assurance, str):
         raise ValueError("frugality_assurance must be off, observe, or strict")
+    if raw_efficiency is None and not is_resume:
+        # Persistent default policy fills the fresh-start gap (#1733):
+        # explicit arguments won above, resume keeps its persisted contract,
+        # and the coupled frugality default still derives from the mode, so
+        # strict can never appear implicitly.
+        raw_efficiency = default_execution_efficiency_mode()
     preferences = resolve_execution_preferences(raw_efficiency, raw_assurance)
     return (
         preferences,
@@ -672,6 +682,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     session_signal_hub: Any | None = field(default=None, repr=False)
+    # HostDispatchBridge from the MCP composition root; bound onto the runtime
+    # when the ``host`` backend is selected (no-op for every other backend).
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
     seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _process_local_resume_owners: dict[str, OrchestratorRunner] = field(
@@ -1075,7 +1088,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     description=(
                         "Execution efficiency policy. adaptive may start decomposed ACs "
                         "on lower-cost tiers and escalate on recovery; quality_first keeps "
-                        "children at the parent starting tier. Default: adaptive."
+                        "children at the parent starting tier. When omitted on a fresh "
+                        "start, a configured execution.default_policy supplies it; "
+                        "otherwise defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -1185,6 +1200,30 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         Returns:
             Result containing execution result or error.
         """
+        if not synchronous:
+            # The direct (fire-and-forget) entry has no JobManager job, so a
+            # parked host dispatch would have no ``job_wait``/``job_status``
+            # surface through which the caller could discover its
+            # ``fanout_id`` and submit a result. Only the job-tracked path
+            # (``StartExecuteSeedHandler``, which calls back in with
+            # ``synchronous=True``) can service a host dispatch.
+            from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+
+            try:
+                resolved_runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+            except Exception:
+                resolved_runtime_backend = None
+            if resolved_runtime_backend == "host":
+                return Result.err(
+                    MCPToolError(
+                        "The 'host' agent runtime dispatches execution to the "
+                        "calling MCP host and requires job tracking so "
+                        "job_wait/job_status can surface pending_host_dispatches. "
+                        "Use ouroboros_start_execute_seed (ooo run) instead of "
+                        "ouroboros_execute_seed.",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
         cwd_result = self._resolve_dispatch_cwd_result(
             arguments.get("cwd"), tool_name="ouroboros_execute_seed"
         )
@@ -1514,6 +1553,20 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # same-process continuation into a foreign-adapter path.
                     runner = retained_owner
                     agent_adapter = runner._adapter
+                    # A resumed host-dispatch runtime keeps its bridge but must
+                    # re-scope to this run's identity so fresh dispatch records
+                    # correlate under the resuming session/execution. No-op for
+                    # every other backend.
+                    from ouroboros.orchestrator.host_dispatch import (
+                        bind_host_dispatch_bridge as _rebind_host_bridge,
+                    )
+
+                    _rebind_host_bridge(
+                        agent_adapter,
+                        self.host_dispatch_bridge,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     if event_store is not runner._event_store:
                         # A handler without an injected store opened this
                         # short-lived observer connection solely to reconstruct
@@ -1532,7 +1585,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         if inherited_runtime_handle and inherited_runtime_handle.approval_mode
                         else None
                     )
-                    agent_adapter = create_agent_runtime(
+                    agent_adapter = await create_agent_runtime_async(
+                        create_agent_runtime,
                         backend=self.agent_runtime_backend,
                         model=resolve_execution_model(self.agent_runtime_backend),
                         cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
@@ -1544,6 +1598,20 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             if delegated_permission_mode
                             else {}
                         ),
+                    )
+                    # Host-driven execution: attach the composed bridge and the
+                    # job identity its dispatch records correlate under. A
+                    # retained-owner resume keeps the adapter this already
+                    # bound to.
+                    from ouroboros.orchestrator.host_dispatch import (
+                        bind_host_dispatch_bridge,
+                    )
+
+                    bind_host_dispatch_bridge(
+                        agent_adapter,
+                        self.host_dispatch_bridge,
+                        session_id=session_id,
+                        execution_id=execution_id,
                     )
 
                     # Create checkpoint store for execution state persistence
@@ -2713,6 +2781,16 @@ class StartExecuteSeedHandler:
             snapshot.links.execution_id or execution_id, self._event_store
         )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            session_id=snapshot.links.session_id,
+            execution_id=snapshot.links.execution_id,
+            follow_result_job_keys=(
+                "chained_evaluate_job_id",
+                "chained_ralph_job_id",
+            ),
+        )
         text = (
             f"Started background execution.\n\n"
             f"Job ID: {snapshot.job_id}\n"
@@ -2728,6 +2806,7 @@ class StartExecuteSeedHandler:
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
             "ouroboros_job_result(job_id) for the final output."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta: dict[str, Any] = {
             "job_id": snapshot.job_id,
             "session_id": snapshot.links.session_id,
@@ -2739,16 +2818,7 @@ class StartExecuteSeedHandler:
             "llm_backend": llm_backend,
             "efficiency_mode": execution_preferences.efficiency_mode.value,
             "frugality_assurance": execution_preferences.frugality_assurance.value,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                session_id=snapshot.links.session_id,
-                execution_id=snapshot.links.execution_id,
-                follow_result_job_keys=(
-                    "chained_evaluate_job_id",
-                    "chained_ralph_job_id",
-                ),
-            ),
+            "job_observer": observer,
             **_run_only_verification_meta(snapshot.links.session_id),
         }
         if idempotency_key:

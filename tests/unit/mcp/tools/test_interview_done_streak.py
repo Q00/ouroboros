@@ -10,6 +10,8 @@ reset_on_failure flags on _score_interview_state().
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
@@ -53,8 +55,15 @@ def create_mock_live_ambiguity_score(
 class TestInterviewDoneStreakAndShortfall:
     """Explicit-done path: streak enforcement + shortfall persistence."""
 
-    async def test_explicit_done_advances_streak(self) -> None:
-        """Explicit 'done' with qualifying score but streak=0 must advance streak.
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "done",
+            "[from-user][refined][closure] 지금 추가 인터뷰를 종료한다.",
+        ],
+    )
+    async def test_explicit_done_advances_streak(self, answer: str) -> None:
+        """Explicit closure intent with a qualifying score advances the streak.
 
         Regression test for #405: previously the handler refused completion
         when streak < required but never advanced the streak, leaving the
@@ -105,7 +114,7 @@ class TestInterviewDoneStreakAndShortfall:
             "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
             return_value=mock_engine,
         ):
-            result = await handler.handle({"session_id": "sess-123", "answer": "done"})
+            result = await handler.handle({"session_id": "sess-123", "answer": answer})
 
         assert result.is_ok
         assert state.status == InterviewStatus.IN_PROGRESS

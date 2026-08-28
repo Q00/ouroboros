@@ -55,7 +55,10 @@ from ouroboros.mcp.tools.evolve_start_claim import (
     PreparedEvolveClaim,
     evolve_lineage_busy_error,
 )
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -1740,6 +1743,11 @@ class StartEvolveStepHandler:
         except MCPToolError as exc:
             return Result.err(exc)
 
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=snapshot.cursor,
+            execution_id=snapshot.links.execution_id,
+        )
         text = (
             f"Started background evolve_step.\n\n"
             f"Job ID: {snapshot.job_id}\n"
@@ -1747,17 +1755,14 @@ class StartEvolveStepHandler:
             f"Execution ID: {snapshot.links.execution_id}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "lineage_id": lineage_id,
             "execution_id": snapshot.links.execution_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=snapshot.cursor,
-                execution_id=snapshot.links.execution_id,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(

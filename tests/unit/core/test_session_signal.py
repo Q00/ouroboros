@@ -129,6 +129,15 @@ class TestSessionSignalValidation:
         assert len(reply.encode("utf-8")) <= MAX_REPLY_BYTES
         assert reply.endswith("…")
 
+    def test_runtime_reply_truncates_instead_of_rejecting_long_input(self) -> None:
+        long_reply = bounded_session_signal_reply("a" * (MAX_REPLY_BYTES * 3))
+
+        assert len(long_reply.encode("utf-8")) <= MAX_REPLY_BYTES
+        assert long_reply.endswith("…")
+
+        with pytest.raises(ValueError, match="visible text"):
+            bounded_session_signal_reply("   \n\t ")
+
     def test_expiry_is_timezone_aware_and_normalized(self) -> None:
         with pytest.raises(ValueError, match="timezone-aware"):
             _signal(expires_at=datetime(2026, 7, 12, 12, 0, 0))
@@ -138,11 +147,23 @@ class TestSessionSignalValidation:
         assert signal.is_expired(at=expires - timedelta(seconds=1)) is False
         assert signal.is_expired(at=expires) is True
 
-    def test_requested_event_data_includes_message_only_when_requested(self) -> None:
+    def test_event_data_round_trips_with_default_arguments(self) -> None:
         signal = _signal()
 
-        assert "message" not in signal.to_event_data()
-        assert signal.to_event_data(include_message=True)["message"] == signal.message
+        restored = SessionSignal.from_event_data(signal.to_event_data())
+
+        assert restored == signal
+
+    def test_requested_event_data_omits_message_only_when_opted_out(self) -> None:
+        signal = _signal()
+
+        assert signal.to_event_data()["message"] == signal.message
+
+        telemetry = signal.to_event_data(include_message=False)
+        assert "message" not in telemetry
+        assert telemetry["message_digest"] == signal.message_digest
+        with pytest.raises(ValueError, match="non-empty message"):
+            SessionSignal.from_event_data(telemetry)
 
 
 class TestSessionSignalCapabilityResolution:

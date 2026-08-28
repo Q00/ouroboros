@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
@@ -22,6 +23,7 @@ from ouroboros.orchestrator.workflow_ir import (
 from ouroboros.orchestrator.workflow_ir_adapter import (
     DEFAULT_SEED_AC_EVIDENCE_SCHEMA_REF,
     DEFAULT_SEED_AC_INPUT_SCHEMA_REF,
+    _normalize_acceptance_criteria,
     workflow_spec_from_seed,
 )
 
@@ -141,8 +143,19 @@ class TestWorkflowSpecFromSeed:
             workflow_spec_from_seed(_seed())
 
     def test_rejects_blank_acceptance_criteria(self) -> None:
+        """The blank-AC boundary now sits on ``Seed`` itself.
+
+        ``AcceptanceCriterionSpec.description`` rejects whitespace-only text at
+        construction, so a blank AC can no longer reach the adapter through a
+        valid ``Seed``. The adapter keeps its own guard as defense-in-depth for
+        loosely typed criteria inputs; it is covered directly below.
+        """
+        with pytest.raises(PydanticValidationError, match="cannot be empty or whitespace-only"):
+            _seed("A", "   ")
+
+    def test_adapter_guard_still_rejects_blank_criteria(self) -> None:
         with pytest.raises(ValueError, match="criterion 2 must be non-blank"):
-            workflow_spec_from_seed(_seed("A", "   "))
+            _normalize_acceptance_criteria(("A", "   "))
 
     def test_does_not_import_projection_records_or_runtime_paths(self) -> None:
         import ouroboros.orchestrator.workflow_ir_adapter as adapter

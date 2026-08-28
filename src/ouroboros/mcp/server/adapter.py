@@ -32,6 +32,7 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
 from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
 
 # Re-exported: split out in #1754, still imported from here by evaluation tests.
@@ -72,6 +73,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator import host_dispatch
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus
 
@@ -84,7 +86,6 @@ try:  # Keep the core package importable when the optional MCP extra is absent.
     from mcp.server import MCPServer as _SDKMCPServer
 except ImportError:  # pragma: no cover - exercised by packaging smoke tests.
     _SDKMCPServer = None  # type: ignore[assignment,misc]
-
 
 if _SDKMCPServer is not None:
 
@@ -116,10 +117,14 @@ if _SDKMCPServer is not None:
             arguments: dict[str, Any],
             context: Any = None,
         ) -> Any:
-            del context
             from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
+            return await call_sdk_tool(
+                self._ouroboros_adapter,
+                name,
+                arguments,
+                host_context=from_sdk_context(context),
+            )
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -1083,8 +1088,10 @@ class MCPServerAdapter:
         Network transports are gated here rather than at the CLI, because this
         is the one place every embedder passes through. The rule: a bind that
         other machines can reach must carry credentials. A loopback bind may
-        stay credential-free -- the client already owns this process, and the
-        SDK auto-enables DNS-rebinding protection there.
+        stay credential-free -- the client already owns this process, and
+        Ouroboros supplies explicit SDK DNS-rebinding settings there, preserving
+        the SDK-compatible Host defaults while keeping an empty Origin policy
+        fail-closed.
 
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
@@ -1131,6 +1138,7 @@ class MCPServerAdapter:
             version=self._version,
             token_verifier=wiring.token_verifier,
             auth=wiring.auth_settings,
+            extensions=subagent_capability_extensions(),
         )
 
         # Register tools with MCPServer.
@@ -1606,19 +1614,17 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        create_fanout_handlers,
     )
     from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.fanout_composition import create_fanout_wiring
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
-    from ouroboros.orchestrator.runner import (
-        OrchestratorRunner,
-    )
+    from ouroboros.orchestrator.runner import OrchestratorRunner
+    from ouroboros.orchestrator.runtime_factory import create_agent_runtime_async
     from ouroboros.orchestrator.synapse import (
         EventStoreSessionSignalTargetResolver,
         SessionSignalHub,
@@ -1873,8 +1879,10 @@ def create_ouroboros_server(
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         await _ensure_evolution_store_initialized()
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="execution")
         task_cwd = evolutionary_loop.get_project_dir()
-        runner_adapter = create_agent_runtime(
+        runner_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=execution_model,
             cwd=task_cwd or effective_cwd,
@@ -2139,7 +2147,9 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
-        validation_adapter = create_agent_runtime(
+        host_dispatch.reject_host_runtime_for_evolve(execute_runtime_backend, phase="validation")
+        validation_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,
@@ -2353,27 +2363,27 @@ def create_ouroboros_server(
     # ``ouroboros_submit_fanout_results``, so both sides must observe the same
     # directory. Until #1754 this composition root injected no registry and
     # registered no submit handler, so on the shipped stdio server no
-    # ``fanout_id`` was ever stamped and the re-entry contract in
-    # skills/interview/SKILL.md named a tool that was not there.
-    #
-    # Built at its FINAL directory rather than at the default plus a later
-    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
-    # the mutable path never had a reason to exist here — and leaving it mutable
-    # is not free: a producer that registers before the first interview turn (a
-    # lateral panel) would have its record moved out from under an already
-    # issued fan-out id, whose valid submission then returns
-    # ``unknown_fanout_id``.
+    # Built at its FINAL directory (``state_dir_path``, resolved above), not a
+    # mutable path: moving a producer record after issuing its fan-out id makes
+    # valid submissions return ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
-    # Create the lifecycle owner before its production handlers. Raw builtin
-    # runtime interception calls handlers directly rather than through
-    # ``call_tool()``, so durable fan-out publication receives this same
-    # explicit readiness boundary as server transport requests.
+    host_dispatch_bridge = host_dispatch.compose_host_dispatch_bridge(
+        default_execute_runtime, fanout_registry
+    )
+    execute_seed.host_dispatch_bridge = host_dispatch_bridge
+    # Lifecycle owner before its handlers: raw builtin interception calls
+    # handlers directly, bypassing ``call_tool()``'s readiness boundary.
     from ouroboros.backends import render_mcp_server_instructions
+    from ouroboros.mcp.update_notice import append_cached_update_notice
 
     server = MCPServerAdapter(
         name=name,
         version=version,
-        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
+        # Every MCP host gets the cached update nudge (#2066); the append is
+        # offline-only and a no-op without a fresh cache entry.
+        instructions=append_cached_update_notice(
+            instructions if instructions is not None else render_mcp_server_instructions()
+        ),
         auth_config=auth_config,
         rate_limit_config=rate_limit_config,
     )
@@ -2439,11 +2449,13 @@ def create_ouroboros_server(
         JobStatusHandler(
             event_store=event_store,
             job_manager=job_manager,
+            host_dispatch_bridge=host_dispatch_bridge,
         ),
         JobWaitHandler(
             event_store=event_store,
             job_manager=job_manager,
             available_conductor_tools=conductor_action_tools,
+            host_dispatch_bridge=host_dispatch_bridge,
         ),
         JobResultHandler(
             event_store=event_store,
@@ -2470,23 +2482,6 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(event_store=event_store),
-        InterviewHandler(
-            interview_engine=interview_engine,
-            event_store=event_store,
-            llm_backend=interview_llm_backend,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-            suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
-        PMInterviewHandler(
-            data_dir=state_dir_path,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            fanout_registry=fanout_registry,
-        ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
@@ -2496,10 +2491,20 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        *create_fanout_handlers(
-            fanout_registry,
-            effective_cwd,
-            event_store,
+        # One store, and both producers are handed it rather than deriving a
+        # path from the workspace when a question is asked (RFC #2153).
+        *create_fanout_wiring(
+            interview_engine=interview_engine,
+            suppress_tool_use_prompt_cues=interview_envelope_sealed,
+            host_dispatch_bridge=host_dispatch_bridge,
+            fanout_registry=fanout_registry,
+            workspace=effective_cwd,
+            event_store=event_store,
+            handler_event_store=event_store,
+            state_dir=state_dir_path,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=interview_runtime_backend,
+            opencode_mode=opencode_mode,
             ensure_ready=server.startup,
         ),
         evolve_step,

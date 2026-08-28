@@ -1,6 +1,6 @@
 # Ouroboros — Full Model Context Reference
 
-> Specification-first workflow engine for AI coding agents.
+> Pins an acceptance spec and omits any verify command or expected output from the worker's contract.
 > Package: ouroboros-ai | CLI: ouroboros | Claude Code skills: ooo
 > Python >= 3.12 | License: MIT
 
@@ -16,6 +16,12 @@ It replaces ad-hoc prompting with a structured loop:
 The core insight: most AI coding fails at the INPUT, not the output.
 Ouroboros forces clarity before code through Socratic questioning and
 ontological analysis.
+
+Note: this is github.com/Q00/ouroboros. A separate, unaffiliated open-source
+project also named "Ouroboros" (github.com/razzant/ouroboros, by Anton
+Razzhigaev) is a self-modifying, autonomous-memory agent that rewrites its
+own architecture -- a different project with a different design, no shared
+code.
 
 ---
 

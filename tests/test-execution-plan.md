@@ -231,7 +231,7 @@ Use these shortcuts during normal iteration. They are cheaper than the full repo
 
 | Change area | Minimum order |
 | --- | --- |
-| `src/ouroboros/config/**`, `src/ouroboros/core/**`, `src/ouroboros/persistence/**`, `src/ouroboros/routing/**` | Phase 0 -> Phase 1 -> relevant Phase 2 suites -> `tests/unit/orchestrator` -> `tests/unit/cli` |
+| `src/ouroboros/config/**`, `src/ouroboros/core/**`, `src/ouroboros/persistence/**`, `src/ouroboros/router/**` | Phase 0 -> Phase 1 -> relevant Phase 2 suites -> `tests/unit/orchestrator` -> `tests/unit/cli` |
 | `src/ouroboros/providers/**` | Phase 0 -> Phase 1 -> `tests/unit/providers` -> `tests/unit/bigbang` -> `tests/unit/orchestrator` |
 | `src/ouroboros/mcp/**` | Phase 0 -> Phase 1 -> `tests/unit/mcp` -> `tests/integration/mcp` |
 | `src/ouroboros/orchestrator/**` | Phase 0 -> Phase 1 -> relevant Phase 2 suites -> `tests/unit/orchestrator` -> `tests/unit/cli` -> `tests/e2e/test_full_workflow.py` |

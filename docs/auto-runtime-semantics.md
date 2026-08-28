@@ -23,7 +23,7 @@ before reporting an "interview is too slow" issue saves a round-trip.
 
 - `--runtime codex` does **not** mean "Codex picks up the entire pipeline as a single subagent task". The first interview question is still generated in-process by the authoring handler that talks to Codex. If the first call is slow, you see `interview.start timed out after <N>s` in the auto state — not a Codex subagent error.
 - `--runtime` does **not** silently change between phases. Resume rejects a runtime mismatch (`resume runtime mismatch: session uses <X>, but --runtime <Y> was requested`).
-- `--runtime` does **not** disable the Socratic interview for operational goals (PR URLs, merge intents). Path selection lives in [`auto/operational_task.py`](../src/ouroboros/auto/operational_task.py) and is independent of runtime selection — see #689.
+- `--runtime` does **not** disable the Socratic interview for operational goals (PR URLs, merge intents). Task-class selection is independent of runtime selection: after Seed generation, `derive_domain_from_ledger()` in [`auto/domain_inference.py`](../src/ouroboros/auto/domain_inference.py) classifies the goal (see the post-generation step in [`auto/pipeline.py`](../src/ouroboros/auto/pipeline.py)); `auto/task_classes.py` is only the reference catalog — see #689.
 
 ## Reading a blocker through this lens
 
@@ -45,8 +45,15 @@ fixes for the incident split into:
 - #687 — persist `interview_session_id` before the first question generation
   call returns, so a timeout still leaves a resumable handle.
 - #688 — make `Resume:` vs `Retry:` truthful given that handle's presence.
-- #689 — give operational goals a direct path so they don't enter the
-  authoring loop at all.
+- #689 — the proposed direct operational path was rejected; operational goals
+  still go through the Socratic interview (see line 26). Separately, post-Seed
+  task-class inference via `derive_domain_from_ledger()` is artifact-shape
+  enrichment only — it selects one of the eight `TaskClass` shapes and applies
+  default acceptance criteria (see [`auto/domain_inference.py`](../src/ouroboros/auto/domain_inference.py)
+  and the post-generation step in [`auto/pipeline.py`](../src/ouroboros/auto/pipeline.py));
+  it does not bypass authoring. Domain-specific operational workflows (e.g.
+  GitHub PR operations) live in plugins outside `ooo auto`
+  ([`docs/rfc/userlevel-plugins.md`](rfc/userlevel-plugins.md)).
 - #690 (this doc) — make the meaning of `--runtime` legible so users do not
   expect `--runtime codex` to bypass the authoring handler.
 

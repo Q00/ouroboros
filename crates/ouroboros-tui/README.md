@@ -33,13 +33,14 @@ ouroboros-tui --help                    # show all options
 | `3` | `e` | Lineage — Evolutionary generation history |
 | `4` | `s` | Sessions — Browse and load sessions |
 | | `l` | Open the log panel while Execution is active |
-| | `Esc` | Close the open log panel |
+| | `Esc` | Close the open log panel when no modal is active |
 
 ## Keys
 
-`q` quit · `1-4` screens · `Ctrl+P` command palette · `l` open logs · `Esc` close logs · `↑↓` navigate · `Enter` select · mouse click
+`q` quit · `1-4` screens · `Ctrl+P` command palette · `l` open logs · `Esc` close palette / return from Sessions / close Execution logs · `↑↓` navigate · `Enter` select · mouse click
 
 With the log filter focused, `l` enters filter text; global `q`, `1-4`, and `Ctrl+P` remain reserved.
+When the command palette is open, `Esc` closes only the palette and preserves the underlying log panel and filter.
 
 `p`/`r` pause/resume are available in demo mode only, where this process owns the simulation
 it is pausing. Demo mode is entered with `--mock`, and also as a fallback when the database

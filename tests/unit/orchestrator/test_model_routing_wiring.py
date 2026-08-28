@@ -547,8 +547,13 @@ class TestModelRoutedEvent:
         assert data["runtime_backend"] == "claude"
 
     @pytest.mark.asyncio
-    async def test_model_event_store_failure_does_not_abort_ac(self) -> None:
+    async def test_model_event_store_failure_does_not_abort_ac(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A degraded event store degrades the proof event to a warning, not an AC failure."""
+        # The append retry ladder backs off for real seconds; keep the retries,
+        # drop the waiting.
+        monkeypatch.setattr("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock())
         store = AsyncMock()
         model_append_attempts = 0
 

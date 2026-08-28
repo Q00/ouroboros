@@ -1,5 +1,6 @@
 """Unit tests for the GJC LLM adapter."""
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+from ouroboros.providers.codex_cli_stream import DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
 from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 
 
@@ -745,3 +747,114 @@ async def test_slash_qualified_model_id_sends_set_model() -> None:
         "provider": "openrouter",
         "modelId": "google/gemini-3-flash-preview",
     }
+
+
+class _HangingStream:
+    """Stream that never yields a byte and never reaches EOF."""
+
+    async def read(self, chunk_size: int = 16384) -> bytes:
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+
+class _WedgedProcess(_FakeProcess):
+    """Process whose RPC stream hangs after start-up."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdout = _HangingStream()
+        self.stderr = _FakeStream("")
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            await asyncio.Future()
+        return self.returncode
+
+    def terminate(self) -> None:
+        super().terminate()
+        self.returncode = self._returncode
+
+    def kill(self) -> None:
+        super().kill()
+        self.returncode = self._returncode
+
+
+class _LingeringProcess(_FakeProcess):
+    """Process that answers the prompt but never exits on its own."""
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            await asyncio.Future()
+        return self.returncode
+
+    def terminate(self) -> None:
+        super().terminate()
+        self.returncode = self._returncode
+
+    def kill(self) -> None:
+        super().kill()
+        self.returncode = self._returncode
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_bounds_rpc_protocol_when_no_timeout_configured() -> None:
+    """A silent `gjc --mode rpc` child must not block the generation forever.
+
+    ``timeout`` defaults to ``None`` and no production call site sets one, so
+    the module-level ceiling is the only bound on the RPC protocol wait.
+    """
+    process = _WedgedProcess()
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+    assert adapter._timeout is None
+    assert adapter._effective_timeout_seconds() == DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
+    adapter._default_completion_timeout_seconds = 0.01
+    adapter._process_shutdown_timeout_seconds = 0.01
+
+    with patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory):
+        result = await asyncio.wait_for(
+            adapter.complete(
+                [Message(role=MessageRole.USER, content="Hang")],
+                CompletionConfig(model="default"),
+            ),
+            timeout=10,
+        )
+
+    assert result.is_err
+    assert result.error.details["timed_out"] is True
+    assert result.error.details["timeout_seconds"] == pytest.approx(0.01)
+    assert result.error.details["timeout_was_default"] is True
+    assert process.terminated
+
+
+@pytest.mark.asyncio
+async def test_lingering_child_after_agent_end_does_not_hang_completion() -> None:
+    """The post-`agent_end` reap is bounded, and the answer is still returned."""
+    process = _LingeringProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            _agent_end("prompt-1", "Hello"),
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+    adapter._process_shutdown_timeout_seconds = 0.01
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await asyncio.wait_for(
+            adapter.complete(
+                [Message(role=MessageRole.USER, content="Say hello")],
+                CompletionConfig(model="default"),
+            ),
+            timeout=10,
+        )
+
+    assert result.is_ok
+    assert result.value.content == "Hello"
+    assert process.terminated

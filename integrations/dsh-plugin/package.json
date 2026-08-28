@@ -1,0 +1,28 @@
+{
+  "name": "dsh-ouroboros",
+  "version": "0.1.0",
+  "description": "Mount Ouroboros (spec-first AI dev workflow engine) into DeepSeek Harness as native tools — type \"ooo interview\" or \"ooo auto\" in chat.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Q00/ouroboros.git",
+    "directory": "integrations/dsh-plugin"
+  },
+  "homepage": "https://github.com/Q00/ouroboros/tree/main/integrations/dsh-plugin",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "ouroboros",
+    "mcp"
+  ],
+  "files": [
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

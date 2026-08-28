@@ -141,6 +141,7 @@ class LLMConfig(BaseModel, frozen=True):
         "goose",
         "pi",
         "ourocode",
+        "dsh",
         "gjc",
         "zcode",
     ] = "claude_code"
@@ -256,6 +257,13 @@ class ExecutionConfig(BaseModel, frozen=True):
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
             fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
+        default_policy: Persistent default execution policy for FRESH runs
+            (#1733). ``ask`` (the default) preserves the host's interactive
+            prompt exactly; ``efficient`` resolves to adaptive/observe and
+            ``quality_first`` to quality_first/off without asking. Explicit
+            invocation arguments always win, resumed sessions keep their
+            persisted immutable contract, and strict frugality assurance
+            never derives from this setting.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -268,11 +276,12 @@ class ExecutionConfig(BaseModel, frozen=True):
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)
-    cross_harness_redispatch: bool = True
+    cross_harness_redispatch: bool = False
     n_version_tournament: bool = False
     decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+    default_policy: Literal["ask", "efficient", "quality_first"] = "ask"
 
     @field_validator("decomposition_mode", mode="before")
     @classmethod
@@ -493,6 +502,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "grok_build",
         "zcode",
         "zcode_cli",
+        "host",
+        "host_dispatch",
     }
 )
 
@@ -661,6 +672,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "antigravity",
         "grok",
         "zcode",
+        "host",
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
@@ -704,6 +716,15 @@ class OrchestratorConfig(BaseModel, frozen=True):
     grok_cli_path: str | None = None
     ourocode_cli_path: str | None = None
     zcode_cli_path: str | None = None
+    dsh_cli_path: str | None = None
+    # dsh Cordis composition file passed to `dsh-acp-demo --config`. Not an
+    # executable itself, but it names the plugins the Node process loads, so it
+    # is treated with the same untrusted-source caution as a CLI path.
+    dsh_config_path: str | None = None
+    # POSIX shell used to run an AC's verify_command. Not an agent CLI, but it
+    # is an executable path fed straight into a subprocess, so it carries the
+    # same untrusted-source caution.
+    verify_bash_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -729,6 +750,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "grok_cli_path",
         "ourocode_cli_path",
         "zcode_cli_path",
+        "dsh_cli_path",
+        "dsh_config_path",
+        "verify_bash_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:
@@ -756,6 +780,23 @@ class TelemetryConfig(BaseModel, frozen=True):
     enabled: bool = True
 
 
+class SeedConfig(BaseModel, frozen=True):
+    """Seed-authoring gates applied before a Seed is executed.
+
+    Attributes:
+        verify_command_gate: How to treat an acceptance criterion that declares
+            neither a ``verify_command`` nor a ``verify_exemption_reason``.
+            ``warn`` surfaces it and continues; ``block`` refuses the run.
+            Such an AC can only be judged from the leaf's own transcript, which
+            is both the gameable path and the one that breaks when transcript
+            collection fails — so the default moves toward ``block`` over time.
+            There is no permanent opt-out; the exemption reason is the escape
+            hatch, and it is per-AC and explicit.
+    """
+
+    verify_command_gate: Literal["warn", "block"] = "warn"
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -776,6 +817,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         drift: Drift monitoring configuration
         runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
+        seed: Seed-authoring gates applied before execution
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -793,6 +835,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    seed: SeedConfig = Field(default_factory=SeedConfig)
 
 
 def get_default_config() -> OuroborosConfig:

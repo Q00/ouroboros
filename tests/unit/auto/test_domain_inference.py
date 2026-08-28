@@ -65,15 +65,6 @@ def _bare_ledger(goal: str = "Build a tiny local CLI") -> SeedDraftLedger:
 # ---------------------------------------------------------------------------
 
 
-def test_single_match_cli() -> None:
-    ledger = _bare_ledger("Build a habit-tracker CLI tool")
-    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 def test_single_match_webhook() -> None:
     ledger = _bare_ledger("Build a webhook receiver service")
     _seed_section(ledger, "inputs", value="Incoming webhook POST payloads from GitHub")
@@ -81,39 +72,6 @@ def test_single_match_webhook() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEBHOOK
-
-
-def test_single_match_web_service() -> None:
-    ledger = _bare_ledger("Build a REST API for blog posts")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Multiple REST endpoints returning JSON body responses",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_SERVICE
-
-
-def test_single_match_data_pipeline() -> None:
-    ledger = _bare_ledger("Aggregate daily logs into Parquet")
-    _seed_section(ledger, "inputs", value="Dataset of log files split per day")
-    _seed_section(ledger, "outputs", value="Aggregated output dataset in Parquet")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.DATA_PIPELINE
-
-
-def test_single_match_game_2d() -> None:
-    ledger = _bare_ledger("Build a small 2D game scene")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Each frame renders a canvas with the playable scene state",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.GAME_2D
 
 
 def test_single_match_refactor_in_place() -> None:
@@ -126,18 +84,6 @@ def test_single_match_refactor_in_place() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.REFACTOR_IN_PLACE
-
-
-def test_single_match_library() -> None:
-    ledger = _bare_ledger("Publish a JSON-schema parsing library")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="An importable Python package exposing a public API surface",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
 
 
 # ---------------------------------------------------------------------------
@@ -260,19 +206,6 @@ def test_domain_inference_dataclass_properties() -> None:
 # ``_matches_library`` so the generic word "module" no longer shadows
 # other classes.
 # ---------------------------------------------------------------------------
-
-
-def test_cli_matches_on_goal_signal_alone() -> None:
-    """A ledger whose `goal` says CLI but whose `outputs` lacks cli
-    vocabulary should still classify as CLI as long as the
-    ledger-evidence gate is satisfied (outputs OR runtime is non-empty)."""
-    ledger = _bare_ledger("Build a habit-tracker CLI for end users")
-    # Generic non-cli output vocabulary — what a ledger_only closure
-    # would typically write.
-    _seed_section(ledger, "outputs", value="JSON file stored in the working directory")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
 
 
 def test_cli_matches_on_conservative_default_ledger() -> None:
@@ -731,24 +664,6 @@ def test_cli_does_not_match_on_exclusion_phrasing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_match_web_app() -> None:
-    """The #1813 reproduction: browser form/panel/validation signals plus a
-    ``package.json`` mention must resolve to the product-complete web_app
-    class instead of being dragged to library by the manifest filename."""
-    ledger = _bare_ledger("Build a signup page that runs in the browser")
-    _seed_section(
-        ledger,
-        "outputs",
-        value=(
-            "Signup form with a settings panel shown in the browser; "
-            "client-side validation messages; package.json build scripts"
-        ),
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 def test_web_app_requires_browser_context_signal() -> None:
     """Generic form/validation vocabulary without any browser-context signal
     must not classify as web_app — those words appear in many non-UI goals
@@ -789,40 +704,6 @@ def test_ambiguous_browser_ui_with_rest_backend() -> None:
     assert TaskClass.WEB_SERVICE in result.classes
 
 
-def test_browser_performance_vocabulary_is_not_ui_evidence() -> None:
-    """R1 probe: "form" inside "performance" must not count as UI composition."""
-    ledger = _bare_ledger("Build browser performance benchmarking tools")
-    _seed_section(ledger, "outputs", value="Performance report with timing metrics")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_browser_cache_invalidation_is_not_ui_evidence() -> None:
-    """R1 probe: "validation" inside "invalidation" must not count either."""
-    ledger = _bare_ledger("Implement browser cache invalidation")
-    _seed_section(ledger, "outputs", value="Invalidation events are logged")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_negated_browser_goal_keeps_cli_single() -> None:
-    """ "Build a CLI, not a browser page" is CLI evidence, not web_app evidence."""
-    ledger = _bare_ledger("Build a CLI, not a browser page")
-    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_negated_browser_goal_keeps_library_single() -> None:
-    ledger = _bare_ledger("Publish a reusable helper, not a browser page")
-    _seed_section(ledger, "outputs", value="A reusable package published to PyPI")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -837,79 +718,6 @@ def test_web_app_negation_forms_are_rejected(goal: str) -> None:
     _seed_section(ledger, "outputs", value="Plain text summary written to a file")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
-
-
-def test_affirmative_expansion_keeps_web_app_signal() -> None:
-    """ "not just a browser page" asserts the page — the signal must survive."""
-    ledger = _bare_ledger("Build a dashboard that is not just a browser page")
-    # UI composition must come from standardized outputs (R2); the goal
-    # contributes only the surviving affirmative browser signal.
-    _seed_section(ledger, "outputs", value="A charts panel refreshed from a data feed")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP in result.classes
-
-
-def test_negated_ui_vocabulary_in_goal_is_not_ui_evidence() -> None:
-    """R2 probe: "without forms or pages" is a denial, not UI composition."""
-    ledger = _bare_ledger("Build a browser benchmark without forms or pages")
-    _seed_section(ledger, "outputs", value="A performance report with timing metrics")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_goal_domain_vocabulary_is_not_ui_evidence() -> None:
-    """R2 probe: "browser form parsing" names the data domain, not a UI —
-    with no user interface requested, the library classification must not
-    be dragged into ambiguity."""
-    ledger = _bare_ledger("Build a library for browser form parsing without a user interface")
-    _seed_section(ledger, "outputs", value="An importable parsing package with a public api")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
-def test_single_page_document_goal_is_not_browser_context() -> None:
-    """R3 probe: "single page PDF report" is a document, not an SPA."""
-    ledger = _bare_ledger("Generate a single page PDF report")
-    _seed_section(ledger, "outputs", value="A PDF page containing the monthly totals")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_single_page_application_phrase_is_browser_context() -> None:
-    ledger = _bare_ledger("Build a single-page application for notes")
-    _seed_section(ledger, "outputs", value="A notes form with an edit panel")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_validation_helpers_output_is_not_ui_evidence() -> None:
-    """R3 probe: bare "validation" in a library's outputs is not a UI."""
-    ledger = _bare_ledger("Build a browser protocol library")
-    _seed_section(ledger, "outputs", value="An importable package with validation helpers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
-def test_documentation_pages_output_is_not_ui_evidence() -> None:
-    """R3 probe: "documentation pages" are prose artifacts, not a UI."""
-    ledger = _bare_ledger("Build a browser automation library")
-    _seed_section(ledger, "outputs", value="An importable package plus documentation pages")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
-def test_web_application_dashboard_matches_web_app() -> None:
-    """R3 follow-up: an explicit web-application goal with interactive
-    outputs must not fall through to unmatched."""
-    ledger = _bare_ledger("Build a web application dashboard")
-    _seed_section(ledger, "outputs", value="Interactive charts and navigation")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
 
 
 @pytest.mark.parametrize(
@@ -929,28 +737,6 @@ def test_coordinated_negation_strips_all_browser_alternatives(goal: str) -> None
     assert result.single is TaskClass.CLI
 
 
-def test_client_side_validation_helpers_are_not_ui_evidence() -> None:
-    """R4 probe: the phrase inside a library's outputs names an API domain."""
-    ledger = _bare_ledger("Build a browser library for client-side validation")
-    _seed_section(
-        ledger, "outputs", value="An importable package providing client-side validation helpers"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
-def test_interactive_documentation_is_not_ui_evidence() -> None:
-    """R4 probe: interactive API documentation is a docs artifact, not a UI."""
-    ledger = _bare_ledger("Build a browser automation library")
-    _seed_section(
-        ledger, "outputs", value="An importable package with interactive API documentation"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
 @pytest.mark.parametrize(
     "outputs",
     [
@@ -962,26 +748,6 @@ def test_dashboard_outputs_are_ui_evidence(outputs: str) -> None:
     """R4 probe: ordinary rendered-dashboard descriptions must match."""
     ledger = _bare_ledger("Build a web application dashboard")
     _seed_section(ledger, "outputs", value=outputs)
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_ordinary_login_page_output_matches_web_app() -> None:
-    """R5 probe: a plain named page with navigation is an ordinary web-app
-    description and must not fall through to unmatched."""
-    ledger = _bare_ledger("Build a web app")
-    _seed_section(ledger, "outputs", value="A responsive login page with navigation")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_rendered_page_does_not_dual_fire_game_2d() -> None:
-    """R5 probe: "rendered" is normal UI wording; the game predicate must
-    not claim the passive participle."""
-    ledger = _bare_ledger("Build a web app")
-    _seed_section(ledger, "outputs", value="A login page rendered in the browser")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -1081,33 +847,6 @@ def test_noun_first_ui_outputs_match_web_app(outputs: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_descriptive_modifier_in_denial_strips_whole_coordination() -> None:
-    """R7 probe: arbitrary descriptive modifiers inside a denied
-    alternative ("browser-based graphical UI") must not shield the next
-    coordinated signal."""
-    ledger = _bare_ledger("Build a terminal dashboard, not a browser-based graphical UI or web app")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Interactive dashboard panels and buttons with deterministic stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_page_objects_are_not_ui_evidence() -> None:
-    """R7 probe: Page Object artifacts are testing-library outputs."""
-    ledger = _bare_ledger("Build a browser automation library")
-    _seed_section(
-        ledger, "outputs", value="An importable package with login page objects and test fixtures"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
 @pytest.mark.parametrize(
     "outputs",
     [
@@ -1123,16 +862,6 @@ def test_user_action_outputs_match_web_app(outputs: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_passive_rendered_game_output_still_matches_game_2d() -> None:
-    """R7 probe: bounding the render signal must stay context-sensitive —
-    passive "rendered sprites" is still a game description."""
-    ledger = _bare_ledger("Build a platformer")
-    _seed_section(ledger, "outputs", value="Rendered sprites with player movement and collisions")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.GAME_2D
 
 
 @pytest.mark.parametrize(
@@ -1151,35 +880,6 @@ def test_browser_ui_screens_match_web_app_not_game(outputs: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_game_screens_still_match_game_2d() -> None:
-    """Bounding "screen" must stay context-sensitive: unanchored screens
-    are still game evidence."""
-    ledger = _bare_ledger("Build an arcade shooter")
-    _seed_section(
-        ledger, "outputs", value="A title screen and a game-over screen with the final score"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.GAME_2D
-
-
-def test_long_denied_alternative_strips_completely() -> None:
-    """R8 probe: a denied alternative longer than three modifier words
-    must still strip up to the coordination boundary."""
-    ledger = _bare_ledger(
-        "Build a terminal UI, not a browser-based graphical user interface or web app"
-    )
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Interactive dashboard panels and buttons with deterministic stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs"),
     [
@@ -1193,16 +893,6 @@ def test_non_allowlisted_product_widgets_match_web_app(goal: str, outputs: str) 
     without being enumerated in a finite anchor list."""
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value=outputs)
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_rendered_ui_clause_variants_do_not_fire_game() -> None:
-    """R9 probe: "is rendered on initial load" is a UI clause; grammatical
-    variants must not leak into the game classifier."""
-    ledger = _bare_ledger("Build a web app")
-    _seed_section(ledger, "outputs", value="A login page is rendered on initial load")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -1338,16 +1028,6 @@ def test_reusable_alone_is_not_library_intent(goal: str, outputs: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_package_goal_intent_stays_library() -> None:
-    """R13 probe: the guard must carry the complete _matches_library
-    signal set — including the singular package word."""
-    ledger = _bare_ledger("Build a frontend Python package")
-    _seed_section(ledger, "outputs", value="Login forms and settings panels")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
 @pytest.mark.parametrize(
     "outputs",
     [
@@ -1362,46 +1042,6 @@ def test_layout_and_navigation_vocabulary_is_ui_composition(outputs: str) -> Non
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_iframe_is_not_game_frame_evidence() -> None:
-    """R13 probe: "iframe" must not satisfy the game fast path's "frame"."""
-    ledger = _bare_ledger("Build a browser dashboard")
-    _seed_section(ledger, "outputs", value="An embedded iframe and a settings panel")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_denied_artifact_type_overrides_browser_domain_mentions() -> None:
-    """R14 probe: browser-auditing tooling denies the web-app artifact
-    type; the domain word "browser" and the inspected pages in its report
-    are not evidence that it IS one."""
-    ledger = _bare_ledger("Build a CLI that audits browser pages, not a web app")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Accessibility report for login pages and settings panels, printed to stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_web_application_firewall_denial_is_not_web_app() -> None:
-    """R14 probe: "web application firewall, not a browser UI" denies the
-    artifact type despite the affirmative-looking domain phrase."""
-    ledger = _bare_ledger("Build a web application firewall, not a browser UI")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Filter rules for login forms and settings panels, printed to stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
 
 
 @pytest.mark.parametrize(
@@ -1421,22 +1061,6 @@ def test_denial_of_other_artifacts_keeps_affirmative_web_app(goal: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_artifact_denial_covers_browser_wording_in_outputs() -> None:
-    """R15 probe: an artifact-type denial in the goal governs the whole
-    ledger — a report naturally described as a browser report cannot
-    revive the denied web-app classification."""
-    ledger = _bare_ledger("Build a CLI that audits browser pages, not a web app")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Browser accessibility report for login pages and settings panels, printed to stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -1450,49 +1074,6 @@ def test_denied_head_noun_scopes_dominance(goal: str) -> None:
     make it an app denial."""
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value="Login forms and settings panels")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_prefix_style_web_app_denial_dominates() -> None:
-    """R16 probe: "non-web-app" is an artifact-type denial too."""
-    ledger = _bare_ledger("Build a non-web-app CLI for browser audits")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Login forms and settings panels listed in the report, printed to stdout",
-    )
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_game_subject_matter_does_not_erase_requested_web_app() -> None:
-    """R16 probe: "for game leaderboards" is the app's subject, not its
-    artifact shape."""
-    ledger = _bare_ledger("Build a web app for game leaderboards")
-    _seed_section(ledger, "outputs", value="Leaderboard page with a filters panel")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_co_produced_api_does_not_erase_requested_web_app() -> None:
-    """R16 probe: a co-produced public API must not suppress the explicit
-    browser UI — web_app survives, alone or in honest ambiguity."""
-    ledger = _bare_ledger("Build a web application with a public API")
-    _seed_section(ledger, "outputs", value="Login forms and settings panels")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP in result.classes
-
-
-def test_output_game_vocabulary_without_game_shape_keeps_web_app() -> None:
-    """R17 probe: output-side game subject vocabulary suppresses web_app
-    only when the game predicate itself has artifact-shape evidence."""
-    ledger = _bare_ledger("Build a web app for game leaderboards")
-    _seed_section(ledger, "outputs", value="Game leaderboard page with a filters panel")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -1538,37 +1119,6 @@ def test_canvas_and_scene_uis_are_not_conclusive_game_evidence(goal: str, output
     assert result.single is TaskClass.WEB_APP
 
 
-def test_sdk_documentation_subject_does_not_own_the_web_app() -> None:
-    """R18 probe: a relative clause naming SDK documentation is subject
-    matter, not library artifact-shape evidence."""
-    ledger = _bare_ledger("Build a web app that displays SDK documentation")
-    _seed_section(ledger, "outputs", value="Browser dashboard with search and a navigation bar")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_package_delivery_subject_does_not_own_the_web_app() -> None:
-    """R18 probe: physical package-delivery vocabulary is not the library
-    package signal."""
-    ledger = _bare_ledger("Build a package-delivery tracking web app")
-    _seed_section(ledger, "outputs", value="Tracking dashboard with a search form and status pages")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_negated_canvas_does_not_fire_game_for_cli() -> None:
-    """R19 probe: the shared-shape gate must read the negation-filtered
-    text — "without a canvas" is not game shape."""
-    ledger = _bare_ledger("Build a CLI without a canvas")
-    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 def test_negated_canvas_does_not_fire_game_without_browser() -> None:
     ledger = _bare_ledger("Build a local report generator without a canvas")
     _seed_section(ledger, "outputs", value="Plain text summary written to a file")
@@ -1592,24 +1142,6 @@ def test_artifact_defining_clauses_keep_library_ownership(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
-
-
-def test_prefix_denial_head_noun_dominates_subject_mentions() -> None:
-    """R19 probe: "non-browser user interface" denies the artifact through
-    its head noun; later browser subject mentions cannot resurrect it."""
-    ledger = _bare_ledger("Build a non-browser user interface for browser accessibility audits")
-    _seed_section(ledger, "outputs", value="Login dashboard with account pages")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_co_requested_sdk_keeps_web_app_in_honest_ambiguity() -> None:
-    """R20 probe: a goal requesting both artifacts must not let library
-    evidence veto the web app — independent ownership, honest ambiguity."""
-    ledger = _bare_ledger("Build a web app and a companion SDK")
-    _seed_section(ledger, "outputs", value="Browser dashboard with login forms and a companion SDK")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP in result.classes
 
 
 def test_co_requested_game_and_admin_app_is_ambiguous() -> None:
@@ -1641,45 +1173,6 @@ def test_artifact_defining_for_clauses_keep_library(goal: str) -> None:
     assert result.single is TaskClass.LIBRARY
 
 
-def test_error_pages_in_service_output_are_not_ui_composition() -> None:
-    """R20 probe: "error pages returned in a JSON response" is service
-    data, not a produced UI."""
-    ledger = _bare_ledger("Build a web service for browser error analysis")
-    _seed_section(ledger, "outputs", value="Browser error pages returned in a JSON response")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_SERVICE
-
-
-def test_error_pages_in_cli_output_are_not_ui_composition() -> None:
-    ledger = _bare_ledger("Build a CLI for browser error diagnostics")
-    _seed_section(ledger, "outputs", value="Browser error pages listed with deterministic stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_pages_listed_in_report_are_not_ui_composition() -> None:
-    """R21 probe: a report enumerating audited pages is data, not a UI."""
-    ledger = _bare_ledger("Build a CLI for browser page audits")
-    _seed_section(ledger, "outputs", value="Login pages listed with deterministic stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_negated_output_ui_description_is_not_ui_composition() -> None:
-    """R21 probe: "No user interface" is an explicit output-side denial."""
-    ledger = _bare_ledger("Build a browser automation CLI")
-    _seed_section(ledger, "outputs", value="No user interface; deterministic stdout and exit codes")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -1697,16 +1190,6 @@ def test_library_subject_modifiers_do_not_erase_web_app_head(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_with_joined_web_app_co_product_keeps_web_ownership() -> None:
-    """R22 probe: a with-clause can introduce a co-produced web app."""
-    ledger = _bare_ledger("Build an SDK with an admin web app")
-    _seed_section(
-        ledger, "outputs", value="Browser admin dashboard with login forms and a companion SDK"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP in result.classes
 
 
 @pytest.mark.parametrize(
@@ -1743,16 +1226,6 @@ def test_website_and_web_ui_are_browser_context(goal: str, outputs: str) -> None
     names."""
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value=outputs)
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_goal_quality_statement_is_not_artifact_denial() -> None:
-    """R23 probe: "no errors in the web UI" targets the errors — the
-    artifact-denial path needs the same quality rule as the strip."""
-    ledger = _bare_ledger("Build a dashboard with no errors in the web UI")
-    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -1807,45 +1280,6 @@ def test_subtype_denial_does_not_deny_the_web_class(goal: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_widget_data_nouns_before_report_verbs_are_not_ui() -> None:
-    """R24 probe: "form errors printed to stdout" is audit data."""
-    ledger = _bare_ledger("Build a CLI to audit browser form errors")
-    _seed_section(ledger, "outputs", value="Login form errors printed to stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_widget_failure_data_is_not_ui() -> None:
-    ledger = _bare_ledger("Build a browser audit report")
-    _seed_section(ledger, "outputs", value="Signup form failures listed in JSON")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_goal_side_consumed_sdk_is_not_library_ownership() -> None:
-    """R25 probe: an SDK the app is built WITH is a dependency — the
-    consumed-dependency rule applies to goal ownership too."""
-    ledger = _bare_ledger("Build a web app using the Stripe SDK")
-    _seed_section(ledger, "outputs", value="A login form with an account settings panel")
-    _seed_section(ledger, "runtime_context", value="Browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_coordinated_report_data_is_not_ui_composition() -> None:
-    """R25 probe: report data separated from its verb by a conjunction is
-    still report data."""
-    ledger = _bare_ledger("Build a browser audit CLI")
-    _seed_section(ledger, "outputs", value="Audited pages and URLs printed to stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -1885,33 +1319,6 @@ def test_possessive_dependencies_are_not_library_ownership(goal: str, outputs: s
     assert result.single is TaskClass.WEB_APP
 
 
-def test_automation_target_widgets_are_not_produced_ui() -> None:
-    """R26 probe: a CLI that manipulates login forms in a browser does
-    not produce those forms."""
-    ledger = _bare_ledger("Build a shell CLI for browser logins")
-    _seed_section(ledger, "outputs", value="Opens a browser and submits login forms")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_crawler_screenshot_targets_are_not_produced_ui() -> None:
-    ledger = _bare_ledger("Build a browser crawler")
-    _seed_section(ledger, "outputs", value="Screenshots login pages and saves them to disk")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_pipeline_widget_metadata_is_not_produced_ui() -> None:
-    ledger = _bare_ledger("Build a data pipeline for browser analytics")
-    _seed_section(ledger, "inputs", value="Dataset of crawled sessions")
-    _seed_section(ledger, "outputs", value="Aggregated login page metadata in Parquet")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.DATA_PIPELINE
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs"),
     [
@@ -1927,22 +1334,6 @@ def test_layout_and_homepage_vocabulary_is_ui_composition(goal: str, outputs: st
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_extension_screenshot_content_is_not_produced_ui() -> None:
-    """R27 probe: screenshots of login pages are inspected content."""
-    ledger = _bare_ledger("Build a browser extension for account security")
-    _seed_section(ledger, "outputs", value="Login page screenshots with risk scores")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_verification_target_is_not_produced_ui() -> None:
-    """R27 probe: a test suite verifying a page does not produce it."""
-    ledger = _bare_ledger("Build a browser automation test suite")
-    _seed_section(ledger, "outputs", value="Verifies the login page is displayed correctly")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -1961,25 +1352,6 @@ def test_requested_web_product_owns_its_output_description(goal: str, outputs: s
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_infinitive_target_web_app_is_not_the_produced_artifact() -> None:
-    """R28 probe: "to test a web app" names a target, not the product."""
-    ledger = _bare_ledger("Build a CLI to test a web app")
-    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_infinitive_target_web_app_pipeline_variant() -> None:
-    ledger = _bare_ledger("Build a data pipeline to analyze a web app")
-    _seed_section(ledger, "inputs", value="Dataset of access logs")
-    _seed_section(ledger, "outputs", value="Aggregated output dataset in Parquet")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.DATA_PIPELINE
 
 
 @pytest.mark.parametrize(
@@ -2073,15 +1445,6 @@ def test_with_joined_web_co_product_owns_web_regardless_of_wording() -> None:
     assert TaskClass.LIBRARY in result.classes
 
 
-def test_inspection_tool_goal_voids_target_widget_outputs() -> None:
-    """R30 probe: an automation suite's checkout-form results are
-    inspected content, not a produced web app."""
-    ledger = _bare_ledger("Build a browser automation suite that tests checkout forms")
-    _seed_section(ledger, "outputs", value="Checkout form results and screenshots")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -2134,29 +1497,6 @@ def test_displayed_service_responses_do_not_create_service_ownership(outputs: st
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_prenominal_api_client_is_a_consumed_dependency() -> None:
-    """R37 probe: REST API modifies client; it is not a produced service."""
-    ledger = _bare_ledger("Build a frontend REST API client")
-    _seed_section(
-        ledger,
-        "outputs",
-        value="Login panels displaying HTTP responses received from upstream",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_server_produced_response_shape_is_web_service_evidence() -> None:
-    """R37 probe: response vocabulary still owns a service when a server
-    artifact explicitly produces it."""
-    ledger = _bare_ledger("Build a backend")
-    _seed_section(ledger, "outputs", value="Server returns HTTP responses with JSON bodies")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_SERVICE
 
 
 @pytest.mark.parametrize(
@@ -2270,47 +1610,6 @@ def test_coordinated_target_phrases_are_not_co_products(goal: str) -> None:
 # Adversarial pre-probe pins (#1813 W1): confirmed violations found by
 # bot-style probing ahead of review, fixed proactively.
 # ---------------------------------------------------------------------------
-
-
-def test_feature_denial_cannot_cross_a_comma() -> None:
-    ledger = _bare_ledger(
-        "Build a recipe website with no signup, plus a browser UI for browsing recipes"
-    )
-    _seed_section(
-        ledger, "outputs", value="Homepage with responsive layout and recipe detail pages"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_prefix_denial_inside_content_clause_is_scoped() -> None:
-    ledger = _bare_ledger("Build a website that lists non-browser apps for offline work")
-    _seed_section(ledger, "outputs", value="Homepage with responsive layout and app detail pages")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_trailing_adverb_does_not_defeat_denial() -> None:
-    ledger = _bare_ledger(
-        "Turn the reporting web app into a CLI; the deliverable is not a web app anymore"
-    )
-    _seed_section(ledger, "outputs", value="Report tables printed to stdout with exit codes")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
-def test_adjective_led_denial_alternatives_are_consumed() -> None:
-    ledger = _bare_ledger(
-        "Build a terminal report tool, not a browser-based graphical dashboard, "
-        "interactive web app, or responsive frontend"
-    )
-    _seed_section(ledger, "outputs", value="Usage tables printed to stdout")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
 
 
 @pytest.mark.parametrize(
@@ -2474,17 +1773,6 @@ def test_adjacent_classes_keep_ownership_over_web_modifiers(goal, outputs, expec
     assert result.single is expected
 
 
-def test_but_coordination_ends_the_content_clause() -> None:
-    """R33 probe: "for browser audits but not a web app" — the denial
-    after "but" returns to the main artifact claim."""
-    ledger = _bare_ledger("Build a CLI for browser audits but not a web app")
-    _seed_section(ledger, "outputs", value="Interactive dashboard panels with deterministic stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -2500,17 +1788,6 @@ def test_routine_coordination_forms_are_co_products(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
     assert TaskClass.LIBRARY in result.classes
-
-
-def test_adversative_but_ends_content_clause_without_tool_keyword() -> None:
-    """R34 probe: the denial after "but" is top-level even when the
-    for-clause carries no inspection keyword."""
-    ledger = _bare_ledger("Build a CLI for frontend developers but not a web app")
-    _seed_section(ledger, "outputs", value="Interactive dashboard panels and deterministic stdout")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
 
 
 @pytest.mark.parametrize(
@@ -2625,54 +1902,6 @@ def test_postpositive_browser_denials_are_not_context(runtime: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_coordinated_consumer_lists_are_fully_consumed() -> None:
-    """R37 probe: a web target later in a coordinated consumer list is
-    still a consumer."""
-    ledger = _bare_ledger("Build a desktop tool compatible with mobile apps and web apps")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_coordinated_supporting_list_keeps_library_single() -> None:
-    ledger = _bare_ledger("Build an SDK supporting websites, web apps, and browser UIs")
-    _seed_section(ledger, "outputs", value="An importable package with a public API")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.LIBRARY
-
-
-def test_coordinated_dependency_lists_are_fully_consumed() -> None:
-    """R37 probe: later items in a dependency list are dependencies too."""
-    ledger = _bare_ledger("Build a web app compatible with a REST API and command-line tools")
-    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_postpositive_denial_with_capability_noun() -> None:
-    """R38 probe: the denied capability noun is generic, not just
-    "support"."""
-    ledger = _bare_ledger("Build a native desktop settings tool")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(
-        ledger, "runtime_context", value="Browser integration is disabled; native desktop runtime"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_as_well_as_joins_consumer_lists() -> None:
-    """R38 probe: "as well as" coordinates consumer targets too."""
-    ledger = _bare_ledger("Build a desktop tool compatible with mobile apps as well as web apps")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "runtime",
     [
@@ -2754,44 +1983,6 @@ def test_postpositive_denials_cover_goal_and_predicates(goal: str, runtime: str)
 def test_plain_audience_targets_are_consumer_relations(goal: str) -> None:
     """R40 probe: a bare for/available-to web target names the audience."""
     ledger = _bare_ledger(goal)
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_relative_clause_audiences_are_not_ownership() -> None:
-    """R41 probe: "for developers who build web apps" describes the
-    users' work — a human relative clause marks the whole for-phrase as
-    audience."""
-    ledger = _bare_ledger("Build a native desktop settings tool for developers who build web apps")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_compositional_not_available_denial() -> None:
-    """R41 probe: "not available" composes like "unavailable"."""
-    ledger = _bare_ledger("Build a native desktop settings tool; browser support is not available")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_contracted_postpositive_denials() -> None:
-    """R42 probe: "aren't supported" composes like "are not supported"."""
-    ledger = _bare_ledger("Build a native desktop settings tool; browser apps aren't supported")
-    _seed_section(ledger, "outputs", value="Settings panel for local files")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_that_clause_audiences_with_activity_verbs() -> None:
-    """R42 probe: "for teams that use web apps" is audience activity."""
-    ledger = _bare_ledger("Build a native desktop settings tool for teams that use web apps")
     _seed_section(ledger, "outputs", value="Settings panel for local files")
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
@@ -2885,16 +2076,6 @@ def test_browser_qualified_ui_heads_own_the_artifact(goal: str, outputs: str) ->
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_similarity_modifier_is_not_browser_ownership() -> None:
-    """R44 probe: "browser-like" compares the panel to a browser; the
-    produced artifact is the native desktop app."""
-    ledger = _bare_ledger("Build a native desktop app with a browser-like settings panel")
-    _seed_section(ledger, "outputs", value="Settings panel with local preferences")
-    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -3181,17 +2362,6 @@ def test_obligation_qualifiers_own_the_artifact(goal: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_attributive_gerunds_stay_product_vocabulary() -> None:
-    """R50 guard: nominal gerund modifiers ("landing page") keep the
-    grant while the participle bar stops verbal chain tokens."""
-    ledger = _bare_ledger("Build a landing page for the browser")
-    _seed_section(ledger, "outputs", value="Signup conversion copy and forms")
-    _seed_section(ledger, "runtime_context", value="Browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs", "runtime"),
     [
@@ -3388,41 +2558,6 @@ def test_definite_destinations_are_transfers_not_transformations(
     assert excluded not in result.classes
 
 
-def test_report_artifacts_cannot_gain_ownership_from_outputs() -> None:
-    """R55 guard: output composition corroborates ownership but cannot
-    create it — a goal whose first noun phrase is a report keeps its
-    report identity regardless of widget-rich output wording."""
-    ledger = _bare_ledger("Build a report on browser pages")
-    _seed_section(ledger, "outputs", value="Login page vulnerabilities and settings panel risks")
-    _seed_section(ledger, "runtime_context", value="Local batch job")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_attributive_browser_modifiers_do_not_make_a_report_a_product() -> None:
-    """R56 guard: a bare browser modifier is a domain attribute — the
-    first NP's actual head decides, so "browser performance report"
-    stays a report while "browser-based" qualifiers keep predicating
-    the environment."""
-    ledger = _bare_ledger("Build a browser performance report")
-    _seed_section(ledger, "outputs", value="Login page timings and settings panel latency")
-    _seed_section(ledger, "runtime_context", value="Local batch job")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_runtime_context_environment_declarations_are_not_consumer_relations() -> None:
-    """R56 probe: runtime_context declares the execution environment, so
-    "Runs in browsers" is affirmative browser context and must not be
-    erased by the consumer-relation normalization."""
-    ledger = _bare_ledger("Create a customer dashboard")
-    _seed_section(ledger, "outputs", value="Interactive charts and settings panel")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs"),
     [
@@ -3446,20 +2581,6 @@ def test_generator_clis_keep_their_class_despite_widget_outputs(goal: str, outpu
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
-
-
-def test_ui_head_plus_browser_runtime_is_semantic_ui_evidence() -> None:
-    """R57 probe: an affirmative UI-product head with a standardized
-    browser execution environment owns without widget vocabulary —
-    ordinary user-flow outputs suffice."""
-    ledger = _bare_ledger("Build an admin portal")
-    _seed_section(
-        ledger, "outputs", value="Users authenticate, manage roles, and update account settings"
-    )
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
 
 
 @pytest.mark.parametrize(
@@ -3556,18 +2677,6 @@ def test_panel_and_form_heads_own_the_artifact(goal: str, outputs: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_bare_web_qualifier_owns_a_ui_head() -> None:
-    """R60 probe: "web" directly modifying a UI product head is the
-    bounded ownership form — deployment prose need not repeat
-    "browser"."""
-    ledger = _bare_ledger("Build a web dashboard")
-    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
-    _seed_section(ledger, "runtime_context", value="Containerized service")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs", "runtime"),
     [
@@ -3596,16 +2705,6 @@ def test_component_nouns_rehead_the_browser_qualifier(
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_component_goals_resist_generic_browser_runtimes() -> None:
-    """R61 guard: component ownership survives generic runtime wording —
-    "Runs in browsers" cannot hand an extension surface to web_app."""
-    ledger = _bare_ledger("Build a browser extension settings page")
-    _seed_section(ledger, "outputs", value="Settings panel with permission toggles")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     ("goal", "excluded"),
     [
@@ -3625,18 +2724,6 @@ def test_attributive_artifact_mentions_follow_the_final_head(
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
     assert excluded not in result.classes
-
-
-def test_monitoring_subject_dashboards_own_with_runtime_evidence() -> None:
-    """R61 probe: the inspection veto's product-head exception accepts
-    standardized runtime evidence — monitoring is the dashboard's
-    subject, not its artifact type."""
-    ledger = _bare_ledger("Build a webhook monitoring dashboard")
-    _seed_section(ledger, "outputs", value="Interactive charts and a filters panel")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
 
 
 @pytest.mark.parametrize(
@@ -3770,17 +2857,6 @@ def test_component_heads_own_regardless_of_qualifier_order(goal: str, outputs: s
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_one_word_product_declarations_reach_their_np() -> None:
-    """R65 probe: a lone leading noun is a product NP — only a bare
-    action verb fails to mark one."""
-    ledger = _bare_ledger("Spreadsheet in the browser")
-    _seed_section(ledger, "outputs", value="Editable cells with formula bar")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs"),
     [
@@ -3794,16 +2870,6 @@ def test_manipulated_and_subject_browser_mentions_are_not_context(goal: str, out
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value=outputs)
     _seed_section(ledger, "runtime_context", value="Desktop")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_postfix_component_targets_own_their_surfaces() -> None:
-    """R66 guard: a UI surface declared FOR a component belongs to that
-    component even under a legitimate generic browser runtime."""
-    ledger = _bare_ledger("Build a settings dashboard for a browser extension")
-    _seed_section(ledger, "outputs", value="Settings panel with save button")
-    _seed_section(ledger, "runtime_context", value="Browser")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
 
@@ -3879,17 +2945,6 @@ def test_participial_content_clauses_are_not_browser_context(goal: str) -> None:
     data; one followed by a preposition declares its environment and
     keeps its signal."""
     ledger = _bare_ledger(goal)
-    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Desktop application")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_browser_usage_compounds_are_subject_matter() -> None:
-    """R69 guard: a browser word re-headed by a measurement noun
-    ("browser usage metrics") is what the artifact reports on, and the
-    "for browser use" idiom stays a terminal environment form."""
-    ledger = _bare_ledger("Build a desktop dashboard with browser usage metrics")
     _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
     _seed_section(ledger, "runtime_context", value="Desktop application")
     result = derive_domain_from_ledger(ledger)
@@ -4080,18 +3135,6 @@ def test_brand_qualified_determinerless_hosts_reach_the_component(goal: str) -> 
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_bare_qualifier_defers_to_a_competing_runtime() -> None:
-    """R75 guard: a bare browser qualifier is the ambiguous ownership
-    form — under a competing runtime it reads as a subject compound,
-    whatever the topical noun, while explicit web artifact vocabulary
-    still overrides."""
-    ledger = _bare_ledger("Build a browser compliance dashboard")
-    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Runs as a local Python process")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -4105,16 +3148,6 @@ def test_identity_relations_reach_the_component(goal: str) -> None:
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value="Settings panel with save button")
     _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_out_of_scope_is_a_postpositive_denial() -> None:
-    """R75 guard: "browser support is out of scope" removes the browser
-    signal like the other postpositive denials."""
-    ledger = _bare_ledger("Build a dashboard; browser support is out of scope")
-    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Runs as a local Python process")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
 
@@ -4187,42 +3220,6 @@ def test_postpositive_goal_denials_precede_every_grant(goal: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_component_runtime_is_authoritative_over_the_grant() -> None:
-    """R77 guard: a standardized extension/plugin runtime owns the
-    surface before any goal-side grant — no per-surface vocabulary
-    (browser action, page, panel) is needed."""
-    ledger = _bare_ledger("Build a Chrome browser action settings page")
-    _seed_section(ledger, "outputs", value="Settings panel with save button")
-    _seed_section(ledger, "runtime_context", value="Browser extension runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
-def test_displayed_denials_are_content_not_scope() -> None:
-    """R78 guard: a denial the app DISPLAYS ("showing which browsers are
-    unsupported") lives in a content clause and keeps the web-app
-    request intact."""
-    ledger = _bare_ledger("Build a web app showing which browsers are unsupported")
-    _seed_section(ledger, "outputs", value="Interactive compatibility matrix with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_negated_component_runtimes_do_not_veto() -> None:
-    """R78 guard: "No browser extension" in the runtime is a denial, not
-    the runtime's identity — the standalone website keeps its class."""
-    ledger = _bare_ledger("Build a standalone website")
-    _seed_section(ledger, "outputs", value="Landing pages with signup forms")
-    _seed_section(
-        ledger, "runtime_context", value="No browser extension; runs as a standalone website"
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 def test_companion_component_runtimes_do_not_veto() -> None:
     """R78 guard: a companion component in the runtime is a co-product,
     not the runtime's identity — explicit web ownership survives."""
@@ -4267,17 +3264,6 @@ def test_conjunct_scoped_denials_do_not_erase_the_web_app(goal: str) -> None:
     assert TaskClass.WEB_APP in result.classes
 
 
-def test_participial_content_denials_stay_content() -> None:
-    """R80 guard: a denial inside displayed content ("displaying
-    websites that are unavailable") never erases the web app."""
-    ledger = _bare_ledger("Build a web app displaying websites that are unavailable")
-    _seed_section(ledger, "outputs", value="Availability table with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 def test_prepositional_scope_tails_keep_the_web_app() -> None:
     """R80 guard: any prepositional tail names the denial's own scope —
     "unsupported for the desktop client" belongs to the client."""
@@ -4288,16 +3274,6 @@ def test_prepositional_scope_tails_keep_the_web_app() -> None:
     _seed_section(ledger, "runtime_context", value="Browser")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
-
-
-def test_component_identity_precedes_the_explicit_grant() -> None:
-    """R80 guard: "a web app that is a Chrome browser extension" is an
-    extension — identity resolves before every affirmative grant."""
-    ledger = _bare_ledger("Build a web app that is a Chrome browser extension")
-    _seed_section(ledger, "outputs", value="Settings panel with save button")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -4393,16 +3369,6 @@ def test_association_relations_spare_explicit_web_artifacts(goal: str) -> None:
     assert TaskClass.WEB_APP in result.classes
 
 
-def test_component_vocabulary_is_shared_across_decisions() -> None:
-    """R83 guard: drivers and automation are components in every
-    decision — goal identity and runtime identity alike."""
-    ledger = _bare_ledger("Build a web app that is a browser driver")
-    _seed_section(ledger, "outputs", value="Settings panel with save button")
-    _seed_section(ledger, "runtime_context", value="Browser driver runtime")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -4453,20 +3419,6 @@ def test_causal_availability_conditions_preserve_ownership(goal: str) -> None:
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
     _seed_section(ledger, "runtime_context", value="Browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_displayed_component_status_keeps_the_dashboard() -> None:
-    """R85 guard: a bare-preposition association inside a content clause
-    is displayed content — the dashboard with browser runtime owns,
-    while relation-participles (belonging to) still veto."""
-    ledger = _bare_ledger("Build a dashboard showing the status of browser extensions")
-    _seed_section(
-        ledger, "outputs", value="Extension status table with filters and install buttons"
-    )
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -4595,17 +3547,6 @@ def test_verification_exemption_covers_qualified_web_ownership(goal: str) -> Non
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_displayed_web_apps_are_content_not_artifact() -> None:
-    """R100 guard: a participial content clause names what the product
-    displays — "a desktop dashboard showing a list of web apps" shows
-    web apps and is not one."""
-    ledger = _bare_ledger("Build a desktop dashboard showing a list of web apps")
-    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
-    _seed_section(ledger, "runtime_context", value="Desktop application")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -4762,17 +3703,6 @@ def test_passively_consumed_documents_are_not_browser_apps(
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_engine_attachment_is_not_the_environment() -> None:
-    """R106 guard: an engine attachment names the host's implementation —
-    a desktop app powered by Chromium is hosted natively and the
-    non-browser host dominates."""
-    ledger = _bare_ledger("Build a native desktop settings dashboard")
-    _seed_section(ledger, "outputs", value="Settings form and navigation sidebar")
-    _seed_section(ledger, "runtime_context", value="Desktop application powered by Chromium")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs"),
     [
@@ -4843,17 +3773,6 @@ def test_artifact_defining_library_clauses_still_own() -> None:
     assert result.single is TaskClass.LIBRARY
 
 
-def test_bundled_engine_accompaniment_keeps_native_ownership() -> None:
-    """R108 guard: a bare accompaniment preposition before the engine
-    name ships the engine inside the host — an Electron desktop runtime
-    with Chromium stays native on every grant path."""
-    ledger = _bare_ledger("Build a native desktop dashboard")
-    _seed_section(ledger, "outputs", value="Settings form and navigation sidebar")
-    _seed_section(ledger, "runtime_context", value="Electron desktop runtime with Chromium")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "runtime",
     [
@@ -4892,18 +3811,6 @@ def test_shared_render_vocabulary_needs_positive_game_ownership(goal: str, outpu
     assert TaskClass.GAME_2D not in result.classes
 
 
-def test_library_tokens_premodifying_ui_heads_are_content() -> None:
-    """R106 guard: "package search form" and "package detail pages"
-    render content about packages — the registry frontend keeps a clean
-    single web_app class."""
-    ledger = _bare_ledger("Build a package registry frontend")
-    _seed_section(ledger, "outputs", value="Package search form and package detail pages")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 def test_later_ui_conjunct_takes_browser_corroboration() -> None:
     """R106 guard: a later UI-headed conjunct gets the same browser
     corroboration as the first noun phrase — a backend with an admin
@@ -4933,29 +3840,6 @@ def test_implementation_adjuncts_do_not_rehead(goal: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_coordinated_manipulated_targets_strip_whole() -> None:
-    """R116 guard: coordinated manipulated targets are consumed whole
-    and a grouping adverbial names data organization, not the runtime —
-    the aggregation keeps its single data_pipeline class."""
-    ledger = _bare_ledger("Aggregate browser compatibility datasets into a matrix")
-    _seed_section(ledger, "inputs", value="Compatibility datasets in CSV")
-    _seed_section(ledger, "outputs", value="Aggregated login pages and signup forms by browser")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.DATA_PIPELINE
-
-
-def test_bare_frontend_respects_native_runtime() -> None:
-    """R115 guard: bare "frontend" is not inherently browser-hosted — a
-    native app's frontend stays native under an authoritative
-    non-browser runtime, while a frontend against browsers owns."""
-    ledger = _bare_ledger("Build the frontend of a native mobile app")
-    _seed_section(ledger, "outputs", value="Login form and settings page")
-    _seed_section(ledger, "runtime_context", value="Native iOS and Android application")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 def test_neither_nor_reaches_the_cli_path() -> None:
     """R115 guard: the CLI matcher shares the neither/nor denial — the
     denied CLI cannot pollute the library's single class."""
@@ -4965,42 +3849,6 @@ def test_neither_nor_reaches_the_cli_path() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
-
-
-def test_spa_abbreviation_owns_like_its_expansion() -> None:
-    """R115 guard: "SPA" is the canonical abbreviation of the
-    single-page-application subtype and owns the class outright."""
-    ledger = _bare_ledger("Build a React SPA")
-    _seed_section(ledger, "outputs", value="Interactive login form and settings panel")
-    _seed_section(ledger, "runtime_context", value="Vite dev server")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_pwa_abbreviation_owns_like_its_expansion() -> None:
-    """R117 guard: PWA is the canonical progressive-web-application
-    abbreviation and owns the web-app class outright."""
-    ledger = _bare_ledger("Build a PWA")
-    _seed_section(ledger, "outputs", value="Interactive signup page and settings panel")
-    _seed_section(
-        ledger,
-        "runtime_context",
-        value="Service worker and installable manifest",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_browser_consuming_a_document_is_not_web_app_ownership() -> None:
-    """R117 guard: a browser merely viewing a document is its consumer,
-    not proof that the produced artifact is a browser application."""
-    ledger = _bare_ledger("Generate a PDF ebook")
-    _seed_section(ledger, "outputs", value="Downloadable PDF with chapters")
-    _seed_section(ledger, "runtime_context", value="Viewed in modern browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -5030,20 +3878,6 @@ def test_passive_browser_consumption_covers_document_and_email_variants(
     assert TaskClass.WEB_APP not in result.classes
 
 
-def test_passive_consumer_strips_entire_oxford_browser_list() -> None:
-    """R118 guard: no browser in a passive Oxford-comma consumer list
-    may survive normalization and independently mint browser context."""
-    ledger = _bare_ledger("Build a kanban board")
-    _seed_section(ledger, "outputs", value="Drag-and-drop cards and navigation")
-    _seed_section(
-        ledger,
-        "runtime_context",
-        value="Presented via Chrome, Safari, and Firefox",
-    )
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -5058,18 +3892,6 @@ def test_explicit_browser_owned_pdf_editors_remain_web_apps(goal: str) -> None:
     ledger = _bare_ledger(goal)
     _seed_section(ledger, "outputs", value="Editor canvas, toolbar, and save button")
     _seed_section(ledger, "runtime_context", value="Displayed in modern browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
-def test_capability_exclusion_is_not_artifact_denial() -> None:
-    """R105 guard: a transitive exclusion is the app's own compatibility
-    policy — "a web app that excludes unsupported browsers" is still the
-    requested web app."""
-    ledger = _bare_ledger("Build a web app that excludes unsupported browsers")
-    _seed_section(ledger, "outputs", value="Interactive account settings panel")
-    _seed_section(ledger, "runtime_context", value="Modern browsers")
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
@@ -5175,17 +3997,6 @@ def test_replaced_background_artifacts_do_not_own(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
-
-
-def test_neither_nor_denies_both_alternatives() -> None:
-    """R102 guard: "neither a web app nor a website" denies BOTH
-    alternatives — a denied artifact can never become a match or a
-    co-product."""
-    ledger = _bare_ledger("Build a native desktop dashboard, neither a web app nor a website")
-    _seed_section(ledger, "outputs", value="Interactive settings panel and navigation bar")
-    _seed_section(ledger, "runtime_context", value="Native desktop application")
-    result = derive_domain_from_ledger(ledger)
-    assert TaskClass.WEB_APP not in result.classes
 
 
 @pytest.mark.parametrize(
@@ -5424,17 +4235,6 @@ def test_explicit_game_product_heads_stay_games(goal: str, runtime: str) -> None
     assert result.single is TaskClass.GAME_2D
 
 
-def test_denied_game_heads_do_not_claim_ownership() -> None:
-    """R120 guard: the game-product head is read from the negation-stripped
-    goal, so a denial cannot claim game ownership."""
-    ledger = _bare_ledger("Build a web app, not a browser game")
-    _seed_section(ledger, "outputs", value="Interactive signup page and settings panels")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.WEB_APP
-
-
 @pytest.mark.parametrize(
     ("goal", "outputs", "runtime", "expected"),
     [
@@ -5522,16 +4322,6 @@ def test_shell_launch_mechanisms_do_not_own_cli(runtime: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
-def test_shell_runtime_still_owns_cli_products() -> None:
-    """R121 guard: genuine CLI ledgers keep their shell runtime signal."""
-    ledger = _bare_ledger("Build a habit-tracker CLI tool")
-    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
-    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
-    result = derive_domain_from_ledger(ledger)
-    assert result.is_single
-    assert result.single is TaskClass.CLI
-
-
 @pytest.mark.parametrize(
     "goal",
     [
@@ -5552,11 +4342,975 @@ def test_adversative_pivots_keep_the_affirmed_game(goal: str) -> None:
     assert result.single is TaskClass.GAME_2D
 
 
-def test_denied_game_pivots_still_release_ownership() -> None:
-    """R122 guard: a pivot into a non-game product keeps its own class."""
-    ledger = _bare_ledger("Build not a browser game but a web app")
-    _seed_section(ledger, "outputs", value="Interactive signup page and settings panels")
-    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+# ---------------------------------------------------------------------------
+# Consolidated case corpora
+#
+# Each param below was previously its own test function; the ``id`` is that
+# function's original name and the comment above it is its original rationale.
+# The ledger construction and assertions are unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime_context"),
+    [
+        pytest.param(
+            "Build a habit-tracker CLI tool",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            id="single_match_cli",
+        ),
+        # "Build a CLI, not a browser page" is CLI evidence, not web_app evidence.
+        pytest.param(
+            "Build a CLI, not a browser page",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            id="negated_browser_goal_keeps_cli_single",
+        ),
+        # R7 probe: arbitrary descriptive modifiers inside a denied alternative ("browser-based
+        # graphical UI") must not shield the next coordinated signal.
+        pytest.param(
+            "Build a terminal dashboard, not a browser-based graphical UI or web app",
+            "Interactive dashboard panels and buttons with deterministic stdout",
+            "Local shell / terminal",
+            id="descriptive_modifier_in_denial_strips_whole_coordination",
+        ),
+        # R8 probe: a denied alternative longer than three modifier words must still strip up to the
+        # coordination boundary.
+        pytest.param(
+            "Build a terminal UI, not a browser-based graphical user interface or web app",
+            "Interactive dashboard panels and buttons with deterministic stdout",
+            "Local shell / terminal",
+            id="long_denied_alternative_strips_completely",
+        ),
+        # R14 probe: browser-auditing tooling denies the web-app artifact type; the domain word
+        # "browser" and the inspected pages in its report are not evidence that it IS one.
+        pytest.param(
+            "Build a CLI that audits browser pages, not a web app",
+            "Accessibility report for login pages and settings panels, printed to stdout",
+            "Local shell / terminal",
+            id="denied_artifact_type_overrides_browser_domain_mentions",
+        ),
+        # R14 probe: "web application firewall, not a browser UI" denies the artifact type despite the
+        # affirmative-looking domain phrase.
+        pytest.param(
+            "Build a web application firewall, not a browser UI",
+            "Filter rules for login forms and settings panels, printed to stdout",
+            "Local shell / terminal",
+            id="web_application_firewall_denial_is_not_web_app",
+        ),
+        # R15 probe: an artifact-type denial in the goal governs the whole ledger — a report naturally
+        # described as a browser report cannot revive the denied web-app classification.
+        pytest.param(
+            "Build a CLI that audits browser pages, not a web app",
+            "Browser accessibility report for login pages and settings panels, printed to stdout",
+            "Local shell / terminal",
+            id="artifact_denial_covers_browser_wording_in_outputs",
+        ),
+        # R16 probe: "non-web-app" is an artifact-type denial too.
+        pytest.param(
+            "Build a non-web-app CLI for browser audits",
+            "Login forms and settings panels listed in the report, printed to stdout",
+            "Local shell / terminal",
+            id="prefix_style_web_app_denial_dominates",
+        ),
+        # R19 probe: the shared-shape gate must read the negation-filtered text — "without a canvas"
+        # is not game shape.
+        pytest.param(
+            "Build a CLI without a canvas",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            id="negated_canvas_does_not_fire_game_for_cli",
+        ),
+        pytest.param(
+            "Build a CLI for browser error diagnostics",
+            "Browser error pages listed with deterministic stdout",
+            "Local shell / terminal",
+            id="error_pages_in_cli_output_are_not_ui_composition",
+        ),
+        # R21 probe: a report enumerating audited pages is data, not a UI.
+        pytest.param(
+            "Build a CLI for browser page audits",
+            "Login pages listed with deterministic stdout",
+            "Local shell / terminal",
+            id="pages_listed_in_report_are_not_ui_composition",
+        ),
+        # R21 probe: "No user interface" is an explicit output-side denial.
+        pytest.param(
+            "Build a browser automation CLI",
+            "No user interface; deterministic stdout and exit codes",
+            "Local shell / terminal",
+            id="negated_output_ui_description_is_not_ui_composition",
+        ),
+        # R24 probe: "form errors printed to stdout" is audit data.
+        pytest.param(
+            "Build a CLI to audit browser form errors",
+            "Login form errors printed to stdout",
+            "Local shell / terminal",
+            id="widget_data_nouns_before_report_verbs_are_not_ui",
+        ),
+        # R25 probe: report data separated from its verb by a conjunction is still report data.
+        pytest.param(
+            "Build a browser audit CLI",
+            "Audited pages and URLs printed to stdout",
+            "Local shell / terminal",
+            id="coordinated_report_data_is_not_ui_composition",
+        ),
+        # R26 probe: a CLI that manipulates login forms in a browser does not produce those forms.
+        pytest.param(
+            "Build a shell CLI for browser logins",
+            "Opens a browser and submits login forms",
+            "Local shell / terminal",
+            id="automation_target_widgets_are_not_produced_ui",
+        ),
+        # R28 probe: "to test a web app" names a target, not the product.
+        pytest.param(
+            "Build a CLI to test a web app",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            id="infinitive_target_web_app_is_not_the_produced_artifact",
+        ),
+        # R33 probe: "for browser audits but not a web app" — the denial after "but" returns to the
+        # main artifact claim.
+        pytest.param(
+            "Build a CLI for browser audits but not a web app",
+            "Interactive dashboard panels with deterministic stdout",
+            "Local shell / terminal",
+            id="but_coordination_ends_the_content_clause",
+        ),
+        # R34 probe: the denial after "but" is top-level even when the for-clause carries no
+        # inspection keyword.
+        pytest.param(
+            "Build a CLI for frontend developers but not a web app",
+            "Interactive dashboard panels and deterministic stdout",
+            "Local shell / terminal",
+            id="adversative_but_ends_content_clause_without_tool_keyword",
+        ),
+        # R121 guard: genuine CLI ledgers keep their shell runtime signal.
+        pytest.param(
+            "Build a habit-tracker CLI tool",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            id="shell_runtime_still_owns_cli_products",
+        ),
+    ],
+)
+def test_goal_output_runtime_corpus_resolves_to_cli(
+    goal: str, outputs: str, runtime_context: str
+) -> None:
+    """Corpus of goal/outputs/runtime_context ledgers that must resolve to a single CLI."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime_context)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        pytest.param(
+            "Build a REST API for blog posts",
+            "Multiple REST endpoints returning JSON body responses",
+            id="single_match_web_service",
+        ),
+        # R20 probe: "error pages returned in a JSON response" is service data, not a produced UI.
+        pytest.param(
+            "Build a web service for browser error analysis",
+            "Browser error pages returned in a JSON response",
+            id="error_pages_in_service_output_are_not_ui_composition",
+        ),
+        # R37 probe: response vocabulary still owns a service when a server artifact explicitly
+        # produces it.
+        pytest.param(
+            "Build a backend",
+            "Server returns HTTP responses with JSON bodies",
+            id="server_produced_response_shape_is_web_service_evidence",
+        ),
+    ],
+)
+def test_goal_output_corpus_resolves_to_web_service(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must resolve to a single WEB_SERVICE."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_SERVICE
+
+
+@pytest.mark.parametrize(
+    ("goal", "inputs", "outputs"),
+    [
+        pytest.param(
+            "Aggregate daily logs into Parquet",
+            "Dataset of log files split per day",
+            "Aggregated output dataset in Parquet",
+            id="single_match_data_pipeline",
+        ),
+        pytest.param(
+            "Build a data pipeline for browser analytics",
+            "Dataset of crawled sessions",
+            "Aggregated login page metadata in Parquet",
+            id="pipeline_widget_metadata_is_not_produced_ui",
+        ),
+        pytest.param(
+            "Build a data pipeline to analyze a web app",
+            "Dataset of access logs",
+            "Aggregated output dataset in Parquet",
+            id="infinitive_target_web_app_pipeline_variant",
+        ),
+        # R116 guard: coordinated manipulated targets are consumed whole and a grouping adverbial
+        # names data organization, not the runtime — the aggregation keeps its single data_pipeline
+        # class.
+        pytest.param(
+            "Aggregate browser compatibility datasets into a matrix",
+            "Compatibility datasets in CSV",
+            "Aggregated login pages and signup forms by browser",
+            id="coordinated_manipulated_targets_strip_whole",
+        ),
+    ],
+)
+def test_goal_input_output_corpus_resolves_to_data_pipeline(
+    goal: str, inputs: str, outputs: str
+) -> None:
+    """Corpus of goal/inputs/outputs ledgers that must resolve to a single DATA_PIPELINE."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "inputs", value=inputs)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.DATA_PIPELINE
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        pytest.param(
+            "Build a small 2D game scene",
+            "Each frame renders a canvas with the playable scene state",
+            id="single_match_game_2d",
+        ),
+        # R7 probe: bounding the render signal must stay context-sensitive — passive "rendered
+        # sprites" is still a game description.
+        pytest.param(
+            "Build a platformer",
+            "Rendered sprites with player movement and collisions",
+            id="passive_rendered_game_output_still_matches_game_2d",
+        ),
+        # Bounding "screen" must stay context-sensitive: unanchored screens are still game evidence.
+        pytest.param(
+            "Build an arcade shooter",
+            "A title screen and a game-over screen with the final score",
+            id="game_screens_still_match_game_2d",
+        ),
+    ],
+)
+def test_goal_output_corpus_resolves_to_game_2d(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must resolve to a single GAME_2D."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        pytest.param(
+            "Publish a JSON-schema parsing library",
+            "An importable Python package exposing a public API surface",
+            id="single_match_library",
+        ),
+        pytest.param(
+            "Publish a reusable helper, not a browser page",
+            "A reusable package published to PyPI",
+            id="negated_browser_goal_keeps_library_single",
+        ),
+        # R2 probe: "browser form parsing" names the data domain, not a UI — with no user interface
+        # requested, the library classification must not be dragged into ambiguity.
+        pytest.param(
+            "Build a library for browser form parsing without a user interface",
+            "An importable parsing package with a public api",
+            id="goal_domain_vocabulary_is_not_ui_evidence",
+        ),
+        # R3 probe: bare "validation" in a library's outputs is not a UI.
+        pytest.param(
+            "Build a browser protocol library",
+            "An importable package with validation helpers",
+            id="validation_helpers_output_is_not_ui_evidence",
+        ),
+        # R3 probe: "documentation pages" are prose artifacts, not a UI.
+        pytest.param(
+            "Build a browser automation library",
+            "An importable package plus documentation pages",
+            id="documentation_pages_output_is_not_ui_evidence",
+        ),
+        # R4 probe: the phrase inside a library's outputs names an API domain.
+        pytest.param(
+            "Build a browser library for client-side validation",
+            "An importable package providing client-side validation helpers",
+            id="client_side_validation_helpers_are_not_ui_evidence",
+        ),
+        # R4 probe: interactive API documentation is a docs artifact, not a UI.
+        pytest.param(
+            "Build a browser automation library",
+            "An importable package with interactive API documentation",
+            id="interactive_documentation_is_not_ui_evidence",
+        ),
+        # R7 probe: Page Object artifacts are testing-library outputs.
+        pytest.param(
+            "Build a browser automation library",
+            "An importable package with login page objects and test fixtures",
+            id="page_objects_are_not_ui_evidence",
+        ),
+        # R13 probe: the guard must carry the complete _matches_library signal set — including the
+        # singular package word.
+        pytest.param(
+            "Build a frontend Python package",
+            "Login forms and settings panels",
+            id="package_goal_intent_stays_library",
+        ),
+        pytest.param(
+            "Build an SDK supporting websites, web apps, and browser UIs",
+            "An importable package with a public API",
+            id="coordinated_supporting_list_keeps_library_single",
+        ),
+    ],
+)
+def test_goal_output_corpus_resolves_to_library(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must resolve to a single LIBRARY."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        # A ledger whose `goal` says CLI but whose `outputs` lacks cli vocabulary should still
+        # classify as CLI as long as the ledger-evidence gate is satisfied (outputs OR runtime is non-
+        # empty).
+        # Generic non-cli output vocabulary — what a ledger_only closure
+        # would typically write.
+        pytest.param(
+            "Build a habit-tracker CLI for end users",
+            "JSON file stored in the working directory",
+            id="cli_matches_on_goal_signal_alone",
+        ),
+        pytest.param(
+            "Turn the reporting web app into a CLI; the deliverable is not a web app anymore",
+            "Report tables printed to stdout with exit codes",
+            id="trailing_adverb_does_not_defeat_denial",
+        ),
+        pytest.param(
+            "Build a terminal report tool, not a browser-based graphical dashboard, interactive web app, or responsive frontend",
+            "Usage tables printed to stdout",
+            id="adjective_led_denial_alternatives_are_consumed",
+        ),
+    ],
+)
+def test_goal_output_corpus_resolves_to_cli(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must resolve to a single CLI."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        # The #1813 reproduction: browser form/panel/validation signals plus a ``package.json``
+        # mention must resolve to the product-complete web_app class instead of being dragged to
+        # library by the manifest filename.
+        pytest.param(
+            "Build a signup page that runs in the browser",
+            "Signup form with a settings panel shown in the browser; client-side validation messages; package.json build scripts",
+            id="single_match_web_app",
+        ),
+        pytest.param(
+            "Build a single-page application for notes",
+            "A notes form with an edit panel",
+            id="single_page_application_phrase_is_browser_context",
+        ),
+        # R3 follow-up: an explicit web-application goal with interactive outputs must not fall
+        # through to unmatched.
+        pytest.param(
+            "Build a web application dashboard",
+            "Interactive charts and navigation",
+            id="web_application_dashboard_matches_web_app",
+        ),
+        # R5 probe: a plain named page with navigation is an ordinary web-app description and must not
+        # fall through to unmatched.
+        pytest.param(
+            "Build a web app",
+            "A responsive login page with navigation",
+            id="ordinary_login_page_output_matches_web_app",
+        ),
+        # R5 probe: "rendered" is normal UI wording; the game predicate must not claim the passive
+        # participle.
+        pytest.param(
+            "Build a web app",
+            "A login page rendered in the browser",
+            id="rendered_page_does_not_dual_fire_game_2d",
+        ),
+        # R9 probe: "is rendered on initial load" is a UI clause; grammatical variants must not leak
+        # into the game classifier.
+        pytest.param(
+            "Build a web app",
+            "A login page is rendered on initial load",
+            id="rendered_ui_clause_variants_do_not_fire_game",
+        ),
+        # R13 probe: "iframe" must not satisfy the game fast path's "frame".
+        pytest.param(
+            "Build a browser dashboard",
+            "An embedded iframe and a settings panel",
+            id="iframe_is_not_game_frame_evidence",
+        ),
+        # R16 probe: "for game leaderboards" is the app's subject, not its artifact shape.
+        pytest.param(
+            "Build a web app for game leaderboards",
+            "Leaderboard page with a filters panel",
+            id="game_subject_matter_does_not_erase_requested_web_app",
+        ),
+        # R17 probe: output-side game subject vocabulary suppresses web_app only when the game
+        # predicate itself has artifact-shape evidence.
+        pytest.param(
+            "Build a web app for game leaderboards",
+            "Game leaderboard page with a filters panel",
+            id="output_game_vocabulary_without_game_shape_keeps_web_app",
+        ),
+        # R18 probe: a relative clause naming SDK documentation is subject matter, not library
+        # artifact-shape evidence.
+        pytest.param(
+            "Build a web app that displays SDK documentation",
+            "Browser dashboard with search and a navigation bar",
+            id="sdk_documentation_subject_does_not_own_the_web_app",
+        ),
+        # R18 probe: physical package-delivery vocabulary is not the library package signal.
+        pytest.param(
+            "Build a package-delivery tracking web app",
+            "Tracking dashboard with a search form and status pages",
+            id="package_delivery_subject_does_not_own_the_web_app",
+        ),
+        # R23 probe: "no errors in the web UI" targets the errors — the artifact-denial path needs the
+        # same quality rule as the strip.
+        pytest.param(
+            "Build a dashboard with no errors in the web UI",
+            "Login page with settings panel and navigation",
+            id="goal_quality_statement_is_not_artifact_denial",
+        ),
+        # R37 probe: REST API modifies client; it is not a produced service.
+        pytest.param(
+            "Build a frontend REST API client",
+            "Login panels displaying HTTP responses received from upstream",
+            id="prenominal_api_client_is_a_consumed_dependency",
+        ),
+        pytest.param(
+            "Build a recipe website with no signup, plus a browser UI for browsing recipes",
+            "Homepage with responsive layout and recipe detail pages",
+            id="feature_denial_cannot_cross_a_comma",
+        ),
+        pytest.param(
+            "Build a website that lists non-browser apps for offline work",
+            "Homepage with responsive layout and app detail pages",
+            id="prefix_denial_inside_content_clause_is_scoped",
+        ),
+        # R37 probe: later items in a dependency list are dependencies too.
+        pytest.param(
+            "Build a web app compatible with a REST API and command-line tools",
+            "Login page with settings panel and navigation",
+            id="coordinated_dependency_lists_are_fully_consumed",
+        ),
+    ],
+)
+def test_goal_output_corpus_resolves_to_web_app(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must resolve to a single WEB_APP."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        # R1 probe: "form" inside "performance" must not count as UI composition.
+        pytest.param(
+            "Build browser performance benchmarking tools",
+            "Performance report with timing metrics",
+            id="browser_performance_vocabulary_is_not_ui_evidence",
+        ),
+        # R1 probe: "validation" inside "invalidation" must not count either.
+        pytest.param(
+            "Implement browser cache invalidation",
+            "Invalidation events are logged",
+            id="browser_cache_invalidation_is_not_ui_evidence",
+        ),
+        # R2 probe: "without forms or pages" is a denial, not UI composition.
+        pytest.param(
+            "Build a browser benchmark without forms or pages",
+            "A performance report with timing metrics",
+            id="negated_ui_vocabulary_in_goal_is_not_ui_evidence",
+        ),
+        # R3 probe: "single page PDF report" is a document, not an SPA.
+        pytest.param(
+            "Generate a single page PDF report",
+            "A PDF page containing the monthly totals",
+            id="single_page_document_goal_is_not_browser_context",
+        ),
+        # R19 probe: "non-browser user interface" denies the artifact through its head noun; later
+        # browser subject mentions cannot resurrect it.
+        pytest.param(
+            "Build a non-browser user interface for browser accessibility audits",
+            "Login dashboard with account pages",
+            id="prefix_denial_head_noun_dominates_subject_mentions",
+        ),
+        pytest.param(
+            "Build a browser audit report",
+            "Signup form failures listed in JSON",
+            id="widget_failure_data_is_not_ui",
+        ),
+        pytest.param(
+            "Build a browser crawler",
+            "Screenshots login pages and saves them to disk",
+            id="crawler_screenshot_targets_are_not_produced_ui",
+        ),
+        # R27 probe: screenshots of login pages are inspected content.
+        pytest.param(
+            "Build a browser extension for account security",
+            "Login page screenshots with risk scores",
+            id="extension_screenshot_content_is_not_produced_ui",
+        ),
+        # R27 probe: a test suite verifying a page does not produce it.
+        pytest.param(
+            "Build a browser automation test suite",
+            "Verifies the login page is displayed correctly",
+            id="verification_target_is_not_produced_ui",
+        ),
+        # R30 probe: an automation suite's checkout-form results are inspected content, not a produced
+        # web app.
+        pytest.param(
+            "Build a browser automation suite that tests checkout forms",
+            "Checkout form results and screenshots",
+            id="inspection_tool_goal_voids_target_widget_outputs",
+        ),
+    ],
+)
+def test_goal_output_corpus_withholds_web_app(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers that must not yield WEB_APP."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        # "not just a browser page" asserts the page — the signal must survive.
+        # UI composition must come from standardized outputs (R2); the goal
+        # contributes only the surviving affirmative browser signal.
+        pytest.param(
+            "Build a dashboard that is not just a browser page",
+            "A charts panel refreshed from a data feed",
+            id="affirmative_expansion_keeps_web_app_signal",
+        ),
+        # R16 probe: a co-produced public API must not suppress the explicit browser UI — web_app
+        # survives, alone or in honest ambiguity.
+        pytest.param(
+            "Build a web application with a public API",
+            "Login forms and settings panels",
+            id="co_produced_api_does_not_erase_requested_web_app",
+        ),
+        # R20 probe: a goal requesting both artifacts must not let library evidence veto the web app —
+        # independent ownership, honest ambiguity.
+        pytest.param(
+            "Build a web app and a companion SDK",
+            "Browser dashboard with login forms and a companion SDK",
+            id="co_requested_sdk_keeps_web_app_in_honest_ambiguity",
+        ),
+        # R22 probe: a with-clause can introduce a co-produced web app.
+        pytest.param(
+            "Build an SDK with an admin web app",
+            "Browser admin dashboard with login forms and a companion SDK",
+            id="with_joined_web_app_co_product_keeps_web_ownership",
+        ),
+    ],
+)
+def test_goal_output_corpus_keeps_web_app_candidate(goal: str, outputs: str) -> None:
+    """Corpus of goal/outputs ledgers where WEB_APP must stay among the candidates."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime_context"),
+    [
+        # R25 probe: an SDK the app is built WITH is a dependency — the consumed-dependency rule
+        # applies to goal ownership too.
+        pytest.param(
+            "Build a web app using the Stripe SDK",
+            "A login form with an account settings panel",
+            "Browser",
+            id="goal_side_consumed_sdk_is_not_library_ownership",
+        ),
+        # R50 guard: nominal gerund modifiers ("landing page") keep the grant while the participle bar
+        # stops verbal chain tokens.
+        pytest.param(
+            "Build a landing page for the browser",
+            "Signup conversion copy and forms",
+            "Browser",
+            id="attributive_gerunds_stay_product_vocabulary",
+        ),
+        # R56 probe: runtime_context declares the execution environment, so "Runs in browsers" is
+        # affirmative browser context and must not be erased by the consumer-relation normalization.
+        pytest.param(
+            "Create a customer dashboard",
+            "Interactive charts and settings panel",
+            "Runs in browsers",
+            id="runtime_context_environment_declarations_are_not_consumer_relations",
+        ),
+        # R57 probe: an affirmative UI-product head with a standardized browser execution environment
+        # owns without widget vocabulary — ordinary user-flow outputs suffice.
+        pytest.param(
+            "Build an admin portal",
+            "Users authenticate, manage roles, and update account settings",
+            "Runs in browsers",
+            id="ui_head_plus_browser_runtime_is_semantic_ui_evidence",
+        ),
+        # R60 probe: "web" directly modifying a UI product head is the bounded ownership form —
+        # deployment prose need not repeat "browser".
+        pytest.param(
+            "Build a web dashboard",
+            "Login page with settings panel and navigation",
+            "Containerized service",
+            id="bare_web_qualifier_owns_a_ui_head",
+        ),
+        # R61 probe: the inspection veto's product-head exception accepts standardized runtime
+        # evidence — monitoring is the dashboard's subject, not its artifact type.
+        pytest.param(
+            "Build a webhook monitoring dashboard",
+            "Interactive charts and a filters panel",
+            "Runs in browsers",
+            id="monitoring_subject_dashboards_own_with_runtime_evidence",
+        ),
+        # R65 probe: a lone leading noun is a product NP — only a bare action verb fails to mark one.
+        pytest.param(
+            "Spreadsheet in the browser",
+            "Editable cells with formula bar",
+            "Runs in browsers",
+            id="one_word_product_declarations_reach_their_np",
+        ),
+        # R78 guard: a denial the app DISPLAYS ("showing which browsers are unsupported") lives in a
+        # content clause and keeps the web-app request intact.
+        pytest.param(
+            "Build a web app showing which browsers are unsupported",
+            "Interactive compatibility matrix with a filters panel",
+            "Browser",
+            id="displayed_denials_are_content_not_scope",
+        ),
+        # R78 guard: "No browser extension" in the runtime is a denial, not the runtime's identity —
+        # the standalone website keeps its class.
+        pytest.param(
+            "Build a standalone website",
+            "Landing pages with signup forms",
+            "No browser extension; runs as a standalone website",
+            id="negated_component_runtimes_do_not_veto",
+        ),
+        # R80 guard: a denial inside displayed content ("displaying websites that are unavailable")
+        # never erases the web app.
+        pytest.param(
+            "Build a web app displaying websites that are unavailable",
+            "Availability table with a filters panel",
+            "Browser",
+            id="participial_content_denials_stay_content",
+        ),
+        # R85 guard: a bare-preposition association inside a content clause is displayed content — the
+        # dashboard with browser runtime owns, while relation-participles (belonging to) still veto.
+        pytest.param(
+            "Build a dashboard showing the status of browser extensions",
+            "Extension status table with filters and install buttons",
+            "Runs in browsers",
+            id="displayed_component_status_keeps_the_dashboard",
+        ),
+        # R106 guard: "package search form" and "package detail pages" render content about packages —
+        # the registry frontend keeps a clean single web_app class.
+        pytest.param(
+            "Build a package registry frontend",
+            "Package search form and package detail pages",
+            "Runs in browsers",
+            id="library_tokens_premodifying_ui_heads_are_content",
+        ),
+        # R115 guard: "SPA" is the canonical abbreviation of the single-page-application subtype and
+        # owns the class outright.
+        pytest.param(
+            "Build a React SPA",
+            "Interactive login form and settings panel",
+            "Vite dev server",
+            id="spa_abbreviation_owns_like_its_expansion",
+        ),
+        # R117 guard: PWA is the canonical progressive-web-application abbreviation and owns the web-
+        # app class outright.
+        pytest.param(
+            "Build a PWA",
+            "Interactive signup page and settings panel",
+            "Service worker and installable manifest",
+            id="pwa_abbreviation_owns_like_its_expansion",
+        ),
+        # R105 guard: a transitive exclusion is the app's own compatibility policy — "a web app that
+        # excludes unsupported browsers" is still the requested web app.
+        pytest.param(
+            "Build a web app that excludes unsupported browsers",
+            "Interactive account settings panel",
+            "Modern browsers",
+            id="capability_exclusion_is_not_artifact_denial",
+        ),
+        # R120 guard: the game-product head is read from the negation-stripped goal, so a denial
+        # cannot claim game ownership.
+        pytest.param(
+            "Build a web app, not a browser game",
+            "Interactive signup page and settings panels",
+            "Runs in browsers",
+            id="denied_game_heads_do_not_claim_ownership",
+        ),
+        # R122 guard: a pivot into a non-game product keeps its own class.
+        pytest.param(
+            "Build not a browser game but a web app",
+            "Interactive signup page and settings panels",
+            "Runs in browsers",
+            id="denied_game_pivots_still_release_ownership",
+        ),
+    ],
+)
+def test_goal_output_runtime_corpus_resolves_to_web_app(
+    goal: str, outputs: str, runtime_context: str
+) -> None:
+    """Corpus of goal/outputs/runtime_context ledgers that must resolve to a single WEB_APP."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime_context)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime_context"),
+    [
+        # R37 probe: a web target later in a coordinated consumer list is still a consumer.
+        pytest.param(
+            "Build a desktop tool compatible with mobile apps and web apps",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="coordinated_consumer_lists_are_fully_consumed",
+        ),
+        # R38 probe: the denied capability noun is generic, not just "support".
+        pytest.param(
+            "Build a native desktop settings tool",
+            "Settings panel for local files",
+            "Browser integration is disabled; native desktop runtime",
+            id="postpositive_denial_with_capability_noun",
+        ),
+        # R38 probe: "as well as" coordinates consumer targets too.
+        pytest.param(
+            "Build a desktop tool compatible with mobile apps as well as web apps",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="as_well_as_joins_consumer_lists",
+        ),
+        # R41 probe: "for developers who build web apps" describes the users' work — a human relative
+        # clause marks the whole for-phrase as audience.
+        pytest.param(
+            "Build a native desktop settings tool for developers who build web apps",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="relative_clause_audiences_are_not_ownership",
+        ),
+        # R41 probe: "not available" composes like "unavailable".
+        pytest.param(
+            "Build a native desktop settings tool; browser support is not available",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="compositional_not_available_denial",
+        ),
+        # R42 probe: "aren't supported" composes like "are not supported".
+        pytest.param(
+            "Build a native desktop settings tool; browser apps aren't supported",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="contracted_postpositive_denials",
+        ),
+        # R42 probe: "for teams that use web apps" is audience activity.
+        pytest.param(
+            "Build a native desktop settings tool for teams that use web apps",
+            "Settings panel for local files",
+            "Native desktop runtime",
+            id="that_clause_audiences_with_activity_verbs",
+        ),
+        # R44 probe: "browser-like" compares the panel to a browser; the produced artifact is the
+        # native desktop app.
+        pytest.param(
+            "Build a native desktop app with a browser-like settings panel",
+            "Settings panel with local preferences",
+            "Native desktop runtime",
+            id="similarity_modifier_is_not_browser_ownership",
+        ),
+        # R55 guard: output composition corroborates ownership but cannot create it — a goal whose
+        # first noun phrase is a report keeps its report identity regardless of widget-rich output
+        # wording.
+        pytest.param(
+            "Build a report on browser pages",
+            "Login page vulnerabilities and settings panel risks",
+            "Local batch job",
+            id="report_artifacts_cannot_gain_ownership_from_outputs",
+        ),
+        # R56 guard: a bare browser modifier is a domain attribute — the first NP's actual head
+        # decides, so "browser performance report" stays a report while "browser-based" qualifiers
+        # keep predicating the environment.
+        pytest.param(
+            "Build a browser performance report",
+            "Login page timings and settings panel latency",
+            "Local batch job",
+            id="attributive_browser_modifiers_do_not_make_a_report_a_product",
+        ),
+        # R61 guard: component ownership survives generic runtime wording — "Runs in browsers" cannot
+        # hand an extension surface to web_app.
+        pytest.param(
+            "Build a browser extension settings page",
+            "Settings panel with permission toggles",
+            "Runs in browsers",
+            id="component_goals_resist_generic_browser_runtimes",
+        ),
+        # R66 guard: a UI surface declared FOR a component belongs to that component even under a
+        # legitimate generic browser runtime.
+        pytest.param(
+            "Build a settings dashboard for a browser extension",
+            "Settings panel with save button",
+            "Browser",
+            id="postfix_component_targets_own_their_surfaces",
+        ),
+        # R69 guard: a browser word re-headed by a measurement noun ("browser usage metrics") is what
+        # the artifact reports on, and the "for browser use" idiom stays a terminal environment form.
+        pytest.param(
+            "Build a desktop dashboard with browser usage metrics",
+            "Interactive charts with a filters panel",
+            "Desktop application",
+            id="browser_usage_compounds_are_subject_matter",
+        ),
+        # R75 guard: a bare browser qualifier is the ambiguous ownership form — under a competing
+        # runtime it reads as a subject compound, whatever the topical noun, while explicit web
+        # artifact vocabulary still overrides.
+        pytest.param(
+            "Build a browser compliance dashboard",
+            "Interactive charts with a filters panel",
+            "Runs as a local Python process",
+            id="bare_qualifier_defers_to_a_competing_runtime",
+        ),
+        # R75 guard: "browser support is out of scope" removes the browser signal like the other
+        # postpositive denials.
+        pytest.param(
+            "Build a dashboard; browser support is out of scope",
+            "Interactive charts with a filters panel",
+            "Runs as a local Python process",
+            id="out_of_scope_is_a_postpositive_denial",
+        ),
+        # R77 guard: a standardized extension/plugin runtime owns the surface before any goal-side
+        # grant — no per-surface vocabulary (browser action, page, panel) is needed.
+        pytest.param(
+            "Build a Chrome browser action settings page",
+            "Settings panel with save button",
+            "Browser extension runtime",
+            id="component_runtime_is_authoritative_over_the_grant",
+        ),
+        # R80 guard: "a web app that is a Chrome browser extension" is an extension — identity
+        # resolves before every affirmative grant.
+        pytest.param(
+            "Build a web app that is a Chrome browser extension",
+            "Settings panel with save button",
+            "Runs in browsers",
+            id="component_identity_precedes_the_explicit_grant",
+        ),
+        # R83 guard: drivers and automation are components in every decision — goal identity and
+        # runtime identity alike.
+        pytest.param(
+            "Build a web app that is a browser driver",
+            "Settings panel with save button",
+            "Browser driver runtime",
+            id="component_vocabulary_is_shared_across_decisions",
+        ),
+        # R100 guard: a participial content clause names what the product displays — "a desktop
+        # dashboard showing a list of web apps" shows web apps and is not one.
+        pytest.param(
+            "Build a desktop dashboard showing a list of web apps",
+            "Interactive charts with a filters panel",
+            "Desktop application",
+            id="displayed_web_apps_are_content_not_artifact",
+        ),
+        # R106 guard: an engine attachment names the host's implementation — a desktop app powered by
+        # Chromium is hosted natively and the non-browser host dominates.
+        pytest.param(
+            "Build a native desktop settings dashboard",
+            "Settings form and navigation sidebar",
+            "Desktop application powered by Chromium",
+            id="engine_attachment_is_not_the_environment",
+        ),
+        # R108 guard: a bare accompaniment preposition before the engine name ships the engine inside
+        # the host — an Electron desktop runtime with Chromium stays native on every grant path.
+        pytest.param(
+            "Build a native desktop dashboard",
+            "Settings form and navigation sidebar",
+            "Electron desktop runtime with Chromium",
+            id="bundled_engine_accompaniment_keeps_native_ownership",
+        ),
+        # R115 guard: bare "frontend" is not inherently browser-hosted — a native app's frontend stays
+        # native under an authoritative non-browser runtime, while a frontend against browsers owns.
+        pytest.param(
+            "Build the frontend of a native mobile app",
+            "Login form and settings page",
+            "Native iOS and Android application",
+            id="bare_frontend_respects_native_runtime",
+        ),
+        # R117 guard: a browser merely viewing a document is its consumer, not proof that the produced
+        # artifact is a browser application.
+        pytest.param(
+            "Generate a PDF ebook",
+            "Downloadable PDF with chapters",
+            "Viewed in modern browsers",
+            id="browser_consuming_a_document_is_not_web_app_ownership",
+        ),
+        # R118 guard: no browser in a passive Oxford-comma consumer list may survive normalization and
+        # independently mint browser context.
+        pytest.param(
+            "Build a kanban board",
+            "Drag-and-drop cards and navigation",
+            "Presented via Chrome, Safari, and Firefox",
+            id="passive_consumer_strips_entire_oxford_browser_list",
+        ),
+        # R102 guard: "neither a web app nor a website" denies BOTH alternatives — a denied artifact
+        # can never become a match or a co-product.
+        pytest.param(
+            "Build a native desktop dashboard, neither a web app nor a website",
+            "Interactive settings panel and navigation bar",
+            "Native desktop application",
+            id="neither_nor_denies_both_alternatives",
+        ),
+    ],
+)
+def test_goal_output_runtime_corpus_withholds_web_app(
+    goal: str, outputs: str, runtime_context: str
+) -> None:
+    """Corpus of goal/outputs/runtime_context ledgers that must not yield WEB_APP."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime_context)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

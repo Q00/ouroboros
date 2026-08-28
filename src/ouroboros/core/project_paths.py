@@ -151,9 +151,16 @@ def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPat
        by the seed generator as documentation pointers, often to individual
        *files* whose paths only make sense relative to the real project
        root. A reference candidate is only accepted when its resolved path
-       actually exists on disk: an existing file is returned as-is (callers
-       collapse to its parent), and a non-existent path is logged and
-       skipped so the caller's runtime cwd is never set to a synthetic
+       actually exists on disk. A **relative** reference that resolves to an
+       existing file proves ``stable_base`` is the base its seed-relative
+       paths (including ``expected_artifacts``) were written against, so
+       ``stable_base`` itself is returned as the project root — collapsing
+       the file to its parent instead pushed the runtime cwd into a
+       subdirectory (``app/widgets`` for ``app/widgets/kanban.js``) and made
+       every AC's artifact verification unsatisfiable (#2194). An absolute
+       existing-file reference carries no base information and is returned
+       as-is (callers collapse to its parent). A non-existent path is logged
+       and skipped so the caller's runtime cwd is never set to a synthetic
        join (e.g. ``<.ouroboros/seeds>/<reference.path>``).
 
     ``rejected`` is set only when at least one candidate was *encoded but
@@ -205,6 +212,8 @@ def resolve_seed_project_path(seed: Any, *, stable_base: Path) -> SeedProjectPat
                 stable_base=str(stable_base.resolve()),
             )
             continue
+        if resolved.is_file() and not Path(candidate).expanduser().is_absolute():
+            return SeedProjectPathResolution(path=stable_base.resolve(), rejected=False)
         return SeedProjectPathResolution(path=resolved, rejected=False)
 
     if containment_rejected:

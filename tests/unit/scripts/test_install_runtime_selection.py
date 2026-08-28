@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import atexit
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -16,10 +20,90 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 
+_SHELL_QUOTE_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,:/@%+=-"
+)
+
+
+def _expected_shell_quote(value: str) -> str:
+    """Mirror install.sh's `_shell_quote` — ASCII-only, one shell word.
+
+    The installer cannot delegate to `printf %q`: bash 3.2, the macOS system
+    bash, escapes only part of a multibyte character and emits invalid UTF-8.
+    So the expectation is spelled out here rather than read back out of bash.
+    """
+    if not value:
+        return "$''"
+    if all(char in _SHELL_QUOTE_SAFE for char in value):
+        return value
+    body = "".join(
+        char
+        if char in _SHELL_QUOTE_SAFE
+        else "".join(f"\\{byte:03o}" for byte in char.encode("utf-8"))
+        for char in value
+    )
+    return f"$'{body}'"
+
+
+def _shell_word_reads_back_as(quoted: str, expected: str) -> bool:
+    """A quoted word must survive the shell as exactly the original name."""
+    read_back = subprocess.run(
+        ["bash", "-c", f"printf '%sEND' {quoted}"],
+        check=True,
+        capture_output=True,
+    )
+    return read_back.stdout == expected.encode("utf-8") + b"END"
+
+
+# Test-only variables read by the fake commands below (never by install.sh):
+# keeping the stub bodies free of per-test paths makes their content identical
+# across tests, which is what lets _write_executable share one on-disk copy.
+CALLS_LOG_VAR = "OUROBOROS_TEST_CALLS_LOG"
+TOOL_BIN_VAR = "OUROBOROS_TEST_TOOL_BIN"
+OUROBOROS_STUB_VAR = "OUROBOROS_TEST_OUROBOROS_STUB"
+# Where the fake curl records the requests it was asked to send.
+CAPTURES_LOG_VAR = "OUROBOROS_TEST_CURL_LOG"
+# Shell reference the fake commands append their call log to.
+CALLS_LOG_REF = f'"${CALLS_LOG_VAR}"'
+
+_STUB_CACHE: dict[str, Path] = {}
+_STUB_CACHE_DIR: Path | None = None
+
+_OUROBOROS_STUB = f"""#!/bin/sh
+printf 'ouroboros %s\\n' "$*" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+
+def _cached_executable(content: str) -> Path:
+    """Return a warm executable holding `content`, creating it at most once.
+
+    macOS scans every newly created executable the first time it is exec'd
+    (~0.3s per file), and the installer harness runs a handful of stubs per
+    test. Writing each distinct stub body once and reusing that file keeps the
+    scan to a single occurrence per body instead of one per test.
+    """
+    global _STUB_CACHE_DIR
+
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    cached = _STUB_CACHE.get(digest)
+    if cached is not None:
+        return cached
+
+    if _STUB_CACHE_DIR is None:
+        _STUB_CACHE_DIR = Path(tempfile.mkdtemp(prefix="install-sh-stubs-"))
+        atexit.register(shutil.rmtree, _STUB_CACHE_DIR, ignore_errors=True)
+
+    cached = _STUB_CACHE_DIR / digest
+    cached.write_text(content, encoding="utf-8")
+    cached.chmod(0o755)
+    _STUB_CACHE[digest] = cached
+    return cached
+
 
 def _write_executable(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-    path.chmod(0o755)
+    path.unlink(missing_ok=True)
+    path.symlink_to(_cached_executable(content))
 
 
 def _run_installer(
@@ -27,6 +111,7 @@ def _run_installer(
     *,
     include_uv: bool = True,
     local_repo: bool = True,
+    piped: bool = False,
     env: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     fake_commands: dict[str, str] | None = None,
@@ -46,28 +131,17 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then
-  echo "{tool_bin_dir!s}"
+  echo "${TOOL_BIN_VAR}"
   exit 0
 fi
 if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
-  cat > "{tool_bin_dir!s}/ouroboros" <<'SH'
-#!/bin/sh
-printf 'ouroboros %s\\n' "$*" >> "{calls!s}"
-exit 0
-SH
-  chmod 755 "{tool_bin_dir!s}/ouroboros"
+  ln -sf "${OUROBOROS_STUB_VAR}" "${TOOL_BIN_VAR}/ouroboros"
 fi
-printf 'uv %s\\n' "$*" >> {calls!s}
+printf 'uv %s\\n' "$*" >> {CALLS_LOG_REF}
 exit 0
 """,
         )
-    _write_executable(
-        bin_dir / "ouroboros",
-        f"""#!/bin/sh
-printf 'ouroboros %s\\n' "$*" >> {calls!s}
-exit 0
-""",
-    )
+    _write_executable(bin_dir / "ouroboros", _OUROBOROS_STUB)
 
     if not include_uv:
         # Keep pipx/pip interpreter-selection tests independent of Python
@@ -93,6 +167,10 @@ exit 0
         {
             "HOME": str(tmp_path / "home"),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
+            CALLS_LOG_VAR: str(calls),
+            TOOL_BIN_VAR: str(tool_bin_dir),
+            OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
+            CAPTURES_LOG_VAR: str(tmp_path / "telemetry.log"),
         }
     )
     if env:
@@ -104,10 +182,12 @@ exit 0
     for key in drop_env:
         run_env.pop(key, None)
 
+    command = ["bash"] if piped else ["bash", str(install_sh)]
     return subprocess.run(
-        ["bash", str(install_sh)],
+        command,
         cwd=cwd,
         env=run_env,
+        input=install_sh.read_text(encoding="utf-8") if piped else None,
         text=True,
         capture_output=True,
         check=False,
@@ -146,27 +226,26 @@ def test_install_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def _telemetry_probe_curl(tmp_path: Path) -> str:
-    captures = tmp_path / "telemetry.log"
-    return f'''#!/bin/sh
+def _telemetry_probe_curl() -> str:
+    return f"""#!/bin/sh
 case "$*" in
   *"/capture/"*) ;;
   *) printf '{{"info":{{"version":"0.50.0"}}}}\n'; exit 0 ;;
 esac
 state="$HOME/.ouroboros/telemetry.json"
 if ! grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$state" 2>/dev/null; then
-  printf 'capture-before-notice\\n' >> "{captures!s}"
+  printf 'capture-before-notice\\n' >> "${CAPTURES_LOG_VAR}"
   exit 0
 fi
-printf '%s\\n' "$*" >> "{captures!s}"
+printf '%s\\n' "$*" >> "${CAPTURES_LOG_VAR}"
 exit 0
-'''
+"""
 
 
-def _telemetry_fake_commands(tmp_path: Path) -> dict[str, str]:
+def _telemetry_fake_commands() -> dict[str, str]:
     """Use the test environment's schema while recording installer captures."""
     return {
-        "curl": _telemetry_probe_curl(tmp_path),
+        "curl": _telemetry_probe_curl(),
         "python3": (f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n'),
     }
 
@@ -189,15 +268,70 @@ def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) ->
         tmp_path,
         local_repo=False,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
+def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        piped=True,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "BASH_SOURCE" not in result.stderr
+
+
+def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    old_package = tmp_path / "old-package" / "ouroboros" / "config"
+    old_package.mkdir(parents=True)
+    (old_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "__init__.py").write_text("", encoding="utf-8")
+    (old_package / "models.py").write_text(
+        "class OuroborosConfig:\n"
+        "    @classmethod\n"
+        "    def model_validate(cls, raw):\n"
+        "        return cls()\n",
+        encoding="utf-8",
+    )
+    python_wrapper = (
+        "#!/bin/sh\n"
+        "shift\n"
+        f"PYTHONPATH={shlex.quote(str(old_package.parents[1]))} "
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={
+            "curl": _telemetry_probe_curl(),
+            "python3": python_wrapper,
+            "python": python_wrapper,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "AttributeError" not in result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
@@ -209,7 +343,7 @@ def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -
         tmp_path,
         local_repo=False,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+        fake_commands={"curl": _telemetry_probe_curl()},
     )
 
     assert result.returncode == 0, result.stderr
@@ -228,7 +362,7 @@ def test_installer_persisted_opt_out_suppresses_all_collection(tmp_path: Path) -
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -244,7 +378,7 @@ def test_installer_malformed_config_fails_closed(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -269,7 +403,7 @@ def test_installer_unrelated_invalid_config_fails_closed(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -285,7 +419,7 @@ def test_installer_explicit_enable_cannot_override_persisted_opt_out(tmp_path: P
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "1"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -301,7 +435,7 @@ def test_installer_explicit_enable_cannot_override_malformed_config(tmp_path: Pa
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "1"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -317,7 +451,7 @@ def test_installer_honors_user_env_opt_out(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -333,7 +467,7 @@ def test_installer_honors_quoted_user_env_opt_out_with_comment(tmp_path: Path) -
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -349,7 +483,7 @@ def test_installer_honors_quoted_do_not_track_with_comment(tmp_path: Path) -> No
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -365,7 +499,7 @@ def test_installer_honors_user_env_opt_out_two_spaces_after_export(tmp_path: Pat
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -381,7 +515,7 @@ def test_installer_honors_user_env_opt_out_tab_after_export(tmp_path: Path) -> N
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -399,7 +533,7 @@ def test_installer_honors_export_multi_space_quoted_do_not_track_with_comment(
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -411,7 +545,7 @@ def test_installer_honors_uppercase_telemetry_off_flag(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "OFF"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -423,7 +557,7 @@ def test_installer_honors_uppercase_do_not_track_yes_flag(tmp_path: Path) -> Non
     result = _run_installer(
         tmp_path,
         env={"DO_NOT_TRACK": "YES", "OUROBOROS_TELEMETRY": "1"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -439,7 +573,7 @@ def test_installer_honors_single_quoted_user_env_opt_out_with_comment(tmp_path: 
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -455,7 +589,7 @@ def test_installer_honors_quoted_user_env_opt_out_without_comment(tmp_path: Path
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -482,7 +616,7 @@ def test_installer_fails_closed_on_unclosed_quote_at_eof(tmp_path: Path) -> None
         tmp_path,
         local_repo=False,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -506,7 +640,7 @@ def test_installer_fails_closed_on_genuinely_multiline_telemetry_opt_out(
         tmp_path,
         local_repo=False,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -523,7 +657,7 @@ def test_installer_fails_closed_on_genuinely_multiline_do_not_track(tmp_path: Pa
         tmp_path,
         local_repo=False,
         drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -546,7 +680,7 @@ def test_installer_fails_closed_on_multiline_value_that_looks_enabling(
         tmp_path,
         local_repo=False,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -563,7 +697,7 @@ def test_installer_user_env_trailing_garbage_after_quote_is_skipped(tmp_path: Pa
         tmp_path,
         local_repo=False,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -585,7 +719,7 @@ def test_installer_honors_user_env_destination_override(tmp_path: Path) -> None:
         tmp_path,
         local_repo=False,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -609,7 +743,7 @@ def test_installer_process_env_wins_over_user_env_file(tmp_path: Path) -> None:
             "OUROBOROS_TELEMETRY": "",
             "OUROBOROS_POSTHOG_HOST": "https://telemetry-process.invalid",
         },
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -633,7 +767,7 @@ def test_installer_user_env_duplicate_telemetry_key_resolves_last_wins(tmp_path:
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -649,7 +783,7 @@ def test_installer_user_env_duplicate_do_not_track_resolves_last_wins(tmp_path: 
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -673,7 +807,7 @@ def test_installer_user_env_duplicate_telemetry_key_reverse_order_enables(
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -696,7 +830,7 @@ def test_installer_real_process_env_wins_over_duplicated_user_env_file(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "0"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -720,7 +854,7 @@ def test_installer_fails_closed_on_escape_bearing_quoted_value(tmp_path: Path) -
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -739,7 +873,7 @@ def test_installer_honors_single_quoted_key(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -755,7 +889,7 @@ def test_installer_honors_double_quoted_key(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -779,7 +913,7 @@ def test_installer_fails_closed_on_escape_bearing_value_even_when_it_looks_enabl
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -801,7 +935,7 @@ def test_installer_plain_quoted_value_without_backslash_still_enables(
     result = _run_installer(
         tmp_path,
         drop_env=("OUROBOROS_TELEMETRY",),
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -814,7 +948,7 @@ def test_installer_do_not_track_precedes_explicit_enable(tmp_path: Path) -> None
     result = _run_installer(
         tmp_path,
         env={"DO_NOT_TRACK": "1", "OUROBOROS_TELEMETRY": "1"},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -835,7 +969,7 @@ def test_installer_unreadable_config_fails_closed(tmp_path: Path) -> None:
         result = _run_installer(
             tmp_path,
             env={"OUROBOROS_TELEMETRY": ""},
-            fake_commands=_telemetry_fake_commands(tmp_path),
+            fake_commands=_telemetry_fake_commands(),
         )
     finally:
         config.chmod(0o600)
@@ -852,13 +986,12 @@ def test_installer_notice_is_persisted_before_first_capture(tmp_path: Path) -> N
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
     state = (tmp_path / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
@@ -881,7 +1014,7 @@ def test_installer_repairs_corrupt_telemetry_json_and_persists_events(tmp_path: 
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -924,7 +1057,7 @@ def test_installer_replaces_non_uuid_distinct_id_with_fresh_uuid(tmp_path: Path)
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -952,7 +1085,7 @@ def test_installer_salvages_uuid_from_malformed_json_and_lowercases_it(tmp_path:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -982,7 +1115,7 @@ def test_installer_canonicalizes_uppercase_uuid_in_valid_json(tmp_path: Path) ->
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1013,7 +1146,7 @@ def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path:
     fresh_result = _run_installer(
         fresh_home,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(fresh_home),
+        fake_commands=_telemetry_fake_commands(),
     )
     assert fresh_result.returncode == 0, fresh_result.stderr
     fresh_text = (fresh_home / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
@@ -1028,7 +1161,7 @@ def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path:
     repaired_result = _run_installer(
         repaired_home,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(repaired_home),
+        fake_commands=_telemetry_fake_commands(),
     )
     assert repaired_result.returncode == 0, repaired_result.stderr
     repaired_text = corrupt_state.read_text(encoding="utf-8")
@@ -1066,7 +1199,7 @@ def test_installer_drops_telemetry_when_identity_storage_is_unwritable(tmp_path:
         result = _run_installer(
             tmp_path,
             env={"OUROBOROS_TELEMETRY": ""},
-            fake_commands=_telemetry_fake_commands(tmp_path),
+            fake_commands=_telemetry_fake_commands(),
         )
     finally:
         state_dir.chmod(0o700)  # restore write access so tmp cleanup can proceed
@@ -1100,7 +1233,7 @@ def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_pat
         result = _run_installer(
             tmp_path,
             env={"OUROBOROS_TELEMETRY": ""},
-            fake_commands=_telemetry_fake_commands(tmp_path),
+            fake_commands=_telemetry_fake_commands(),
         )
     finally:
         state_dir.chmod(0o700)
@@ -1133,7 +1266,7 @@ def test_installer_shows_notice_when_only_nested_and_persists_top_level(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1169,7 +1302,7 @@ def test_installer_shows_notice_when_top_level_value_is_a_string_not_bool(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1187,7 +1320,7 @@ _HOSTILE_UNAME_SCRIPT = (
 )
 
 
-def _capture_dashd_curl(captures: Path) -> str:
+def _capture_dashd_curl() -> str:
     """Fake curl that logs ONLY the raw `-d` argument of each call, one per
     line -- lets a test `json.loads()` the exact payload instead of
     substring-matching the whole curl invocation (which also contains
@@ -1197,7 +1330,7 @@ def _capture_dashd_curl(captures: Path) -> str:
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "-d" ]; then
-    printf '%s\\n' "$arg" >> {captures!s}
+    printf '%s\\n' "$arg" >> "${CAPTURES_LOG_VAR}"
   fi
   prev="$arg"
 done
@@ -1232,7 +1365,7 @@ def _build_no_python3_path(target_dir: Path) -> str:
 
 
 def _drive_telemetry_ping(
-    tmp_path: Path, *, home: Path, path_env: str, extra_setup: str = ""
+    tmp_path: Path, *, home: Path, path_env: str, captures: Path, extra_setup: str = ""
 ) -> subprocess.CompletedProcess[str]:
     """Extract `_telemetry_distinct_id` + `_telemetry_ping` verbatim from
     install.sh and run them in an isolated driver, bypassing `_telemetry_enabled`
@@ -1260,6 +1393,7 @@ wait
     run_env = os.environ.copy()
     run_env["HOME"] = str(home)
     run_env["PATH"] = path_env
+    run_env[CAPTURES_LOG_VAR] = str(captures)
     return subprocess.run(
         ["bash", str(driver)],
         env=run_env,
@@ -1281,12 +1415,13 @@ def test_installer_ping_escapes_hostile_uname_output_with_python3(tmp_path: Path
     bin_dir.mkdir()
     captures = tmp_path / "captures.log"
     _write_executable(bin_dir / "uname", _HOSTILE_UNAME_SCRIPT)
-    _write_executable(bin_dir / "curl", _capture_dashd_curl(captures))
+    _write_executable(bin_dir / "curl", _capture_dashd_curl())
 
     result = _drive_telemetry_ping(
         tmp_path,
         home=tmp_path / "home",
         path_env=f"{bin_dir}:/usr/bin:/bin",
+        captures=captures,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1296,7 +1431,6 @@ def test_installer_ping_escapes_hostile_uname_output_with_python3(tmp_path: Path
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["properties"]["is_local"] == "true"
 
 
@@ -1310,7 +1444,7 @@ def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: P
     bin_dir.mkdir()
     captures = tmp_path / "captures.log"
     _write_executable(bin_dir / "uname", _HOSTILE_UNAME_SCRIPT)
-    _write_executable(bin_dir / "curl", _capture_dashd_curl(captures))
+    _write_executable(bin_dir / "curl", _capture_dashd_curl())
     no_python_dir = _build_no_python3_path(tmp_path / "no-python-bin")
 
     home = tmp_path / "home"
@@ -1329,6 +1463,7 @@ def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: P
         tmp_path,
         home=home,
         path_env=f"{bin_dir}:{no_python_dir}",
+        captures=captures,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1339,7 +1474,6 @@ def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: P
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["distinct_id"] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 
 
@@ -1353,8 +1487,8 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
         fake_commands={
-            **_telemetry_fake_commands(tmp_path),
-            "curl": _capture_dashd_curl(tmp_path / "telemetry.log"),
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
         },
     )
 
@@ -1367,24 +1501,105 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties"}
         events[payload["event"]] = payload
 
-    assert set(events) == {"install_started", "install_completed"}
-    assert set(events["install_started"]["properties"].keys()) == {
-        "source",
-        "os",
-        "arch",
-        "is_local",
-        "pre",
-        "version",
-    }
+    assert set(events) == {"install_completed"}
     assert set(events["install_completed"]["properties"].keys()) == {
-        "source",
         "os",
-        "arch",
-        "method",
         "runtime",
-        "detected_runtimes",
         "version",
+        "ref",
     }
+
+
+def test_installer_ping_ref_defaults_to_direct_when_unset(tmp_path: Path) -> None:
+    """No `OUROBOROS_INSTALL_REF` in the environment -- both telemetry events
+    must carry `ref=direct`, the documented fallback for an install with no
+    channel attribution. `drop_env` (not just omitting it from `env`) is
+    required here: a set-but-empty variable still counts as "set" for shell
+    parameter expansion, so this must genuinely unset the key rather than
+    rely on it being absent from the test's own `env` dict.
+    """
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        drop_env=("OUROBOROS_INSTALL_REF",),
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_completed"]["properties"]["ref"] == "direct"
+
+
+def test_installer_ping_ref_carries_approved_channel_token(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "readme-hero"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_completed"]["properties"]["ref"] == "readme-hero"
+
+
+def test_installer_ping_ref_folds_valid_shaped_unknown_to_direct(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "private-project-2278"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    payload = json.loads(next(line for line in captures.splitlines() if line))
+    assert payload["properties"]["ref"] == "direct"
+    assert "private-project-2278" not in captures
+
+
+def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> None:
+    """Invalid shell-shaped values also fold to the closed `direct` token."""
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "evil; rm -rf /"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    events = {}
+    for line in captures.splitlines():
+        if not line:
+            continue
+        payload = json.loads(line)
+        events[payload["event"]] = payload
+
+    assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
 def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
@@ -1415,7 +1630,7 @@ def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1454,7 +1669,7 @@ def test_installer_adopts_last_value_for_duplicate_top_level_distinct_id(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1485,7 +1700,7 @@ def test_installer_still_salvages_uuid_from_unparseable_text_with_nested_shape(
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": ""},
-        fake_commands=_telemetry_fake_commands(tmp_path),
+        fake_commands=_telemetry_fake_commands(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -1791,11 +2006,11 @@ def test_explicit_runtime_setup_failure_fails_install(tmp_path: Path) -> None:
         env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
         fake_commands={
             "pipx": "#!/bin/sh\nprintf 'pipx %s\\n' \"$*\" >> __CALLS__\nexit 0\n".replace(
-                "__CALLS__", str(tmp_path / "calls.log")
+                "__CALLS__", CALLS_LOG_REF
             ),
             "python3.12": '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.12; exit 0; fi\necho \'Python 3.12.0\'\n',
             "pi": "#!/bin/sh\nexit 0\n",
-            "ouroboros": f'#!/bin/sh\nprintf \'ouroboros %s\\n\' "$*" >> {tmp_path / "calls.log"}\nif [ "$1" = "setup" ] && [ "$2" = "--runtime" ]; then exit 42; fi\nexit 0\n',
+            "ouroboros": f'#!/bin/sh\nprintf \'ouroboros %s\\n\' "$*" >> {CALLS_LOG_REF}\nif [ "$1" = "setup" ] && [ "$2" = "--runtime" ]; then exit 42; fi\nexit 0\n',
         },
     )
 
@@ -1837,7 +2052,7 @@ def test_uv_install_setup_prefers_fresh_tool_bin_over_stale_path_command(tmp_pat
         env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
         fake_commands={
             "pi": "#!/bin/sh\nexit 0\n",
-            "ouroboros": f"#!/bin/sh\nprintf 'stale-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+            "ouroboros": f"#!/bin/sh\nprintf 'stale-ouroboros %s\\n' \"$*\" >> {CALLS_LOG_REF}\nexit 0\n",
         },
     )
 
@@ -1854,7 +2069,7 @@ def test_uv_install_setup_prefers_fresh_tool_bin_over_stale_home_local_bin(
     home_local_bin.mkdir(parents=True)
     _write_executable(
         home_local_bin / "ouroboros",
-        f"#!/bin/sh\nprintf 'stale-local-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+        f"#!/bin/sh\nprintf 'stale-local-ouroboros %s\\n' \"$*\" >> {CALLS_LOG_REF}\nexit 0\n",
     )
 
     result = _run_installer(
@@ -1876,7 +2091,7 @@ def test_pipx_install_setup_prefers_existing_path_command_over_stale_home_local_
     home_local_bin.mkdir(parents=True)
     _write_executable(
         home_local_bin / "ouroboros",
-        f"#!/bin/sh\nprintf 'stale-home-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+        f"#!/bin/sh\nprintf 'stale-home-ouroboros %s\\n' \"$*\" >> {CALLS_LOG_REF}\nexit 0\n",
     )
 
     python = '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.12; exit 0; fi\necho \'Python 3.12.0\'\n'
@@ -1886,7 +2101,7 @@ def test_pipx_install_setup_prefers_existing_path_command_over_stale_home_local_
         env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
         fake_commands={
             "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo \'pipx 0.0.0-test\'; exit 0; fi\nprintf \'pipx %s\\n\' "$*" >> __CALLS__\nexit 0\n'.replace(
-                "__CALLS__", str(tmp_path / "calls.log")
+                "__CALLS__", CALLS_LOG_REF
             ),
             "python3.12": python,
             "pi": "#!/bin/sh\nexit 0\n",
@@ -1911,8 +2126,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -1941,7 +2156,7 @@ def test_all_runtime_pipx_selects_python_313_when_314_is_available(tmp_path: Pat
         env={"OUROBOROS_INSTALL_RUNTIME": "all"},
         fake_commands={
             "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
-                "__CALLS__", str(tmp_path / "calls.log")
+                "__CALLS__", CALLS_LOG_REF
             ),
             "python3.14": python_314,
             "python3.13": python_313,
@@ -1966,7 +2181,7 @@ def test_all_runtime_pipx_fails_before_install_when_only_python_314_exists(
         env={"OUROBOROS_INSTALL_RUNTIME": "all"},
         fake_commands={
             "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
-                "__CALLS__", str(tmp_path / "calls.log")
+                "__CALLS__", CALLS_LOG_REF
             ),
             "python3.14": python_314,
         },
@@ -1989,7 +2204,7 @@ def test_all_runtime_pipx_rejects_python_315_for_litellm_range(tmp_path: Path) -
         env={"OUROBOROS_INSTALL_RUNTIME": "all"},
         fake_commands={
             "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
-                "__CALLS__", str(tmp_path / "calls.log")
+                "__CALLS__", CALLS_LOG_REF
             ),
             "python3.15": python_315,
             "python3": python_315,
@@ -2031,7 +2246,7 @@ def test_all_runtime_pip_fallback_selects_313_when_generic_python3_is_314(
         'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
         'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip313 %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
         "echo 'Python 3.13.0'\n"
-    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    ).replace("__CALLS__", CALLS_LOG_REF)
     result = _run_installer(
         tmp_path,
         include_uv=False,
@@ -2053,7 +2268,7 @@ def test_all_runtime_pip_fallback_uses_compatible_python(tmp_path: Path) -> None
         'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
         'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
         "echo 'Python 3.13.0'\n"
-    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    ).replace("__CALLS__", CALLS_LOG_REF)
     result = _run_installer(
         tmp_path,
         include_uv=False,
@@ -2080,6 +2295,52 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
+
+
+def test_installer_configures_omp_after_runtime_setup_source_order() -> None:
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    assert source.rfind("_ensure_omp_tool_call_timeout") > source.index(
+        "setup --runtime $RUNTIME --non-interactive"
+    )
+
+
+def test_installer_preserves_higher_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 120000; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_preserves_oversized_omp_tool_timeout(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nif [ "$2" = "get" ]; then echo 9223372036854775808; else printf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" not in calls
+
+
+def test_installer_sets_omp_tool_call_timeout_when_omp_is_available(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "omp": '#!/bin/sh\nprintf \'omp %s\\n\' "$*" >> "$OUROBOROS_TEST_CALLS_LOG"\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "omp config set extensionHandlers.toolCallTimeoutMs 60000" in calls
 
 
 def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
@@ -2125,9 +2386,7 @@ def test_preserved_codex_runtime_refreshes_claude_skills_when_detected(tmp_path:
     result = _run_installer(
         tmp_path,
         fake_commands={
-            "claude": (
-                f'#!/bin/sh\nprintf "claude %s\\n" "$*" >> {tmp_path / "calls.log"}\nexit 0\n'
-            ),
+            "claude": (f'#!/bin/sh\nprintf "claude %s\\n" "$*" >> {CALLS_LOG_REF}\nexit 0\n'),
         },
     )
 
@@ -2261,5 +2520,194 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.128" in calls
-    assert "--with anthropic==0.120.2" in calls
+    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with anthropic==0.122.0" in calls
+
+
+_DSH_STUB = f"""#!/bin/sh
+printf 'dsh %s\\n' "$*" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+
+def _dsh_calls(tmp_path: Path) -> list[str]:
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    return [line for line in calls if line.startswith("dsh ")]
+
+
+def test_installer_without_dsh_touches_no_profile(tmp_path: Path) -> None:
+    """The bundle install is conditional on the host actually being installed."""
+    result = _run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not _dsh_calls(tmp_path)
+    assert "DeepSeek Harness plugin" not in result.stdout
+
+
+def test_installer_covers_the_profile_a_dsh_user_boots(tmp_path: Path) -> None:
+    """`dsh web` scaffolds `web`, so that is the profile worth covering blind."""
+    result = _run_installer(tmp_path, fake_commands={"dsh": _DSH_STUB})
+
+    assert result.returncode == 0, result.stderr
+    assert _dsh_calls(tmp_path) == [
+        "dsh plugin --profile web add github:Q00/ouroboros#main&path:integrations/dsh-plugin"
+    ]
+
+
+def test_installer_refreshes_profiles_that_already_opted_in(tmp_path: Path) -> None:
+    """An existing install picks up a release; an unrelated profile is left alone."""
+    profiles = tmp_path / "home" / ".dsh" / "profiles"
+    (profiles / "tui").mkdir(parents=True)
+    (profiles / "tui" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    (profiles / "unrelated").mkdir(parents=True)
+    (profiles / "unrelated" / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"not-dsh-ouroboros": "1.0.0"},
+                "description": "mentions dsh-ouroboros without installing it",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (profiles / "malformed").mkdir(parents=True)
+    (profiles / "malformed" / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros":', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": _DSH_STUB,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = sorted(
+        line.split("--profile ")[1].split()[0] for line in _dsh_calls(tmp_path)
+    )
+    assert profiles_called == ["tui", "web"]
+
+
+def test_installer_preserves_an_opted_in_profile_name_as_one_argument(tmp_path: Path) -> None:
+    """Profile discovery must not split or expand user-owned directory names."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / "team alpha"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+    dsh_stub = f"""#!/bin/sh
+printf 'dsh-profile:%s\\n' "$3" >> {CALLS_LOG_REF}
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": dsh_stub,
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    profiles_called = [
+        line.removeprefix("dsh-profile:")
+        for line in (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+        if line.startswith("dsh-profile:")
+    ]
+    assert profiles_called == ["web", "team alpha"]
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    [
+        "team alpha",
+        "team's alpha",
+        "team$alpha*",
+        "team$(printf PWNED)",
+        "team`printf PWNED`",
+        "team;printf PWNED",
+        "team\nalpha",
+        "team\n",
+        "team\ralpha",
+        "team\x1b[31mred",
+        "team\u202etxt",
+        "team\u200btxt",
+        "팀 alpha",
+    ],
+)
+def test_installer_quotes_profile_in_manual_recovery_command(
+    tmp_path: Path, profile_name: str
+) -> None:
+    """The printed fallback command must preserve a profile name as one shell argument."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 1\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    manual_commands = [
+        line.split("Manual install: ", 1)[1]
+        for line in result.stdout.splitlines()
+        if "Manual install: " in line
+    ]
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
+    assert manual_commands == [
+        'dsh plugin --profile web add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+        f'dsh plugin --profile {quoted_profile} add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"',
+    ]
+    expected_warning = f"dsh profile {quoted_profile}: install skipped"
+    assert sum(line.endswith(expected_warning) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    ["team\n", "team\x1b[31mred", "team\u202etxt", "team\u200btxt", "팀 alpha"],
+)
+def test_installer_quotes_profile_in_success_log(tmp_path: Path, profile_name: str) -> None:
+    """Successful installs must not emit raw profile control characters."""
+    profile = tmp_path / "home" / ".dsh" / "profiles" / profile_name
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text(
+        '{"dependencies": {"dsh-ouroboros": "github:Q00/ouroboros"}}', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "dsh": "#!/bin/sh\nexit 0\n",
+            "python3": f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    quoted_profile = _expected_shell_quote(profile_name)
+    assert _shell_word_reads_back_as(quoted_profile, profile_name)
+    expected_status = f"dsh profile {quoted_profile}: Ouroboros tools installed"
+    assert sum(line.endswith(expected_status) for line in result.stdout.splitlines()) == 1
+    assert profile_name not in result.stdout
+
+
+def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
+    """A broken host cannot fail an install that already put Ouroboros on disk."""
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"dsh": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "install skipped" in result.stdout
+    assert "Manual install: dsh plugin --profile web add" in result.stdout

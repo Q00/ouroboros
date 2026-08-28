@@ -99,9 +99,9 @@ a new default after GitHub ships new models.
 
 ### Hyphen versus dotted model IDs
 
-Ouroboros' defaults use the hyphenated Anthropic SDK form
-(`claude-opus-4-8`, `claude-sonnet-4-6`). Copilot CLI expects the dotted form
-(`claude-opus-4.8`, `claude-sonnet-4.6`). The adapter resolves these forms
+Ouroboros' defaults use the Anthropic SDK form
+(`claude-opus-5`, `claude-sonnet-4-6`). Copilot CLI expects its catalog form
+(`claude-opus-5`, `claude-sonnet-4.6`). The adapter resolves these forms
 against the discovered Copilot catalog rather than rewriting arbitrary model
 names.
 
@@ -115,7 +115,7 @@ prefix-stripped or statically mapped one, is returned only when that exact ID
 is in the discovered or bundled catalog.
 
 The current `DEFAULT_OPUS_MODEL` therefore resolves to the published
-`claude-opus-4.8`, as does `openrouter/anthropic/claude-opus-4-8`. Future
+`claude-opus-5`, as does `openrouter/anthropic/claude-opus-5`. Future
 Anthropic versions use the same catalog-gated trailing-version rule without
 another static-map entry. An unknown model, or any derived candidate that the
 active catalog does not publish, remains unchanged—including its OpenRouter

@@ -33,15 +33,33 @@ def lineage_generation_started(
     phase: str,
     seed_id: str | None = None,
     seed_json: str | None = None,
+    active_ac_indices: list[int] | None = None,
+    frozen_ac_indices: list[int] | None = None,
+    active_ac_descriptions: list[str] | None = None,
+    focus_reason: str | None = None,
 ) -> BaseEvent:
-    """Create event when a generation begins."""
-    data = {
+    """Create event when a generation begins.
+
+    The optional ``ac_focus`` block tells observers WHAT this generation is
+    redoing: which AC indices failed the prior evaluation (active), which are
+    frozen by prior PASS evidence, and the human-readable descriptions of the
+    active ones. Descriptions only — never verify_command/output_assertion
+    (answer-sheet hiding applies to every surface a worker could see quoted).
+    """
+    data: dict[str, Any] = {
         "generation_number": generation_number,
         "phase": phase,
         "seed_id": seed_id,
     }
     if seed_json is not None:
         data["seed_json"] = seed_json
+    if active_ac_indices is not None:
+        data["ac_focus"] = {
+            "active_ac_indices": active_ac_indices,
+            "frozen_ac_indices": frozen_ac_indices or [],
+            "active_ac_descriptions": active_ac_descriptions or [],
+            "reason": focus_reason,
+        }
     return BaseEvent(
         type="lineage.generation.started",
         aggregate_type="lineage",

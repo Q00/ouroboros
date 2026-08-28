@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib import metadata
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import sys
 import tomllib
 from typing import Annotated, Any, cast
 
+from rich.markup import escape
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_success, print_warning
@@ -57,6 +60,47 @@ _CANONICAL_CODEX_UVX_MCP_HOST_ARGS = (
 )
 _CANONICAL_CODEX_DIRECT_MCP_ARGS = ("mcp", "serve")
 _CANONICAL_CODEX_MODULE_MCP_ARGS = ("-m", "ouroboros", "mcp", "serve")
+# The shipped plugin descriptors pin the served package to the plugin
+# manifest version (#2066) so plugin updates change the uvx cache key. The
+# doctor accepts exactly that shape — the canonical requirement with a
+# release-shaped exact pin — and continues rejecting every other
+# requirement (ranges, other packages, a missing mcp extra).
+_MCP_PINNED_FROM_SPEC_RE = re.compile(
+    r"^ouroboros-ai\[mcp\]==(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?)$"
+)
+
+
+def _authoritative_plugin_version() -> str | None:
+    """Return the shipped plugin version, or installed distribution fallback."""
+    manifest_path = Path(__file__).resolve().parents[4] / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        version = manifest.get("version")
+        if isinstance(version, str) and version:
+            return version
+    except (OSError, ValueError):
+        pass
+    try:
+        return metadata.version("ouroboros-ai")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _is_authoritative_mcp_pin(argument: str, expected_version: str | None) -> bool:
+    match = _MCP_PINNED_FROM_SPEC_RE.match(argument)
+    return bool(match and expected_version and match.group("version") == expected_version)
+
+
+def _normalize_shipped_mcp_pin(
+    arguments: list[str], *, expected_version: str | None
+) -> tuple[str, ...]:
+    """Map a shipped manifest-matching exact pin onto the canonical spec."""
+    return tuple(
+        "ouroboros-ai[mcp]" if _is_authoritative_mcp_pin(argument, expected_version) else argument
+        for argument in arguments
+    )
+
+
 _CODEX_RUNTIME_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "codex",
     "OUROBOROS_LLM_BACKEND": "codex",
@@ -162,10 +206,13 @@ def doctor(
     failures = _check_auto_dispatch_surface(resolved_codex_dir, live_mcp=live_mcp)
 
     if failures:
-        print_error(
+        message = (
             "Codex ooo auto dispatch: BROKEN\n"
             + "\n".join(f"- {failure}" for failure in failures)
-            + "\n\nRun `ouroboros codex refresh` and ensure the `ouroboros` MCP server is enabled.",
+            + "\n\nRun `ouroboros codex refresh` and ensure the `ouroboros` MCP server is enabled."
+        )
+        print_error(
+            escape(message),
             title="Codex Doctor",
         )
         raise typer.Exit(1)
@@ -601,7 +648,10 @@ def _check_mcp_runtime_dependency_surface(
                 "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
             )
 
-        args_tuple = tuple(string_args)
+        expected_plugin_version = _authoritative_plugin_version()
+        args_tuple = _normalize_shipped_mcp_pin(
+            string_args, expected_version=expected_plugin_version
+        )
         if args_tuple == _CANONICAL_CODEX_UVX_MCP_ARGS:
             _check_codex_runtime_env(string_env, failures, required=True)
             return
@@ -664,14 +714,19 @@ def _check_mcp_runtime_dependency_surface(
             and from_indices[0] + 1 < len(string_args)
             else None
         )
+        package_spec_accepted = package_spec == "ouroboros-ai[mcp]" or (
+            package_spec is not None
+            and _is_authoritative_mcp_pin(package_spec, expected_plugin_version)
+        )
         if (
             len(from_indices) != 1
-            or package_spec != "ouroboros-ai[mcp]"
+            or not package_spec_accepted
             or (command_index is not None and from_indices[0] > command_index)
         ):
             failures.append(
-                "Codex MCP uvx command must use exactly one unpinned "
-                "`--from ouroboros-ai[mcp]` before the launched command"
+                "Codex MCP uvx command must use exactly one `--from ouroboros-ai[mcp]` "
+                "requirement before the launched command — unpinned, or the shipped "
+                "plugin descriptor's manifest-matching exact release pin"
             )
 
         allowed_command_tails = {
@@ -723,8 +778,10 @@ def _check_mcp_runtime_dependency_surface(
         )
         if check_local_import and importlib.util.find_spec("mcp") is None:
             failures.append(
-                "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
-                "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+                "current `ouroboros` environment cannot import `mcp`; replace the direct "
+                "launcher with `ouroboros setup --runtime codex --mcp-mode stdio`, or "
+                "reinstall for direct Codex MCP usage with "
+                "`uv tool install --force 'ouroboros-ai[mcp]'`"
             )
         return
 

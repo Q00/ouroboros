@@ -218,6 +218,33 @@ def test_normalize_execution_acceptance_preserves_surviving_success_contracts() 
     assert normalized_spec.expected_artifacts == ("hello_auto.py",)
 
 
+def test_normalize_execution_acceptance_preserves_verify_exemption_reason() -> None:
+    reason = "Requires a browser session that the command verifier cannot open."
+    spec = AcceptanceCriterionSpec(
+        description=(
+            "A command/API check returns stable observable output or artifacts proving "
+            "the original requirement for `hello_auto.py` defines `hello_auto() -> str` "
+            "returning exactly `hello from ooo auto`."
+        ),
+        verify_exemption_reason=reason,
+    )
+    seed = _seed(spec).model_copy(
+        update={
+            "goal": (
+                "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+                "hello_auto returns exactly hello from ooo auto."
+            )
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert len(normalized.acceptance_criteria) == 1
+    normalized_spec = normalized.acceptance_criteria[0]
+    assert isinstance(normalized_spec, AcceptanceCriterionSpec)
+    assert normalized_spec.verify_exemption_reason == reason
+
+
 def test_normalize_execution_acceptance_preserves_canonicalized_success_contract() -> None:
     spec = AcceptanceCriterionSpec(
         description=(

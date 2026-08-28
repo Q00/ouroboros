@@ -94,11 +94,17 @@ class UsageInfo:
         prompt_tokens: Number of tokens in the prompt.
         completion_tokens: Number of tokens in the completion.
         total_tokens: Total tokens used (prompt + completion).
+        unallocated_tokens: Authoritative provider-reported tokens that cannot
+            be truthfully assigned to prompt or completion.  This includes a
+            total-only report and additive cache counters when the public
+            prompt/completion fields exclude them.  Accounted spend is
+            ``total_tokens + unallocated_tokens``.
     """
 
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    unallocated_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)

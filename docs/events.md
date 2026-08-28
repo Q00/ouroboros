@@ -151,34 +151,25 @@ Emitted when a background MCP job is cancelled.
 
 ### artifact.referenced
 
-Bounded Disposable Memory projection emitted only after the content-addressed
-body and its per-contract manifest are durable. The aggregate is
-`contract/<contract_id>`. Raw child output and transcripts are forbidden from
-this event; consumers must call the explicit artifact fetch/replay API.
+Bounded Disposable Memory projection emitted only after the body is durable.
+The aggregate is `contract/<contract_id>`. Raw child output and transcripts are
+forbidden from this event; consumers must call the explicit artifact
+fetch/replay API.
+
+The event id is a UUIDv5 over the contract id alone, and exactly-once appending
+matches on that id. A row written before the derivation dropped the content
+address carries a different id and names a body in the filesystem store, so it
+does not stand in for a publication into the database — a contract re-run after
+the cutover appends its own row rather than being masked by the older one.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | `int` | Disposable envelope schema, currently `1` |
+| `schema_version` | `int` | Disposable envelope schema, currently `2`. Version `1` additionally required `artifact_ref`; rows written under it keep that field and keep saying `1`, so a reader distinguishes the two shapes by this value |
 | `contract_id` | `string` | Contract owning this result |
-| `artifact_ref` | `string` | `sha256:<64 lowercase hex>` content address |
 | `result.status` | `string` | `completed` or `failed` |
 | `runtime_id` | `string` | Runtime that produced the artifact |
 | `duration_ms` | `int` | Non-negative child duration |
 | `events_emitted_count` | `int` | Runtime-authored event count; never inline events |
-
-### artifact.tombstoned
-
-Contract-scoped proof that an artifact body was deliberately pruned. The
-durable per-contract manifest is authoritative for local GC and replay;
-EventStore producers may emit the same bounded projection when they own an
-active EventStore connection. Replay checks the tombstone before looking for a
-body and never silently reruns work.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `contract_id` | `string` | Contract whose replay body was pruned |
-| `artifact_ref` | `string` | Pruned content address |
-| `reason` | `string` | Retention/explicit-prune reason |
 
 ### orchestrator.progress.updated
 

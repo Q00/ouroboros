@@ -11,11 +11,12 @@ Without this bridge the two halves were disconnected: ``SecurityLayer`` could
 be configured with credentials that no network client had any way to present,
 which is why network transports used to refuse every auth method outright.
 
-Loopback binds keep the historical credential-free behaviour -- the SDK's own
-DNS-rebinding protection already fences them off from other machines. Binding a
-network transport to a routable address without credentials is refused by
-:func:`resolve_network_security`, which every serve path goes through before
-the SDK starts listening.
+Loopback binds keep the historical credential-free behaviour. Ouroboros passes
+the SDK explicit DNS-rebinding settings even there so the documented empty
+Origin policy remains fail-closed instead of silently inheriting the SDK's
+browser-origin defaults. Binding a network transport to a routable address
+without credentials is refused by :func:`resolve_network_security`, which every
+serve path goes through before the SDK starts listening.
 """
 
 from __future__ import annotations
@@ -40,15 +41,18 @@ log = structlog.get_logger(__name__)
 #: and be reached by someone other than the process that started the server.
 NETWORK_TRANSPORTS = ("sse", "streamable-http")
 
-# Bind addresses for which the SDK builds DNS-rebinding protection on its own
-# (``mcp/server/lowlevel/server.py``). It matches these three spellings
-# literally, so any other host -- including other loopback spellings -- is left
-# bare unless settings are passed explicitly.
-_SDK_AUTOPROTECTED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Exact loopback wire spellings covered by the SDK-compatible default Host set.
+# Ouroboros always supplies explicit settings; this identity set only decides
+# when those three interchangeable defaults remain an exact match for the bind
+# authority. An absolute spelling such as ``localhost.`` needs its own dotted
+# wire entry instead.
+_SDK_LOOPBACK_DEFAULT_IDENTITIES = frozenset({"127.0.0.1", "localhost", "::1"})
+_SDK_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 
-# Hostnames that always resolve to this machine. ``""`` is deliberately absent:
-# an empty bind host means "every interface" to uvicorn, not loopback.
-_LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
+# DNS names guaranteed local by the supported resolver contract. ``localhost``
+# is RFC 6761 special-use; ``localhost.localdomain`` is only a conventional
+# hosts-file alias and can resolve to a routable address on other systems.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 
 #: Scope minted for every accepted credential. Ouroboros authorizes per tool
 #: through ``SecurityLayer``, so the SDK layer only needs one opaque scope to
@@ -66,18 +70,31 @@ def is_loopback_host(host: str) -> bool:
         host: The bind address as written on the command line.
 
     Returns:
-        True for loopback literals and loopback hostnames. A name that cannot
-        be classified without a DNS lookup (``build-box.internal``) returns
-        False: refusing to guess is the safe direction, since the caller uses
-        this to decide whether credentials are mandatory.
+        True for loopback IP literals and the exact ASCII hostnames
+        ``localhost`` and ``localhost.localdomain`` (case-insensitive, with at
+        most one trailing root dot). A name that would need DNS, IDNA, or
+        Unicode compatibility normalization returns False: refusing to guess
+        is the safe direction, since the caller uses this result to decide
+        whether credentials are mandatory.
     """
-    candidate = host.strip().strip("[]").lower()
-    if candidate in _LOOPBACK_HOSTNAMES:
-        return True
+    candidate = host.strip()
+    bracketed = candidate.startswith("[") and candidate.endswith("]")
+    ip_candidate = candidate[1:-1] if bracketed else candidate
     try:
-        return ipaddress.ip_address(candidate).is_loopback
+        address = ipaddress.ip_address(ip_candidate)
     except ValueError:
+        # Wire serialization deliberately uses UTS-46 in ``as_url_authority``.
+        # It must never participate in this trust decision: compatibility
+        # mappings can turn a distinct resolver name such as ``local\u115fhost``
+        # into ``localhost``. Brackets are valid only around IPv6 literals.
+        if bracketed or not candidate.isascii():
+            return False
+        identity = candidate.removesuffix(".").lower()
+        return identity in _LOOPBACK_HOSTNAMES
+
+    if bracketed and address.version != 6:
         return False
+    return address.is_loopback
 
 
 def is_wildcard_host(host: str) -> bool:
@@ -91,23 +108,77 @@ def is_wildcard_host(host: str) -> bool:
 
 
 def as_url_authority(host: str) -> str:
-    """Return ``host`` spelled the way a URL or ``Host`` header needs it.
+    """Return ``host`` as a canonical URL authority.
 
     A bind address and its URL spelling differ for IPv6: the socket layer takes
     the bare literal (``::1``) and rejects the bracketed form, while a URL or
     ``Host`` value needs brackets or the trailing ``:port`` cannot be told apart
-    from another hextet. Callers keep the bare value for binding and pass it
-    through here for anything address-shaped that carries a port.
+    from another hextet. DNS names have a similar bind-to-wire boundary: HTTP
+    clients normally lowercase them and encode Unicode labels using modern IDNA.
+    An absolute DNS name keeps its trailing root dot on the HTTP wire. HTTPX 2
+    preserves an IPv6 literal's input spelling instead, so Host policy also
+    retains that spelling separately when it differs from this canonical form.
+
+    Callers keep the original value for socket binding and pass it through here
+    only for URL- and Host-shaped values.
     """
     candidate = host.strip()
-    if candidate.startswith("["):
-        return candidate
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
     try:
-        if ipaddress.ip_address(candidate).version == 6:
-            return f"[{candidate}]"
+        address = ipaddress.ip_address(candidate)
     except ValueError:
-        pass
-    return candidate
+        # MCP 2's pinned HTTP runtime uses the third-party ``idna`` package,
+        # whose modern processing preserves ``faß`` as ``xn--fa-hia`` rather
+        # than applying Python's built-in IDNA 2003 mapping to ``fass``.
+        import idna
+
+        try:
+            return idna.encode(candidate.lower(), uts46=True).decode("ascii")
+        except idna.IDNAError as exc:
+            raise UnicodeError(f"invalid IDNA hostname: {host!r}") from exc
+    if address.version == 6:
+        return f"[{address.compressed}]"
+    return address.compressed
+
+
+def _input_ipv6_authority(host: str) -> str | None:
+    """Return the operator-provided IPv6 spelling in bracketed wire form.
+
+    HTTPX 2 preserves the textual IPv6 literal from its URL in the ``Host``
+    header. The SDK compares that header textually, so a canonical authority
+    alone cannot admit a client using the same expanded bind spelling.
+    """
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    if address.version != 6:
+        return None
+    return f"[{candidate}]"
+
+
+def _has_scope_id(host: str) -> bool:
+    """Return True when ``host`` is an IPv6 literal carrying a zone identifier.
+
+    Zone identifiers (scope IDs) such as ``fe80::1%eth0`` are valid for socket
+    binding but cannot be represented in a URL authority that the MCP SDK's
+    Pydantic URL parser accepts — neither the raw form ``[fe80::1%eth0]`` nor
+    the percent-encoded form ``[fe80::1%25eth0]`` passes validation. This
+    helper identifies such addresses so callers can reject them early with a
+    clear error rather than crashing deep inside SDK metadata construction.
+    """
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address.version == 6 and bool(address.scope_id)
 
 
 def _credentials_for(method: AuthMethod, token: str) -> dict[str, str] | None:
@@ -247,16 +318,19 @@ def build_transport_security(
 ) -> Any:
     """Build DNS-rebinding protection settings for a network bind.
 
-    The SDK only auto-enables this protection for loopback binds; a routable
-    bind is left unprotected unless settings are passed explicitly, which is
-    what this produces.
+    The SDK only auto-enables this protection for three loopback literals and
+    couples that default to a permissive local-browser Origin list. This
+    builder makes the policy explicit for every network bind: it preserves the
+    SDK's interchangeable loopback Host spellings, while an empty Origin list
+    remains empty and therefore rejects browser-originated requests.
 
     Args:
         host: The bind address.
         port: The bind port.
         allowed_hosts: Operator-supplied ``Host`` header allowlist. When empty,
-            the bind address itself is allowed on any port -- which only means
-            anything for a concrete address, hence the wildcard guard below.
+            the bind address itself is allowed only on the configured port.
+            The SDK's three interchangeable loopback defaults retain their
+            documented wildcard-port behaviour.
         allowed_origins: Operator-supplied ``Origin`` header allowlist. Left
             empty by default so that browser-originated requests -- the only
             ones that carry ``Origin`` -- are rejected outright.
@@ -265,9 +339,9 @@ def build_transport_security(
         An SDK ``TransportSecuritySettings`` instance.
 
     Raises:
-        ValueError: If a wildcard bind is passed with no explicit allowlist.
-            Clients reach a ``0.0.0.0`` bind under some other name, so there is
-            no ``Host`` value to infer; the caller must collect one first.
+        ValueError: If a wildcard bind has no explicit allowlist, or if a
+            non-default concrete spelling uses an ephemeral port without one.
+            In either case the Host value clients will send cannot be inferred.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -280,7 +354,29 @@ def build_transport_security(
             )
             raise ValueError(msg)
         authority = as_url_authority(host)
-        hosts = [f"{authority}:{port}", f"{authority}:*"]
+        input_ipv6_authority = _input_ipv6_authority(host)
+        wire_identity = authority.strip("[]")
+        uses_sdk_loopback_defaults = (
+            is_loopback_host(host) and wire_identity in _SDK_LOOPBACK_DEFAULT_IDENTITIES
+        )
+        has_distinct_ipv6_spelling = (
+            input_ipv6_authority is not None and input_ipv6_authority != authority
+        )
+        if port == 0 and (not uses_sdk_loopback_defaults or has_distinct_ipv6_spelling):
+            msg = (
+                f"Cannot infer an exact Host allowlist for ephemeral port on {host!r}. "
+                "Use a fixed port or pass --allowed-host explicitly."
+            )
+            raise ValueError(msg)
+        if uses_sdk_loopback_defaults:
+            # Preserve the SDK's three interchangeable loopback Host spellings
+            # while making the Origin policy explicit and fail-closed.
+            hosts = list(_SDK_LOOPBACK_ALLOWED_HOSTS)
+        else:
+            hosts = [f"{authority}:{port}"]
+        if has_distinct_ipv6_spelling:
+            assert input_ipv6_authority is not None
+            hosts.append(f"{input_ipv6_authority}:{port}")
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -308,8 +404,9 @@ def current_auth_context() -> AuthContext | None:
 class NetworkSecurityWiring:
     """SDK security objects resolved for one bind.
 
-    All three are None for stdio and for a credential-free loopback bind, which
-    is what leaves local use exactly as it was.
+    All three are None for stdio. Credential-free loopback binds still have no
+    verifier or auth settings, but carry explicit transport security so an
+    empty Origin allowlist rejects browser-originated requests as documented.
     """
 
     token_verifier: Any | None = None
@@ -347,7 +444,12 @@ def resolve_network_security(
     Raises:
         ValueError: If the bind would expose tool execution without
             credentials, if authentication is configured for a transport that
-            cannot carry it, or if a wildcard bind has no Host allowlist.
+            cannot carry it, if a wildcard bind has no Host allowlist, if
+            a scoped IPv6 address (zone ID) is used on a non-loopback network
+            bind where authentication metadata URLs cannot be constructed, or
+            if a scoped IPv6 address is used with authentication enabled
+            (even on loopback) since the zone ID breaks AuthSettings URL
+            construction.
     """
     is_network = transport in NETWORK_TRANSPORTS
     auth_method = security.auth_config.method
@@ -386,6 +488,44 @@ def resolve_network_security(
     if not is_network:
         return NetworkSecurityWiring()
 
+    # Scoped IPv6 addresses (zone IDs) are valid socket bind targets but
+    # cannot be represented in a URL that the MCP SDK's Pydantic URL parser
+    # accepts. Reject early with a clear message rather than failing deep
+    # inside AuthSettings construction.
+    #
+    # Two cases:
+    # 1. Non-loopback scoped address (e.g. fe80::1%eth0): always rejected for
+    #    network transports because auth is mandatory for non-loopback and zone
+    #    IDs break AuthSettings URL construction.
+    # 2. Scoped loopback with auth enabled (e.g. ::1%lo with --auth-token or
+    #    inherited token): rejected because the zone ID still cannot appear in
+    #    the AuthSettings issuer/resource URLs that the SDK constructs.
+    #    Unauthenticated scoped loopback remains usable — no AuthSettings needed.
+    if is_network and _has_scope_id(host) and not is_loopback_host(host):
+        msg = (
+            f"Cannot serve on scoped IPv6 address {host!r}. "
+            f"The zone identifier (scope ID) cannot be represented in a URL "
+            f"authority that the MCP SDK accepts — neither raw "
+            f"(e.g. [fe80::1%eth0]) nor percent-encoded "
+            f"(e.g. [fe80::1%25eth0]) forms pass Pydantic URL validation. "
+            f"Use the address without a zone ID or bind to a non-link-local "
+            f"address."
+        )
+        raise ValueError(msg)
+
+    if is_network and _has_scope_id(host) and auth_enabled:
+        msg = (
+            f"Cannot serve on scoped IPv6 address {host!r} with authentication "
+            f"enabled. The zone identifier (scope ID) cannot be represented in "
+            f"the issuer/resource URLs that the MCP SDK's AuthSettings requires "
+            f"— neither raw (e.g. [::1%lo]) nor percent-encoded "
+            f"(e.g. [::1%25lo]) forms pass Pydantic URL validation. "
+            f"Remove the --auth-token / auth configuration to use this address "
+            f"credential-free (safe for loopback), or bind to '::1' without a "
+            f"zone ID."
+        )
+        raise ValueError(msg)
+
     token_verifier = None
     auth_settings = None
     if auth_enabled:
@@ -395,14 +535,12 @@ def resolve_network_security(
         )
         auth_settings = build_auth_settings(host=host, port=port)
 
-    transport_security = None
-    if host not in _SDK_AUTOPROTECTED_HOSTS:
-        transport_security = build_transport_security(
-            host=host,
-            port=port,
-            allowed_hosts=allowed_hosts,
-            allowed_origins=allowed_origins,
-        )
+    transport_security = build_transport_security(
+        host=host,
+        port=port,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
     return NetworkSecurityWiring(
         token_verifier=token_verifier,

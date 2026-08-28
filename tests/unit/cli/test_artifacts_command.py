@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -10,25 +10,24 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.artifacts import parse_ttl
 from ouroboros.cli.main import app
-from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+from ouroboros.persistence.artifact_store import (
+    ArtifactStore,
+    ArtifactTombstonedError,
+)
 
 runner = CliRunner()
 
 
 def _put(project_dir: Path):
-    now = datetime.now(UTC)
-    store = ContentAddressedArtifactStore.for_project(project_dir)
+    store = ArtifactStore.for_project(project_dir)
     envelope = store.put_for_contract(
         contract_id="CONTRACT1",
         body={"answer": 42},
         runtime_id="cli-test",
         duration_ms=1,
         events_emitted_count=0,
-        retain_until=now - timedelta(days=1),
-        now=now,
     )
-    digest = envelope.artifact_ref.removeprefix("sha256:")
-    return store, envelope, store.root / digest[:2] / f"{digest}.json"
+    return store, envelope
 
 
 def test_artifacts_group_is_registered() -> None:
@@ -50,7 +49,7 @@ def test_parse_ttl_rejects_values_larger_than_timedelta_supports() -> None:
 
 
 def test_fetch_and_replay_are_explicit_read_only_commands(tmp_path: Path) -> None:
-    _, envelope, _ = _put(tmp_path)
+    _, envelope = _put(tmp_path)
     for command in ("fetch", "replay"):
         result = runner.invoke(
             app,
@@ -61,16 +60,26 @@ def test_fetch_and_replay_are_explicit_read_only_commands(tmp_path: Path) -> Non
 
 
 def test_prune_is_dry_run_until_apply_and_replay_surfaces_tombstone(tmp_path: Path) -> None:
-    _, envelope, blob = _put(tmp_path)
+    store, envelope = _put(tmp_path)
 
+    # The just-published contract sits inside replay retention, so pruning it
+    # takes the explicit operator override on top of the zero TTL.
     dry_run = runner.invoke(
         app,
-        ["artifacts", "prune", "--project-dir", str(tmp_path), "--ttl", "0d"],
+        [
+            "artifacts",
+            "prune",
+            "--project-dir",
+            str(tmp_path),
+            "--ttl",
+            "0d",
+            "--allow-replay-tombstone",
+        ],
     )
     assert dry_run.exit_code == 0
     assert "would remove" in dry_run.output
     assert "Dry run only" in dry_run.output
-    assert blob.exists()
+    assert store.fetch(envelope.contract_id).body == {"answer": 42}
 
     applied = runner.invoke(
         app,
@@ -81,12 +90,14 @@ def test_prune_is_dry_run_until_apply_and_replay_surfaces_tombstone(tmp_path: Pa
             str(tmp_path),
             "--ttl",
             "0d",
+            "--allow-replay-tombstone",
             "--apply",
         ],
     )
     assert applied.exit_code == 0
     assert "Removed 1 artifact body" in applied.output
-    assert not blob.exists()
+    with pytest.raises(ArtifactTombstonedError):
+        store.fetch(envelope.contract_id)
 
     replay = runner.invoke(
         app,

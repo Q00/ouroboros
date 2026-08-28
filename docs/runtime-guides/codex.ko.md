@@ -238,6 +238,8 @@ sandbox = "workspace-write"
 
 `ouroboros setup --runtime codex`를 돌리고 나면 번들 `ooo` 스킬이 `~/.codex/skills/ouroboros-*`에, 라우팅 규칙이 `~/.codex/rules/`에 설치됩니다. Ouroboros를 올린 뒤 **그 산출물만** 갱신하려면 `ouroboros codex refresh`를 쓰세요. `~/.codex/config.toml`도 `~/.ouroboros/config.yaml`도 건드리지 않습니다.
 
+런타임 식별 지문은 사용자가 관리하는 규칙과 스킬을 계속 추적합니다. 다만 Codex Desktop이 자체적으로 갱신하는 예약 경로 `~/.codex/skills/.system`은 제외하며, 같은 `skills` 디렉터리의 사용자 스킬 변경은 이전처럼 런타임 식별 지문을 무효화합니다.
+
 현재 스냅숏 기준 `resolve_packaged_codex_assets()`는 `skills/*/SKILL.md` 번들 **22개**를 해석해 설치합니다(맨 `ooo`와 `welcome` 포함). 아래 표는 그 전부와, 터미널만 쓰는 사람을 위한 CLI 대응입니다.
 
 | `ooo` 스킬 | Codex 세션 | CLI 대응 (터미널) |

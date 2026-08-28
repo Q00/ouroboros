@@ -26,6 +26,14 @@ UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE = (
 )
 
 
+SDK_RUNTIME_IN_MCP_SERVER_MESSAGE = (
+    "The MCP server cannot host the 'claude' SDK runtime in this process. "
+    "Pass an executable runtime, for example "
+    "'ouroboros mcp serve --runtime claude-cli', or set the runtime in config "
+    "so this command stops inheriting the 'claude' default."
+)
+
+
 class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Public runtime spellings shared by every workflow CLI front door.
 
@@ -50,6 +58,7 @@ class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
     ZCODE = "zcode"
+    HOST = "host"
 
 
 def _installed_major(distribution: str) -> int | None:
@@ -93,6 +102,7 @@ __all__ = [
     "CLAUDE_SDK_PROFILE",
     "CLAUDE_SDK_RUNTIME_BACKEND",
     "MCP_PROFILE",
+    "SDK_RUNTIME_IN_MCP_SERVER_MESSAGE",
     "PublicAgentRuntimeBackend",
     "UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE",
     "has_unsupported_claude_sdk_mcp_mix",

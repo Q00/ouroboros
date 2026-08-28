@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from unittest.mock import patch
 
 from ouroboros.core.git_workflow import (
@@ -146,7 +147,7 @@ class TestIsOnProtectedBranch:
         assert result is True
 
     def test_on_feature_branch(self, tmp_path: Path) -> None:
-        """Returns False when on a feature branch."""
+        """Returns False only when git confirms a concrete non-protected branch."""
         config = GitWorkflowConfig(use_branches=True, protected_branches=("main", "master"))
 
         with patch("subprocess.run") as mock_run:
@@ -158,10 +159,73 @@ class TestIsOnProtectedBranch:
         assert result is False
 
     def test_git_not_available(self, tmp_path: Path) -> None:
-        """Returns False when git is not available."""
+        """Fails closed (True) when git is not installed."""
         config = GitWorkflowConfig(use_branches=True)
 
         with patch("subprocess.run", side_effect=FileNotFoundError):
             result = is_on_protected_branch(tmp_path, config)
 
-        assert result is False
+        assert result is True
+
+    def test_git_timeout(self, tmp_path: Path) -> None:
+        """Fails closed (True) when the git call times out."""
+        config = GitWorkflowConfig(use_branches=True)
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5),
+        ):
+            result = is_on_protected_branch(tmp_path, config)
+
+        assert result is True
+
+    def test_os_error(self, tmp_path: Path) -> None:
+        """Fails closed (True) on OS-level failures reaching project_root."""
+        config = GitWorkflowConfig(use_branches=True)
+
+        with patch("subprocess.run", side_effect=OSError("cwd is gone")):
+            result = is_on_protected_branch(tmp_path, config)
+
+        assert result is True
+
+    def test_not_a_git_repository(self, tmp_path: Path) -> None:
+        """Fails closed (True) when git exits non-zero, e.g. not a repo."""
+        config = GitWorkflowConfig(use_branches=True, protected_branches=("main", "master"))
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 128
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "fatal: not a git repository"
+
+            result = is_on_protected_branch(tmp_path, config)
+
+        assert result is True
+
+    def test_detached_head(self, tmp_path: Path) -> None:
+        """Fails closed (True) on detached HEAD.
+
+        ``git rev-parse --abbrev-ref HEAD`` exits 0 and prints the literal
+        "HEAD" when detached, so this would otherwise be read as a normal
+        non-protected branch name.
+        """
+        config = GitWorkflowConfig(use_branches=True, protected_branches=("main", "master"))
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "HEAD\n"
+
+            result = is_on_protected_branch(tmp_path, config)
+
+        assert result is True
+
+    def test_empty_branch_output(self, tmp_path: Path) -> None:
+        """Fails closed (True) when git reports success but no branch name."""
+        config = GitWorkflowConfig(use_branches=True, protected_branches=("main", "master"))
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "  \n"
+
+            result = is_on_protected_branch(tmp_path, config)
+
+        assert result is True

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 
 ZCODE_SCRIPT_SUFFIXES = (".cjs", ".js", ".mjs")
 ZCODE_NODE_BUNDLE_METADATA = ".node-bundle-meta.json"
@@ -118,3 +119,27 @@ def build_zcode_command_prefix(cli_path: str | Path, electron_node_path: str | N
     if cli_path_str.lower().endswith(ZCODE_SCRIPT_SUFFIXES):
         return ["node", cli_path_str]
     return [cli_path_str]
+
+
+def resolve_zcode_command_prefix(cli_path: str | Path) -> list[str]:
+    """Validate launcher prerequisites and return the runtime command prefix.
+
+    This is intentionally side-effect free: it inspects the selected launch
+    shape without starting ZCode.  App-bundle scripts must have valid bundle
+    metadata and an executable bundled Electron runtime, while standalone
+    scripts require a system Node executable. Direct launchers retain the
+    runtime's existing direct-execution behavior.
+    """
+    cli_path_str = str(cli_path)
+    path = Path(cli_path_str).expanduser()
+    electron_node_path = resolve_zcode_electron_node_path(path)
+    if electron_node_path is not None:
+        return build_zcode_command_prefix(path, electron_node_path)
+
+    if path.suffix.lower() in ZCODE_SCRIPT_SUFFIXES:
+        if shutil.which("node") is None:
+            msg = f"ZCode standalone script requires Node on PATH: {path}"
+            raise RuntimeError(msg)
+        return build_zcode_command_prefix(path, None)
+
+    return build_zcode_command_prefix(path, None)

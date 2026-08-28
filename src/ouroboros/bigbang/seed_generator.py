@@ -22,6 +22,9 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.bigbang.acceptance_criteria_parsing import (
+    _parse_extracted_acceptance_criteria,
+)
 from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
 from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
@@ -1345,102 +1348,6 @@ def _parse_acceptance_criteria_contracts(
     return tuple(parsed)
 
 
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Build a JSON object while rejecting keys that would otherwise be lost."""
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"Duplicate JSON object key {key!r}")
-        result[key] = value
-    return result
-
-
-def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceCriterionSpec, ...]:
-    """Parse the lossless JSON acceptance-criteria extraction boundary."""
-    field_label = "ACCEPTANCE_CRITERIA"
-    if not isinstance(raw_value, str):
-        raise ValueError(f"{field_label} must be a single-line JSON array of objects")
-    text = raw_value.strip()
-    if not text or "\n" in text or "\r" in text:
-        raise ValueError(f"{field_label} must be a single-line JSON array of objects")
-    try:
-        decoded = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_int=_bounded_json_int,
-            parse_constant=_JsonNonFiniteToken,
-        )
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{field_label} must be a valid JSON array of objects: {exc}") from exc
-    if not isinstance(decoded, list):
-        raise ValueError(f"{field_label} must be a JSON array of objects")
-    if not decoded:
-        raise ValueError(f"{field_label} must contain at least one acceptance criterion")
-
-    required_keys = {"description", "verify", "artifacts", "expect"}
-    criteria: list[AcceptanceCriterionSpec] = []
-    for index, entry in enumerate(decoded, start=1):
-        if not isinstance(entry, dict):
-            raise ValueError(f"{field_label} entry {index} must be a JSON object")
-        keys = set(entry)
-        missing = required_keys - keys
-        extra = keys - required_keys
-        if missing:
-            raise ValueError(f"{field_label} entry {index} is missing fields: {sorted(missing)}")
-        if extra:
-            raise ValueError(f"{field_label} entry {index} has unknown fields: {sorted(extra)}")
-
-        description = entry["description"]
-        verify = entry["verify"]
-        artifacts = entry["artifacts"]
-        expect = entry["expect"]
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError(f"{field_label} entry {index} description must be a non-empty string")
-        for key, value in (("verify", verify), ("expect", expect)):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"{field_label} entry {index} {key} must be a non-empty string or NONE"
-                )
-        if isinstance(artifacts, str):
-            if artifacts.strip().upper() != "NONE":
-                raise ValueError(
-                    f"{field_label} entry {index} artifacts must be a JSON string array or NONE"
-                )
-            expected_artifacts: object = ()
-        elif isinstance(artifacts, list):
-            if any(not isinstance(item, str) or not item for item in artifacts):
-                raise ValueError(
-                    f"{field_label} entry {index} artifacts entries must be non-empty strings"
-                )
-            expected_artifacts = artifacts
-        else:
-            raise ValueError(
-                f"{field_label} entry {index} artifacts must be a JSON string array or NONE"
-            )
-        try:
-            criterion = AcceptanceCriterionSpec.model_validate(
-                {
-                    "description": description,
-                    "verify_command": verify,
-                    "expected_artifacts": expected_artifacts,
-                    "output_assertion": expect,
-                }
-            )
-        except PydanticValidationError as exc:
-            raise ValueError(f"Invalid {field_label} entry {index}: {exc}") from exc
-        reason = (
-            _unsupported_verify_command_reason(criterion.verify_command)
-            if criterion.verify_command
-            else None
-        )
-        if reason:
-            raise ValueError(
-                f"Unsupported verify_command in acceptance criterion {index}: {reason}"
-            )
-        criteria.append(criterion)
-    return tuple(criteria)
-
-
 def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec | None:
     """Parse one structured AC line, falling back to description-only on gaps."""
     if not line.startswith("AC:"):
@@ -1798,16 +1705,21 @@ class SeedGenerator:
 
         distillation = build_requirement_distillation(state)
         preflight = apply_requirement_distillation({}, distillation)
-        if preflight.promotion.blockers:
+        reference_aware = is_reference_aware_distillation(distillation)
+        readiness = seed_readiness_details(
+            preflight.promotion,
+            require_promoted_acceptance_criteria=reference_aware,
+        )
+        if readiness["blockers"]:
             return Result.err(
                 ValidationError(
                     "Interview must be reopened before Seed generation",
                     field="requirement_distillation",
-                    details=seed_readiness_details(preflight.promotion),
+                    details=readiness,
                 )
             )
         state.requirement_distillation = distillation
-        if is_reference_aware_distillation(distillation):
+        if reference_aware:
             return Result.ok(
                 build_promoted_reference_seed(
                     state,
@@ -2107,16 +2019,17 @@ Please try again. Extract requirements from this interview:
 You MUST respond with ONLY the following format, one field per line, no other text:
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
-ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
@@ -2220,16 +2133,17 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
-ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]

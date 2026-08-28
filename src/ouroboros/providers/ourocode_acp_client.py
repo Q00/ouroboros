@@ -96,6 +96,11 @@ class OurocodeAcpClient:
     """
 
     _PROTOCOL_VERSION = 1
+    # Human-readable name used in error messages. Subclasses that speak the
+    # same ACP wire protocol to a different server (e.g. DeepSeek Harness's
+    # ``dsh-acp-demo``) override this so failures name the process that
+    # actually died instead of ourocode.
+    _TOOL_LABEL = "ourocode"
 
     def __init__(
         self,
@@ -136,6 +141,18 @@ class OurocodeAcpClient:
         env["OUROCODE_MODEL"] = self._model
         return env
 
+    def _spawn_argv(self) -> list[str]:
+        """Full argv used to launch the ACP server process."""
+        return [self._cli_path, "--acp"]
+
+    def _spawn_failure_hint(self) -> str:
+        """Install/configuration hint appended to a failed-spawn error."""
+        return "Install ourocode and ensure it is on PATH (or set OUROBOROS_OUROCODE_CLI_PATH)."
+
+    def _session_new_params(self) -> dict[str, Any]:
+        """Params for the ACP ``session/new`` request."""
+        return {"cwd": self._cwd}
+
     async def run_turn(
         self,
         prompt_text: str,
@@ -150,8 +167,7 @@ class OurocodeAcpClient:
         """
         try:
             process = await asyncio.create_subprocess_exec(
-                self._cli_path,
-                "--acp",
+                *self._spawn_argv(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -161,9 +177,8 @@ class OurocodeAcpClient:
             )
         except (FileNotFoundError, OSError) as exc:
             raise AcpClientError(
-                f"ourocode not found or not launchable: {exc}. "
-                "Install ourocode and ensure it is on PATH (or set "
-                "OUROBOROS_OUROCODE_CLI_PATH).",
+                f"{self._TOOL_LABEL} not found or not launchable: {exc}. "
+                f"{self._spawn_failure_hint()}",
                 error_type="cli_unavailable",
             ) from exc
 
@@ -181,13 +196,13 @@ class OurocodeAcpClient:
                 process,
                 request_id=2,
                 method="session/new",
-                params={"cwd": self._cwd},
+                params=self._session_new_params(),
                 timeout=self._startup_timeout,
             )
             session_id = session_result.get("sessionId")
             if not isinstance(session_id, str) or not session_id:
                 raise AcpClientError(
-                    "ourocode session/new returned no sessionId",
+                    f"{self._TOOL_LABEL} session/new returned no sessionId",
                     error_type="malformed_response",
                     details={"result": session_result},
                 )
@@ -246,7 +261,7 @@ class OurocodeAcpClient:
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             raise AcpClientError(
-                f"ourocode ACP process closed stdin during {method}: {exc}",
+                f"{self._TOOL_LABEL} ACP process closed stdin during {method}: {exc}",
                 error_type="process_died",
             ) from exc
 
@@ -257,7 +272,7 @@ class OurocodeAcpClient:
             )
         except TimeoutError as exc:
             raise AcpClientError(
-                f"ourocode ACP {method} timed out after {timeout}s",
+                f"{self._TOOL_LABEL} ACP {method} timed out after {timeout}s",
                 error_type="timeout",
             ) from exc
 
@@ -274,7 +289,7 @@ class OurocodeAcpClient:
             if not raw:
                 stderr = await self._read_stderr_tail(process)
                 raise AcpClientError(
-                    f"ourocode ACP closed stdout before answering {method}",
+                    f"{self._TOOL_LABEL} ACP closed stdout before answering {method}",
                     error_type="process_died",
                     details={"stderr": stderr},
                 )
@@ -285,7 +300,7 @@ class OurocodeAcpClient:
                 message = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise AcpClientError(
-                    f"ourocode ACP emitted a malformed JSON frame: {exc.msg}",
+                    f"{self._TOOL_LABEL} ACP emitted a malformed JSON frame: {exc.msg}",
                     error_type="malformed_frame",
                     details={"line": line[:240]},
                 ) from exc
@@ -340,7 +355,7 @@ class OurocodeAcpClient:
                 details={"method": method, "rpc_message": message},
             )
         return AcpClientError(
-            f"ourocode ACP {method} failed: {message}",
+            f"{self._TOOL_LABEL} ACP {method} failed: {message}",
             error_type="rpc_error",
             code=code,
             details={"method": method},

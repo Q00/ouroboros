@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
@@ -16,6 +18,7 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionResponse
+from ouroboros.verification import verifier as verifier_module
 from ouroboros.verification.extractor import AssertionExtractor
 from ouroboros.verification.models import (
     ACVerificationReport,
@@ -26,6 +29,12 @@ from ouroboros.verification.models import (
     VerificationTier,
 )
 from ouroboros.verification.verifier import SpecVerifier
+
+# `MAX_OCCURRENCES_PER_FILE` is read off the module rather than imported by name on
+# purpose. The proof that a regression test is a regression is running it against the
+# verifier from before the fix, and a module-level import of a name that fix introduces
+# makes this whole file unimportable there -- one missing constant then hides the
+# baseline result for every test in it, not just the one that needs it.
 
 # -- Model Tests --
 
@@ -724,6 +733,406 @@ class TestSpecVerifier:
         assert summary.verified_count == 0
         assert summary.failed_count == 1
         assert summary.discrepancy_count == 1
+
+    def _warmup_assertion(self, pattern: str, expected: str = "10") -> SpecAssertion:
+        return SpecAssertion(
+            ac_index=0,
+            ac_text="Warmup frames should be 10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint="*.py",
+        )
+
+    def test_t1_a_mention_beside_the_declaration_is_read_as_the_declaration(self) -> None:
+        """A match that reads no value does not outvote one that reads the value.
+
+        The pattern lands twice: once in the comment, where nothing assignable
+        follows, and once on the declaration. Taking the first used to report
+        DISCREPANCY — the source contradicts the criterion — about a file that
+        satisfies it one line down. The comment reads nothing, so it is nothing
+        to weigh, and the file has exactly one value in it.
+        """
+        project = self._create_project(
+            {
+                "config.py": (
+                    "# WARMUP_FRAMES controls how many frames we discard\nWARMUP_FRAMES = 10\n"
+                ),
+            }
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.VERIFIED
+        assert result.actual_value == "10"
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is None
+        assert summary.reports[0].verified_pass is True
+
+    def test_t1_a_mention_with_no_declaration_anywhere_is_unverifiable(self) -> None:
+        """Prose that names the constant is not source that contradicts it.
+
+        Nothing in this file assigns anything, so no reading is available at
+        all. Strict mode still refuses to approve — absence of evidence is
+        blocking — but it is recorded as absence rather than as a source that
+        disagrees with the expectation.
+        """
+        project = self._create_project(
+            {"config.py": "# WARMUP_FRAMES controls how many frames we discard\n"}
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.unverifiable_count == 1
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
+
+    def test_t1_a_decoy_comment_cannot_outrank_the_declaration_it_contradicts(self) -> None:
+        """The value the criterion wants, written in a comment above a different one.
+
+        This is the pattern shape the extractor's own prompt asks the model for,
+        so the comment match lands directly on a readable scalar. Reading only
+        the first occurrence reported VERIFIED — "found '10' in config.py" —
+        while what the interpreter binds is 3. Two readings that disagree are
+        not a value the file holds.
+        """
+        project = self._create_project({"config.py": "# WARMUP_FRAMES = 10\nWARMUP_FRAMES = 3\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES\s*=\s*"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
+
+    def test_t1_a_decoy_comment_cannot_contradict_the_declaration_that_meets_it(self) -> None:
+        """The same shape, opposite polarity, and the worse of the two.
+
+        Here the declaration does meet the criterion and the stale comment above
+        it does not. Reading only the first occurrence reported DISCREPANCY,
+        which blocks in strict and non-strict mode alike and is never withdrawn
+        by ``_demoted_from_overturning`` — a verdict that the source contradicts
+        a criterion the source meets.
+        """
+        project = self._create_project({"config.py": "# WARMUP_FRAMES = 3\nWARMUP_FRAMES = 10\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES\s*=\s*"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is False
+
+    def test_t1_a_mention_in_one_file_cannot_settle_a_constant_bound_in_another(self) -> None:
+        """Which file the glob yields first is not a fact about the criterion.
+
+        The same choice rule ran between files as within one: the first file
+        with a match decided the verdict and the rest were never opened. A
+        criterion about a constant declared in ``settings.py`` was answered from
+        a note in whichever file sorted ahead of it, and the file that declares
+        it went unread.
+        """
+        project = self._create_project(
+            {
+                "a_notes.py": "# agreed default:\n# MAX_RETRIES = 5\n",
+                "settings.py": "MAX_RETRIES = 1\n",
+            }
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Retries should be 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"MAX_RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
+
+    def test_t1_expected_value_of_only_spaces_cannot_be_met_by_a_blank_reading(
+        self,
+    ) -> None:
+        """A scalar that is only whitespace is not a value the criterion can meet.
+
+        ``TOKEN = ""`` does reach the scanner and does yield a string, and an
+        expectation of only spaces strips to the same nothing that string does,
+        so the comparison used to return VERIFIED for a file whose constant is
+        empty. Blank space is the one thing every file holds, so reading one
+        settles no criterion and is spelled the same way as reading nothing.
+        """
+        project = self._create_project({"config.py": 'WARMUP_FRAMES = ""\n'})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES\s*=\s*", expected="   "),),
+            agent_results={0: True},
+        )
+
+        assert summary.verified_count == 0
+        assert summary.unverifiable_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize(
+        ("label", "declaration"),
+        [
+            ("call", 'WARMUP_FRAMES = int("3")'),
+            ("expression", "WARMUP_FRAMES = 1 + 2"),
+            ("conditional", "WARMUP_FRAMES = 3 if RELEASE else 10"),
+            ("annotated", "WARMUP_FRAMES: int = 3"),
+            ("quoted key", '{"WARMUP_FRAMES": 3}'),
+            ("blank", 'WARMUP_FRAMES = ""'),
+        ],
+    )
+    def test_t1_a_declaration_the_scanner_cannot_read_is_not_a_bare_mention(
+        self, label: str, declaration: str
+    ) -> None:
+        """A binding that yields no reading still costs a decoy its authority.
+
+        Requiring the readings to agree is only worth something if a
+        declaration takes part in the agreement. These six are ordinary
+        Python, and the scanner reads a value from none of them: it bounds a
+        scalar, and a call, an expression, a conditional, a type annotation, a
+        quoted key and a blank string are not that. Counting the miss as
+        nothing-was-written puts an unread declaration and a bare mention back
+        under one spelling, and the decoy beside it becomes the file's only
+        reading — unanimous with itself, and VERIFIED against a file the
+        interpreter binds to 3.
+
+        UNVERIFIABLE is the whole of the claim: the constant is stated here in
+        a form this cannot read, so nothing read elsewhere is what the
+        candidates say.
+        """
+        project = self._create_project({"config.py": f"{declaration}\n# WARMUP_FRAMES = 10\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE, label
+        assert result.actual_value == "", label
+        assert summary.verified_count == 0, label
+        assert summary.override_approval is False, label
+
+    def test_t1_an_unread_declaration_in_one_file_unsettles_a_reading_in_another(
+        self,
+    ) -> None:
+        """The same holds across files, where no comment is needed at all.
+
+        ``settings.py`` states the constant in a form the scanner cannot read
+        and ``a_notes.py`` states it in one it can. Dropping the unreadable
+        occurrence leaves the note as the sole reading, and the criterion is
+        answered out of the file that does not declare it.
+        """
+        project = self._create_project(
+            {
+                "a_notes.py": "# agreed default:\n# MAX_RETRIES = 5\n",
+                "settings.py": 'MAX_RETRIES = int("1")\n',
+            }
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Retries should be 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"MAX_RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
+
+    def test_t1_prose_naming_the_constant_in_quotes_is_still_prose(self) -> None:
+        """The quoted-key allowance must not swallow a mention in prose.
+
+        A quoted name may be a binding — JSON, YAML and every settings dict
+        write one that way — so one closing quote is allowed to stand between
+        the match and the operator. Nothing follows the quote here, so this
+        occurrence binds nothing and the declaration below is read normally.
+        """
+        project = self._create_project(
+            {"config.py": '# the "WARMUP_FRAMES" knob\nWARMUP_FRAMES = 10\n'}
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.VERIFIED
+        assert result.actual_value == "10"
+        assert summary.override_approval is None
+        assert summary.reports[0].verified_pass is True
+
+    @pytest.mark.parametrize(("opening", "closing"), [("(", ")"), ("[", "]")])
+    def test_t1_a_value_wrapped_across_lines_is_not_read_as_its_bracket(
+        self, opening: str, closing: str
+    ) -> None:
+        """A scalar is a value written whole, so a bracket is not one.
+
+        A formatter wrapping a value across lines used to make the scan stop at
+        the line end and return the bracket, which reached the comparison as what
+        the file says the constant is -- a DISCREPANCY manufactured out of
+        punctuation. The declaration is real, so this is a binding that went
+        unread, not prose.
+        """
+        project = self._create_project(
+            {"config.py": f"WARMUP_FRAMES = {opening}\n    10\n{closing}\n"}
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.actual_value == ""
+        assert summary.override_approval is False
+
+    def test_t1_a_line_continuation_is_not_the_value_it_continues(self) -> None:
+        """The same assignment laid out two ways cannot get two verdicts.
+
+        `(` and `[` were added to the stop set because a scalar is a value
+        written whole; `\\` continues a line for exactly the same reason and was
+        left in, so the scan returned the backslash as what the file says the
+        constant is. That reaches the comparison as a DISCREPANCY made out of
+        punctuation -- the arm that blocks in strict and non-strict mode alike
+        and that nothing withdraws -- against a file the interpreter binds to 10.
+        """
+        project = self._create_project({"config.py": "WARMUP_FRAMES = \\\n    10\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.actual_value == ""
+        assert summary.override_approval is False
+
+    def test_t1_an_operator_inside_the_scalar_is_not_part_of_the_value(self) -> None:
+        """A value is what follows the operator, not the operator written twice.
+
+        An annotated assignment spelled without spaces puts the whole of
+        `:int=10` where the scalar was expected. Only the leading `:` was
+        skipped, so `int=10` was read as what the file says the constant is and
+        compared against `10` -- a DISCREPANCY made out of the declaration's own
+        syntax, in the arm that blocks in strict and non-strict mode alike. `=`
+        joins the stop set, which cannot truncate an ordinary `X = 10` because
+        the scan starts after that operator; a token that carries an operator of
+        its own is a binding this cannot read.
+        """
+        project = self._create_project({"config.py": "WARMUP_FRAMES:int=10\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.actual_value == ""
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            "WARMUP_FRAMES ?= 10",
+            "WARMUP_FRAMES += 10",
+            "const WARMUP_FRAMES int = 10",
+            "WARMUP_FRAMES, FPS = 10, 30",
+        ],
+    )
+    def test_t1_a_declaration_is_not_prose_because_a_token_precedes_its_operator(
+        self, declaration: str
+    ) -> None:
+        """A declaration that took part in no agreement is a declaration dropped.
+
+        Requiring the operator to sit adjacent to the name read every one of
+        these as prose -- the bucket that settles nothing -- so the stale comment
+        above became the file's sole unanimous reading and minted VERIFIED
+        against a file that declares 10. Prose carrying an operator is merely
+        unreadable, which costs a verdict; a declaration read as prose costs
+        soundness.
+        """
+        project = self._create_project({"config.py": f"# WARMUP_FRAMES = 99\n{declaration}\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES", expected="99"),),
+            agent_results={0: True},
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is not VerificationOutcome.VERIFIED
+        assert result.actual_value == ""
+        assert summary.override_approval is not True
+
+    def test_t1_the_occurrence_scan_stops_once_the_readings_settle(self) -> None:
+        """Every byte scanned after the outcome is fixed is attacker-chosen work.
+
+        The agreement scan reads occurrences of an untrusted model pattern, and
+        reading them all eagerly meant a pattern that settles the outcome in its
+        first two matches still scanned the whole file. With a backtracking
+        alternative in the tail that is exponential: the eager scan took 64.3 s
+        on this input and roughly quadruples per two characters, so the bound is
+        what keeps the verdict reachable at all.
+        """
+        project = self._create_project(
+            {"config.py": "WARMUP_FRAMES = 3\nWARMUP_FRAMES = 9\n" + "x" * 30 + "\n"}
+        )
+        assertion = self._warmup_assertion(r"WARMUP_FRAMES\s*=\s*|(x+x+)+y", expected="3")
+
+        started = time.monotonic()
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        elapsed = time.monotonic() - started
+
+        assert summary.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+        assert elapsed < 10.0
+
+    def test_t1_more_occurrences_than_the_scan_reads_is_not_agreement(self) -> None:
+        """A cap that returned VERIFIED would agree with a file it stopped reading.
+
+        The scan is bounded, so a file can hold occurrences it never looked at.
+        What those say is unknown, and unknown cannot be part of an agreement --
+        the same rule the unreadable binding already obeys -- so reaching the cap
+        has to unsettle the criterion rather than let the readings so far stand.
+        """
+        cap = verifier_module.MAX_OCCURRENCES_PER_FILE
+        occurrences = "\n".join(["WARMUP_FRAMES = 10"] * (cap + 1))
+        project = self._create_project({"config.py": occurrences + "\n"})
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (self._warmup_assertion(r"WARMUP_FRAMES"),), agent_results={0: True}
+        )
+
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert summary.override_approval is False
 
     def test_t1_pattern_not_found(self) -> None:
         """T1: pattern not in any file → verification fails."""
@@ -2006,6 +2415,234 @@ class TestSpecVerifier:
         summary = SpecVerifier(project_dir=project).verify_all((assertion,))
 
         assert summary.verified_count == 1
+
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files", "file_hint", "tier"),
+        [
+            (
+                "MUST define a CameraProvider interface",
+                r"[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"CameraProvider|[\s\S]+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r".+",
+                {"main.py": "print('hello')\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+\w+",
+                {"unrelated.py": "class Unrelated:\n    pass\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "MUST create a CameraProvider file",
+                "file",
+                {"profile.py": "x = 1\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "The implementation MUST define a CameraProvider class",
+                "MUST",
+                {"unrelated.py": "# MUST clean this up later\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "The implementation MUST define a CameraProvider class",
+                "MUST",
+                {"unrelated.py": "# MUST clean this up later\n"},
+                "*.py",
+                VerificationTier.T1_CONSTANT,
+            ),
+            (
+                "MUST define a CameraProvider class",
+                r"class\s+CameraProvider",
+                {"camera.py": "class CameraProvider:\n    pass\n"},
+                "*.py",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+            (
+                "notes.txt MUST be left empty",
+                r"\A\Z",
+                {"notes.txt": ""},
+                "notes.txt",
+                VerificationTier.T2_STRUCTURAL,
+            ),
+        ],
+        ids=[
+            "consume-everything-t2",
+            "consume-everything-t1",
+            "target-or-anything-t1",
+            "any-content-t2",
+            "structural-keyword-class",
+            "structural-keyword-file-via-filename-path",
+            "requirement-modality-in-a-comment-t2",
+            "requirement-modality-in-a-comment-t1",
+            "genuinely-criterion-bound",
+            "blank-subject-on-a-named-file",
+        ],
+    )
+    def test_no_regex_evidence_overturns_an_agent_fail(
+        self,
+        ac_text: str,
+        pattern: str,
+        files: dict[str, str],
+        file_hint: str,
+        tier: VerificationTier,
+    ) -> None:
+        r"""An agent that reported FAIL keeps its FAIL, whatever matched.
+
+        The first cases are patterns that match anything with content in it;
+        the next three share the criterion's own words — `class`, `file`, and
+        the `MUST` of ordinary requirement prose — while matching source that
+        has nothing to do with what was asked, the last of those from inside a
+        comment. Every rule that tried to sort these by reading the criterion
+        admitted one of them, because whether a text names a criterion's
+        subject is not a question a finite reading of prose answers.
+
+        So the last two matter most: `class\s+CameraProvider` against a real
+        `class CameraProvider`, and `\A\Z` against a genuinely empty named
+        file, are refused here too. There is no property of a pattern that
+        restores the override, which is what leaves nothing to bypass.
+
+        UNVERIFIABLE and not DISCREPANCY throughout: the evidence is unusable
+        in this direction, which is not evidence that the criterion is unmet.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value="",
+            file_hint=file_hint,
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is False
+        assert report.results[0].outcome is VerificationOutcome.UNVERIFIABLE
+        assert "cannot overturn" in report.results[0].detail
+
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern", "files"),
+        [
+            (
+                "MUST define a CameraProvider interface",
+                r"class\s+CameraProvider",
+                {"camera.py": "class CameraProvider:\n    pass\n"},
+            ),
+            (
+                "MUST define a CameraProvider interface",
+                r"def\s+\w+",
+                {"main.py": "def entrypoint(): pass\n"},
+            ),
+            (
+                "notes.txt MUST be left empty",
+                r"\A\Z",
+                {"notes.txt": ""},
+            ),
+        ],
+        ids=["bound", "unbound", "blank-subject"],
+    )
+    def test_agent_pass_confirmation_is_untouched(
+        self, ac_text: str, pattern: str, files: dict[str, str]
+    ) -> None:
+        """Only the overturn direction is withdrawn.
+
+        Checking a claimed PASS against the source is this scanner's actual
+        job — the false-PASS check #1835 says it exists for. A VERIFIED that
+        agrees with the agent claims no authority the agent had not already
+        claimed, so none of these is gated, however loose the pattern.
+        """
+        project = self._create_project(files)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="notes.txt" if pattern == r"\A\Z" else "*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: True})
+            .reports[0]
+        )
+
+        assert report.results[0].outcome is VerificationOutcome.VERIFIED
+
+    def test_an_agent_fail_survives_all_the_way_to_the_formal_verdict(self) -> None:
+        """End to end, because the defect was only visible at the far end.
+
+        The verifier's demotion is only half the story: #1835 is about what
+        the formal adapter does with an all-VERIFIED report, which is to mint
+        `passed=True` and approve the run. This drives the whole path —
+        criterion, hostile pattern, matching-but-unrelated source, an agent
+        that honestly reported FAIL — and asserts the run is still rejected.
+        """
+        from ouroboros.mcp.server.spec_verification_adapter import (
+            evaluation_summary_from_spec_verification,
+        )
+
+        seed = SimpleNamespace(
+            acceptance_criteria=("The implementation MUST define a CameraProvider class",)
+        )
+        mechanical = SimpleNamespace(
+            ac_results=(
+                SimpleNamespace(
+                    ac_index=0,
+                    ac_content="The implementation MUST define a CameraProvider class",
+                    authoritative_pass=False,
+                ),
+            ),
+            task_results=(),
+            feedback_metadata=(),
+            execution_completion_status="completed",
+        )
+        project = self._create_project({"unrelated.py": "# MUST clean this up later\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="The implementation MUST define a CameraProvider class",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="MUST",
+            file_hint="*.py",
+        )
+
+        verification = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        summary = evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
 
 
 # -- Extractor Tests --

@@ -27,7 +27,7 @@ def _test_command_invocation(command: str) -> str | None:
     as ``| grep passed`` survives the strip and is rejected downstream by
     ``_test_invocation_from_prefix`` rather than being silently dropped.
     """
-    normalized = command.strip().lower()
+    normalized = command.strip()
     if not normalized:
         return None
 
@@ -54,7 +54,7 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
     This must not be used as command proof. It exists only to classify rejected
     evidence forms for diagnostics while preserving the #1208 masking guard.
     """
-    normalized = command.strip().lower()
+    normalized = command.strip()
     if not normalized:
         return None
     direct = _test_invocation_from_prefix(_strip_command_output_plumbing(normalized))
@@ -72,14 +72,74 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
 
 
 def _shell_command_body(command: str) -> str | None:
-    """Return the ``-c`` body when the command starts with a shell wrapper."""
+    """Return the command body when the command starts with a shell wrapper.
+
+    Codex uses POSIX ``sh -lc`` wrappers on Unix and a native
+    ``pwsh.exe -Command`` wrapper on Windows.  Both are transport wrappers;
+    evidence may cite the exact inner command without repeating the wrapper.
+    """
     if _has_unquoted_status_masking_control(command):
         return None
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
-    return _shell_command_body_from_argv(tuple(parts))
+    argv = tuple(parts)
+    return _shell_command_body_from_argv(argv) or _powershell_command_body_from_argv(argv)
+
+
+_POWERSHELL_EXECUTABLES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+_POWERSHELL_FLAG_OPTIONS = frozenset(
+    {
+        "-nologo",
+        "-noprofile",
+        "-noninteractive",
+        "-noni",
+        "-sta",
+        "-mta",
+    }
+)
+_POWERSHELL_VALUE_OPTIONS = frozenset(
+    {
+        "-executionpolicy",
+        "-inputformat",
+        "-outputformat",
+        "-windowstyle",
+        "-workingdirectory",
+    }
+)
+
+
+def _powershell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
+    """Return a PowerShell ``-Command`` body from a narrow wrapper prefix.
+
+    Only non-executing host options are allowed before ``-Command`` and no
+    trailing arguments are accepted.  This keeps aliasing exact and prevents a
+    partial inner command from proving a larger PowerShell script.
+    """
+    if len(argv) < 3:
+        return None
+    executable = Path(argv[0].replace("\\", "/")).name.lower()
+    if executable not in _POWERSHELL_EXECUTABLES:
+        return None
+
+    index = 1
+    while index < len(argv):
+        option = argv[index].lower()
+        if option in {"-command", "-c"}:
+            if index + 2 != len(argv):
+                return None
+            return argv[index + 1].strip()
+        if option in _POWERSHELL_FLAG_OPTIONS:
+            index += 1
+            continue
+        if option in _POWERSHELL_VALUE_OPTIONS:
+            if index + 1 >= len(argv):
+                return None
+            index += 2
+            continue
+        return None
+    return None
 
 
 _SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"})
@@ -141,19 +201,18 @@ def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
 
 def _test_invocation_from_shell_body(body: str) -> str | None:
     """Return a test invocation after conservative shell setup preambles."""
-    for segment, pipefail_enabled in _segments_after_safe_shell_preamble_with_pipefail(body):
-        candidate = _strip_command_output_plumbing(segment)
-        if (
-            _has_trailing_output_filter_pipeline(segment)
-            and not pipefail_enabled
-            and _test_invocation_from_prefix(candidate) is not None
-        ):
-            candidate = segment
-        invocation = _test_invocation_from_prefix(candidate)
-        if invocation is not None:
-            return invocation
+    segments = tuple(_segments_after_safe_shell_preamble_with_pipefail(body))
+    if len(segments) != 1:
         return None
-    return None
+    segment, pipefail_enabled = segments[0]
+    candidate = _strip_command_output_plumbing(segment)
+    if (
+        _has_trailing_output_filter_pipeline(segment)
+        and not pipefail_enabled
+        and _test_invocation_from_prefix(candidate) is not None
+    ):
+        candidate = segment
+    return _test_invocation_from_prefix(candidate)
 
 
 def _single_command_after_safe_shell_preamble(command: str) -> str | None:
@@ -319,10 +378,169 @@ def _has_unquoted_status_masking_control(command: str) -> bool:
             previous = command[index - 1] if index > 0 else ""
             following = command[index + 1] if index + 1 < len(command) else ""
             if previous == "&" or following == "&":
-                continue
+                return True
             if previous not in {">", "<"} and following != ">":
                 return True
     return False
+
+
+_UV_VALUE_OPTIONS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--from",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--no-sources-package",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--preview-features",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--upgrade-group",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+    }
+)
+_UV_FLAG_OPTIONS = frozenset(
+    {
+        "--active",
+        "--all-extras",
+        "--all-groups",
+        "--all-packages",
+        "--compile-bytecode",
+        "--exact",
+        "--frozen",
+        "--isolated",
+        "--locked",
+        "--managed-python",
+        "--native-tls",
+        "--no-binary",
+        "--no-build",
+        "--no-build-isolation",
+        "--no-cache",
+        "--no-config",
+        "--no-default-groups",
+        "--no-dev",
+        "--no-editable",
+        "--no-env-file",
+        "--no-index",
+        "--no-managed-python",
+        "--no-progress",
+        "--no-project",
+        "--no-python-downloads",
+        "--no-sources",
+        "--no-sync",
+        "--offline",
+        "--only-dev",
+        "--quiet",
+        "--refresh",
+        "--reinstall",
+        "--system-certs",
+        "--upgrade",
+        "--verbose",
+    }
+)
+_UV_SHORT_VALUE_OPTIONS = frozenset({"C", "f", "i", "p", "P", "w"})
+_UV_SHORT_FLAG_OPTIONS = frozenset({"n", "q", "U", "v"})
+
+
+def _uv_run_pytest_parts(parts: list[str]) -> list[str] | None:
+    """Parse a ``uv run``/``uvx`` prefix and return pytest plus its arguments."""
+    if len(parts) >= 3 and parts[:2] == ["uv", "run"]:
+        index = 2
+    elif len(parts) >= 2 and parts[0] == "uvx":
+        index = 1
+    else:
+        return None
+    while index < len(parts):
+        token = parts[index]
+        if token == "--":
+            index += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        if token in {"--help", "-h", "--version", "-V", "--script", "-s", "--gui-script"}:
+            return None
+        if token in {"--module", "-m"}:
+            index += 1
+            continue
+        if token.startswith("--"):
+            option, separator, attached = token.partition("=")
+            if option in _UV_FLAG_OPTIONS:
+                if separator:
+                    return None
+                index += 1
+                continue
+            if option not in _UV_VALUE_OPTIONS:
+                return None
+            index += 1
+            if separator:
+                if not attached:
+                    return None
+            else:
+                if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
+                    return None
+                index += 1
+            continue
+        cluster = token[1:]
+        position = 0
+        while position < len(cluster):
+            option = cluster[position]
+            if option in {"h", "s"}:
+                return None
+            if option == "m" or option in _UV_SHORT_FLAG_OPTIONS:
+                position += 1
+                continue
+            if option not in _UV_SHORT_VALUE_OPTIONS:
+                return None
+            if position + 1 == len(cluster):
+                index += 1
+                if index >= len(parts) or parts[index] == "--" or parts[index].startswith("-"):
+                    return None
+            position = len(cluster)
+        index += 1
+    if index >= len(parts):
+        return None
+    if parts[index] in {"pytest", "py.test"}:
+        return parts[index:]
+    if (
+        len(parts) >= index + 3
+        and _is_python_executable(parts[index])
+        and parts[index + 1 : index + 3] == ["-m", "pytest"]
+    ):
+        return parts[index:]
+    return None
 
 
 def _test_invocation_from_prefix(command: str) -> str | None:
@@ -347,14 +565,17 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):
         return None
+    uv_pytest_parts = _uv_run_pytest_parts(parts)
+    if uv_pytest_parts is not None:
+        if _has_non_executing_test_mode(uv_pytest_parts):
+            return None
+        return _normalized_evidence_text(" ".join(parts))
     if _has_non_executing_test_mode(parts):
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:
         return _normalized_evidence_text(" ".join(parts))
     if len(parts) >= 2 and parts[0] in {"npm", "pnpm", "yarn"} and parts[1] == "test":
-        return _normalized_evidence_text(" ".join(parts))
-    if len(parts) >= 3 and parts[:3] == ["uv", "run", "pytest"]:
         return _normalized_evidence_text(" ".join(parts))
     if (
         len(parts) >= 3

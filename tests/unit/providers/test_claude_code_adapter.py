@@ -8,6 +8,7 @@ being embedded as XML in the user prompt.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,11 @@ import pytest
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.evolution import provider_usage as provider_usage_module
+from ouroboros.evolution.provider_usage import (
+    capture_generation_provider_usage,
+    tracked_complete,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -2491,6 +2497,283 @@ class TestCLIFallbackWhenSDKAbsent:
         assert "--append-system-prompt" in argv
         assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
 
+    def test_cli_fallback_accepts_top_level_event_array(self) -> None:
+        """Newer/wrapped Claude CLIs may batch stream-json events as one array."""
+        adapter = self._adapter()
+        payload = json.dumps(
+            [
+                {"type": "system", "subtype": "init", "session_id": "array-session"},
+                {
+                    "type": "assistant",
+                    "session_id": "array-session",
+                    "message": {
+                        "content": [{"type": "text", "text": "draft"}],
+                        "usage": {"input_tokens": 2, "output_tokens": 1},
+                    },
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "array answer",
+                    "session_id": "array-session",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 13, "output_tokens": 5},
+                },
+            ]
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "array answer"
+        assert result.value.usage.total_tokens == 18
+        assert result.value.raw_response["type"] == "result"
+        assert result.value.raw_response["session_id"] == "array-session"
+
+    def test_cli_fallback_aggregates_multi_turn_usage_without_terminal_total(self) -> None:
+        adapter = self._adapter()
+        payload = json.dumps(
+            [
+                {
+                    "type": "assistant",
+                    "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"usage": {"input_tokens": 10, "output_tokens": 2}},
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "array answer",
+                    "stop_reason": "end_turn",
+                },
+            ]
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.usage.prompt_tokens == 110
+        assert result.value.usage.completion_tokens == 22
+        assert result.value.usage.total_tokens == 132
+        assert result.value.raw_response["usage"] == {
+            "input_tokens": 110,
+            "output_tokens": 22,
+            "total_tokens": 132,
+        }
+
+    @pytest.mark.parametrize(
+        ("wire_usage", "expected_components", "expected_raw"),
+        [
+            pytest.param(
+                {"total_tokens": 132},
+                (0, 0, 0, 132),
+                {"total_tokens": 132},
+                id="total-only-is-not-allocated",
+            ),
+            pytest.param(
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 12,
+                },
+                (100, 20, 120, 12),
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 12,
+                    "total_tokens": 132,
+                },
+                id="components-derive-cache-inclusive-total",
+            ),
+            pytest.param(
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                (110, 22, 132, 0),
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                id="consistent-components-and-total",
+            ),
+            pytest.param(
+                {"prompt_tokens": 110, "completion_tokens": 22},
+                (110, 22, 132, 0),
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                id="aliases-become-canonical-components",
+            ),
+        ],
+    )
+    def test_cli_fallback_uses_normalized_canonical_usage_authority(
+        self,
+        wire_usage: dict[str, int],
+        expected_components: tuple[int, int, int, int],
+        expected_raw: dict[str, int],
+    ) -> None:
+        adapter = self._adapter()
+        payload = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "answer",
+                "usage": wire_usage,
+            }
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert (
+            result.value.usage.prompt_tokens,
+            result.value.usage.completion_tokens,
+            result.value.usage.total_tokens,
+            result.value.usage.unallocated_tokens,
+        ) == expected_components
+        assert result.value.usage.total_tokens == (
+            result.value.usage.prompt_tokens + result.value.usage.completion_tokens
+        )
+        assert (
+            result.value.usage.total_tokens + result.value.usage.unallocated_tokens
+            == expected_raw["total_tokens"]
+        )
+        assert result.value.raw_response["usage"] == expected_raw
+
+    def test_invalid_terminal_total_cannot_fall_back_or_split_authority(self) -> None:
+        adapter = self._adapter()
+        payload = json.dumps(
+            [
+                {
+                    "type": "assistant",
+                    "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "answer",
+                    "usage": {
+                        "input_tokens": 110,
+                        "output_tokens": 22,
+                        "total_tokens": 12,
+                    },
+                },
+            ]
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "usage.total_tokens disagrees" in result.error.details["parse_error"]
+
+    @pytest.mark.parametrize(
+        "wire_usage",
+        [
+            pytest.param({"total_tokens": 132}, id="total-only"),
+            pytest.param(
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 12,
+                },
+                id="cache-inclusive",
+            ),
+        ],
+    )
+    def test_cli_usage_survives_tracked_completion_frugality_capture(
+        self,
+        wire_usage: dict[str, int],
+    ) -> None:
+        adapter = self._adapter()
+        config = CompletionConfig(model="claude-haiku-4-5", role="reflect")
+        payload = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "answer",
+                "usage": wire_usage,
+            }
+        ).encode()
+
+        # This regression isolates the completion-usage boundary from the
+        # separate execution-configuration attestation gate.  The real Claude
+        # CLI adapter response passes directly through tracked_complete().
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+            patch.object(
+                provider_usage_module,
+                "_prepare_completion_configuration",
+                return_value=(config, {}, None, True, None),
+            ),
+            patch.object(
+                provider_usage_module,
+                "_completion_configuration",
+                return_value={"surface": "completion", "backend": "claude-cli"},
+            ),
+        ):
+            with capture_generation_provider_usage() as capture:
+                result = asyncio.run(
+                    tracked_complete(
+                        adapter,
+                        [Message(role=MessageRole.USER, content="ping")],
+                        config,
+                    )
+                )
+
+        summary = capture.summary(instrumentation_complete=True)
+        assert result.is_ok, result
+        assert summary.complete is True
+        assert summary.token_spend == 132
+        assert summary.issues == ()
+
     def test_the_adapters_own_permission_vocabulary_is_not_forwarded_blindly(self) -> None:
         """`default` is a mode this adapter has and the CLI does not.
 
@@ -2540,6 +2823,117 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.is_err
         assert "maximum number of turns" in result.error.message
         assert result.error.details["subtype"] == "error_max_turns"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "result": None,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "stop_reason": "max_turns",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="typed-null",
+            ),
+            pytest.param(
+                {
+                    "is_error": True,
+                    "subtype": "error_max_turns",
+                    "session_id": "error-session",
+                    "stop_reason": "max_turns",
+                    "usage": {"input_tokens": 9, "output_tokens": 2},
+                },
+                id="untyped-omitted",
+            ),
+        ],
+    )
+    def test_empty_cli_error_preserves_structured_metadata(
+        self, payload: dict[str, object]
+    ) -> None:
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(json.dumps(payload).encode())),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert result.error.message == "claude CLI reported an error"
+        assert result.error.details["subtype"] == "error_max_turns"
+        assert result.error.details["session_id"] == "error-session"
+        assert result.error.details["stop_reason"] == "max_turns"
+        assert result.error.details["usage"] == {
+            "input_tokens": 9,
+            "output_tokens": 2,
+            "total_tokens": 11,
+        }
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done","trace":' + b"9" * 4301 + b"}",
+                "integer exceeds",
+                id="oversized-integer",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"cache_read_input_tokens":1e9999}}',
+                "non-finite JSON number",
+                id="non-finite-secondary-usage",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"cache_read_input_tokens":' + b"9" * 1000 + b"}}",
+                "bounded non-negative integer",
+                id="thousand-digit-secondary-usage",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"prompt_tokens":' + b"9" * 1000 + b"}}",
+                "bounded non-negative integer",
+                id="thousand-digit-primary-alias",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                "bounded non-negative integer",
+                id="malformed-primary-alias",
+            ),
+        ],
+    )
+    def test_hostile_number_becomes_structured_provider_error(
+        self, payload: bytes, message: str
+    ) -> None:
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert message in result.error.details["parse_error"]
 
     def test_a_non_json_body_surfaces_stderr(self) -> None:
         """An auth prompt or a bad flag never reaches the result envelope.
@@ -2798,6 +3192,69 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.value.content == "recovered"
         assert spawn.await_count == 2
 
+    def test_nonzero_exit_stale_success_uses_transient_stderr_and_retries(self) -> None:
+        adapter = self._adapter()
+        stale_success = b'{"is_error":false,"result":"completed"}'
+        good = b'{"is_error":false,"result":"recovered","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(
+                    side_effect=[
+                        self._proc(
+                            stale_success,
+                            stderr=b"API error: 529 overloaded_error",
+                            returncode=1,
+                        ),
+                        self._proc(good),
+                    ]
+                ),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "recovered"
+        assert spawn.await_count == 2
+
+    def test_nonzero_exit_stale_success_surfaces_nontransient_stderr(self) -> None:
+        adapter = self._adapter()
+        stale_success = b'{"is_error":false,"result":"completed"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(
+                    return_value=self._proc(
+                        stale_success,
+                        stderr=b"error: authentication required",
+                        returncode=1,
+                    )
+                ),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert result.error.message == "error: authentication required"
+        assert result.error.details["error_type"] == "ProcessError"
+        assert result.error.details["envelope_is_error"] is False
+        assert result.error.details["stderr"] == "error: authentication required"
+        assert spawn.await_count == 1
+
     def test_a_permanent_cli_failure_is_not_retried(self) -> None:
         """The other half: a non-transient error still fails on the first try."""
         adapter = self._adapter()
@@ -2873,8 +3330,8 @@ class TestCLIFallbackWhenSDKAbsent:
         assert "Empty response" in result.error.message
         assert result.error.details["content_length"] == 0
 
-    def test_a_missing_result_key_is_treated_the_same_as_an_empty_one(self) -> None:
-        """No `result` key at all is the same absence, not a different one."""
+    def test_a_success_envelope_with_missing_result_fails_closed(self) -> None:
+        """Only an explicit error envelope may omit its result content."""
         adapter = self._adapter()
         with (
             patch.dict("sys.modules", {"claude_agent_sdk": None}),
@@ -2896,7 +3353,8 @@ class TestCLIFallbackWhenSDKAbsent:
             )
 
         assert result.is_err
-        assert "Empty response" in result.error.message
+        assert "no valid JSON result" in result.error.message
+        assert "no result content" in result.error.details["parse_error"]
 
     def test_unencodable_caller_text_never_reaches_a_spawn(self) -> None:
         """A lone surrogate must fail before there is a child to orphan.

@@ -180,13 +180,14 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    parent-session assist layer. The advisory exists to help the human answer;
    it must not hide, replace, or delay the question itself.
 
-   Run the advisory lanes through your runtime's native subagent mechanism when
-   one exists. For Claude Code this is the Task/Agent tool; for Codex, explicitly
-   start a native subagent workflow in natural language. Spawn one subagent per
-   lane, pass that lane's payload prompt, wait for all agents, then synthesize.
-   If the runtime has no parallel primitive, process payloads sequentially per
-   `dispatch_mode="sequential"` and the request's `sequential_fallback`
-   semantics. The standard lanes are:
+   Read the stamped dispatch contract before running the lanes. With
+   `dispatch_mode="host_driven"`, use the declared native parallel mechanism.
+   With `dispatch_mode="host_decides"`, use native parallel fan-out when the
+   current host exposes it and otherwise process the same payloads sequentially.
+   With `dispatch_mode="sequential"`, process payloads in order. For Claude Code
+   the parallel mechanism is Task/Agent; for Codex, explicitly start one native
+   subagent per payload in a single fan-out turn. Wait for every result, then
+   synthesize. The standard lanes are:
    - `code_context` — inspect repo-local facts and reuse
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
@@ -204,21 +205,16 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    options, one recommended draft, or a short "I found these ambiguities" note.
    Do not forward advisory output to `ouroboros_interview` until the user
    approves, edits, or explicitly asks you to auto-confirm a safe answer.
-   When `meta.question_advisory_subagents` is present you MUST fan out: treat
-   each entry as a spawn-ready advisory payload with `title`, `agent`, `prompt`,
-   and `context`, and dispatch every payload through your host's native subagent
-   mechanism (Claude Code → one Task/Agent call per payload in one parallel
-   batch; Codex → explicitly spawn one Codex subagent per payload, wait for all
-   results, then synthesize; runtimes without a parallel primitive → process
-   payloads sequentially per `dispatch_mode="sequential"`) instead of
-   reconstructing prompts from prose. This
-   is required regardless of dispatch mode: the payloads themselves are the
-   spawn signal.
-   Treat `meta.question_advisory_host_action=spawn_subagents`, when present, as
-   a reinforcing cue for host-driven runtimes such as Codex or Claude Code, not
-   as a prerequisite. The only time you skip spawning is when the host has no
-   subagent primitive at all (then use `sequential_fallback`).
-   Preserve the original question text while advisory children run.
+   When `meta.question_advisory_subagents` is present you MUST process every
+   payload: treat each entry as spawn-ready advisory work with `title`, `agent`,
+   `prompt`, and `context`, and pass its prompt unchanged. Obey
+   `meta.question_advisory_host_action`: `spawn_subagents` means parallel support
+   was declared; `dispatch_subagents_if_supported` means use native parallel
+   dispatch when available and sequential fallback otherwise;
+   `process_payloads_sequentially` means ordered processing is required. This is
+   required regardless of mode—the payloads themselves are the work contract,
+   while the host action selects the execution strategy. Never reconstruct
+   prompts from prose. Preserve the original question text while children run.
 
    **Submitting fan-out results back (re-entry)**:
    When the originating `meta` carries a `fanout_id` (e.g.
@@ -632,6 +628,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Append `[refined]` to the prefix when sending the structured payload to
    MCP (e.g., `[from-user][refined]`). MCP treats refined answers as
    high-confidence ground truth for ambiguity scoring.
+   When the refined answer explicitly closes the interview, add the language-independent
+   `[closure]` marker: `[from-user][refined][closure]`. Do not encode closure by
+   matching natural-language phrases; the MCP handler treats this marker as the
+   structured human decision and all other answers continue through normal routing.
 
 6. **Keep a visible ambiguity ledger**:
    Track independent ambiguity tracks (scope, constraints, outputs, verification).

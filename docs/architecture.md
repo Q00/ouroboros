@@ -27,12 +27,12 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 │  │     REGISTRY        │     │                     │     │      LAYER           │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Skills      │──┼─────┼─▶│   Seed Spec    │──┼─────┼─▶│   TUI Dashboard │  │                 │
-│  │  │   (9)         │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
+│  │  │   (22)        │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  │                     │     │                     │     │                     │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Agents      │──┼─────┼─▶│  Acceptance    │──┼─────┼─▶│   CLI Interface│  │                 │
-│  │  │   (9)         │  │     │  │  Criteria Tree │  │     │  │   (Typer)    │  │                 │
+│  │  │   (21)        │  │     │  │  Criteria Tree │  │     │  │   (Typer)    │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  └─────────────────────┘     └─────────────────────┘     └─────────────────────┘                 │
 │           │                         │                         │                                 │
@@ -44,8 +44,8 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 │  │    EXECUTION LAYER   │     │    STATE LAYER     │     │    ORCHESTRATION    │                 │
 │  │                     │     │                     │     │      LAYER         │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
-│  │  │ 7 Execution  │  │     │  │ Event Store  │  │     │  │ 6-Phase       │  │                 │
-│  │  │   Modes      │  │     │  │  (SQLite)    │  │     │  │ Pipeline      │  │                 │
+│  │  │ Execution    │  │     │  │ Event Store  │  │     │  │ 6-Phase       │  │                 │
+│  │  │   Engine     │  │     │  │  (SQLite)    │  │     │  │ Pipeline      │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  │                     │     │                     │     │                     │                 │
 │  │  ┌───────────────┐  │     │  │ Checkpoint   │  │     │  │ PAL Router    │  │                 │
@@ -60,8 +60,8 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ### 1. Skills & Agents Registry
 **Auto-discovery of bundled skills and agents that ship with Ouroboros core**
-- Skills: 14 core workflow skills (interview, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, status)
-- Agents: 9 specialized agents for different thinking modes
+- Skills: 22 core workflow skills (auto, brownfield, cancel, config, evaluate, evolve, help, interview, ooo, pm, publish, qa, ralph, resume-session, run, seed, setup, status, tutorial, unstuck, update, welcome)
+- Agents: 21 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)
 
@@ -94,9 +94,9 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 - SQLite event store with append-only writes
 - Full replay capability
 - Checkpoint system with compression
-- Disposable Memory content-addressed artifact bodies under
-  `.ouroboros/artifacts/`; the EventStore keeps only the bounded
-  `contract_id + artifact_ref` envelope
+- Disposable Memory artifact bodies in `.ouroboros/artifacts/artifacts.db`,
+  one row per contract; the EventStore keeps only the bounded envelope, which
+  names the contract and never the body
 - 5 optimized indexes for performance
 
 ### 5. Orchestration Layer
@@ -294,6 +294,11 @@ Key constraints:
 - `DEFAULT_MAX_DECOMPOSITION_DEPTH = 2`; any non-negative depth remains accepted through Seed/env/CLI for backward compatibility. Depths `0..4` may use Routing D crash replay: the maximum five-way tree has 780 child nodes and the completion/pause envelope is derived from that durable boundary. Larger values execute through the historical legacy parallel path without the Routing D resume-owner guarantee. At the configured cap a non-atomic unit executes as atomic with a recorded depth warning.
 - Failures are handled by an attempt-then-bounce loop (bounded retries + evaluation feedback) rather than ever-deeper pre-execution splitting
 - Children are dependency-sorted and executed within each level
+
+Delivery receipts are matched against completed runtime tool calls. Shell transport
+wrappers are normalized conservatively, including POSIX `sh -c` and native Windows
+PowerShell `-Command` wrappers, while trailing or executable PowerShell arguments are
+rejected. Command and test claims must still match successful journal entries exactly.
 
 Values above `4` remain executable on the legacy path, but cannot authorize
 Routing D route switching or its crash-resumable parallel owner. Reducing the

@@ -147,7 +147,7 @@ async def test_question_generation_failure_declined_retry_persists_aborted_state
     state = InterviewState(interview_id="interview_question_failure")
     engine = FakeEngine()
 
-    final_state = await _run_interview_loop(engine, state)
+    final_state = (await _run_interview_loop(engine, state)).state
 
     assert final_state.status == InterviewStatus.ABORTED
     assert final_state.rounds == []
@@ -229,7 +229,7 @@ async def test_empty_interview_response_retries_same_hitl_request_without_cancel
     store = FakeEventStore()
     engine = FakeEngine()
 
-    final_state = await _run_interview_loop(engine, state, event_store=store)
+    final_state = (await _run_interview_loop(engine, state, event_store=store)).state
 
     events = [event for batch in store.batches for event in batch]
     assert [event.type for event in events] == [
@@ -286,7 +286,7 @@ async def test_rejected_interview_response_retries_without_answered_event(
     store = FakeEventStore()
     engine = FakeEngine()
 
-    final_state = await _run_interview_loop(engine, state, event_store=store)
+    final_state = (await _run_interview_loop(engine, state, event_store=store)).state
 
     events = [event for batch in store.batches for event in batch]
     assert [event.type for event in events] == [
@@ -382,7 +382,7 @@ async def test_interview_loop_records_and_saves_answer_when_hitl_append_fails(
     store = StoreFailsAfterSave()
     engine = FakeEngine()
 
-    final_state = await _run_interview_loop(engine, state, event_store=store)
+    final_state = (await _run_interview_loop(engine, state, event_store=store)).state
 
     assert store.calls == 1
     assert order == ["save", "append"]

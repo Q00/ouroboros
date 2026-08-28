@@ -63,10 +63,9 @@ def _tool_restriction_support_for_request(
     tools: list[str],
 ) -> ParamSupport:
     """Return truthful support for this concrete tools allow-list request."""
-    support = capabilities.tool_restriction_support
-    if tools == [] and support == ParamSupport.TRANSLATED:
-        return ParamSupport.IGNORED
-    return support
+    if tools == []:
+        return capabilities.empty_tool_restriction_support
+    return capabilities.tool_restriction_support
 
 
 def negotiate_execution_params(

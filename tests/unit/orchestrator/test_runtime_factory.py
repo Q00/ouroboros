@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import subprocess
+import time
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +18,7 @@ from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.runtime_factory import (
     create_agent_runtime,
+    create_agent_runtime_async,
     resolve_agent_runtime_backend,
 )
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
@@ -57,6 +61,36 @@ class TestResolveAgentRuntimeBackend:
         """Raises for unsupported backends."""
         with pytest.raises(ValueError):
             resolve_agent_runtime_backend("unknown")
+
+
+@pytest.mark.asyncio
+async def test_async_factory_does_not_block_event_loop_during_pi_capability_probe() -> None:
+    def slow_probe(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        time.sleep(0.2)
+        return subprocess.CompletedProcess(
+            args=["/tmp/pi", "--help"],
+            returncode=0,
+            stdout="Usage: pi [options]",
+            stderr="",
+        )
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    with patch("ouroboros.orchestrator.pi_runtime.subprocess.run", side_effect=slow_probe):
+        runtime_task = asyncio.create_task(
+            create_agent_runtime_async(
+                create_agent_runtime,
+                backend="pi",
+                cli_path="/tmp/pi",
+                cwd="/tmp/project",
+            )
+        )
+        await asyncio.sleep(0.02)
+        heartbeat_elapsed = loop.time() - started_at
+        runtime = await runtime_task
+
+    assert heartbeat_elapsed < 0.1
+    assert runtime.runtime_backend == "pi"
 
 
 class TestCreateAgentRuntime:

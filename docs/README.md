@@ -26,10 +26,12 @@ replayable execution contract on your choice of runtime backend.
 - [Codex CLI (한국어)](./runtime-guides/codex.ko.md) - 같은 문서의 한국어판
 - [GitHub Copilot CLI (한국어)](./runtime-guides/copilot.ko.md) - 같은 문서의 한국어판
 - [Kiro CLI (한국어)](./runtime-guides/kiro.ko.md) - 같은 문서의 한국어판
+- [Goose (한국어)](./runtime-guides/goose.ko.md) - 같은 문서의 한국어판
 
 ### Architecture
 
 - [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
+- [Native-Windows Codex Desktop HTTP task persistence](./rfc/windows-codex-desktop-http-task.md) - Proposed explicit opt-in loopback HTTP MCP task for native Codex Desktop
 - [Routing B — Route Admission](./rfc/routing-b-route-admission.md) - Deterministic, provider-neutral route contract and Admission Kernel
 - [Routing C — Compatibility Projection](./rfc/routing-c-route-compat.md) - Bridge existing model/effort routing into the Admission Kernel
 - [Routing D — Bounded Escalation](./rfc/routing-d-bounded-escalation.md) - Route observations and finite next-route decisions
@@ -56,6 +58,7 @@ replayable execution contract on your choice of runtime backend.
 - [Hidden-Checklist Convergence](./hidden-checklist-convergence/architecture.md) - Run → evaluation → bounded Ralph chaining with hidden harness grading inputs
 - [Hidden-Checklist Convergence (简体中文)](./hidden-checklist-convergence/README.zh-CN.md) - 同一设计的中文说明
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
+- [DeepSeek Harness Integration](./guides/deepseek-harness.md) - Both directions: the installable `dsh` plugin, and the `dsh` LLM backend
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
@@ -64,7 +67,11 @@ replayable execution contract on your choice of runtime backend.
 ### Contributing
 
 - [Contributing Guide](../CONTRIBUTING.md) - How to set up, code, test, and submit PRs
+- [The Development Loop](./contributing/developing.md) - Run your own code, not the published package: local MCP, config, state, fastest verification per change type
+- [Review Conventions](./contributing/review-conventions.md) - What the review bot demands, with evidence from real reviews
+- [CI Gates and Branch Protection](./contributing/ci-gates.md) - Required checks, local reproduction, release order
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
+- [Source Tour](./contributing/source-tour.md) - Three core mechanisms mapped to file:line coordinates, for teardown writers and reviewers
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
 - [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
@@ -106,7 +113,7 @@ for current AgentOS sequencing.
 ### Core Principles
 
 - **Frugal by default, rigorous in verification** - Start with the simplest approach, escalate only when needed
-- **Ambiguity threshold** - Requirements must have ambiguity score <= 0.2 before execution begins
+- **Ambiguity threshold** - A requirement scoring above 0.2 does not proceed to Seed generation unless `force` is passed explicitly
 - **Lateral thinking** - When stuck, switch persona and think differently rather than retry harder
 
 ## Quick Links

@@ -7,7 +7,7 @@
         "--python",
         ">=3.12",
         "--from",
-        "ouroboros-ai[mcp]",
+        "ouroboros-ai[mcp]==0.51.16",
         "ouroboros",
         "mcp",
         "serve",

@@ -93,8 +93,13 @@ _VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
         "SCOPE_CREEP",
         "STALL",
         "BLOCKED",
+        # Kept in sync by hand with FailureClass: failure_taxonomy imports this
+        # module, so the vocabulary cannot be derived from the enum here.
+        "TRANSCRIPT_MISSING_INFRASTRUCTURE",
     }
 )
+
+_UNAVAILABLE_FAILURE_CLASS = "TRANSCRIPT_MISSING_INFRASTRUCTURE"
 
 
 class VerifierStatus(StrEnum):
@@ -103,6 +108,7 @@ class VerifierStatus(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
     BLOCKED = "BLOCKED"
+    UNAVAILABLE = "UNAVAILABLE"
 
 
 class RetryAdmission(StrEnum):
@@ -184,6 +190,21 @@ class VerifierVerdict:
                 f"not a recognized taxonomy value. Valid: {valid}, or None."
             )
             raise VerifierContractError(msg)
+        unavailable_claimed = (
+            self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            or status is VerifierStatus.UNAVAILABLE
+            or (not self.passed and retry_admission is RetryAdmission.ACCEPT)
+        )
+        unavailable_valid = (
+            not self.passed
+            and self.failure_class == _UNAVAILABLE_FAILURE_CLASS
+            and status is VerifierStatus.UNAVAILABLE
+            and retry_admission is RetryAdmission.ACCEPT
+        )
+        if unavailable_claimed and not unavailable_valid:
+            raise VerifierContractError(
+                "UNAVAILABLE requires TRANSCRIPT_MISSING_INFRASTRUCTURE and ACCEPT"
+            )
         if self.passed and status is not VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=True) must have status PASS"
             raise VerifierContractError(msg)
@@ -193,8 +214,12 @@ class VerifierVerdict:
         if not self.passed and status is VerifierStatus.PASS:
             msg = "VerifierVerdict(passed=False) cannot have status PASS"
             raise VerifierContractError(msg)
-        if not self.passed and retry_admission is RetryAdmission.ACCEPT:
-            msg = "VerifierVerdict(passed=False) cannot have retry_admission ACCEPT"
+        if (
+            not self.passed
+            and retry_admission is RetryAdmission.ACCEPT
+            and status is not VerifierStatus.UNAVAILABLE
+        ):
+            msg = "Only an unavailable verifier may continue without retry"
             raise VerifierContractError(msg)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "retry_admission", retry_admission)
@@ -208,11 +233,13 @@ def _normalize_verifier_status(
     failure_class: str | None,
 ) -> VerifierStatus:
     if status is None:
-        return (
-            VerifierStatus.PASS
-            if passed
-            else (VerifierStatus.BLOCKED if failure_class == "BLOCKED" else VerifierStatus.FAIL)
-        )
+        if passed:
+            return VerifierStatus.PASS
+        if failure_class == "BLOCKED":
+            return VerifierStatus.BLOCKED
+        if failure_class == _UNAVAILABLE_FAILURE_CLASS:
+            return VerifierStatus.UNAVAILABLE
+        return VerifierStatus.FAIL
     try:
         return VerifierStatus(status)
     except ValueError as exc:
@@ -257,6 +284,8 @@ def _normalize_evidence_used(evidence_used: tuple[str, ...]) -> tuple[str, ...]:
 def _default_retry_admission_for_failure_class(
     failure_class: str | None,
 ) -> RetryAdmission:
+    if failure_class == _UNAVAILABLE_FAILURE_CLASS:
+        return RetryAdmission.ACCEPT
     if failure_class == "FABRICATION_SUSPECTED":
         return RetryAdmission.ESCALATE_MODEL
     if failure_class in {"SCOPE_CREEP", "STALL"}:

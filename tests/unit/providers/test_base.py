@@ -160,6 +160,19 @@ class TestUsageInfo:
         assert usage.prompt_tokens == 100
         assert usage.completion_tokens == 50
         assert usage.total_tokens == 150
+        assert usage.unallocated_tokens == 0
+
+    def test_usage_info_explicitly_preserves_unallocated_authority(self) -> None:
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            unallocated_tokens=12,
+        )
+
+        assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+        assert usage.unallocated_tokens == 12
+        assert usage.total_tokens + usage.unallocated_tokens == 132
 
     def test_usage_info_is_frozen(self) -> None:
         """UsageInfo is immutable."""

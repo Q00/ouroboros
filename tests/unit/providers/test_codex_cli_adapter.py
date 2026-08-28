@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import signal
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -16,7 +16,11 @@ from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
-from ouroboros.providers.codex_cli_stream import collect_stream_lines, terminate_runtime_process
+from ouroboros.providers.codex_cli_stream import (
+    DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS,
+    collect_stream_lines,
+    terminate_runtime_process,
+)
 
 
 class _FakeStream:
@@ -525,11 +529,18 @@ class TestCodexCliLLMAdapter:
         (codex_home / "custom.config.toml").write_text(
             '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
         )
+        # Shrink the probe budget (and the CLI's stall) rather than waiting out
+        # the production 5s grace period; the contract under test is that any
+        # overrun is uncertainty, not the length of the overrun.
+        monkeypatch.setattr(
+            "ouroboros.codex.runtime_profile.HELP_PROBE_TIMEOUT_SECONDS",
+            0.2,
+        )
         cli = self._write_profile_help_cli(
             tmp_path / "codex-slow-unified",
             "  -p, --profile <CONFIG_PROFILE_V2>\n"
             "          Layer $CODEX_HOME/<name>.config.toml on top of the base user config",
-            delay_seconds=5.25,
+            delay_seconds=1.0,
         )
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
@@ -776,12 +787,17 @@ class TestCodexCliLLMAdapter:
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
 
-        command = adapter._build_command(
-            output_last_message_path="/tmp/out.txt",
-            output_schema_path=None,
-            model=None,
-            profile="custom",
-        )
+        # Pin the legacy contract instead of probing whichever ``codex`` happens
+        # to be installed on the machine running the tests.
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=False
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
 
         assert command[-2:] == ["--profile", "custom"]
         assert "mcp_servers.ouroboros.enabled=false" in command
@@ -1364,6 +1380,45 @@ class TestCodexCliLLMAdapter:
         assert callback_events == [("thinking", "Still working...")]
         assert process_holder["process"].terminated or process_holder["process"].killed
 
+    @pytest.mark.asyncio
+    async def test_default_timeout_bounds_wait_when_no_timeout_configured(self) -> None:
+        """A wedged `codex` child must not block the generation forever.
+
+        ``timeout`` defaults to ``None`` and no production call site passes one,
+        so without the module-level ceiling ``await process.wait()`` is an
+        unbounded wait on the default path.
+        """
+        process_holder: dict[str, _FakeProcess] = {}
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        assert adapter._timeout is None
+        assert adapter._effective_timeout_seconds() == DEFAULT_CLI_COMPLETION_TIMEOUT_SECONDS
+        adapter._default_completion_timeout_seconds = 0.01
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            process = _FakeProcess(returncode=124, wait_forever=True)
+            process_holder["process"] = process
+            return process
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=10,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.01)
+        assert result.error.details["timeout_was_default"] is True
+        assert process_holder["process"].terminated or process_holder["process"].killed
+
     def test_build_command_does_not_include_prompt_as_positional_arg(self) -> None:
         """Prompt is fed via stdin, not as a positional CLI argument."""
         adapter = CodexCliLLMAdapter(cli_path="codex", cwd="/tmp/project")
@@ -1455,9 +1510,17 @@ class TestCodexCliLLMAdapter:
                 returncode=1,
             )
 
-        with patch(
-            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
-            side_effect=fake_create_subprocess_exec,
+        with (
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            # 502 is retryable, so the adapter walks its full backoff ladder —
+            # skip the real waiting, keep the retries.
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.sleep",
+                new=AsyncMock(),
+            ),
         ):
             result = await adapter.complete(
                 [Message(role=MessageRole.USER, content="Reflect on the run.")],
@@ -1852,3 +1915,170 @@ class TestLazyImport:
 
         with pytest.raises(AttributeError, match="NonExistent"):
             _ = providers.NonExistent
+
+
+class TestStreamDrainLifecycle:
+    """Regression tests for review blockers #1 and #2 on Codex CLI adapter."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_drain_uses_completion_deadline(self) -> None:
+        """A child that stops reading stdin is terminated at the completion deadline."""
+
+        class _BlockedStdin(_FakeStdin):
+            async def drain(self) -> None:
+                await asyncio.Future()
+
+        class _BlockedStdinProcess(_FakeProcess):
+            def __init__(self) -> None:
+                super().__init__(wait_forever=True)
+                self.stdin = _BlockedStdin()
+
+        process = _BlockedStdinProcess()
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _BlockedStdinProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            return process
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Block prompt delivery")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is True
+        assert process.terminated is True
+
+    @pytest.mark.asyncio
+    async def test_streaming_exited_parent_non_eof_pipe_bounded(self) -> None:
+        """Process exits but a descendant holds stdout open — must not hang.
+
+        Regression for review blocker #1: if the direct child exits but a
+        stream never reaches EOF, the adapter must still return within the
+        completion deadline rather than hanging indefinitely on the pipe drain.
+        """
+
+        class _NeverEOFStream:
+            """A stream whose read() hangs forever, simulating a held-open pipe."""
+
+            async def read(self, chunk_size: int = 16384) -> bytes:
+                await asyncio.Future()  # never returns
+                return b""  # unreachable
+
+        process_holder: dict[str, Any] = {}
+
+        class _ExitedButPipesOpenProcess:
+            def __init__(self) -> None:
+                self.stdin = _FakeStdin()
+                self.stdout = _NeverEOFStream()
+                self.stderr = _FakeStream("")
+                self.returncode = 0
+                self.terminated = False
+                self.killed = False
+
+            async def wait(self) -> int:
+                return 0  # process exited immediately
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(
+            *command: str, **kwargs: Any
+        ) -> _ExitedButPipesOpenProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            proc = _ExitedButPipesOpenProcess()
+            process_holder["process"] = proc
+            return proc
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang on pipe")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_was_default"] is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_timeout_returns_result_err_provider_error(self) -> None:
+        """Legacy communicate() timeout must be translated to Result.err(ProviderError).
+
+        Regression for review blocker #2: the legacy path must not propagate a
+        bare TimeoutError. It must terminate the child, clean temp artifacts,
+        and return a structured error with timed_out, timeout_seconds, and
+        timeout_was_default details.
+        """
+
+        class _HangingLegacyProcess:
+            """Legacy process whose communicate() hangs forever."""
+
+            def __init__(self) -> None:
+                self.stdin = _FakeStdin()
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+
+            async def communicate(self, _input: bytes | None = None) -> tuple[bytes, bytes]:
+                await asyncio.Future()  # never returns
+                return b"", b""  # unreachable
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+        adapter = CodexCliLLMAdapter(cli_path="codex", max_retries=1)
+        adapter._default_completion_timeout_seconds = 0.05
+
+        async def fake_create_subprocess_exec(
+            *command: str, **kwargs: Any
+        ) -> _HangingLegacyProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("partial output", encoding="utf-8")
+            return _HangingLegacyProcess()
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await asyncio.wait_for(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="Hang legacy")],
+                    CompletionConfig(model="default"),
+                ),
+                timeout=5,
+            )
+
+        assert result.is_err
+        assert result.error.details["timed_out"] is True
+        assert result.error.details["timeout_seconds"] == pytest.approx(0.05)
+        assert result.error.details["timeout_was_default"] is True
+        assert "timed out" in result.error.message

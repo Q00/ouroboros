@@ -6,6 +6,8 @@ from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -41,8 +43,11 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+from ouroboros.router import Resolved, ResolveRequest, resolve_skill_dispatch
+from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
 def _terminate_and_reap_test_process(process: subprocess.Popen[str] | None) -> None:
@@ -525,7 +530,7 @@ class TestCodexSetup:
     def test_register_codex_mcp_server_refreshes_legacy_direct_dev_entry(
         self, tmp_path: Path
     ) -> None:
-        """Earlier setup-owned direct executable configs should not become stuck."""
+        """Earlier setup-owned base-argv executable configs should not become stuck."""
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         codex_config.write_text(
@@ -539,7 +544,7 @@ class TestCodexSetup:
                     "",
                     "[mcp_servers.ouroboros]",
                     'command = "/old/venv/bin/ouroboros"',
-                    ('args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]'),
+                    'args = ["mcp", "serve"]',
                     "",
                 ]
             ),
@@ -559,6 +564,150 @@ class TestCodexSetup:
 
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert "/old/venv/bin/ouroboros" not in contents
+
+    def test_register_codex_mcp_server_refreshes_path_selected_legacy_direct_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A canonical PATH launcher and Codex env are a safe legacy migration seam."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[mcp_servers.ouroboros]",
+                    'command = "/home/operator/.local/bin/ouroboros"',
+                    'args = ["mcp", "serve"]',
+                    "",
+                    "[mcp_servers.ouroboros.env]",
+                    'OUROBOROS_AGENT_RUNTIME = "codex"',
+                    'OUROBOROS_LLM_BACKEND = "codex"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.51.4",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        assert "/home/operator/.local/bin/ouroboros" not in contents
+        assert "ouroboros-ai[mcp]" in contents
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_mismatched_env(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical argv does not make a launcher with foreign env setup-owned."""
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(selected))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "claude"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_direct_not_selected_by_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Canonical base argv stays user-managed when PATH selects another executable."""
+        configured = tmp_path / "custom" / "ouroboros"
+        selected = tmp_path / "path" / "ouroboros"
+        configured.parent.mkdir()
+        selected.parent.mkdir()
+        configured.touch()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(configured))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            if command == "ouroboros":
+                return str(selected)
+            return str(configured) if command == str(configured) else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
+    def test_register_codex_mcp_server_preserves_path_direct_with_process_controls(
+        self, tmp_path: Path
+    ) -> None:
+        """Process controls keep an otherwise canonical direct entry user-managed."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            'command = "/home/operator/.local/bin/ouroboros"\n'
+            'args = ["mcp", "serve"]\n'
+            "tool_timeout_sec = 600\n"
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._command_matches_path_program",
+                return_value=True,
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
 
     def test_register_codex_mcp_server_preserves_custom_python_module_by_default(
         self, tmp_path: Path
@@ -4473,6 +4622,85 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_native_windows_auto_skips_persistent_mcp_registration(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="auto") is True
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_native_windows_stdio_fails_closed(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="stdio") is False
+
+    def test_native_windows_http_mode_writes_explicit_loopback_url(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is True
+
+        config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config
+
+    def test_native_windows_http_fails_without_launchable_mcp(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+            patch("ouroboros.cli.commands.setup._codex_release_mcp_launcher", return_value=None),
+            patch("ouroboros.cli.commands.setup._is_dev_ouroboros_build", return_value=False),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is False
+
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+    def test_native_windows_http_repairs_endpointless_entry(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[mcp_servers.ouroboros]\n", encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._codex_release_mcp_launcher",
+                return_value=("uvx", ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]),
+            ),
+            patch("ouroboros.cli.windows_codex_mcp._launcher_is_usable", return_value=True),
+        ):
+            assert setup_cmd._register_codex_mcp_server(mode="http") is True
+
+        assert 'url = "http://127.0.0.1:8765/mcp"' in config.read_text(encoding="utf-8")
+
+    def test_windows_prepared_file_ignores_synthetic_posix_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with patch.object(runtime_activation.os, "name", "nt"):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
+    def test_posix_prepared_file_still_rejects_broader_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.yaml"
+
+        with (
+            patch.object(runtime_activation.os, "name", "posix"),
+            pytest.raises(OSError, match="Prepared file mode exceeds"),
+        ):
+            runtime_activation._validate_prepared_mode(
+                path,
+                0o666,
+                requested_mode=0o600,
+                preserve_exact_mode=False,
+            )
+
     @pytest.mark.parametrize(
         ("persisted", "profile"),
         [("claude_mcp", "claude-cli"), ("claude", "claude")],
@@ -7697,6 +7925,417 @@ class TestHermesSetup:
         mock_register.assert_called_once()
         assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
+    def test_setup_hermes_reports_failure_when_required_skills_are_not_installed(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_runtime_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_runtime_config, encoding="utf-8")
+        hermes_config = tmp_path / ".hermes" / "config.yaml"
+        hermes_config.parent.mkdir()
+        original_hermes_config = "mcp_servers:\n  existing:\n    command: keep\n"
+        hermes_config.write_text(original_hermes_config, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_hermes_artifacts",
+                return_value=False,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as mock_register,
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        output = capsys.readouterr().out
+        assert result is False
+        assert "activation incomplete" in output
+        assert "Configured Hermes runtime" not in output
+        assert config_path.read_text(encoding="utf-8") == original_runtime_config
+        assert hermes_config.read_text(encoding="utf-8") == original_hermes_config
+        mock_register.assert_not_called()
+
+    @pytest.mark.parametrize("target_existed", (False, True))
+    def test_setup_hermes_rolls_back_skills_when_activation_fails(
+        self, tmp_path: Path, target_existed: bool
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_run = source_skills / "run"
+        source_run.mkdir(parents=True)
+        source_run.joinpath("SKILL.md").write_text("fresh skill\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        if target_existed:
+            target.joinpath("run").mkdir(parents=True)
+            target.joinpath("run", "SKILL.md").write_text("operator generation\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        if target_existed:
+            assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == (
+                "operator generation\n"
+            )
+        else:
+            assert not target.exists()
+
+    def test_setup_hermes_failed_first_publication_leaves_no_unactivated_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        real_replace = os.replace
+
+        def interrupt_after_first_publication(src, dst):
+            result = real_replace(src, dst)
+            if Path(dst) == target and Path(src).name.startswith(".ouroboros-skills-"):
+                raise OSError("committed first publication")
+            return result
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.os.replace",
+                side_effect=interrupt_after_first_publication,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert not target.exists()
+        register.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == (
+            "orchestrator:\n  runtime_backend: claude\n"
+        )
+
+    def test_setup_hermes_rolls_back_when_post_publication_snapshot_fails(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        original_snapshot = setup_cmd._snapshot_path
+
+        def fail_published_snapshot(path: Path, **kwargs):
+            skill = target / "run" / "SKILL.md"
+            if path == target and skill.exists() and skill.read_text(encoding="utf-8") == "fresh\n":
+                raise OSError("synthetic post-publication snapshot failure")
+            return original_snapshot(path, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._snapshot_path",
+                side_effect=fail_published_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server") as register,
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "previous\n"
+        assert config_path.read_text(encoding="utf-8") == original_config
+        register.assert_not_called()
+
+    def test_setup_hermes_preserves_edit_after_publication_before_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        from ouroboros.hermes.artifacts import install_hermes_skills
+
+        real_install = install_hermes_skills
+
+        def publish_then_operator_edit(**kwargs):
+            receipt = real_install(**kwargs)
+            target.joinpath("operator-after-publish.txt").write_text("preserve\n", encoding="utf-8")
+            return receipt
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.hermes.artifacts.install_hermes_skills",
+                side_effect=publish_then_operator_edit,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("operator-after-publish.txt").read_text(encoding="utf-8") == (
+            "preserve\n"
+        )
+
+    def test_setup_hermes_rollback_staging_failure_keeps_published_generation(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=OSError("synthetic staging write failure"),
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("run", "SKILL.md").read_text(encoding="utf-8") == "published\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_revalidates_after_staging(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: claude\n", encoding="utf-8"
+        )
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("run").mkdir(parents=True)
+        target.joinpath("run", "SKILL.md").write_text("previous\n", encoding="utf-8")
+        real_restore = setup_cmd._restore_path_snapshot
+
+        def publish() -> bool:
+            target.joinpath("run", "SKILL.md").write_text("published\n", encoding="utf-8")
+            return True
+
+        def stage_then_mutate(path, snapshot, **kwargs) -> None:
+            real_restore(path, snapshot, **kwargs)
+            target.joinpath("concurrent.txt").write_text("preserve\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", side_effect=publish),
+            patch("ouroboros.cli.commands.setup._register_hermes_mcp_server", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._restore_path_snapshot",
+                side_effect=stage_then_mutate,
+            ),
+        ):
+            assert setup_cmd._setup_hermes("/usr/local/bin/hermes") is False
+
+        assert target.joinpath("concurrent.txt").read_text(encoding="utf-8") == "preserve\n"
+        assert not tuple(target.parent.glob(".ouroboros-rollback-*"))
+
+    def test_setup_hermes_rollback_preserves_concurrent_symlink_target_update(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-state.txt"
+        external.write_text("before\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+
+        def fail_after_external_update(*, detected) -> bool:  # noqa: ARG001
+            external.write_text("concurrent\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_external_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "concurrent\n"
+
+    def test_setup_hermes_never_reads_nested_symlink_targets(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.mkdir(parents=True)
+        external = tmp_path / "operator-secret.txt"
+        external.write_text("secret\n", encoding="utf-8")
+        target.joinpath("operator-link").symlink_to(external)
+        real_read_bytes = Path.read_bytes
+
+        def refuse_external_read(path: Path) -> bytes:
+            if path == external:
+                raise AssertionError("nested symlink target was read")
+            return real_read_bytes(path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.read_bytes", refuse_external_read),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch("ouroboros.cli.commands.setup._install_hermes_artifacts", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                return_value=False,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-link").is_symlink()
+        assert external.read_text(encoding="utf-8") == "secret\n"
+
+    def test_setup_hermes_rollback_preserves_concurrent_managed_tree_edits(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("orchestrator:\n  runtime_backend: claude\n", encoding="utf-8")
+        source_skills = tmp_path / "packaged-skills"
+        source_skills.joinpath("run").mkdir(parents=True)
+        source_skills.joinpath("run", "SKILL.md").write_text("fresh\n", encoding="utf-8")
+        target = tmp_path / ".hermes" / "skills" / "autonomous-ai-agents" / "ouroboros"
+        target.joinpath("operator-note.txt").parent.mkdir(parents=True)
+        target.joinpath("operator-note.txt").write_text("before\n", encoding="utf-8")
+
+        def fail_after_tree_update(*, detected) -> bool:  # noqa: ARG001
+            target.joinpath("operator-note.txt").write_text("concurrent\n", encoding="utf-8")
+            target.joinpath("new-note.txt").write_text("new concurrent file\n", encoding="utf-8")
+            return False
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+            patch(
+                "ouroboros.hermes.artifacts._repo_root_skills_dir",
+                return_value=source_skills,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_hermes_mcp_server",
+                side_effect=fail_after_tree_update,
+            ),
+        ):
+            result = setup_cmd._setup_hermes("/usr/local/bin/hermes")
+
+        assert result is False
+        assert target.joinpath("operator-note.txt").read_text(encoding="utf-8") == "concurrent\n"
+        assert target.joinpath("new-note.txt").read_text(encoding="utf-8") == (
+            "new concurrent file\n"
+        )
+
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
         config_dir = tmp_path / ".ouroboros"
@@ -7812,66 +8451,54 @@ class TestHermesSetup:
 class TestDisplayReposTable:
     """Tests for _display_repos_table rendering."""
 
-    def test_renders_without_error(self, capsys) -> None:
-        """Table renders without raising for typical repo data."""
-        repos = [
-            {"path": "/home/user/proj", "name": "proj", "desc": "A project", "is_default": True},
-            {"path": "/home/user/other", "name": "other", "desc": "", "is_default": False},
-        ]
-        # Should not raise
-        _display_repos_table(repos)
-
-    def test_renders_empty_list(self) -> None:
-        """Empty list renders without error."""
-        _display_repos_table([])
-
-    def test_renders_without_default_column(self) -> None:
-        """Can hide the default column."""
-        repos = [{"path": "/p", "name": "n", "desc": "d", "is_default": False}]
-        _display_repos_table(repos, show_default=False)
+    @pytest.mark.parametrize(
+        ("repos", "kwargs"),
+        [
+            pytest.param(
+                [
+                    {
+                        "path": "/home/user/proj",
+                        "name": "proj",
+                        "desc": "A project",
+                        "is_default": True,
+                    },
+                    {"path": "/home/user/other", "name": "other", "desc": "", "is_default": False},
+                ],
+                {},
+                id="typical-repo-data",
+            ),
+            pytest.param([], {}, id="empty-list"),
+            pytest.param(
+                [{"path": "/p", "name": "n", "desc": "d", "is_default": False}],
+                {"show_default": False},
+                id="without-default-column",
+            ),
+        ],
+    )
+    def test_renders_without_error(self, repos: list[dict], kwargs: dict) -> None:
+        """Table renders without raising, with or without the default column."""
+        _display_repos_table(repos, **kwargs)
 
 
 class TestPromptRepoSelection:
     """Tests for _prompt_repo_selection interactive input."""
 
-    def test_valid_number_selection(self) -> None:
-        """Selecting a valid number returns 0-based index."""
-        repos = [
-            {"path": "/a", "name": "a"},
-            {"path": "/b", "name": "b"},
-            {"path": "/c", "name": "c"},
-        ]
-        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="2"):
+    @pytest.mark.parametrize(
+        ("repo_count", "answer", "expected"),
+        [
+            pytest.param(3, "2", 1, id="valid-number-is-zero-based"),
+            pytest.param(2, "1", 0, id="first-repo"),
+            pytest.param(1, "skip", None, id="skip"),
+            pytest.param(1, "abc", None, id="non-number"),
+            pytest.param(1, "5", None, id="out-of-range"),
+        ],
+    )
+    def test_selection(self, repo_count: int, answer: str, expected: int | None) -> None:
+        """A valid number maps to a 0-based index; anything else returns None."""
+        repos = [{"path": f"/{chr(97 + i)}", "name": chr(97 + i)} for i in range(repo_count)]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value=answer):
             result = _prompt_repo_selection(repos)
-        assert result == 1  # 0-based
-
-    def test_skip_returns_none(self) -> None:
-        """Typing 'skip' returns None."""
-        repos = [{"path": "/a", "name": "a"}]
-        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="skip"):
-            result = _prompt_repo_selection(repos)
-        assert result is None
-
-    def test_invalid_input_returns_none(self) -> None:
-        """Invalid input (non-number) returns None."""
-        repos = [{"path": "/a", "name": "a"}]
-        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="abc"):
-            result = _prompt_repo_selection(repos)
-        assert result is None
-
-    def test_out_of_range_returns_none(self) -> None:
-        """Number out of range returns None."""
-        repos = [{"path": "/a", "name": "a"}]
-        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="5"):
-            result = _prompt_repo_selection(repos)
-        assert result is None
-
-    def test_first_repo_selection(self) -> None:
-        """Selecting 1 returns index 0."""
-        repos = [{"path": "/a", "name": "a"}, {"path": "/b", "name": "b"}]
-        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="1"):
-            result = _prompt_repo_selection(repos)
-        assert result == 0
+        assert result == expected
 
 
 # ── Brownfield async core logic tests ─────────────────────────────
@@ -7879,40 +8506,6 @@ class TestPromptRepoSelection:
 
 class TestScanAndRegisterRepos:
     """Tests for _scan_and_register_repos async function."""
-
-    @pytest.mark.asyncio
-    async def test_returns_repo_dicts(self) -> None:
-        """Returns list of dicts from scan_and_register."""
-        from ouroboros.persistence.brownfield import BrownfieldRepo
-
-        mock_repos = [
-            BrownfieldRepo(path="/home/user/proj", name="proj", desc="A project", is_default=True),
-            BrownfieldRepo(path="/home/user/lib", name="lib", desc="", is_default=False),
-        ]
-
-        mock_store = AsyncMock()
-        mock_store.initialize = AsyncMock()
-        mock_store.close = AsyncMock()
-        mock_store.clear_all = AsyncMock(return_value=0)
-
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.BrownfieldStore",
-                return_value=mock_store,
-            ),
-            patch(
-                "ouroboros.cli.commands.setup.scan_and_register",
-                new_callable=AsyncMock,
-                return_value=mock_repos,
-            ),
-        ):
-            result = await _scan_and_register_repos()
-
-        assert len(result) == 2
-        assert result[0]["name"] == "proj"
-        assert result[0]["is_default"] is True
-        assert result[1]["name"] == "lib"
-        assert result[1]["desc"] == ""
 
     @pytest.mark.asyncio
     async def test_empty_scan(self) -> None:
@@ -8250,31 +8843,12 @@ class TestScanRegisterPipeline:
             "is_default": True,
         }
         # None desc should be converted to ""
-        assert result[1]["desc"] == ""
-        assert result[1]["is_default"] is False
-
-    @pytest.mark.asyncio
-    async def test_store_closed_even_on_scan_error(self) -> None:
-        """Store is closed even if scan_and_register raises."""
-        mock_store = AsyncMock()
-        mock_store.initialize = AsyncMock()
-        mock_store.close = AsyncMock()
-
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.BrownfieldStore",
-                return_value=mock_store,
-            ),
-            patch(
-                "ouroboros.cli.commands.setup.scan_and_register",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("DB locked"),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="DB locked"):
-                await _scan_and_register_repos()
-
-        mock_store.close.assert_awaited_once()
+        assert result[1] == {
+            "path": "/home/user/lib",
+            "name": "lib",
+            "desc": "",
+            "is_default": False,
+        }
 
     @pytest.mark.asyncio
     async def test_many_repos_all_returned(self) -> None:
@@ -8468,15 +9042,41 @@ class TestOpenCodeMCPSetup:
 
     _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
-    def test_jsonc_comments_preserved(self, tmp_path: Path) -> None:
-        """JSONC with line and block comments parses without crashing and preserves non-MCP keys."""
+    @pytest.mark.parametrize(
+        ("raw_config", "preserved"),
+        [
+            pytest.param(
+                '{\n  // line comment\n  /* block comment */\n  "theme": "dark",\n  "mcp": {}\n}\n',
+                {"theme": "dark"},
+                id="jsonc-line-and-block-comments",
+            ),
+            pytest.param(
+                '{\n  "editor": "vim",\n  "mcp": {},\n}\n',
+                {"editor": "vim"},
+                id="jsonc-trailing-commas",
+            ),
+            pytest.param(
+                json.dumps(
+                    {"$schema": "https://example.com/schema.json", "plugin": ["foo"], "mcp": {}}
+                ),
+                {"$schema": "https://example.com/schema.json", "plugin": ["foo"]},
+                id="schema-and-plugin-keys",
+            ),
+            pytest.param(
+                '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {}\n}\n',
+                {"$schema": "https://opencode.ai/config.json"},
+                id="quoted-slashes-inside-values",
+            ),
+        ],
+    )
+    def test_foreign_keys_survive_setup(
+        self, tmp_path: Path, raw_config: str, preserved: dict
+    ) -> None:
+        """Non-MCP keys survive setup and the ouroboros entry is added."""
         config_dir = tmp_path / "opencode"
         config_dir.mkdir()
         config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            '{\n  // line comment\n  /* block comment */\n  "theme": "dark",\n  "mcp": {}\n}\n',
-            encoding="utf-8",
-        )
+        config_path.write_text(raw_config, encoding="utf-8")
 
         with (
             patch(self._OCD, return_value=config_dir),
@@ -8488,68 +9088,38 @@ class TestOpenCodeMCPSetup:
             _ensure_opencode_mcp_entry()
 
         data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert "theme" in data
-        assert data["theme"] == "dark"
+        for key, value in preserved.items():
+            assert key in data
+            assert data[key] == value
         assert "ouroboros" in data["mcp"]
 
-    def test_jsonc_trailing_commas_preserved(self, tmp_path: Path) -> None:
-        """JSONC with trailing commas parses correctly and preserves keys."""
+    @pytest.mark.parametrize(
+        "raw_config",
+        [
+            pytest.param(json.dumps({"mcp": ["invalid"]}), id="mcp-as-list"),
+            pytest.param(json.dumps({"mcp": {"ouroboros": "disabled"}}), id="entry-as-string"),
+            pytest.param(
+                json.dumps(
+                    {
+                        "mcp": {
+                            "ouroboros": {
+                                "type": "local",
+                                "command": ["ouroboros", "mcp", "serve"],
+                                "environment": "BROKEN_STRING_VALUE",
+                            },
+                        }
+                    }
+                ),
+                id="environment-as-string",
+            ),
+        ],
+    )
+    def test_malformed_shapes_are_replaced(self, tmp_path: Path, raw_config: str) -> None:
+        """Non-dict mcp/entry/environment shapes are repaired into a valid entry."""
         config_dir = tmp_path / "opencode"
         config_dir.mkdir()
         config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            '{\n  "editor": "vim",\n  "mcp": {},\n}\n',
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["editor"] == "vim"
-        assert "ouroboros" in data["mcp"]
-
-    def test_existing_keys_survive_setup(self, tmp_path: Path) -> None:
-        """Non-MCP keys like $schema and plugin survive _ensure_opencode_mcp_entry."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps(
-                {"$schema": "https://example.com/schema.json", "plugin": ["foo"], "mcp": {}}
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["$schema"] == "https://example.com/schema.json"
-        assert data["plugin"] == ["foo"]
-        assert "ouroboros" in data["mcp"]
-
-    def test_mcp_as_non_dict_is_replaced(self, tmp_path: Path) -> None:
-        """If mcp is a list instead of a dict, setup replaces it with a valid dict."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps({"mcp": ["invalid"]}),
-            encoding="utf-8",
-        )
+        config_path.write_text(raw_config, encoding="utf-8")
 
         with (
             patch(self._OCD, return_value=config_dir),
@@ -8563,85 +9133,10 @@ class TestOpenCodeMCPSetup:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert isinstance(data["mcp"], dict)
         assert "ouroboros" in data["mcp"]
-
-    def test_ouroboros_entry_as_non_dict_is_replaced(self, tmp_path: Path) -> None:
-        """If mcp.ouroboros is a string, setup replaces it with a proper entry."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps({"mcp": {"ouroboros": "disabled"}}),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert isinstance(data["mcp"]["ouroboros"], dict)
-        assert data["mcp"]["ouroboros"]["type"] == "local"
-
-    def test_quoted_slashes_in_config_values_survive(self, tmp_path: Path) -> None:
-        """URLs and patterns containing // or /* */ inside values are preserved."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {}\n}\n',
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["$schema"] == "https://opencode.ai/config.json"
-        assert "ouroboros" in data["mcp"]
-
-    def test_environment_as_string_is_replaced(self, tmp_path: Path) -> None:
-        """If mcp.ouroboros.environment is a string, setup replaces it with a valid dict."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "mcp": {
-                        "ouroboros": {
-                            "type": "local",
-                            "command": ["ouroboros", "mcp", "serve"],
-                            "environment": "BROKEN_STRING_VALUE",
-                        },
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        env = data["mcp"]["ouroboros"]["environment"]
-        assert isinstance(env, dict)
+        entry = data["mcp"]["ouroboros"]
+        assert isinstance(entry, dict)
+        assert entry["type"] == "local"
+        assert isinstance(entry["environment"], dict)
 
     def test_malformed_json_aborts_without_overwriting(self, tmp_path: Path) -> None:
         """If the config file is unparseable, setup must abort — not overwrite it."""
@@ -8730,8 +9225,19 @@ class TestOpenCodeMCPSetup:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert data["mcp"]["ouroboros"]["type"] == "local"
 
-    def test_command_as_bare_string_replaced_with_array(self, tmp_path: Path) -> None:
-        """A hand-edited command: "ouroboros" string must be replaced with array."""
+    @pytest.mark.parametrize(
+        "stale_command",
+        [
+            pytest.param("ouroboros mcp serve", id="bare-string"),
+            pytest.param([], id="empty-list"),
+            pytest.param([123, "mcp", "serve"], id="non-string-first-element"),
+            pytest.param([None, "mcp", "serve"], id="none-first-element"),
+        ],
+    )
+    def test_unusable_command_replaced_with_detected_array(
+        self, tmp_path: Path, stale_command: object
+    ) -> None:
+        """A command that is not a usable argv array is replaced by the detected launcher."""
         config_dir = tmp_path / "opencode"
         config_dir.mkdir()
         config_path = config_dir / "opencode.json"
@@ -8741,7 +9247,7 @@ class TestOpenCodeMCPSetup:
                     "mcp": {
                         "ouroboros": {
                             "type": "local",
-                            "command": "ouroboros mcp serve",
+                            "command": stale_command,
                             "environment": {},
                         },
                     }
@@ -8761,102 +9267,6 @@ class TestOpenCodeMCPSetup:
 
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert isinstance(data["mcp"]["ouroboros"]["command"], list)
-        assert data["mcp"]["ouroboros"]["command"] == ["ouroboros", "mcp", "serve"]
-
-    def test_empty_list_command_replaced(self, tmp_path: Path) -> None:
-        """An empty command array must be replaced with the detected launcher."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "mcp": {
-                        "ouroboros": {
-                            "type": "local",
-                            "command": [],
-                            "environment": {},
-                        },
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["mcp"]["ouroboros"]["command"] == ["ouroboros", "mcp", "serve"]
-
-    def test_non_string_first_element_replaced(self, tmp_path: Path) -> None:
-        """A command array with non-string first element must be replaced."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "mcp": {
-                        "ouroboros": {
-                            "type": "local",
-                            "command": [123, "mcp", "serve"],
-                            "environment": {},
-                        },
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["mcp"]["ouroboros"]["command"] == ["ouroboros", "mcp", "serve"]
-
-    def test_none_first_element_replaced(self, tmp_path: Path) -> None:
-        """A command array with null first element must be replaced."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        config_path = config_dir / "opencode.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "mcp": {
-                        "ouroboros": {
-                            "type": "local",
-                            "command": [None, "mcp", "serve"],
-                            "environment": {},
-                        },
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
         assert data["mcp"]["ouroboros"]["command"] == ["ouroboros", "mcp", "serve"]
 
 
@@ -9109,16 +9519,12 @@ class TestOpenCodeModePersisted:
             _setup_opencode("/usr/bin/opencode", mode=mode)
         return yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    def test_mode_plugin_persisted(self, tmp_path: Path) -> None:
-        result = self._run(tmp_path, "plugin")
-        assert result["orchestrator"]["opencode_mode"] == "plugin"
-        # Plugin mode sets runtime_backend=opencode so the MCP server's
+    @pytest.mark.parametrize("mode", ["plugin", "subprocess"])
+    def test_mode_persisted(self, tmp_path: Path, mode: str) -> None:
+        result = self._run(tmp_path, mode)
+        assert result["orchestrator"]["opencode_mode"] == mode
+        # Both branches set runtime_backend=opencode so the MCP server's
         # should_dispatch_via_plugin() gate recognises the OpenCode context.
-        assert result["orchestrator"]["runtime_backend"] == "opencode"
-
-    def test_mode_subprocess_persisted(self, tmp_path: Path) -> None:
-        result = self._run(tmp_path, "subprocess")
-        assert result["orchestrator"]["opencode_mode"] == "subprocess"
         assert result["orchestrator"]["runtime_backend"] == "opencode"
 
 
@@ -9134,50 +9540,35 @@ class TestFindOpencodeConfig:
 
     _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
-    def test_prefers_jsonc_over_json(self, tmp_path: Path) -> None:
-        """When both opencode.jsonc and opencode.json exist, .jsonc wins."""
+    @pytest.mark.parametrize(
+        ("existing", "expected_name", "expected_exists"),
+        [
+            pytest.param(
+                ("opencode.jsonc", "opencode.json"), "opencode.jsonc", True, id="jsonc-wins"
+            ),
+            pytest.param(("opencode.json",), "opencode.json", True, id="json-only"),
+            pytest.param(("opencode.jsonc",), "opencode.jsonc", True, id="jsonc-only"),
+            pytest.param((), "opencode.json", False, id="neither-defaults-to-json"),
+        ],
+    )
+    def test_config_detection(
+        self,
+        tmp_path: Path,
+        existing: tuple[str, ...],
+        expected_name: str,
+        expected_exists: bool,
+    ) -> None:
+        """.jsonc wins when present; opencode.json is the default for creation."""
         config_dir = tmp_path / "opencode"
         config_dir.mkdir()
-        (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
-        (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
+        for name in existing:
+            (config_dir / name).write_text("{}", encoding="utf-8")
 
         with patch(self._OCD, return_value=config_dir):
             result = _find_opencode_config()
 
-        assert result.name == "opencode.jsonc"
-
-    def test_falls_back_to_json(self, tmp_path: Path) -> None:
-        """When only opencode.json exists, it is returned."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
-
-        with patch(self._OCD, return_value=config_dir):
-            result = _find_opencode_config()
-
-        assert result.name == "opencode.json"
-
-    def test_returns_json_default_when_neither_exists(self, tmp_path: Path) -> None:
-        """When no config exists, returns opencode.json as default for creation."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-
-        with patch(self._OCD, return_value=config_dir):
-            result = _find_opencode_config()
-
-        assert result.name == "opencode.json"
-        assert not result.exists()
-
-    def test_only_jsonc_exists(self, tmp_path: Path) -> None:
-        """When only opencode.jsonc exists, it is returned."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
-
-        with patch(self._OCD, return_value=config_dir):
-            result = _find_opencode_config()
-
-        assert result.name == "opencode.jsonc"
+        assert result.name == expected_name
+        assert result.exists() is expected_exists
 
 
 class TestSetupJsoncDetection:
@@ -9208,28 +9599,10 @@ class TestSetupJsoncDetection:
             _ensure_opencode_mcp_entry()
 
         # Must write back to .jsonc, not create a separate .json
+        assert jsonc_path.exists()
         data = json.loads(jsonc_path.read_text(encoding="utf-8"))
         assert "ouroboros" in data["mcp"]
         assert data["theme"] == "dark"
-        assert not (config_dir / "opencode.json").exists()
-
-    def test_setup_does_not_create_json_when_jsonc_exists(self, tmp_path: Path) -> None:
-        """No stray opencode.json should be created when .jsonc is present."""
-        config_dir = tmp_path / "opencode"
-        config_dir.mkdir()
-        jsonc_path = config_dir / "opencode.jsonc"
-        jsonc_path.write_text('{"mcp": {}}', encoding="utf-8")
-
-        with (
-            patch(self._OCD, return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
-                return_value={"command": ["ouroboros", "mcp", "serve"]},
-            ),
-        ):
-            _ensure_opencode_mcp_entry()
-
-        assert jsonc_path.exists()
         assert not (config_dir / "opencode.json").exists()
 
 
@@ -9290,12 +9663,43 @@ class TestGeminiSetup:
         )
 
 
-class TestAntigravitySetup:
-    """Tests for the runtime-only Antigravity (agy) setup path."""
+_RUNTIME_ONLY_BACKENDS = [
+    pytest.param("antigravity", "agy", "/usr/bin/agy", "/opt/bin/agy", "/opt/bin/agy", id="agy"),
+    pytest.param("grok", "grok", "/usr/bin/grok", "/opt/bin/grok", "/opt/bin/grok", id="grok"),
+    pytest.param(
+        "zcode",
+        "zcode",
+        "/usr/local/bin/zcode",
+        "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        None,
+        id="zcode",
+    ),
+]
 
-    def test_setup_antigravity_writes_runtime_only_config(self, tmp_path: Path) -> None:
-        """Setup records the runtime + CLI path but leaves llm.backend alone
-        (antigravity is runtime-only), and the written config validates."""
+
+class TestRuntimeOnlyBackendSetup:
+    """The runtime-only backends (Antigravity/agy, Grok Build, Zcode).
+
+    Each records `orchestrator.runtime_backend` plus its `*_cli_path` without
+    ever touching the completion-only `llm.backend`, and each must dispatch
+    from `--runtime <name>` rather than failing with 'Unsupported runtime'.
+    """
+
+    @pytest.mark.parametrize(
+        ("runtime", "binary", "path_on_path", "setup_path", "expected_cli_path"),
+        _RUNTIME_ONLY_BACKENDS,
+    )
+    def test_setup_writes_runtime_only_config(
+        self,
+        tmp_path: Path,
+        runtime: str,
+        binary: str,
+        path_on_path: str,
+        setup_path: str,
+        expected_cli_path: str | None,
+    ) -> None:
+        """Setup records the runtime + CLI path but leaves llm.backend alone,
+        and the written config round-trips through schema validation."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
@@ -9304,57 +9708,88 @@ class TestAntigravitySetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
         ):
-            setup_cmd._setup_antigravity("/opt/bin/agy")
+            getattr(setup_cmd, f"_setup_{runtime}")(setup_path)
 
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "antigravity"
-        assert data["orchestrator"]["antigravity_cli_path"] == "/opt/bin/agy"
+        assert data["orchestrator"]["runtime_backend"] == runtime
+        written_path = data["orchestrator"][f"{runtime}_cli_path"]
+        assert written_path.endswith(Path(setup_path).name)
+        if expected_cli_path is not None:
+            assert written_path == expected_cli_path
         # Runtime-only: the completion-only llm.backend is never set to it.
-        assert data.get("llm", {}).get("backend") != "antigravity"
+        assert data.get("llm", {}).get("backend") != runtime
         # The persisted config must round-trip through schema validation.
         from ouroboros.config.models import OuroborosConfig
 
         OuroborosConfig.model_validate(data)
 
-    def test_detect_runtimes_includes_antigravity(self) -> None:
+    @pytest.mark.parametrize(
+        ("runtime", "binary", "path_on_path", "setup_path", "expected_cli_path"),
+        _RUNTIME_ONLY_BACKENDS,
+    )
+    def test_detect_runtimes_includes_backend(
+        self,
+        runtime: str,
+        binary: str,
+        path_on_path: str,
+        setup_path: str,
+        expected_cli_path: str | None,
+    ) -> None:
         with (
             patch(
                 "ouroboros.cli.commands.setup.shutil.which",
-                side_effect=lambda name: "/usr/bin/agy" if name == "agy" else None,
+                side_effect=lambda name: path_on_path if name == binary else None,
             ),
-            patch("ouroboros.config.get_antigravity_cli_path", return_value=None),
+            patch(f"ouroboros.config.get_{runtime}_cli_path", return_value=None),
         ):
             detected = setup_cmd._detect_runtimes()
 
-        assert detected["antigravity"] == "/usr/bin/agy"
+        assert detected[runtime] == path_on_path
 
-    def test_setup_runtime_antigravity_dispatches_not_unsupported(self, tmp_path: Path) -> None:
-        """`setup --runtime antigravity --non-interactive` configures the backend
+    @pytest.mark.parametrize(
+        ("runtime", "binary", "path_on_path", "setup_path", "expected_cli_path"),
+        _RUNTIME_ONLY_BACKENDS,
+    )
+    def test_setup_runtime_dispatches_not_unsupported(
+        self,
+        tmp_path: Path,
+        runtime: str,
+        binary: str,
+        path_on_path: str,
+        setup_path: str,
+        expected_cli_path: str | None,
+    ) -> None:
+        """`setup --runtime <name> --non-interactive` configures the backend
         rather than failing with 'Unsupported runtime' (the prior contract gap)."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        detected_path = expected_cli_path or path_on_path
         runner = CliRunner()
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={"antigravity": "/opt/bin/agy"},
+                return_value={runtime: detected_path},
             ),
         ):
-            result = runner.invoke(setup_cmd.app, ["--runtime", "antigravity", "--non-interactive"])
+            result = runner.invoke(setup_cmd.app, ["--runtime", runtime, "--non-interactive"])
 
         assert "Unsupported runtime" not in result.output
         assert result.exit_code == 0, result.output
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "antigravity"
+        assert data["orchestrator"]["runtime_backend"] == runtime
 
 
-class TestGrokSetup:
-    """Tests for the runtime-only Grok Build (grok) setup path."""
+class TestHostRuntimeSetup:
+    """``host`` has no CLI to detect at all: unlike the runtime-only backends
+    above, ``--runtime host`` must configure
+    ``orchestrator.runtime_backend: host`` with no ``*_cli_path`` and without
+    a `_detect_runtimes()` entry — this is what dsh's ``cordis.patch.yml``
+    now defaults to (see ``integrations/dsh-plugin``)."""
 
-    def test_setup_grok_writes_runtime_only_config(self, tmp_path: Path) -> None:
+    def test_setup_host_writes_runtime_only_config(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
@@ -9363,31 +9798,22 @@ class TestGrokSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
         ):
-            setup_cmd._setup_grok("/opt/bin/grok")
+            setup_cmd._setup_host()
 
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "grok"
-        assert data["orchestrator"]["grok_cli_path"] == "/opt/bin/grok"
-        assert data.get("llm", {}).get("backend") != "grok"
+        assert data["orchestrator"]["runtime_backend"] == "host"
+        assert "host_cli_path" not in data["orchestrator"]
+        # Runtime-only: the completion-only llm.backend is never set to it.
+        assert data.get("llm", {}).get("backend") != "host"
+        # The persisted config must round-trip through schema validation.
         from ouroboros.config.models import OuroborosConfig
 
         OuroborosConfig.model_validate(data)
 
-    def test_detect_runtimes_includes_grok(self) -> None:
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.shutil.which",
-                side_effect=lambda name: "/usr/bin/grok" if name == "grok" else None,
-            ),
-            patch("ouroboros.config.get_grok_cli_path", return_value=None),
-        ):
-            detected = setup_cmd._detect_runtimes()
-
-        assert detected["grok"] == "/usr/bin/grok"
-
-    def test_setup_runtime_grok_dispatches_not_unsupported(self, tmp_path: Path) -> None:
-        """`setup --runtime grok --non-interactive` configures the backend rather
-        than failing with 'Unsupported runtime' (the prior contract gap)."""
+    def test_setup_runtime_host_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+        """`setup --runtime host --non-interactive` configures the backend
+        rather than failing with 'Unsupported runtime' (the prior contract gap
+        docs/cli-reference.md advertised but the dispatcher never implemented)."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
@@ -9395,72 +9821,298 @@ class TestGrokSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={"grok": "/opt/bin/grok"},
-            ),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
         ):
-            result = runner.invoke(setup_cmd.app, ["--runtime", "grok", "--non-interactive"])
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
 
         assert "Unsupported runtime" not in result.output
         assert result.exit_code == 0, result.output
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "grok"
+        assert data["orchestrator"]["runtime_backend"] == "host"
 
+        assert "In your MCP host chat, type: ooo run" in result.output
+        assert "ouroboros run workflow seed.yaml" not in result.output
 
-class TestZcodeSetup:
-    """Tests for the runtime-only Zcode setup path."""
-
-    def test_setup_zcode_writes_runtime_only_config(self, tmp_path: Path) -> None:
+    def test_setup_host_migrates_setup_managed_codex_launcher(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: codex\n", encoding="utf-8"
+        )
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        codex_config.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines=(
+                    'command = "ouroboros"\n'
+                    'args = ["mcp", "serve", "--runtime", "codex", '
+                    '"--llm-backend", "codex"]'
+                )
+            ),
+            encoding="utf-8",
+        )
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
         ):
-            setup_cmd._setup_zcode("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
+            assert setup_cmd._setup_host() is True
 
+        entry = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"]["ouroboros"]
+        assert entry["args"] == [
+            "mcp",
+            "serve",
+            "--runtime",
+            "host",
+            "--llm-backend",
+            "codex",
+        ]
+        assert entry["env"] == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "codex",
+        }
         data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "zcode"
-        assert data["orchestrator"]["zcode_cli_path"].endswith("zcode.cjs")
-        assert data.get("llm", {}).get("backend") != "zcode"
-        from ouroboros.config.models import OuroborosConfig
+        assert data["orchestrator"]["runtime_backend"] == "host"
 
-        OuroborosConfig.model_validate(data)
-
-    def test_detect_runtimes_includes_zcode(self) -> None:
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.shutil.which",
-                side_effect=lambda name: "/usr/local/bin/zcode" if name == "zcode" else None,
-            ),
-            patch("ouroboros.config.get_zcode_cli_path", return_value=None),
-        ):
-            detected = setup_cmd._detect_runtimes()
-
-        assert detected["zcode"] == "/usr/local/bin/zcode"
-
-    def test_setup_runtime_zcode_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "opencode_command",
+        [
+            ["uvx", "ouroboros-ai[mcp]", "mcp", "serve"],
+            ["uvx", *setup_cmd._CODEX_UVX_MCP_ARGS],
+            [
+                "pipx",
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ],
+        ],
+        ids=["legacy-uvx", "isolated-uvx", "isolated-pipx"],
+    )
+    def test_setup_host_migrates_all_setup_managed_launchers(
+        self, tmp_path: Path, opencode_command: list[str]
+    ) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        kiro_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "uvx",
+                            "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_RUNTIME": "kiro",
+                                "OUROBOROS_LLM_BACKEND": "kiro",
+                                "KEEP": "kiro",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        copilot_path = tmp_path / ".copilot" / "mcp-config.json"
+        copilot_path.parent.mkdir(parents=True)
+        copilot_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "pipx",
+                            "args": ["run", "ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_AGENT_RUNTIME": "copilot",
+                                "OUROBOROS_LLM_BACKEND": "copilot",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        opencode_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "ouroboros": {
+                            "type": "local",
+                            "command": opencode_command,
+                            "environment": {
+                                "OUROBOROS_AGENT_RUNTIME": "opencode",
+                                "OUROBOROS_LLM_BACKEND": "opencode",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is True
+
+        kiro_env = json.loads(kiro_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"][
+            "env"
+        ]
+        assert kiro_env == {
+            "OUROBOROS_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "kiro",
+            "KEEP": "kiro",
+            "OUROBOROS_AGENT_RUNTIME": "host",
+        }
+        copilot_env = json.loads(copilot_path.read_text(encoding="utf-8"))["mcpServers"][
+            "ouroboros"
+        ]["env"]
+        assert copilot_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "copilot",
+        }
+        opencode_env = json.loads(opencode_path.read_text(encoding="utf-8"))["mcp"]["ouroboros"][
+            "environment"
+        ]
+        assert opencode_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "opencode",
+        }
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+    def test_setup_host_rolls_back_launchers_when_later_selector_is_user_managed(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: kiro\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        original_kiro = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": "uvx",
+                        "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                        "env": {"OUROBOROS_RUNTIME": "kiro"},
+                    }
+                }
+            }
+        )
+        kiro_path.write_text(original_kiro, encoding="utf-8")
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        original_opencode = json.dumps(
+            {
+                "mcp": {
+                    "ouroboros": {
+                        "type": "local",
+                        "command": ["docker", "run", "ouroboros"],
+                        "environment": {"OUROBOROS_AGENT_RUNTIME": "opencode"},
+                    }
+                }
+            }
+        )
+        opencode_path.write_text(original_opencode, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert kiro_path.read_text(encoding="utf-8") == original_kiro
+        assert opencode_path.read_text(encoding="utf-8") == original_opencode
+
+    def test_setup_host_rejects_user_managed_runtime_override(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        original_codex = (
+            '[mcp_servers.ouroboros]\ncommand = "/custom/mcp-wrapper"\n'
+            'args = ["serve", "--runtime", "codex"]\n'
+        )
+        codex_config.write_text(original_codex, encoding="utf-8")
+
         runner = CliRunner()
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={"zcode": "/usr/local/bin/zcode"},
-            ),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
         ):
-            result = runner.invoke(setup_cmd.app, ["--runtime", "zcode", "--non-interactive"])
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
 
-        assert "Unsupported runtime" not in result.output
-        assert result.exit_code == 0, result.output
-        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
-        assert data["orchestrator"]["runtime_backend"] == "zcode"
+        assert result.exit_code == 1
+        assert "user-managed" in result.output
+        assert "Setup complete" not in result.output
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == original_codex
+
+    @pytest.mark.parametrize(
+        ("command", "args"),
+        [
+            ("python", ["/opt/custom/server.py", "--runtime", "codex"]),
+            ("uv", ["run", "/opt/custom/server.py", "--runtime", "codex"]),
+            ("uvx", ["custom-package", "serve", "--runtime", "codex"]),
+        ],
+    )
+    def test_setup_host_preserves_custom_common_launcher(
+        self,
+        tmp_path: Path,
+        command: str,
+        args: list[str],
+    ) -> None:
+        """Common executable names do not prove setup ownership."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        original = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": command,
+                        "args": args,
+                        "env": {"OUROBOROS_LLM_BACKEND": "codex"},
+                    }
+                }
+            },
+            indent=2,
+        )
+        mcp_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert mcp_path.read_text(encoding="utf-8") == original
 
 
 class TestKiroSetup:
@@ -9818,62 +10470,6 @@ class TestGjcSetup:
         assert config_path.read_text(encoding="utf-8") == original
         mock_register.assert_not_called()
 
-    def test_setup_cli_with_runtime_kiro_flag(self, tmp_path: Path) -> None:
-        """`ouroboros setup --runtime kiro --non-interactive` runs the kiro
-        setup path without requiring user interaction."""
-        runner = CliRunner()
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": "/opt/bin/kiro-cli",
-                },
-            ),
-            patch("ouroboros.cli.commands.setup._setup_kiro") as mock_setup,
-        ):
-            result = runner.invoke(
-                setup_cmd.app,
-                ["--runtime", "kiro", "--non-interactive"],
-            )
-
-        assert result.exit_code == 0, result.output
-        mock_setup.assert_called_once_with("/opt/bin/kiro-cli")
-
-    def test_setup_cli_kiro_missing_binary_errors_cleanly(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Explicit --runtime kiro with no kiro-cli should exit non-zero
-        instead of crashing or silently succeeding."""
-        runner = CliRunner()
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": None,
-                },
-            ),
-        ):
-            result = runner.invoke(
-                setup_cmd.app,
-                ["--runtime", "kiro", "--non-interactive"],
-            )
-
-        assert result.exit_code != 0
-        assert "Kiro CLI not found" in result.output
-
     def test_setup_cli_propagates_kiro_activation_failure(self, tmp_path: Path) -> None:
         """A host-registration failure must become a non-zero CLI result."""
         runner = CliRunner()
@@ -10075,18 +10671,41 @@ class TestCopilotSetup:
         # Explicit, never-shipped override is preserved (no over-broadening).
         assert config["resilience"]["reflect_model"] == "gpt-5-mini"
 
-    def test_setup_copilot_aborts_on_non_mapping_sections(self, tmp_path: Path) -> None:
-        """Malformed sections must not be clobbered or crash setup."""
+    @pytest.mark.parametrize(
+        "original",
+        [
+            pytest.param(
+                yaml.safe_dump(
+                    {
+                        "orchestrator": ["keep", "me"],
+                        "llm": {"backend": "claude_code"},
+                    },
+                    sort_keys=False,
+                ),
+                id="non-mapping-orchestrator",
+            ),
+            pytest.param(
+                yaml.safe_dump(
+                    {
+                        "orchestrator": {"runtime_backend": "claude"},
+                        "llm": {"backend": "claude_code"},
+                        "consensus": ["keep", "me"],
+                    },
+                    sort_keys=False,
+                ),
+                id="non-mapping-model-section",
+            ),
+            pytest.param("- not-a-mapping\n- keep-me\n", id="non-mapping-config-root"),
+        ],
+    )
+    def test_setup_copilot_aborts_on_non_mapping_config(
+        self, tmp_path: Path, original: str
+    ) -> None:
+        """Malformed sections are validated before rewrite — never clobbered,
+        never partially rewritten, and MCP registration never runs."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
-        original = yaml.safe_dump(
-            {
-                "orchestrator": ["keep", "me"],
-                "llm": {"backend": "claude_code"},
-            },
-            sort_keys=False,
-        )
         config_path.write_text(original, encoding="utf-8")
 
         with (
@@ -10097,62 +10716,6 @@ class TestCopilotSetup:
                 return_value=self._stub_models(),
             ),
             patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
-            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
-        ):
-            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
-
-        assert config_path.read_text(encoding="utf-8") == original
-        mock_register.assert_not_called()
-
-    def test_setup_copilot_aborts_on_non_mapping_model_sections(self, tmp_path: Path) -> None:
-        """Model-default sections are validated before rewrite."""
-        config_dir = tmp_path / ".ouroboros"
-        config_dir.mkdir()
-        config_path = config_dir / "config.yaml"
-        original = yaml.safe_dump(
-            {
-                "orchestrator": {"runtime_backend": "claude"},
-                "llm": {"backend": "claude_code"},
-                "consensus": ["keep", "me"],
-            },
-            sort_keys=False,
-        )
-        config_path.write_text(original, encoding="utf-8")
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch(
-                "ouroboros.copilot.model_discovery.list_copilot_models",
-                return_value=self._stub_models(),
-            ),
-            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
-            patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
-        ):
-            setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
-
-        assert config_path.read_text(encoding="utf-8") == original
-        mock_register.assert_not_called()
-
-    def test_setup_copilot_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
-        """Malformed config.yaml must not be clobbered or partially rewritten."""
-        config_dir = tmp_path / ".ouroboros"
-        config_dir.mkdir()
-        config_path = config_dir / "config.yaml"
-        original = "- not-a-mapping\n- keep-me\n"
-        config_path.write_text(original, encoding="utf-8")
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch(
-                "ouroboros.copilot.model_discovery.list_copilot_models",
-                return_value=self._stub_models(),
-            ),
-            patch(
-                "ouroboros.copilot.model_discovery.used_fallback",
-                return_value=False,
-            ),
             patch("ouroboros.cli.commands.setup._register_copilot_mcp_server") as mock_register,
         ):
             setup_cmd._setup_copilot("/opt/bin/copilot", non_interactive=True)
@@ -10536,114 +11099,271 @@ class TestCopilotSetup:
 
         assert bridge_path.stat().st_mtime_ns == first_mtime
 
-    def test_setup_cli_with_runtime_pi_flag(self, tmp_path: Path) -> None:
-        """`ouroboros setup --runtime pi --non-interactive` runs the Pi setup path."""
+    def test_pi_bridge_registers_argument_completions(self) -> None:
+        """The managed bridge should TAB-complete `/ooo` arguments.
+
+        `/ooo <TAB>` lists the dispatchable subcommands and `ooo run <TAB>`
+        lists Seed files from `~/.ouroboros/seeds/` as `run <quoted-absolute-path>`
+        so Pi's full-prefix replacement preserves the subcommand and the
+        completed value executes regardless of the Pi session cwd.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+
+        assert "getArgumentCompletions: argumentCompletions" in bridge_source
+        assert "function argumentCompletions(argumentPrefix: string)" in bridge_source
+        assert 'path.join(homedir(), ".ouroboros", "seeds")' in bridge_source
+        # Seed completion values carry `run <quoted path>` — Pi replaces the
+        # entire argument prefix with the value, so `run` must be part of it.
+        assert "value: `run ${quoted}`" in bridge_source
+        assert ".sort()" in bridge_source
+        assert 'tokens[0].toLowerCase() === "run"' in bridge_source
+
+    def test_pi_bridge_completions_mirror_dispatchable_skills(self) -> None:
+        """Completion subcommands must mirror dispatcher-eligible skills.
+
+        Eligibility is derived through ``resolve_skill_dispatch`` itself —
+        frontmatter loading, ``normalize_mcp_frontmatter`` validation, and
+        template resolution — instead of a textual ``mcp_tool:`` grep, so a
+        body example or an invalid/missing ``mcp_args`` mapping cannot make
+        an undispatchable skill look dispatchable.
+        """
+        bridge_source = setup_cmd._pi_ooo_bridge_source_text()
+        completed = set(re.findall(r'cmd: "([a-z0-9][a-z0-9_-]*)"', bridge_source))
+
+        with resolve_packaged_skills_dir(anchor_file=Path(__file__)) as skills_dir:
+            dispatchable = {
+                skill_dir.name
+                for skill_dir in skills_dir.iterdir()
+                if (skill_dir / "SKILL.md").is_file()
+                and isinstance(
+                    resolve_skill_dispatch(
+                        ResolveRequest(prompt=f"ooo {skill_dir.name}", cwd=Path.cwd())
+                    ),
+                    Resolved,
+                )
+            }
+
+        assert completed == dispatchable
+
+    async def test_pi_bridge_run_completion_value_round_trips_to_global_seed(
+        self, tmp_path: Path
+    ) -> None:
+        """Absolute Seed completion values must stay executable end to end.
+
+        The `run` dispatcher forwards ``seed_path`` unchanged and the seed
+        resolver treats relative paths as session-cwd-relative, degrading a
+        missing file to inline YAML. Completion therefore advertises
+        ``run <quoted-absolute-path>``; this test pins that contract from the
+        completed value through router resolution to seed loading.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        absolute_path = str(seeds_dir / "demo.yaml")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        # The completion value now carries `run <path>` — the full replacement
+        # that Pi will substitute for the argument prefix.
+        completed_value = f"run {absolute_path}"
+
+        resolved = resolve_skill_dispatch(
+            ResolveRequest(prompt=f"ooo {completed_value}", cwd=session_cwd)
+        )
+        assert isinstance(resolved, Resolved)
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            loaded = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": absolute_path},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+            bare_name = await ExecuteSeedHandler._resolve_seed_content(
+                arguments={"seed_path": "demo.yaml"},
+                resolved_cwd=session_cwd,
+                tool_name="ouroboros_execute_seed",
+            )
+
+        assert loaded.is_ok
+        assert loaded.value == "goal: demo\n"
+        # The pre-fix completion shape: a bare name never reaches the global
+        # store from a session cwd and degrades to inline YAML.
+        assert bare_name.is_ok
+        assert bare_name.value == "demo.yaml"
+
+    def test_pi_completion_value_survives_combined_autocomplete_provider_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Seed completion values remain dispatchable after Pi's full-prefix replacement.
+
+        Pi's ``CombinedAutocompleteProvider.applyCompletion`` replaces the
+        entire argument prefix with ``item.value``. For example, when a user
+        types ``/ooo run de<TAB>`` and selects a Seed completion, the argument
+        text ``run de`` is replaced wholesale with the item's ``value``.
+
+        Before the fix, ``value`` was just the absolute path, so the result
+        was ``/ooo /path/to/demo.yaml`` — which the shared dispatcher could
+        not recognize (no ``run`` subcommand). This regression test verifies
+        that the completed value, when applied as Pi does, produces a
+        dispatchable command.
+        """
+        seeds_dir = tmp_path / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: demo\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+
+        # --- Simulate Pi's CombinedAutocompleteProvider semantics ---
+        # The user types: /ooo run de
+        # argumentPrefix passed to getArgumentCompletions: "run de"
+        # The rendered bridge returns: { value: "run <absolute-path>", ... }
+        # Pi applies the completion: replaces "run de" with item.value.
+        # The final command dispatched: /ooo <item.value>
+
+        # The completion value as the bridge would render it (without
+        # shell-quoting since this path has no special chars):
+        completed_item_value = f"run {absolute_path}"
+
+        # Pi replaces the full argument prefix with item.value, making the
+        # dispatched command: `ooo <completed_item_value>`
+        dispatched_text = f"ooo {completed_item_value}"
+
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Pi full-prefix replacement produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+        # --- Verify the OLD (broken) behavior would fail ---
+        # Before the fix, value was just the absolute path (no 'run' prefix).
+        broken_item_value = absolute_path
+        broken_dispatched = f"ooo {broken_item_value}"
+        broken_result = resolve_skill_dispatch(
+            ResolveRequest(prompt=broken_dispatched, cwd=session_cwd)
+        )
+        # The absolute path alone is not a recognized skill subcommand
+        assert not isinstance(broken_result, Resolved), (
+            "Bare absolute path should NOT dispatch — it means Pi's replacement "
+            "lost the 'run' subcommand"
+        )
+
+    def test_pi_completion_value_with_quoted_path_survives_replacement(
+        self, tmp_path: Path
+    ) -> None:
+        """Every shlex-supported pathname character survives Pi replacement.
+
+        The rendered bridge uses POSIX single-argument quoting, including the
+        standard quote break for an embedded single quote. The dispatcher's
+        ``shlex.split`` must recover the exact original path without expanding
+        dollar signs or backticks or retaining escape characters.
+        """
+        seeds_dir = tmp_path / "my $projects`archive'\\data" / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True)
+        (seeds_dir / "demo.yaml").write_text("goal: quoted\n", encoding="utf-8")
+        session_cwd = tmp_path / "session"
+        session_cwd.mkdir()
+
+        absolute_path = str(seeds_dir / "demo.yaml")
+        quoted_path = shlex.quote(absolute_path)
+        completed_item_value = f"run {quoted_path}"
+
+        dispatched_text = f"ooo {completed_item_value}"
+        resolved = resolve_skill_dispatch(ResolveRequest(prompt=dispatched_text, cwd=session_cwd))
+        assert isinstance(resolved, Resolved), (
+            f"Quoted-path completion produced undispatchable command: "
+            f"{dispatched_text!r} -> {resolved!r}"
+        )
+        assert resolved.mcp_tool == "ouroboros_execute_seed"
+        assert resolved.mcp_args["seed_path"] == absolute_path
+
+
+class TestRuntimeFlagDispatch:
+    """`setup --runtime <name> --non-interactive` dispatch for the CLI-detected
+    runtimes (kiro, pi, copilot) — both the found and the missing-binary case."""
+
+    _EMPTY_DETECTION = {
+        "claude": None,
+        "codex": None,
+        "opencode": None,
+        "hermes": None,
+        "gemini": None,
+        "kiro": None,
+        "copilot": None,
+        "pi": None,
+    }
+
+    @pytest.mark.parametrize(
+        ("runtime", "setup_attr", "cli_path", "expected_kwargs"),
+        [
+            pytest.param("kiro", "_setup_kiro", "/opt/bin/kiro-cli", {}, id="kiro"),
+            pytest.param("pi", "_setup_pi", "/opt/bin/pi", {}, id="pi"),
+            pytest.param(
+                "copilot",
+                "_setup_copilot",
+                "/opt/bin/copilot",
+                {"non_interactive": True},
+                id="copilot",
+            ),
+        ],
+    )
+    def test_runtime_flag_runs_setup_path(
+        self,
+        tmp_path: Path,
+        runtime: str,
+        setup_attr: str,
+        cli_path: str,
+        expected_kwargs: dict,
+    ) -> None:
+        """The setup path runs with the detected binary and no user interaction."""
+        detected = dict(self._EMPTY_DETECTION, **{runtime: cli_path})
         runner = CliRunner()
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": None,
-                    "copilot": None,
-                    "pi": "/opt/bin/pi",
-                },
-            ),
-            patch("ouroboros.cli.commands.setup._setup_pi") as mock_setup,
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value=detected),
+            patch(f"ouroboros.cli.commands.setup.{setup_attr}") as mock_setup,
         ):
             result = runner.invoke(
                 setup_cmd.app,
-                ["--runtime", "pi", "--non-interactive"],
+                ["--runtime", runtime, "--non-interactive"],
             )
 
         assert result.exit_code == 0, result.output
-        mock_setup.assert_called_once_with("/opt/bin/pi")
+        mock_setup.assert_called_once_with(cli_path, **expected_kwargs)
 
-    def test_setup_cli_pi_missing_binary_errors_cleanly(self, tmp_path: Path) -> None:
-        """Explicit --runtime pi with no pi binary should exit non-zero."""
+    @pytest.mark.parametrize(
+        ("runtime", "message"),
+        [
+            pytest.param("kiro", "Kiro CLI not found", id="kiro"),
+            pytest.param("pi", "Pi CLI not found", id="pi"),
+            pytest.param("copilot", "Copilot CLI not found", id="copilot"),
+        ],
+    )
+    def test_missing_binary_errors_cleanly(
+        self, tmp_path: Path, runtime: str, message: str
+    ) -> None:
+        """An explicit --runtime with no binary exits non-zero instead of
+        crashing or silently succeeding."""
         runner = CliRunner()
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch(
                 "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": None,
-                    "copilot": None,
-                    "pi": None,
-                },
+                return_value=dict(self._EMPTY_DETECTION),
             ),
         ):
             result = runner.invoke(
                 setup_cmd.app,
-                ["--runtime", "pi", "--non-interactive"],
+                ["--runtime", runtime, "--non-interactive"],
             )
 
         assert result.exit_code != 0
-        assert "Pi CLI not found" in result.output
-
-    def test_setup_cli_with_runtime_copilot_flag(self, tmp_path: Path) -> None:
-        """`ouroboros setup --runtime copilot --non-interactive` runs the
-        copilot setup path without requiring user interaction."""
-        runner = CliRunner()
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": None,
-                    "copilot": "/opt/bin/copilot",
-                },
-            ),
-            patch("ouroboros.cli.commands.setup._setup_copilot") as mock_setup,
-        ):
-            result = runner.invoke(
-                setup_cmd.app,
-                ["--runtime", "copilot", "--non-interactive"],
-            )
-
-        assert result.exit_code == 0, result.output
-        mock_setup.assert_called_once_with("/opt/bin/copilot", non_interactive=True)
-
-    def test_setup_cli_copilot_missing_binary_errors_cleanly(self, tmp_path: Path) -> None:
-        """Explicit --runtime copilot with no copilot binary should exit non-zero."""
-        runner = CliRunner()
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch(
-                "ouroboros.cli.commands.setup._detect_runtimes",
-                return_value={
-                    "claude": None,
-                    "codex": None,
-                    "opencode": None,
-                    "hermes": None,
-                    "gemini": None,
-                    "kiro": None,
-                    "copilot": None,
-                },
-            ),
-        ):
-            result = runner.invoke(
-                setup_cmd.app,
-                ["--runtime", "copilot", "--non-interactive"],
-            )
-
-        assert result.exit_code != 0
-        assert "Copilot CLI not found" in result.output
+        assert message in result.output
 
 
 class TestNonInteractiveAutoSelect:

@@ -36,6 +36,13 @@ When the user invokes this skill:
      ouroboros update --yes
      ```
 
+     When the user actively uses both Claude Code and Codex, refresh both host
+     integrations without changing the configured execution backend:
+
+     ```bash
+     ouroboros update --yes --runtime all
+     ```
+
    Show the command's result. The native updater binds the package upgrade and
    post-update setup to one receipt-backed installation identity: manager,
    environment, recorded profile, and environment-local console script.
@@ -79,6 +86,11 @@ When the user invokes this skill:
   then the persisted `orchestrator.*_cli_path`, then PATH. The chosen exact
   executable is validated and reused for plugin/setup refresh so a stale PATH
   binary cannot replace an operator-selected runtime.
+- `--runtime all` refreshes the Claude and Codex plugin integrations plus
+  installed runtime artifacts without changing the configured execution
+  backend. Active Codex sessions still need a restart because Codex does not
+  currently retain an in-use plugin generation; Claude may use
+  `/reload-plugins` or restart.
 - `ouroboros update` supports `--check`, `--yes`, `--dry-run`,
   `--prerelease`, and `--runtime`; see `ouroboros update --help`.
 

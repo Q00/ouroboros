@@ -683,10 +683,14 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert payload["tool_name"] == "ouroboros_pm_interview"
 
     async def test_resume_with_answer_returns_subagent(self, handler) -> None:
+        # Every answer names its question, on every runtime: a turn persists
+        # nothing when it asks (RFC #2222 revision 4), so there is no stored
+        # question for the server to file an unnamed answer under.
         result = await handler.handle(
             {
                 "session_id": "sess-123",
                 "answer": "React + Node.js",
+                "last_question": "What stack?",
             }
         )
         assert result.is_ok

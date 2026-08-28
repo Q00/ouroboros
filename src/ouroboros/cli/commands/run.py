@@ -280,14 +280,28 @@ def _resolve_cli_project_dir(
     *,
     seed_data: dict[str, Any] | None = None,
     project_dir: Path | None = None,
+    fallback_dir: Path | None = None,
 ) -> Path:
-    """Resolve the project directory for CLI execution and verification."""
+    """Resolve the project directory for CLI execution and verification.
+
+    ``fallback_dir`` replaces the Seed file's own folder as the base used when
+    the Seed does not say where it belongs. Callers that hold a better answer
+    than "wherever the file sits" pass it — `init` passes the directory the
+    interview was run from — so a Seed written to the global store cannot turn
+    that store into a workspace. It stays a *fallback*: an explicit
+    ``project_dir``, Seed metadata, and a valid brownfield target all still win,
+    and every one of those decisions is made here, once.
+    """
     if project_dir is not None:
         return project_dir.expanduser().resolve()
 
     seed_data = seed_data or {}
     detected_root = _detect_project_root_from_seed_path(seed_file)
-    seed_base = detected_root or seed_file.parent.resolve()
+    seed_base = (
+        detected_root
+        or (fallback_dir.expanduser().resolve() if fallback_dir is not None else None)
+        or seed_file.parent.resolve()
+    )
     metadata_project_dir = _resolve_raw_metadata_project_dir(seed_data, stable_base=seed_base)
     if metadata_project_dir is not None:
         return _directory_for_runtime(metadata_project_dir)
@@ -585,6 +599,7 @@ async def _run_orchestrator(
     max_decomposition_depth: int | None = None,
     skip_completed: str | None = None,
     project_dir: Path | None = None,
+    project_fallback_dir: Path | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -600,11 +615,14 @@ async def _run_orchestrator(
         max_decomposition_depth: Optional recursive decomposition depth cap override.
         skip_completed: Optional path to a marker file for already-satisfied ACs.
         project_dir: Optional explicit project directory for seed path resolution.
+        project_fallback_dir: Directory to stand in for the Seed file's folder
+            when the Seed itself does not say where it belongs.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
         OrchestratorRunner,
         create_agent_runtime,
+        create_agent_runtime_async,
         resolve_agent_runtime_backend,
     )
     from ouroboros.orchestrator.session import SessionRepository
@@ -661,7 +679,13 @@ async def _run_orchestrator(
         seed_file,
         seed_data=seed_data,
         project_dir=project_dir,
+        fallback_dir=project_fallback_dir,
     )
+    # Always visible, never inferred by the reader: this is the directory the
+    # agent will write in. Seed metadata, a brownfield target, a caller's
+    # fallback, and `--project-dir` can each decide it, so printing the winner
+    # is the only way the person knows before the first write lands.
+    print_info(f"Project directory: {project_dir}")
     session_repo = SessionRepository(event_store)
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
@@ -706,9 +730,22 @@ async def _run_orchestrator(
     if debug:
         print_info(f"Execution runtime: {resolved_runtime_backend}")
 
+    if resolved_runtime_backend == "host":
+        # Host-driven execution needs an MCP host model pumping job_wait and
+        # spawning dispatch payloads; a terminal run has no such host, so the
+        # dispatch would park forever. Reject with the working alternative.
+        print_error(
+            "The 'host' agent runtime dispatches execution to the calling MCP "
+            "host and cannot run from the terminal. Start the run from your "
+            "host chat session (ooo run / ouroboros_start_execute_seed), or "
+            "pick an executable runtime (claude-cli, codex, opencode, ...)."
+        )
+        raise typer.Exit(1)
+
     execution_model = resolve_execution_model(resolved_runtime_backend)
     print_info(_execution_model_status(resolved_runtime_backend, execution_model))
-    adapter = create_agent_runtime(
+    adapter = await create_agent_runtime_async(
+        create_agent_runtime,
         backend=resolved_runtime_backend,
         model=execution_model,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,

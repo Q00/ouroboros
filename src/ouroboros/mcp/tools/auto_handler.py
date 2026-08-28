@@ -14,13 +14,12 @@ import re
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
 from ouroboros.auto.adapters import (
-    EnvRuntimeProbeRunner,
-    HandlerEvaluator,
     HandlerInterviewBackend,
     HandlerLateralThinker,
     HandlerRalphPoller,
-    HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
@@ -52,6 +51,7 @@ from ouroboros.auto.policies import apply_domain_policy_defaults
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.runtime_routing import (
+    AutoStageRuntimePlan,
     demote_plugin_opencode_mode,
     resolve_auto_stage_runtime_plan,
 )
@@ -67,14 +67,13 @@ from ouroboros.auto.state import (
     AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
-    validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import (
     auto_worktree_cleanup_eligible,
     ensure_auto_worktree,
     release_auto_worktree,
 )
-from ouroboros.config import get_opencode_mode
+from ouroboros.config import default_execution_efficiency_mode, get_opencode_mode
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
@@ -82,6 +81,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_runtime import initialized_runtime_event_store
 from ouroboros.mcp.tools.auto_start_lease_store import (
     CORRUPT_START_LEASE,
 )
@@ -91,12 +91,19 @@ from ouroboros.mcp.tools.auto_start_lease_store import (
 from ouroboros.mcp.tools.auto_start_lease_store import (
     write_start_lease_locked as _write_start_lease_locked,
 )
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    _runtime_requires_in_process_job,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
-from ouroboros.mcp.tools.job_observer import build_job_observer_contract
+from ouroboros.mcp.tools.job_observer import (
+    append_job_observer_inline_handoff,
+    build_job_observer_contract,
+)
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.run_successors import resolve_run_successor_handler
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     build_subagent_payload,
@@ -250,7 +257,9 @@ class AutoHandler:
                     (
                         "Execution efficiency policy: adaptive may use lower-cost child "
                         "tiers with recovery escalation; quality_first keeps child ACs "
-                        "at the parent starting tier. Default: adaptive."
+                        "at the parent starting tier. When omitted on a fresh start, a "
+                        "configured execution.default_policy supplies it; otherwise "
+                        "defaults to adaptive."
                     ),
                     required=False,
                     enum=("adaptive", "quality_first"),
@@ -269,10 +278,9 @@ class AutoHandler:
                     "complete_product",
                     ToolInputType.BOOLEAN,
                     (
-                        "When true, chain RUN → RALPH_HANDOFF after a successful run "
-                        "handoff so a single ouroboros_auto invocation iterates Ralph "
-                        "until QA passes, convergence, or a budget bound trips. "
-                        "Defaults to false (opt-in)."
+                        "Deprecated and ignored. The run job owns "
+                        "run -> evaluate -> ralph; follow it with ouroboros_job_status "
+                        "or ouroboros_job_wait instead."
                     ),
                     required=False,
                     default=False,
@@ -372,7 +380,17 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
-        complete_product = bool(arguments.get("complete_product", False))
+        # Accepted so existing callers do not hard-fail. It is read here and
+        # nowhere else: no validation, no persisted state, no resume merging —
+        # passing it must behave exactly like omitting it.
+        if arguments.get("complete_product"):
+            structlog.get_logger(__name__).info(
+                "auto.complete_product.ignored",
+                detail=(
+                    "complete_product is deprecated and ignored: the run job owns "
+                    "run -> evaluate -> ralph"
+                ),
+            )
         attach_execution = _optional_text_arg(arguments, "attach_execution")
         attach_job = _optional_text_arg(arguments, "attach_job")
         attach_session = _optional_text_arg(arguments, "attach_session")
@@ -392,10 +410,6 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
-        validate_complete_product_timeout(
-            complete_product=complete_product and not (isinstance(resume, str) and resume),
-            pipeline_timeout_seconds=pipeline_timeout_seconds,
-        )
         # Distinguish "caller did not pass user_preferences" from "caller
         # passed an empty mapping". Only validate/parse when the caller
         # actually supplied the arg so a resume call can defer to persisted
@@ -441,15 +455,6 @@ class AutoHandler:
                     state.ledger,
                     state.user_preferences,
                 ).to_dict()
-            # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
-            # session intent, not a per-invocation flag. Honor the persisted
-            # value so MCP callers that omit ``complete_product`` on resume
-            # still chain RUN → RALPH_HANDOFF for sessions that originally
-            # opted in. Mirrors the CLI policy in ``cli/commands/auto.py``.
-            if state.complete_product and not complete_product:
-                complete_product = True
-            elif complete_product and not state.complete_product:
-                state.complete_product = True
         else:
             supplied_user_preferences = (
                 _parse_user_preferences(arguments.get("user_preferences"))
@@ -468,7 +473,7 @@ class AutoHandler:
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
             preferences = resolve_execution_preferences(
-                requested_efficiency_mode,
+                requested_efficiency_mode or default_execution_efficiency_mode(),
                 requested_frugality_assurance,
             )
             state.efficiency_mode = preferences.efficiency_mode.value
@@ -483,7 +488,6 @@ class AutoHandler:
             ).to_dict()
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
-            state.complete_product = complete_product
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
@@ -546,6 +550,7 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
+        runtime_event_store = await initialized_runtime_event_store(self.event_store)
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -556,43 +561,8 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            event_store=runtime_event_store,
         )
-        # Complete-product Ralph follows the execute-stage runtime because it
-        # continues product mutation/evaluation after the initial run handoff.
-        # OpenCode plugin mode is intentionally preserved here: unlike
-        # interview/Seed authoring, Ralph can surface a plugin delegation
-        # receipt to the caller.
-        ralph_opencode_mode = (
-            state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
-            if runtime_plan.execute.runtime_backend == "opencode"
-            else None
-        )
-        ralph_handler = None
-        if complete_product:
-            ralph_handler = (
-                self.ralph_handler_factory(
-                    runtime_plan.execute.runtime_backend,
-                    ralph_opencode_mode,
-                )
-                if self.ralph_handler_factory is not None
-                else RalphHandler(
-                    agent_runtime_backend=runtime_plan.execute.runtime_backend,
-                    opencode_mode=ralph_opencode_mode,
-                )
-            )
-        ralph_starter = (
-            HandlerRalphStarter(ralph_handler, project_dir=state.cwd)
-            if ralph_handler is not None
-            else None
-        )
-        # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
-        # same ``RalphHandler`` so MCP-side resumes of an interrupted
-        # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
-        # to a terminal auto phase. The same handler is reused so both the
-        # starter and the poller share a ``JobManager`` (and underlying
-        # ``EventStore``) — without that share the poller would query a
-        # fresh, empty job table.
-        ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
         # RFC #809 Phase 2.1 — wire Seed QA on every MCP auto surface before
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
         # demoted authoring mode as Interview/GenerateSeed so QA executes
@@ -605,30 +575,24 @@ class AutoHandler:
         # EVALUATE → UNSTUCK_LATERAL path. The complete-product evaluator is
         # plugin-skipped based on the resolved EVALUATE stage, not the default
         # runtime, so explicit non-plugin stage overrides remain consumable.
-        evaluator = None
         seed_qa_handler = QAHandler(
             llm_backend=self.llm_backend,
             agent_runtime_backend=runtime_plan.interview.runtime_backend,
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        evaluate_plugin_mode = should_dispatch_via_plugin(
-            runtime_plan.evaluate.runtime_backend,
-            runtime_plan.evaluate.opencode_mode,
-        )
-        if complete_product and not evaluate_plugin_mode:
-            evaluation_handler = QAHandler(
-                llm_backend=self.llm_backend,
-                agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
-                opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
-            )
-            evaluator = HandlerEvaluator(evaluation_handler)
-        watchdog_event_store = self.event_store or EventStore()
-        await watchdog_event_store.initialize()
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
-            event_appender=watchdog_event_store,
+            event_appender=runtime_event_store,
         )
+        ralph_resumer = None
+        if state.ralph_job_id is not None and self.ralph_handler_factory is not None:
+            ralph_resumer = HandlerRalphPoller(
+                self.ralph_handler_factory(
+                    runtime_plan.execute.runtime_backend,
+                    runtime_plan.execute.opencode_mode,
+                )
+            )
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -651,14 +615,10 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
-            ralph_starter=ralph_starter,
             ralph_resumer=ralph_resumer,
-            complete_product=complete_product,
-            evaluator=evaluator,
             seed_qa_evaluator=seed_qa_evaluator,
             lateral_thinker=lateral_thinker,
             watchdog=watchdog,
-            probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
         )
         result: AutoPipelineResult | None = None
         try:
@@ -670,7 +630,7 @@ class AutoHandler:
                 cleanup=auto_worktree_cleanup_eligible(result),
             )
             if self.event_store is None:
-                await watchdog_event_store.close()
+                await runtime_event_store.close()
 
 
 @dataclass
@@ -769,10 +729,6 @@ class StartAutoHandler:
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
             requested_efficiency_mode = _optional_text_arg(arguments, "efficiency_mode")
             requested_frugality_assurance = _optional_text_arg(arguments, "frugality_assurance")
-            validate_complete_product_timeout(
-                complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
-                pipeline_timeout_seconds=requested_pipeline_timeout,
-            )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
         if attach_requested and not has_resume:
@@ -849,6 +805,19 @@ class StartAutoHandler:
             state,
             fallback_runtime_backend=self.agent_runtime_backend,
             fallback_opencode_mode=self.opencode_mode,
+        )
+        # The detach decision below sees only ``self.agent_runtime_backend``
+        # (auto's reflect-stage default): a mixed runtime_profile can put
+        # `stages.execute: host` behind an executable reflect/default runtime,
+        # so ask explicitly whether the resolved EXECUTE stage — the one that
+        # actually parks a host dispatch — needs this process to stay put.
+        execute_runtime_plan = _state_runtime_plan(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            fallback_opencode_mode=self.opencode_mode,
+        )
+        execute_requires_in_process = (not state.skip_run) and _runtime_requires_in_process_job(
+            execute_runtime_plan.execute.runtime_backend
         )
         lease_token, lease_error = _reserve_start_lease(
             self._store,
@@ -972,6 +941,7 @@ class StartAutoHandler:
                 on_detaching=_on_detaching,
                 on_started=_on_started,
                 on_enqueue_failure=_on_enqueue_failure,
+                requires_in_process_job=execute_requires_in_process,
             )
         except MCPToolError as exc:
             return Result.err(exc)
@@ -990,6 +960,12 @@ class StartAutoHandler:
 
         dashboard_url = await resolve_dashboard_base_url(self._event_store)
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
+        observer = build_job_observer_contract(
+            job_id=snapshot.job_id,
+            cursor=getattr(snapshot, "cursor", 0),
+            session_id=auto_session_id,
+            follow_result_job_keys=_FOLLOW_JOBS,
+        )
         text = (
             "Started background auto session.\n\n"
             "Status: queued\n"
@@ -1005,6 +981,7 @@ class StartAutoHandler:
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
             "then fetch ouroboros_job_result."
         )
+        text = append_job_observer_inline_handoff(text, observer)
         meta = {
             "job_id": snapshot.job_id,
             "auto_session_id": auto_session_id,
@@ -1016,12 +993,7 @@ class StartAutoHandler:
             "status_tool": "ouroboros_job_status",
             "wait_tool": "ouroboros_job_wait",
             "result_tool": "ouroboros_job_result",
-            "job_observer": build_job_observer_contract(
-                job_id=snapshot.job_id,
-                cursor=getattr(snapshot, "cursor", 0),
-                session_id=auto_session_id,
-                follow_result_job_keys=_FOLLOW_JOBS,
-            ),
+            "job_observer": observer,
         }
         return Result.ok(
             MCPToolResult(
@@ -1043,7 +1015,7 @@ class StartAutoHandler:
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
         preferences = resolve_execution_preferences(
-            _optional_text_arg(arguments, "efficiency_mode"),
+            _optional_text_arg(arguments, "efficiency_mode") or default_execution_efficiency_mode(),
             _optional_text_arg(arguments, "frugality_assurance"),
         )
         state.efficiency_mode = preferences.efficiency_mode.value
@@ -1053,7 +1025,6 @@ class StartAutoHandler:
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
-        state.complete_product = bool(arguments.get("complete_product", False))
         supplied_user_preferences: dict[str, str | None] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
             supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
@@ -1254,12 +1225,18 @@ def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
     return None
 
 
-def _state_dispatches_via_plugin(
+def _state_runtime_plan(
     state: AutoPipelineState,
     *,
     fallback_runtime_backend: str | None,
     fallback_opencode_mode: str | None,
-) -> bool:
+) -> AutoStageRuntimePlan:
+    """Resolve the same per-stage runtime plan ``AutoHandler._run`` will use.
+
+    Shared by ``_state_dispatches_via_plugin`` and ``StartAutoHandler`` so
+    both ask "what will actually run this stage" the identical way instead of
+    each hand-rolling the ``state.runtime_backend`` fallback chain.
+    """
     runtime_backend = state.runtime_backend or fallback_runtime_backend
     if runtime_backend is None and state.opencode_mode is not None:
         runtime_backend = "opencode"
@@ -1268,10 +1245,23 @@ def _state_dispatches_via_plugin(
         runtime_backend,
         state.opencode_mode or fallback_opencode_mode,
     )
-    runtime_plan = resolve_auto_stage_runtime_plan(
+    return resolve_auto_stage_runtime_plan(
         runtime_override=None,
         fallback_runtime_backend=runtime_backend,
         fallback_opencode_mode=opencode_mode,
+    )
+
+
+def _state_dispatches_via_plugin(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    fallback_opencode_mode: str | None,
+) -> bool:
+    runtime_plan = _state_runtime_plan(
+        state,
+        fallback_runtime_backend=fallback_runtime_backend,
+        fallback_opencode_mode=fallback_opencode_mode,
     )
     interview_dispatch = should_dispatch_via_plugin(
         runtime_plan.interview.runtime_backend,
@@ -2318,10 +2308,11 @@ def _authoring_seed_handler(
 def _handler_matches_runtime(
     handler: object, agent_runtime_backend: str | None, opencode_mode: str | None
 ) -> bool:
-    return (
-        getattr(handler, "agent_runtime_backend", None) == agent_runtime_backend
-        and getattr(handler, "opencode_mode", None) == opencode_mode
-    )
+    handler_runtime = getattr(handler, "agent_runtime_backend", None)
+    return handler_runtime == agent_runtime_backend and _resolved_opencode_mode(
+        handler_runtime,
+        getattr(handler, "opencode_mode", None),
+    ) == _resolved_opencode_mode(agent_runtime_backend, opencode_mode)
 
 
 def _execution_start_handler(
@@ -2357,13 +2348,20 @@ def _execution_start_handler(
         opencode_mode=opencode_mode,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        session_signal_hub=getattr(original_execute, "session_signal_hub", None),
+        host_dispatch_bridge=getattr(original_execute, "host_dispatch_bridge", None),
+        seed_handoff_registry=getattr(original_execute, "seed_handoff_registry", None),
     )
+    # Without the successor stack the run cannot enqueue the evaluation it
+    # delegates to and finishes with ``evaluation_status="enqueue_failed"``.
     return StartExecuteSeedHandler(
         execute_handler=execute_seed,
         event_store=event_store,
         job_manager=job_manager,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
+        start_evaluate_handler=resolve_run_successor_handler(handler, execute_seed, job_manager),
+        seed_handoff_registry=getattr(handler, "seed_handoff_registry", None),
     )
 
 

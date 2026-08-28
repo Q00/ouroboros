@@ -85,6 +85,10 @@ def test_grok_ships_verified_list_args() -> None:
     assert mc.get_model_catalog("grok").list_args == ("models",)
 
 
+def test_kiro_ships_verified_list_args() -> None:
+    assert mc.get_model_catalog("kiro").list_args == ("chat", "--listmodels", "-f", "json")
+
+
 def test_grok_static_catalog_lists_known_models_after_sentinel() -> None:
     choices = mc.model_choices("grok")
     assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
@@ -107,6 +111,28 @@ def test_grok_models_parser_ignores_headers_and_blanks() -> None:
     assert mc._parse_grok_models("You are logged in.\nDefault model: x\n") == ()
 
 
+def test_kiro_models_parser_accepts_string_list() -> None:
+    raw = '["auto", "claude-sonnet-4.6", "auto", "  "]'
+    assert mc._parse_kiro_models(raw) == ("auto", "claude-sonnet-4.6")
+
+
+def test_kiro_models_parser_accepts_record_payloads() -> None:
+    raw = (
+        '{"models": ['
+        '{"id": "claude-opus-5", "name": "Claude Opus 5"},'
+        '{"modelId": "claude-sonnet-4.6"},'
+        '{"value": "auto"},'
+        '{"name": "display-only"},'
+        "7]}"
+    )
+    assert mc._parse_kiro_models(raw) == ("claude-opus-5", "claude-sonnet-4.6", "auto")
+
+
+@pytest.mark.parametrize("raw", ["", "not-json", "{}", '{"models": {}}'])
+def test_kiro_models_parser_rejects_unusable_payload(raw: str) -> None:
+    assert mc._parse_kiro_models(raw) == ()
+
+
 def test_refresh_models_grok_uses_custom_parser(monkeypatch) -> None:
     monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/grok")
 
@@ -115,6 +141,43 @@ def test_refresh_models_grok_uses_custom_parser(monkeypatch) -> None:
 
     monkeypatch.setattr(mc.subprocess, "run", lambda *_a, **_k: _Result())
     assert mc.refresh_models("grok") == ("grok-build", "grok-composer-2.5-fast")
+
+
+def test_refresh_models_kiro_uses_json_parser(monkeypatch) -> None:
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/kiro-cli")
+    captured: dict[str, object] = {}
+
+    class _Result:
+        stdout = '{"models":[{"id":"auto"},{"id":"claude-opus-5"}]}'
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _Result()
+
+    monkeypatch.setattr(mc.subprocess, "run", _fake_run)
+    assert mc.refresh_models("kiro") == ("auto", "claude-opus-5")
+    assert captured["argv"] == ("/bin/kiro-cli", "chat", "--listmodels", "-f", "json")
+
+
+def test_refresh_models_kiro_retries_newer_flag_spelling(monkeypatch) -> None:
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/kiro-cli")
+    calls: list[tuple[str, ...]] = []
+
+    class _Result:
+        stdout = '["auto", "claude-sonnet-4.6"]'
+
+    def _fake_run(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(2, argv)
+        return _Result()
+
+    monkeypatch.setattr(mc.subprocess, "run", _fake_run)
+    assert mc.refresh_models("kiro") == ("auto", "claude-sonnet-4.6")
+    assert calls == [
+        ("/bin/kiro-cli", "chat", "--listmodels", "-f", "json"),
+        ("/bin/kiro-cli", "chat", "--list-models", "--format", "json"),
+    ]
 
 
 def test_refresh_models_uninstalled_cli_degrades_to_none(monkeypatch) -> None:

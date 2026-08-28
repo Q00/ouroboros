@@ -1,0 +1,97 @@
+# dsh-ouroboros — mounts Ouroboros as native MCP tools inside DeepSeek Harness.
+#
+# Ouroboros (https://github.com/Q00/ouroboros) is a spec-first AI dev workflow
+# engine: Socratic interview -> Seed spec -> execute -> evaluate -> evolve.
+# This bundle inserts one @deepseek-ai/dsh-mcp-client row that spawns
+# `ouroboros mcp serve` over stdio, so every dsh agent gets tools named
+# mcp__ouroboros__ouroboros_interview, mcp__ouroboros__ouroboros_auto, and 33
+# others. Typing "ooo interview <goal>" or "ooo auto <goal>" in chat is enough
+# for the model to find and call the matching tool on its own — no extra
+# prompting needed (each tool carries its own description).
+#
+# Requirements: Python >= 3.12 and `uv` (https://astral.sh/uv) on PATH. No
+# separate `pip install` step — uvx fetches and runs Ouroboros in an isolated
+# environment on first launch.
+#
+# Configuration (env vars, read by the spawned `ouroboros mcp serve` process):
+#   OUROBOROS_LLM_BACKEND   — LLM backend for interview/seed/QA. Unset uses
+#                             your existing `ouroboros setup` default. `dsh`
+#                             routes those calls back through DeepSeek Harness,
+#                             but it is NOT a one-variable switch: Ouroboros
+#                             spawns its own `dsh-acp-demo` child and fails
+#                             closed (`invalid_config`) unless
+#                             OUROBOROS_DSH_CONFIG_PATH names an absolute
+#                             trusted Cordis composition. See the bundle README.
+#   OUROBOROS_AGENT_RUNTIME — agent runtime backend for ooo run/ooo auto's
+#                             execution step. Defaults to `host`: dsh has no
+#                             installable execution CLI of its own, so by
+#                             default the dsh model itself does the work —
+#                             `execute_task` publishes a dispatch and dsh
+#                             spawns its own subagent to service it
+#                             (orchestrator/host_dispatch.py). Set this to an
+#                             executable runtime (claude-cli, codex,
+#                             opencode, ...) to have that CLI do the work
+#                             instead.
+#   OUROBOROS_DSH_CONFIG_PATH / OUROBOROS_DSH_CLI_PATH
+#                           — the two prerequisites of the `dsh` LLM backend
+#                             above: the absolute composition file, and the
+#                             `dsh-acp-demo` bin when it is not on PATH.
+#
+# Override any field from your own profile's cordis.patch.yml by id (see the
+# "Package and install a plugin" tutorial) — e.g. to pin a specific Ouroboros
+# version, add local MCP servers back, or tighten toolCallTimeoutMs.
+- insert:
+    - id: mcp-ouroboros
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: ouroboros
+        transport: stdio
+        command: uvx
+        args:
+          - --from
+          - 'ouroboros-ai[mcp]'
+          - --with
+          - 'mcp==2.0.0'
+          - ouroboros
+          - mcp
+          - serve
+        # The child does NOT inherit the harness environment wholesale:
+        # @deepseek-ai/dsh-subprocess hands mcp-client a scrubbed parent env
+        # with every credential-shaped name (/KEY|PASSWORD|SECRET|TOKEN/i) and
+        # every DSH_* name removed, precisely so harness credentials never leak
+        # into a spawned process implicitly. This explicit layer merges *after*
+        # that scrub, so any credential Ouroboros genuinely needs has to be
+        # named here. It is deliberately a short allowlist covering the two
+        # documented backends — not a wildcard passthrough. To forward another
+        # (OPENAI_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY, ...), override
+        # this row in your own profile's cordis.patch.yml with that one extra
+        # name — restating the whole `config`, since a later layer replaces a
+        # row's config rather than deep-merging it. Non-credential names
+        # (PATH, HOME, the OUROBOROS_* selectors) survive the scrub on their
+        # own; the OUROBOROS_* rows below are here to keep the contract
+        # visible in one place.
+        #
+        # `?? ''` keeps every value a string (the row's schema is a string
+        # dict). Ouroboros treats a blank credential as unset, so an unset host
+        # variable stays effectively unset in the child. OUROBOROS_AGENT_RUNTIME
+        # is the one exception: it falls back to the literal `'host'` rather
+        # than `''`, because dsh has no installable execution CLI to fall back
+        # to on its own — see the comment above.
+        env:
+          OUROBOROS_LLM_BACKEND: !!js process.env.OUROBOROS_LLM_BACKEND ?? ''
+          OUROBOROS_AGENT_RUNTIME: !!js process.env.OUROBOROS_AGENT_RUNTIME || 'host'
+          OUROBOROS_DSH_CONFIG_PATH: !!js process.env.OUROBOROS_DSH_CONFIG_PATH ?? ''
+          OUROBOROS_DSH_CLI_PATH: !!js process.env.OUROBOROS_DSH_CLI_PATH ?? ''
+          ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY ?? ''
+          DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY ?? ''
+        # ouroboros_auto runs a full interview -> Seed -> execute -> grade
+        # pipeline synchronously when called without polling; give it real
+        # headroom instead of dsh's 60s mcp-client default.
+        toolCallTimeoutMs: 1800000
+        # Soft-fail: a machine without `uv`/Ouroboros configured yet should
+        # still boot dsh with every other plugin working, not crash outright.
+        # Recovery is not guaranteed to be automatic — whether mcp-client
+        # retries at all depends on the dsh build (the published rc has no
+        # reconnect loop), and where it exists the attempt budget is bounded.
+        # After fixing the cause, reload the plugin or restart dsh.
+        failOnStartupError: false

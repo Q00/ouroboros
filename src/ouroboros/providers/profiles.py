@@ -32,6 +32,8 @@ _BACKEND_ALIASES = {
     "gjc": "gjc",
     "gjc_cli": "gjc",
     "ourocode": "ourocode",
+    "dsh": "dsh",
+    "deepseek_harness": "dsh",
     "litellm": "litellm",
     "openai": "litellm",
     "openrouter": "litellm",

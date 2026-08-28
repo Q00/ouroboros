@@ -16,6 +16,7 @@ installed ZCode coding agent. The runtime supports either the macOS app-bundle
 | --- | --- |
 | ZCode desktop app or `zcode` executable | Provides the coding-agent runtime |
 | A configured Z.ai provider/model | Zcode reads provider and model selection from its own config |
+| `~/.zcode/cli/config.json` with an effective `model.main` | The headless CLI exits with `Model config is missing` without it; see [Model provider configuration](#model-provider-configuration) |
 | Compatible Node.js for a standalone `.cjs` path | Official app bundles use their bundled Electron/Node runtime; standalone scripts use the system Node |
 | Ouroboros base package | No provider-specific Python extra is required |
 
@@ -25,6 +26,10 @@ installed ZCode coding agent. The runtime supports either the macOS app-bundle
 ouroboros setup --runtime zcode
 ouroboros run workflow seed.yaml --runtime zcode
 ```
+
+Setup warns, and `ouroboros status health` reports a warning, when
+`~/.zcode/cli/config.json` has no effective `model.main` — the CLI would
+otherwise fail only after Ouroboros has already spawned it.
 
 If setup cannot find ZCode automatically, configure one of:
 
@@ -58,6 +63,52 @@ paths use the system Node.js. Other paths are treated as executable wrappers or
 binaries and are invoked directly. `NODE_OPTIONS` is removed from both Node
 launch shapes so a project or parent process cannot preload JavaScript into the
 vendor CLI.
+
+## Model provider configuration
+
+Besides the CLI path, the Zcode CLI resolves its model provider from
+`~/.zcode/cli/config.json` on every run — including the headless
+`--prompt --json` invocations Ouroboros spawns. Without an effective
+`model.main` the CLI exits immediately with:
+
+```text
+Error: Model config is missing. Create /Users/<you>/.zcode/cli/config.json
+with an explicit model provider before running ZCode.
+```
+
+`model.main` must be the `"provider-id/model-id"` **string**; an object entry
+is silently dropped by the CLI's config parser, which then reports the same
+missing-config error. The referenced provider id needs an entry in the same
+file's `provider` registry carrying `kind`, `options.baseURL`, and
+`options.apiKey`:
+
+```json
+{
+  "model": { "main": "builtin:zai-coding-plan/GLM-5.3" },
+  "provider": {
+    "builtin:zai-coding-plan": {
+      "name": "Z.ai - Coding Plan",
+      "kind": "anthropic",
+      "options": {
+        "baseURL": "https://api.z.ai/api/anthropic",
+        "apiKey": "<your key>",
+        "apiKeyRequired": true
+      },
+      "enabled": true
+    }
+  }
+}
+```
+
+The desktop app's `~/.zcode/v2/config.json` uses the same `provider` registry
+shape, so copying the active provider entry from there is the quickest way to
+satisfy the CLI. OAuth credentials in `~/.zcode/v2/credentials.json` are shared
+between the desktop app and the CLI, but the model reference itself is not:
+the desktop app's model selection does not create `~/.zcode/cli/config.json`.
+
+`ouroboros setup --runtime zcode` warns when this file has no effective
+`model.main`, and the `ouroboros status health` rows for the zcode runtime and
+LLM backend surface the same probe.
 
 ## Runtime and LLM backend
 
@@ -152,6 +203,12 @@ output timeout for their expected task duration.
 
 **Zcode is not detected.** Set `OUROBOROS_ZCODE_CLI_PATH`, configure
 `orchestrator.zcode_cli_path`, or put a `zcode` executable on `PATH`.
+
+**Headless runs exit with `Model config is missing`.** The Zcode CLI has no
+`model.main` it can resolve in `~/.zcode/cli/config.json`. See
+[Model provider configuration](#model-provider-configuration); the two usual
+causes are a missing file and an object-form `model.main`, which the CLI
+silently drops — the reference must be the `"provider-id/model-id"` string.
 
 **A standalone script reports a missing Node built-in such as `node:sqlite`.**
 Use the intact ZCode app-bundle path so Ouroboros can select the bundled

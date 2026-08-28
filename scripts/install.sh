@@ -82,6 +82,40 @@ _info() {
   _say "  ${DIM}•${RESET} $1"
 }
 
+# Quote a string as one shell word using ASCII only, independent of the host
+# bash version. `printf %q` cannot be used here: bash 3.2 (the macOS system
+# bash) escapes only the bytes of a multibyte character that it happens to
+# consider unsafe, leaving the rest raw, which emits invalid UTF-8 and lets a
+# profile name smuggle RTL overrides or ANSI escapes into the terminal. This
+# escapes every byte outside a conservative safe set, so the output is always
+# printable ASCII and always re-reads as the original name.
+_shell_quote() {
+  local _sq_in=$1 _sq_out='' _sq_char _sq_code _sq_i _sq_len
+  local LC_ALL=C
+  case $_sq_in in
+    '') printf "\$''"; return ;;
+    *[!A-Za-z0-9_.,:/@%+=-]*) ;;
+    *) printf '%s' "$_sq_in"; return ;;
+  esac
+  _sq_len=${#_sq_in}
+  _sq_i=0
+  while [ "$_sq_i" -lt "$_sq_len" ]; do
+    _sq_char=${_sq_in:_sq_i:1}
+    case $_sq_char in
+      [A-Za-z0-9_.,:/@%+=-]) _sq_out=$_sq_out$_sq_char ;;
+      *)
+        # `printf "'c"` yields a signed value, so bytes >= 0x80 arrive
+        # negative; mask them back into the 0-255 range before formatting.
+        printf -v _sq_code '%d' "'$_sq_char"
+        printf -v _sq_code '%03o' "$((_sq_code & 255))"
+        _sq_out=$_sq_out\\$_sq_code
+        ;;
+    esac
+    _sq_i=$((_sq_i + 1))
+  done
+  printf '%s' "\$'$_sq_out'"
+}
+
 _choice() {
   printf '  %b[%s]%b %-8s %s\n' "$BOLD" "$1" "$RESET" "$2" "$3"
 }
@@ -280,7 +314,7 @@ PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9
 PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
 
 _telemetry_config_allows() {
-  local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
+  local f="$HOME/.ouroboros/config.yaml" script_path script_dir source_root=""
   local python_candidate ouroboros_cmd shebang status
   # `-e` is false for a dangling symlink. That is invalid persisted state,
   # not a genuinely absent config, so keep it on the fail-closed path.
@@ -294,7 +328,13 @@ _telemetry_config_allows() {
   # requires a Python environment with Ouroboros' real schema available;
   # otherwise collection fails closed. A genuinely absent config retains the
   # documented default-on behavior after the notice below.
-  script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || true
+  # `curl | bash` has no sourced file path; nounset must not break this
+  # optional local-source optimization.
+  script_path="${BASH_SOURCE[0]-}"
+  script_dir=""
+  if [ -n "$script_path" ]; then
+    script_dir=$(CDPATH='' cd -- "$(dirname -- "$script_path")" 2>/dev/null && pwd) || true
+  fi
   if [ -n "$script_dir" ] && [ -f "$script_dir/../src/ouroboros/config/models.py" ]; then
     source_root=$(CDPATH='' cd -- "$script_dir/../src" 2>/dev/null && pwd) || true
   fi
@@ -321,7 +361,10 @@ try:
 except Exception:
     raise SystemExit(1)
 
-raise SystemExit(0 if config.telemetry.enabled is True else 1)
+# Older installed schemas may validate without a telemetry field. Fail closed
+# instead of dereferencing an attribute the schema does not have.
+enabled = getattr(getattr(config, "telemetry", None), "enabled", False)
+raise SystemExit(0 if enabled is True else 1)
 PY
   }
 
@@ -711,20 +754,12 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
 # _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
 _telemetry_ping() {
   _telemetry_enabled || return 0
-  local event="$1" id os arch py body kv k v props api_key_safe event_safe id_safe
+  local event="$1" id os py body kv k v props api_key_safe event_safe id_safe
   shift
   id=$(_telemetry_distinct_id) || return 0
 
-  # Token-constrain os/arch at the source: a hostile executable earlier on
-  # PATH (or a nonstandard uname) can emit anything, including embedded
-  # quotes that would otherwise mutate the JSON structure below -- neither
-  # os nor arch legitimately needs more than this charset (darwin, linux,
-  # arm64, x86_64, ...), so anything that doesn't fullmatch is discarded
-  # outright rather than partially trusted.
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   [[ "$os" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || os="unknown"
-  arch=$(uname -m)
-  [[ "$arch" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || arch="unknown"
 
   py=$(command -v python3 2>/dev/null || true)
   body=""
@@ -741,10 +776,11 @@ _telemetry_ping() {
     body=$("$py" -c '
 import json, re, sys
 
-event, distinct_id, api_key, os_name, arch = sys.argv[1:6]
-props = {"source": "install_sh", "os": os_name, "arch": arch}
 key_re = re.compile(r"^[A-Za-z0-9_]+$")
-for kv in sys.argv[6:]:
+
+event, distinct_id, api_key, os_name = sys.argv[1:5]
+props = {"os": os_name}
+for kv in sys.argv[5:]:
     key, sep, value = kv.partition("=")
     if sep and key_re.match(key):
         props[key] = value
@@ -757,7 +793,7 @@ print(json.dumps(
     },
     separators=(",", ":"),
 ))
-' "$event" "$id" "$PH_API_KEY" "$os" "$arch" "$@" 2>/dev/null)
+' "$event" "$id" "$PH_API_KEY" "$os" "$@" 2>/dev/null)
   fi
 
   if [ -z "$body" ]; then
@@ -770,7 +806,7 @@ print(json.dumps(
     # doesn't is stripped down to it (then length-capped) or falls back to
     # `unknown` -- best-effort, consistent with the identity/notice
     # readers' own NO_PYTHON3 fallback posture elsewhere in this file.
-    props='"source":"install_sh","os":"'"$os"'","arch":"'"$arch"'"'
+    props='"os":"'"$os"'"'
     for kv in "$@"; do
       k=$(printf '%s' "${kv%%=*}" | tr -cd 'A-Za-z0-9_')
       [ -n "$k" ] || continue
@@ -835,10 +871,18 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
+# Closed install-channel vocabulary. Unknown values may contain private slugs,
+# customer names, or account identifiers, so they always fold to `direct`.
+case "${OUROBOROS_INSTALL_REF:-direct}" in
+  direct|readme|readme-hero|readme-ko|readme-hero-ko|readme-zh|readme-hero-zh|docs-getting-started)
+    INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+    ;;
+  *) INSTALL_REF="direct" ;;
+esac
+
 _banner
 
 _telemetry_notice
-_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -908,6 +952,8 @@ HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
 HAS_GJC=false
+HAS_DSH=false
+DSH_PLUGIN_SPEC="github:Q00/ouroboros#main&path:integrations/dsh-plugin"
 if command -v codex &>/dev/null; then
   _ok "Codex found: $(which codex)"
   HAS_CODEX=true
@@ -947,6 +993,10 @@ fi
 if command -v gjc &>/dev/null; then
   _ok "GJC found: $(which gjc)"
   HAS_GJC=true
+fi
+if command -v dsh &>/dev/null; then
+  _ok "DeepSeek Harness found: $(which dsh)"
+  HAS_DSH=true
 fi
 
 RUNTIME_COUNT=0
@@ -1211,8 +1261,8 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[claude,tui]" | "[claude-sdk,tui]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.128"
-        --with "anthropic==0.120.2"
+        --with "claude-agent-sdk==0.2.139"
+        --with "anthropic==0.122.0"
       )
       ;;
     "[mcp,tui]")
@@ -1220,8 +1270,8 @@ if [ "$HAS_UV" = true ]; then
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.128"
-        --with "anthropic==0.120.2"
+        --with "claude-agent-sdk==0.2.139"
+        --with "anthropic==0.122.0"
         --with "litellm==1.91.0"
       )
       ;;
@@ -1291,6 +1341,7 @@ elif command -v ouroboros &>/dev/null; then
   OUROBOROS_SETUP_CMD="ouroboros"
 fi
 
+
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
 if [ -n "$RUNTIME" ] && [ -n "$OUROBOROS_SETUP_CMD" ]; then
@@ -1317,6 +1368,42 @@ if [ -n "$OUROBOROS_SETUP_CMD" ]; then
   _info "Refreshing runtime artifacts for detected runtimes"
   "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
+_decimal_at_least() {
+  local left right
+  left="${1#${1%%[!0]*}}"
+  right="${2#${2%%[!0]*}}"
+  [ -n "$left" ] || left=0
+  [ -n "$right" ] || right=0
+  if [ "${#left}" -ne "${#right}" ]; then
+    [ "${#left}" -gt "${#right}" ]
+  else
+    [ "$left" = "$right" ] || [[ "$left" > "$right" ]]
+  fi
+}
+
+_ensure_omp_tool_call_timeout() {
+  local omp_bin current
+  omp_bin="$(command -v omp 2>/dev/null || true)"
+  if [ -z "$omp_bin" ]; then
+    return 0
+  fi
+  current="$("$omp_bin" config get extensionHandlers.toolCallTimeoutMs 2>/dev/null || true)"
+  case "$current" in
+    ''|*[!0-9]*) ;;
+    *)
+      if _decimal_at_least "$current" 60000; then
+        return 0
+      fi
+      ;;
+  esac
+  if "$omp_bin" config set extensionHandlers.toolCallTimeoutMs 60000 >/dev/null 2>&1; then
+    _ok "OMP MCP tool timeout set to 60s"
+  else
+    _warn "Could not set OMP MCP tool timeout; run: omp config set extensionHandlers.toolCallTimeoutMs 60000"
+  fi
+}
+
+_ensure_omp_tool_call_timeout
 
 # 5. Claude Code integration. The default Claude selection and its explicit
 # SDK alias stay on MCP 1.x. The plugin-owned MCP launcher starts MCP 2 in a
@@ -1348,8 +1435,8 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
-_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
-  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+_telemetry_ping install_completed "runtime=${RUNTIME:-none}" \
+  "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
@@ -1408,6 +1495,62 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       _info '  in a terminal:    ouroboros config'
       ;;
   esac
+fi
+
+# 6. DeepSeek Harness integration. Unlike the other hosts, dsh keeps its plugins
+# per profile, and `dsh plugin` requires --profile, so there is no single global
+# install to run. Cover the profile a dsh user actually boots (`web`, which
+# `dsh web` scaffolds) and refresh any other profile that already carries the
+# bundle, which is how an existing install picks up a new release.
+if [ "$HAS_DSH" = true ]; then
+  _blank
+  _say "${BLUE}◆${RESET} ${BOLD}DeepSeek Harness plugin${RESET}"
+
+  DSH_PROFILE_ROOT="${DSH_HOME:-$HOME/.dsh}/profiles"
+  DSH_TARGET_PROFILES=("web")
+  _dsh_json_python="${PYTHON:-}"
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_json_python=$(command -v python3 2>/dev/null || true)
+  fi
+  if [ -z "$_dsh_json_python" ]; then
+    _dsh_ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+    if [ -n "$_dsh_ouroboros_cmd" ] && [ -r "$_dsh_ouroboros_cmd" ]; then
+      _dsh_shebang=$(head -n 1 "$_dsh_ouroboros_cmd" 2>/dev/null || true)
+      case "$_dsh_shebang" in
+        '#!'/*)
+          _dsh_json_python=${_dsh_shebang#'#!'}
+          case "$_dsh_json_python" in
+            *' '*) _dsh_json_python="" ;;
+          esac
+          [ -x "$_dsh_json_python" ] || _dsh_json_python=""
+          ;;
+      esac
+    fi
+  fi
+  if [ -n "$_dsh_json_python" ] && [ -d "$DSH_PROFILE_ROOT" ]; then
+    for _dsh_profile_dir in "$DSH_PROFILE_ROOT"/*/; do
+      [ -d "$_dsh_profile_dir" ] || continue
+      _dsh_profile=${_dsh_profile_dir#"$DSH_PROFILE_ROOT"/}
+      _dsh_profile=${_dsh_profile%/}
+      [ "$_dsh_profile" = "web" ] && continue
+      # Only profiles that already opted in. Adding Ouroboros tools to an
+      # unrelated profile because the installer ran is not an upgrade.
+      if "$_dsh_json_python" -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); dependencies = data.get("dependencies", {}) if isinstance(data, dict) else {}; sys.exit(0 if isinstance(dependencies, dict) and "dsh-ouroboros" in dependencies else 1)' "$_dsh_profile_dir/package.json" 2>/dev/null; then
+        DSH_TARGET_PROFILES+=("$_dsh_profile")
+      fi
+    done
+  fi
+
+  for _dsh_profile in "${DSH_TARGET_PROFILES[@]}"; do
+    _dsh_profile_q=$(_shell_quote "$_dsh_profile")
+    if dsh plugin --profile "$_dsh_profile" add "$DSH_PLUGIN_SPEC" >/dev/null 2>&1; then
+      _ok "dsh profile $_dsh_profile_q: Ouroboros tools installed"
+    else
+      _warn "dsh profile $_dsh_profile_q: install skipped"
+      _info "Manual install: dsh plugin --profile $_dsh_profile_q add \"$DSH_PLUGIN_SPEC\""
+    fi
+  done
+  _info "Type 'ooo interview <goal>' in a dsh chat to use them."
 fi
 
 _blank

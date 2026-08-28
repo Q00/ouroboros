@@ -18,6 +18,7 @@ import structlog
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.failure_taxonomy import classify_failure
 from ouroboros.mcp.telemetry_boundary import JobTelemetryBoundary
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
@@ -137,6 +138,33 @@ def _safe_result_payload(result: Any) -> dict[str, Any]:
     }
 
 
+def _enrich_terminal_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Add fixed recovery metadata to a terminal payload.
+
+    This helper is shared by durable writes and read-only synthetic
+    projections. Existing producer-owned metadata, especially an actionable
+    ``next_step`` such as ``ooo evaluate <session_id>``, takes precedence over
+    the generic fallback supplied by the taxonomy.
+    """
+    enriched = dict(data)
+    status = enriched.get("status")
+    if not isinstance(status, str):
+        return enriched
+    resolution = classify_failure(
+        status,
+        enriched.get("result_meta") if isinstance(enriched.get("result_meta"), dict) else None,
+    )
+    if resolution is None:
+        return enriched
+    existing_meta = enriched.get("result_meta")
+    result_meta = dict(existing_meta) if isinstance(existing_meta, dict) else {}
+    result_meta.setdefault("failure_reason_code", resolution.reason_code.value)
+    result_meta.setdefault("recovery_action", resolution.recovery_action.value)
+    result_meta.setdefault("next_step", resolution.next_step)
+    enriched["result_meta"] = result_meta
+    return enriched
+
+
 def _canonical_acceptance_payload(payload: Mapping[str, Any]) -> str:
     """Return a stable representation for idempotent plan-entry comparison."""
     return json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -171,18 +199,23 @@ _STRANDED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-stranded-interrupted-"
 _DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
 _DRAIN_GRACE_SECONDS = 5.0
 _TERMINAL_APPEND_RETRY_DELAY_SECONDS = 0.05
+_TERMINAL_JOB_EVENTS = frozenset(
+    {"mcp.job.completed", "mcp.job.failed", "mcp.job.cancelled", "mcp.job.interrupted"}
+)
 
 
 def _drain_interrupted_data() -> dict[str, Any]:
     """Terminal payload for jobs interrupted by server shutdown (drain)."""
-    return {
-        "status": JobStatus.INTERRUPTED.value,
-        "message": "Job interrupted: MCP server shut down before the job finished",
-        "error": "MCP server shut down before the job reached a terminal state",
-        "result_text": "MCP server shut down before the job reached a terminal state",
-        "result_meta": {"interrupted_from_shutdown": True},
-        "is_error": True,
-    }
+    return _enrich_terminal_data(
+        {
+            "status": JobStatus.INTERRUPTED.value,
+            "message": "Job interrupted: MCP server shut down before the job finished",
+            "error": "MCP server shut down before the job reached a terminal state",
+            "result_text": "MCP server shut down before the job reached a terminal state",
+            "result_meta": {"interrupted_from_shutdown": True},
+            "is_error": True,
+        }
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -275,15 +308,17 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
         type="mcp.job.failed",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.FAILED.value,
-            "message": "Job failed: workflow progress accounting stalled",
-            "error": blocker,
-            "result_text": blocker,
-            "result_meta": {"failed_from_progress_accounting_stall": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.FAILED.value,
+                "message": "Job failed: workflow progress accounting stalled",
+                "error": blocker,
+                "result_text": blocker,
+                "result_meta": {"failed_from_progress_accounting_stall": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
@@ -294,15 +329,17 @@ def _linked_execution_failed_job_event(job_id: str, failure: str) -> BaseEvent:
         type="mcp.job.failed",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.FAILED.value,
-            "message": "Job failed: linked execution recorded failure",
-            "error": failure,
-            "result_text": failure,
-            "result_meta": {"failed_from_linked_execution_failure": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.FAILED.value,
+                "message": "Job failed: linked execution recorded failure",
+                "error": failure,
+                "result_text": failure,
+                "result_meta": {"failed_from_linked_execution_failure": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
@@ -313,29 +350,33 @@ def _orphaned_job_interrupted_event(job_id: str) -> BaseEvent:
         type="mcp.job.interrupted",
         aggregate_type="job",
         aggregate_id=job_id,
-        data={
-            "status": JobStatus.INTERRUPTED.value,
-            "message": "Job interrupted: owning process is no longer alive",
-            "error": "Owning process exited before the job reached a terminal state",
-            "result_text": "Owning process exited before the job reached a terminal state",
-            "result_meta": {"interrupted_from_dead_owner": True},
-            "is_error": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=_enrich_terminal_data(
+            {
+                "status": JobStatus.INTERRUPTED.value,
+                "message": "Job interrupted: owning process is no longer alive",
+                "error": "Owning process exited before the job reached a terminal state",
+                "result_text": "Owning process exited before the job reached a terminal state",
+                "result_meta": {"interrupted_from_dead_owner": True},
+                "is_error": True,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ),
     )
 
 
 def _stranded_job_interrupted_data() -> dict[str, Any]:
     """Terminal payload for a job whose task was released without a terminal event."""
-    return {
-        "status": JobStatus.INTERRUPTED.value,
-        "message": "Job interrupted: job task released without persisting a terminal state",
-        "error": "Job task exited without persisting a terminal event",
-        "result_text": "Job task exited without persisting a terminal event",
-        "result_meta": {"interrupted_from_stranded_job_task": True},
-        "is_error": True,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+    return _enrich_terminal_data(
+        {
+            "status": JobStatus.INTERRUPTED.value,
+            "message": "Job interrupted: job task released without persisting a terminal state",
+            "error": "Job task exited without persisting a terminal event",
+            "result_text": "Job task exited without persisting a terminal event",
+            "result_meta": {"interrupted_from_stranded_job_task": True},
+            "is_error": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
 
 
 def _stranded_job_interrupted_event(job_id: str) -> BaseEvent:
@@ -355,7 +396,7 @@ def _snapshot_with_terminal_event(
     cursor: int,
 ) -> JobSnapshot:
     """Project a terminal job event onto an existing reconstructed snapshot."""
-    data = event.data
+    data = _enrich_terminal_data(event.data)
     status = JobStatus(data.get("status", snapshot.status.value))
     return replace(
         snapshot,
@@ -2884,6 +2925,11 @@ class JobManager:
         event_id: str | None = None,
     ) -> None:
         """Persist one job event and observe its durable terminal boundary."""
+        if event_type in _TERMINAL_JOB_EVENTS:
+            status = data.get("status")
+            if not isinstance(status, str):
+                status = event_type.removeprefix("mcp.job.")
+            data = _enrich_terminal_data({**data, "status": status})
         await self._ensure_initialized()
         cursor = await self._event_store.append_with_rowid(
             BaseEvent(

@@ -73,7 +73,6 @@ from ouroboros.core.seed_contract_prompt import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
-from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
@@ -104,7 +103,6 @@ from ouroboros.orchestrator.decomposition_limits import (
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
-    create_drift_measured_event,
     create_execution_terminal_event,
     create_guidance_injected_event,
     create_mcp_tools_loaded_event,
@@ -155,12 +153,17 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
     valid_legacy_preflight_execution_semantics_contract,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
+from ouroboros.orchestrator.legacy_identity import (
+    legacy_task_workspace_identity,
+    note_legacy_identity_path,
+)
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
@@ -202,6 +205,10 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
     runtime_resume_identity_from_payload,
+)
+from ouroboros.orchestrator.verify_shell import (
+    capture_verify_shell_identity,
+    resolve_verify_shell,
 )
 from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -1063,6 +1070,10 @@ class OrchestratorRunner:
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        verify_shell = resolve_verify_shell() if self._run_verify_commands else None
+        self._verify_shell_identity = (
+            capture_verify_shell_identity(verify_shell) if verify_shell is not None else None
+        )
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         from ouroboros.config import (
             get_context_pack_enabled,
@@ -3301,23 +3312,6 @@ class OrchestratorRunner:
                 },
             ) from exc
 
-    @classmethod
-    def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Reproduce the pre-anchor managed-workspace representation exactly."""
-        project_root = Path(cls._canonical_path(workspace.repo_root))
-        source_workspace = Path(cls._canonical_path(workspace.original_cwd))
-        try:
-            workspace_path = source_workspace.relative_to(project_root).as_posix() or "."
-        except ValueError as exc:
-            raise OrchestratorError(
-                message="Cannot resume from an invalid historical task workspace",
-                details={"invalid": "legacy_task_workspace"},
-            ) from exc
-        return {
-            "project_root": str(project_root),
-            "workspace_path": workspace_path,
-        }
-
     @staticmethod
     def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
         """Normalize resolver failures at the orchestration lifecycle boundary."""
@@ -3367,7 +3361,7 @@ class OrchestratorRunner:
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
         if self._task_workspace is not None:
-            return self._legacy_task_workspace_identity(self._task_workspace)
+            return legacy_task_workspace_identity(self._task_workspace, self._canonical_path)
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None
@@ -3928,6 +3922,11 @@ class OrchestratorRunner:
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "verify_shell_identity": (
+                dict(self._verify_shell_identity)
+                if self._verify_shell_identity is not None
+                else None
+            ),
             "ac_retry_attempts": self._ac_retry_attempts,
             "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
             "enable_decomposition": self._enable_decomposition,
@@ -6016,145 +6015,6 @@ class OrchestratorRunner:
             restored[ac_index] = {"reason": reason, "commit": commit}
         return restored
 
-    def _validate_legacy_resume_identity(
-        self,
-        progress: Mapping[str, Any],
-        *,
-        seed: Seed | None,
-    ) -> None:
-        """Validate every recoverable identity field before legacy migration.
-
-        Legacy sessions predate the versioned execution contract, but their
-        authoritative start event already records the seed id/goal and runtime
-        backend. ``SessionRepository`` exposes that snapshot under
-        :data:`SESSION_START_IDENTITY_PROGRESS_KEY`; accepting a mismatched
-        current invocation would permanently bless the wrong seed/backend when
-        the migration checkpoint is written.
-        """
-
-        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-        if raw_start_identity is not None and not isinstance(raw_start_identity, Mapping):
-            raise OrchestratorError(
-                message="Cannot migrate a legacy session with invalid start identity",
-                details={"invalid": SESSION_START_IDENTITY_PROGRESS_KEY},
-            )
-        start_identity = raw_start_identity if isinstance(raw_start_identity, Mapping) else {}
-
-        if "seed_id" in start_identity:
-            persisted_seed_id = start_identity.get("seed_id")
-            current_seed_id = seed.metadata.seed_id if seed is not None else None
-            if (
-                not isinstance(persisted_seed_id, str)
-                or not persisted_seed_id.strip()
-                or current_seed_id != persisted_seed_id
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different Seed identity",
-                    details={
-                        "persisted_seed_id": persisted_seed_id,
-                        "current_seed_id": current_seed_id,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        if "seed_goal" in start_identity:
-            persisted_seed_goal = start_identity.get("seed_goal")
-            current_seed_goal = seed.goal if seed is not None else None
-            if (
-                not isinstance(persisted_seed_goal, str)
-                or not persisted_seed_goal.strip()
-                or current_seed_goal != persisted_seed_goal
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a modified Seed goal",
-                    details={
-                        "persisted_seed_goal": persisted_seed_goal,
-                        "current_seed_goal": current_seed_goal,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        persisted_runtime_backend: object | None = None
-        if "runtime_backend" in start_identity:
-            persisted_runtime_backend = start_identity.get("runtime_backend")
-        elif "runtime_backend" in progress:
-            # Older start events may lack the backend while runtime progress
-            # still carries the backend that owns the resumable handle.
-            persisted_runtime_backend = progress.get("runtime_backend")
-        if persisted_runtime_backend is not None:
-            current_runtime_backend = self._runtime_backend_contract()
-            if (
-                not isinstance(persisted_runtime_backend, str)
-                or not persisted_runtime_backend.strip()
-                or current_runtime_backend != persisted_runtime_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different runtime backend",
-                    details={
-                        "persisted_runtime_backend": persisted_runtime_backend,
-                        "current_runtime_backend": current_runtime_backend,
-                        "hint": "Resume with the original runtime, or start a new session.",
-                    },
-                )
-
-        if "llm_backend" in start_identity:
-            persisted_llm_backend = start_identity.get("llm_backend")
-            current_llm_backend = getattr(self._adapter, "llm_backend", None)
-            if (
-                not isinstance(persisted_llm_backend, str)
-                or not persisted_llm_backend.strip()
-                or current_llm_backend != persisted_llm_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different LLM backend",
-                    details={
-                        "persisted_llm_backend": persisted_llm_backend,
-                        "current_llm_backend": current_llm_backend,
-                        "hint": "Resume with the original backend, or start a new session.",
-                    },
-                )
-
-        if "workspace" in progress:
-            persisted_task_workspace = TaskWorkspace.from_progress_dict(progress.get("workspace"))
-            if persisted_task_workspace is None:
-                raise OrchestratorError(
-                    message="Cannot migrate a legacy session with invalid workspace identity",
-                    details={"invalid": "workspace"},
-                )
-            persisted_workspace = self._task_resume_workspace_identity(persisted_task_workspace)
-            active_workspace = self._resume_workspace_identity()
-            if active_workspace != persisted_workspace:
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session from a different project workspace",
-                    details={
-                        "persisted_workspace": persisted_workspace,
-                        "current_workspace": active_workspace,
-                        "hint": "Resume from the original project/workspace.",
-                    },
-                )
-        else:
-            runtime_progress = progress.get("runtime")
-            if isinstance(runtime_progress, Mapping) and "cwd" in runtime_progress:
-                persisted_cwd = runtime_progress.get("cwd")
-                if persisted_cwd is not None:
-                    current_cwd = self._effective_cwd()
-                    if (
-                        not isinstance(persisted_cwd, str)
-                        or not persisted_cwd.strip()
-                        or not isinstance(current_cwd, str)
-                        or self._canonical_path(current_cwd) != self._canonical_path(persisted_cwd)
-                    ):
-                        raise OrchestratorError(
-                            message=(
-                                "Cannot resume a legacy session from a different project workspace"
-                            ),
-                            details={
-                                "persisted_workspace": persisted_cwd,
-                                "current_workspace": current_cwd,
-                                "hint": "Resume from the original project/workspace.",
-                            },
-                        )
-
     def _restore_execution_contract(
         self,
         progress: Mapping[str, Any],
@@ -6260,6 +6120,32 @@ class OrchestratorRunner:
                 message=pre_adaptive_rejection.message,
                 details=pre_adaptive_rejection.details,
             )
+
+        migrated_verify_shell_semantics = migrated_pre_verify_shell_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_verify_shell_semantics is not None:
+            persisted_v4_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_v4_fingerprint, str
+            ) or persisted_v4_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-verify-shell contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_proof, dict)
+            migrated_contract["execution_semantics"] = migrated_verify_shell_semantics
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_verify_shell_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_verify_shell_semantics
+            self._verify_shell_identity = None
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -6505,6 +6391,22 @@ class OrchestratorRunner:
             # Historical v9 session starts predate the additive project anchor.
             # Preserve their exact direct-cwd representation rather than
             # rewriting durable resume authority under the new resolver.
+            # Transitional (#1799): this branch is a package-wide
+            # project-identity support contract — see the removal criterion in
+            # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md.
+            # It does not bypass other resume gates. Removal is allowed only
+            # after the documented identity-compatibility window ends and must
+            # replace this path with a typed fail-closed rejection.
+            #
+            # Current prepared executions intentionally restore an anchorless
+            # contract-only mapping; only a durable historical start snapshot
+            # that still lacks the anchor counts as a legacy activation.
+            raw_start_snapshot = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+            if isinstance(raw_start_snapshot, Mapping):
+                note_legacy_identity_path(
+                    "resume_workspace_comparison",
+                    prepared_live_execution=prepared_live_execution,
+                )
             active_workspace = (
                 self._proof_workspace_identity()
                 if prepared_live_execution
@@ -8593,6 +8495,49 @@ class OrchestratorRunner:
 
         return await self.execute_precreated_session(**execute_kwargs)
 
+    def _apply_verify_command_gate(
+        self, seed: Seed
+    ) -> Result[SessionTracker, OrchestratorError] | None:
+        """Surface — or refuse — criteria nothing can deterministically judge.
+
+        Returns ``None`` when preparation may continue, which is every case in
+        the ``warn`` stage. Only the ``block`` stage produces an error.
+        """
+        from ouroboros.core.seed_verify_gate import (
+            render_verify_command_gate_warning,
+            unverifiable_criteria,
+            verify_command_gate_mode,
+        )
+
+        findings = unverifiable_criteria(seed)
+        if not findings:
+            return None
+
+        mode = verify_command_gate_mode()
+        indices = [finding.display_index for finding in findings]
+        if mode == "block":
+            return Result.err(
+                OrchestratorError(
+                    message=("Acceptance criteria carry no verify_command and no exemption reason"),
+                    details={
+                        "gate": "seed.verify_command_gate",
+                        "mode": mode,
+                        "unverifiable_ac_indices": indices,
+                        "guidance": render_verify_command_gate_warning(findings),
+                    },
+                )
+            )
+        log.warning(
+            "orchestrator.seed.verify_command_gate_warning",
+            mode=mode,
+            unverifiable_ac_indices=indices,
+            unverifiable_ac_count=len(findings),
+        )
+        # Text, not markup interpolation: descriptions and commands are seed
+        # text and may contain Rich tags (`[/yellow]` would raise MarkupError).
+        self._console.print(Text(render_verify_command_gate_warning(findings), style="yellow"))
+        return None
+
     async def prepare_session(
         self,
         seed: Seed,
@@ -8620,6 +8565,12 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
+        # The verify-command gate runs here, at new-session preparation, so
+        # sessions already in flight are never re-judged under a gate that was
+        # tightened after they started.
+        gate_result = self._apply_verify_command_gate(seed)
+        if gate_result is not None:
+            return gate_result
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
@@ -9601,25 +9552,17 @@ class OrchestratorRunner:
                             )
                             await self._event_store.append(progress_event)
 
-                        # Measure and emit drift periodically
-                        if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
-                            # Measure and emit drift
-                            drift_measurement = DriftMeasurement()
-                            drift_metrics = drift_measurement.measure(
-                                current_output=message.content,
-                                constraint_violations=[],  # TODO: track violations
-                                current_concepts=[],  # TODO: extract concepts
-                                seed=seed,
-                            )
-                            drift_event = create_drift_measured_event(
-                                execution_id=exec_id,
-                                goal_drift=drift_metrics.goal_drift,
-                                constraint_drift=drift_metrics.constraint_drift,
-                                ontology_drift=drift_metrics.ontology_drift,
-                                combined_drift=drift_metrics.combined_drift,
-                                is_acceptable=drift_metrics.is_acceptable,
-                            )
-                            await self._event_store.append(drift_event)
+                        # NOTE: periodic drift measurement used to be emitted here
+                        # every PROGRESS_EMIT_INTERVAL messages, but the two inputs
+                        # it needs are not tracked anywhere in this loop. Passing
+                        # empty lists pinned constraint_drift to 0.0 (dropping 30%
+                        # of the weighted score) and ontology_drift to 1.0 (a fixed
+                        # +0.2 penalty), so combined_drift was always
+                        # goal_drift * 0.5 + 0.2 and is_acceptable (<= 0.3) was
+                        # effectively always False. Emitting nothing is preferable
+                        # to persisting a measurement we know is wrong; re-enable
+                        # only once constraint violations and ontology concepts are
+                        # actually tracked for the message being measured.
 
                         # Handle final message
                         if message.is_final:
@@ -10381,6 +10324,10 @@ class OrchestratorRunner:
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            verify_shell_identity=cast(
+                Mapping[str, object] | None,
+                execution_semantics["verify_shell_identity"],
+            ),
             ac_retry_attempts=execution_semantics["ac_retry_attempts"],
             cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],

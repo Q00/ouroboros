@@ -11,6 +11,7 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,17 +23,23 @@ from rich.text import Text
 import structlog
 import typer
 
-from ouroboros import telemetry as usage_telemetry
 from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
-from ouroboros.config import get_agent_runtime_backend
+from ouroboros.config import (
+    get_agent_runtime_backend,
+    get_cli_path,
+    get_codex_cli_path,
+    get_opencode_cli_path,
+)
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
     process_start_time,
 )
 from ouroboros.package_profiles import (
+    CLAUDE_CLI_RUNTIME_BACKEND,
+    SDK_RUNTIME_IN_MCP_SERVER_MESSAGE,
     UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
     has_unsupported_claude_sdk_mcp_mix,
     public_runtime_backend,
@@ -85,6 +92,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     KIRO = "kiro"
     PI = "pi"
     ZCODE = "zcode"
+    DSH = "dsh"
 
 
 def _write_pid_file() -> bool:
@@ -513,6 +521,50 @@ def _effective_mcp_server_runtime(runtime: AgentRuntimeBackend | None) -> str:
     return resolve_runtime_backend_name(normalized)
 
 
+# Executable stand-ins for the in-process ``claude`` SDK runtime, in preference
+# order. Each row carries the canonical backend, public spelling, configured
+# path resolver, and bare command used by the runtime factory.
+_SDK_RUNTIME_STANDINS = (
+    (CLAUDE_CLI_RUNTIME_BACKEND, AgentRuntimeBackend.CLAUDE_CLI.value, get_cli_path, "claude"),
+    ("codex", AgentRuntimeBackend.CODEX.value, get_codex_cli_path, "codex"),
+    ("opencode", AgentRuntimeBackend.OPENCODE.value, get_opencode_cli_path, "opencode"),
+)
+
+
+def _runtime_profile_controls_stage_backends() -> bool:
+    """Return whether stage routing can override the top-level fallback."""
+    try:
+        from ouroboros.config.loader import load_config
+
+        profile = load_config().orchestrator.runtime_profile
+    except Exception:
+        return False
+    return profile is not None and bool(profile.default or profile.stages)
+
+
+def _sdk_runtime_standin(runtime: AgentRuntimeBackend | None) -> tuple[str, str] | None:
+    """Return an executable runtime to use in place of an inherited SDK default.
+
+    Explicit CLI or environment selections remain authoritative. For inherited
+    config/default selection, hydrate the detached host's login-shell PATH and
+    reuse the backend-specific executable path resolvers used by runtime
+    construction instead of maintaining a narrower availability definition.
+    """
+    if runtime is not None:
+        return None
+    if any(
+        os.environ.get(key, "").strip() for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME")
+    ):
+        return None
+    if _runtime_profile_controls_stage_backends():
+        return None
+    for backend, public_name, configured_path, command in _SDK_RUNTIME_STANDINS:
+        executable = configured_path() or command
+        if shutil.which(executable):
+            return backend, public_name
+    return None
+
+
 def _require_mcp_dependency() -> None:
     """Fail before MCP server composition when the MCP v2 API is unavailable.
 
@@ -696,13 +748,12 @@ async def _run_mcp_server(
             mcp_bridge=mcp_bridge,
         )
 
-        tool_count = len(server.info.tools)
+        # Serve startup is the one place that may prime the update-notice
+        # cache (#2066): non-serving server constructions stay network-free.
+        from ouroboros.mcp.update_notice import maybe_schedule_cache_refresh
 
-        # One event per host session attach (Claude/Codex spawn `mcp serve`
-        # per session) — the denominator for agent-side usage ratios.
-        usage_telemetry.capture(
-            "mcp_serve_started", {"transport": transport, "tool_count": tool_count}
-        )
+        maybe_schedule_cache_refresh()
+        tool_count = len(server.info.tools)
 
         # Detect Codex seatbelt sandbox and warn about network restrictions.
         _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
@@ -1152,7 +1203,7 @@ def serve(
                 "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
                 "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
-                "antigravity, grok, or zcode)."
+                "antigravity, grok, zcode, or host)."
             ),
             case_sensitive=False,
         ),
@@ -1163,7 +1214,7 @@ def serve(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools (claude_code, "
-                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),
@@ -1198,23 +1249,47 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # Reject recursive server launches before shell hydration or any persistent
+    # cache/environment mutation. The parent runtime already owns the MCP edge.
+    if os.environ.get("_OUROBOROS_NESTED"):
+        _stderr_console.print("[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]")
+        raise typer.Exit(0)
+    # Detached MCP hosts often inherit a minimal environment. Hydrate before
+    # resolving selector provenance so login-shell/cache OUROBOROS_* choices
+    # remain authoritative rather than being mistaken for the shipped default.
+    _ensure_shell_env()
     # Resolve the exact backend the composition root would use before touching
     # nested-process state, shell state, persistence, or runtime adapters. A
     # missing option inherits config and ultimately defaults to the SDK-backed
     # ``claude`` runtime, which is not executable inside this MCP 2 process.
     selected_runtime = _effective_mcp_server_runtime(runtime)
-    if has_unsupported_claude_sdk_mcp_mix() or selected_runtime == "claude":
+    # Two different failures used to share one string. An environment that mixes
+    # MCP 2 with the Claude SDK really is a package-profile problem and the user
+    # must reinstall. Inheriting the ``claude`` default is a runtime-selection
+    # failure, and the fix is ``--runtime``. Telling that user to reinstall sent
+    # them to change extras that were never relevant to the selected backend.
+    if has_unsupported_claude_sdk_mcp_mix():
         _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
         raise typer.Exit(1)
+    if selected_runtime == "claude":
+        standin = _sdk_runtime_standin(runtime)
+        if standin is None:
+            _stderr_console.print(Text(SDK_RUNTIME_IN_MCP_SERVER_MESSAGE, style="red"))
+            raise typer.Exit(1)
+        # Say which runtime is actually serving. A host that swallows stderr
+        # would otherwise show a working tool list backed by a runtime the user
+        # never picked.
+        standin_backend, standin_name = standin
+        _stderr_console.print(
+            Text(
+                "Inherited the 'claude' SDK runtime, which cannot run inside the MCP "
+                f"server; serving with '{standin_name}' instead. Pass --runtime, set "
+                "OUROBOROS_AGENT_RUNTIME, or set OUROBOROS_RUNTIME to choose.",
+                style="yellow",
+            )
+        )
+        selected_runtime = standin_backend
 
-    # Guard: prevent recursive MCP server spawning.
-    # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
-    # inherits this env var. If that runtime's MCP config tries to spawn another
-    # ouroboros server, the nested instance exits cleanly instead of creating a
-    # process tree explosion.
-    if os.environ.get("_OUROBOROS_NESTED"):
-        _stderr_console.print("[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]")
-        raise typer.Exit(0)
     os.environ["_OUROBOROS_NESTED"] = "1"
 
     # Transport is re-validated inside _run_mcp_server; normalize here first so
@@ -1303,7 +1378,7 @@ def info(
                 "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
                 "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
-                "antigravity, grok, or zcode)."
+                "antigravity, grok, zcode, or host)."
             ),
             case_sensitive=False,
         ),
@@ -1314,7 +1389,7 @@ def info(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools (claude_code, "
-                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, zcode, or dsh)."
             ),
             case_sensitive=False,
         ),

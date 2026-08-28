@@ -118,7 +118,7 @@ def _lateral_persona_panel_metadata() -> LateralPersonaPanelMetadata:
     return LateralPersonaPanelMetadata(
         panel_id="lateral_persona_panel.v1",
         mcp_tool="ouroboros_lateral_think",
-        dispatch_modes=("plugin", "sequential"),
+        dispatch_modes=("plugin", "host_driven", "host_decides", "sequential"),
         legacy_dispatch_modes=("inline_fallback",),
         parallel_preference="parallel_when_runtime_supports_subagents",
         sequential_fallback={
@@ -156,11 +156,12 @@ def _lateral_persona_panel_metadata() -> LateralPersonaPanelMetadata:
         },
         runtime_instruction=(
             "Call ouroboros_lateral_think first. If the response delegates via "
-            "_subagents, consume those payloads. If it returns sequential "
-            "payload metadata and the runtime has a native subagent primitive, "
-            "dispatch each structured payload by context.persona; otherwise "
-            "process those payloads sequentially. Treat inline_fallback as a "
-            "legacy alias for sequential."
+            "_subagents, consume those structured payloads. For inline structured "
+            "payloads, host_driven means the host declared parallel support; "
+            "host_decides means use native parallel fan-out when available and "
+            "otherwise process sequentially; sequential means the selected "
+            "authority explicitly requires ordered processing. Treat "
+            "inline_fallback as a legacy alias for sequential."
         ),
     )
 

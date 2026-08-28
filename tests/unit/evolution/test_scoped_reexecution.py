@@ -32,7 +32,7 @@ from ouroboros.core.types import Result
 from ouroboros.evolution.frugality import OBSERVATION_EVENT, PROOF_EVENT, EvolutionFrugalityStatus
 from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
-from ouroboros.evolution.wonder import WonderOutput
+from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -339,6 +339,45 @@ class TestScopedForwardingIntegration:
         assert result.value.frozen_ac_indices == (0,)
         assert executor.captured is not None
         assert set(executor.captured) == {0}
+
+    async def test_generation_started_reports_post_wonder_reopened_focus(self) -> None:
+        store = await _store()
+        seed_v1 = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_focus_reopened",
+            goal=seed_v1.goal,
+            generations=(_gen(1, seed_v1, _eval({0: True, 1: False})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+        loop.wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(
+                WonderOutput(
+                    questions=("Challenge AC 1",),
+                    grounded_questions=(
+                        GroundedQuestion(
+                            question="Challenge AC 1",
+                            kind="challenge",
+                            ac_indices=(0,),
+                        ),
+                    ),
+                    should_continue=True,
+                )
+            )
+        )
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed_v1,
+        )
+
+        assert result.is_ok
+        assert result.value.active_ac_indices == (0, 1)
+        events = await store.query_events(event_type="lineage.generation.started", limit=10)
+        assert len(events) == 1
+        assert events[0].data["ac_focus"]["active_ac_indices"] == [0, 1]
+        assert events[0].data["ac_focus"]["frozen_ac_indices"] == []
 
     async def test_empty_settled_not_forwarded_integration(self) -> None:
         store = await _store()

@@ -149,8 +149,28 @@ not depend on the truncated human-readable event detail.
 
 ### Seed-QA gate
 
-Emit `auto.seed_qa.blocked` whenever the Seed-QA repair budget closes without a
-passing verdict.
+Emit `auto.seed_qa.advisory_override` whenever the Seed-QA gate gives up without
+a passing verdict — repair budget closed, feedback that the repair mapper cannot
+map, or an evaluator timeout/error. The gate is advisory: it never blocks the
+session, because a session with no Seed-QA evaluator wired runs unconditionally
+and a wired evaluator must not leave the session worse off. The unresolved
+verdict is carried into run → evaluate, which judges execution evidence.
+
+The event is written only on the continuation path: the grade gate and the
+pipeline deadline both run before it. It is not retracted afterwards — a
+retraction cannot be made reliable, since the correcting append can fail
+exactly when the original succeeded — so the deadline is enforced at the
+boundaries that follow instead (RUN phase entry, and skip-run completion).
+
+The event therefore carries **no ownership claim**. The append itself takes
+time, so a session can stop at the very next gate; an event that asserted
+"engine still driving" would be falsified by what happens next, in any path
+rather than one special case. Attention classification treats it as progress
+(`progress_advanced` / `seed_qa_advisory`), and ownership is read from the
+events that actually close a session.
+
+`auto.seed_qa.blocked` is retained for history persisted before the gate became
+advisory; nothing emits it now.
 
 Required data:
 
@@ -163,8 +183,10 @@ Required data:
 - `suggestions`
 - `reason`
 
-Transient evaluator errors and timeouts remain ordinary Auto blockers and use a
-different trigger code from a genuine non-passing Seed-QA verdict.
+Transient evaluator errors and timeouts carry their own `reason`
+(`evaluator_timeout` / `evaluator_error` / `evaluator_transient_error`) so they
+stay distinguishable from a genuine non-passing Seed-QA verdict
+(`repair_budget_exhausted` / `seed_qa_feedback_unmapped`).
 
 ### Frugality and stagnation
 
@@ -266,7 +288,8 @@ menus.
 | `deliver_verdict_rejected_streak` | at least two rejected verdicts for one `(judgment_scope_id, semantic_ac_key)` | verify immediately; mutate only after ownership closes |
 | `frugality_grounding_regression` | proof status `fail_grounding_regression` | successor only |
 | `frugality_no_savings` | proof status `fail_no_frugality` | successor only |
-| `seed_qa_blocked` | `auto.seed_qa.blocked` | successor/resume only |
+| `seed_qa_blocked` | `auto.seed_qa.blocked` (historical; the gate no longer blocks) | successor/resume only |
+| `seed_qa_advisory` | `auto.seed_qa.advisory_override` | none — engine ownership still active |
 | `lineage_stagnated` | `lineage.stagnated` | successor generation only |
 
 If a rejected streak is observed while engine ownership is still active, the

@@ -212,6 +212,65 @@ def test_codex_config_fingerprint_tracks_active_rules_and_skills(
         runtime._assert_codex_config_files_unchanged()
 
 
+def test_codex_config_fingerprint_ignores_only_app_managed_system_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desktop refreshes of .system must not hide changes to user skills."""
+    codex_home = tmp_path / "codex-home"
+    system_skill = codex_home / "skills" / ".system" / "bundled" / "SKILL.md"
+    user_skill = codex_home / "skills" / "my-skill" / "SKILL.md"
+    system_skill.parent.mkdir(parents=True)
+    user_skill.parent.mkdir(parents=True)
+    system_skill.write_text("system before\n", encoding="utf-8")
+    user_skill.write_text("user before\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime.execution_identity_contract()["codex_config_fingerprint"]
+    system_skill.write_text("system during refresh\n", encoding="utf-8")
+    (system_skill.parent / "NEW.md").write_text("new bundled file\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() == original
+
+    user_skill.write_text("user after\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() != original
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlinks require Windows privileges")
+def test_codex_config_fingerprint_ignores_system_skills_through_root_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The logical skills root keeps its ownership boundary through a symlink."""
+    codex_home = tmp_path / "codex-home"
+    skill_target = tmp_path / "skill-target"
+    system_skill = skill_target / ".system" / "bundled" / "SKILL.md"
+    user_skill = skill_target / "my-skill" / "SKILL.md"
+    system_skill.parent.mkdir(parents=True)
+    user_skill.parent.mkdir(parents=True)
+    system_skill.write_text("system before\n", encoding="utf-8")
+    user_skill.write_text("user before\n", encoding="utf-8")
+    codex_home.mkdir()
+    (codex_home / "skills").symlink_to(skill_target, target_is_directory=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime.execution_identity_contract()["codex_config_fingerprint"]
+    system_skill.write_text("system during refresh\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() == original
+
+    user_skill.write_text("user after\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() != original
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
 def test_codex_config_fingerprint_tracks_instruction_asset_symlink_targets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

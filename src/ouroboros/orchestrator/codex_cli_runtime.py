@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import stat
 import subprocess  # noqa: F401  # compatibility: tests patch this shared module
 import sys
 import tempfile
@@ -60,6 +59,9 @@ from ouroboros.orchestrator.cli_version_attestation import (
     read_cli_executable_filesystem_identity,
     read_cli_executable_resolution_chain_identity,
     require_unchanged_cli_version_attestation,
+)
+from ouroboros.orchestrator.codex_instruction_assets import (
+    update_codex_instruction_asset_fingerprint,
 )
 from ouroboros.orchestrator.frugality_runtime_attestation import (
     attested_codex_child_environment,
@@ -429,6 +431,7 @@ class CodexCliRuntime:
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             reasoning_effort_support=ParamSupport.NATIVE,
             # Codex enforces only the allow-listed levels (see _build_command); a
             # level outside this set is silently dropped, so declare the vocabulary
@@ -896,82 +899,13 @@ class CodexCliRuntime:
             digest.update(contents)
             digest.update(b"\0")
         for asset_name in ("rules", "skills"):
-            self._update_codex_instruction_asset_fingerprint(
+            update_codex_instruction_asset_fingerprint(
                 digest,
                 codex_home / asset_name,
                 relative_name=asset_name,
+                ignore_direct_system=asset_name == "skills",
             )
         return digest.hexdigest()
-
-    def _update_codex_instruction_asset_fingerprint(
-        self,
-        digest: Any,
-        path: Path,
-        *,
-        relative_name: str,
-        _seen: frozenset[Path] = frozenset(),
-    ) -> None:
-        """Hash active Codex rules/skills assets, including symlink target contents."""
-        digest.update(relative_name.encode("utf-8", errors="surrogateescape"))
-        digest.update(b"\0")
-        try:
-            stat_result = path.lstat()
-        except FileNotFoundError:
-            digest.update(b"missing\0")
-            return
-        except OSError as exc:
-            raise RuntimeError("Cannot inspect Codex instruction assets") from exc
-
-        mode = stat_result.st_mode
-        if stat.S_ISLNK(mode):
-            try:
-                link_target = os.readlink(path)
-                digest.update(b"symlink\0")
-                digest.update(link_target.encode("utf-8", errors="surrogateescape"))
-                digest.update(b"\0")
-            except OSError as exc:
-                raise RuntimeError("Cannot inspect Codex instruction assets") from exc
-            target_path = Path(link_target)
-            if not target_path.is_absolute():
-                target_path = path.parent / target_path
-            normalized_target = target_path.expanduser().absolute()
-            if normalized_target in _seen:
-                digest.update(b"symlink-cycle\0")
-                return
-            self._update_codex_instruction_asset_fingerprint(
-                digest,
-                target_path,
-                relative_name=f"{relative_name}->target",
-                _seen=_seen | {path.expanduser().absolute()},
-            )
-            return
-
-        if stat.S_ISREG(mode):
-            digest.update(b"file\0")
-            try:
-                digest.update(path.read_bytes())
-            except OSError as exc:
-                raise RuntimeError("Cannot read Codex instruction assets") from exc
-            digest.update(b"\0")
-            return
-
-        if stat.S_ISDIR(mode):
-            digest.update(b"directory\0")
-            try:
-                children = sorted(path.iterdir(), key=lambda child: child.name)
-            except OSError as exc:
-                raise RuntimeError("Cannot inspect Codex instruction assets") from exc
-            for child in children:
-                self._update_codex_instruction_asset_fingerprint(
-                    digest,
-                    child,
-                    relative_name=f"{relative_name}/{child.name}",
-                    _seen=_seen | {path.expanduser().absolute()},
-                )
-            digest.update(b"end-directory\0")
-            return
-
-        digest.update(f"non-file:{mode}\0".encode("ascii"))
 
     @staticmethod
     def _stable_codex_profile_config_bytes(contents: bytes) -> bytes:

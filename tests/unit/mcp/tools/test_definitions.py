@@ -49,6 +49,7 @@ from ouroboros.mcp.tools.execution_handlers import (
     _classify_synchronous_execution_status,
     _pause_metadata_from_progress,
 )
+from ouroboros.mcp.tools.job_observer import extract_job_observer_inline_handoff
 from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
@@ -2077,6 +2078,15 @@ class TestAsyncJobHandlers:
             "chained_evaluate_job_id",
             "chained_ralph_job_id",
         ]
+        assert (
+            extract_job_observer_inline_handoff(
+                result.value.text_content,
+                expected_job_id=observer["job_id"],
+                expected_session_id=observer["session_id"],
+                expected_execution_id=observer["execution_id"],
+            )
+            == observer
+        )
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content

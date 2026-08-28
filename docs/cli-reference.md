@@ -53,6 +53,20 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop and other MCP clients |
+| `plugin` | Manage UserLevel plugins (install, list, remove) |
+| `pm` | Product Management interview for requirements gathering |
+| `doctor` | Diagnose configuration and runtime health |
+| `detect` | Detect available runtime backends |
+| `artifacts` | Manage and inspect execution artifacts |
+| `harness` | Manage runtime harness configurations |
+| `codex` | Codex-specific setup and configuration |
+| `seed` | Generate or inspect seed specifications |
+| `workflow-ir` | Inspect workflow intermediate representation |
+| `zcode` | Convenience wrapper for Zcode (bundles `start`, `qa`, `run` with Zcode pre-selected; for global config use `setup --runtime zcode`) |
+
+> **Shorthand entry points:** `ooo` and `ouroboros` both launch the main CLI.
+> `ozo` is a standalone shorthand that launches only the Zcode convenience commands
+> (equivalent to `ouroboros zcode ...`).
 
 ---
 
@@ -245,10 +259,10 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`, `host`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
-| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
+| `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, `stdio`, or native-Windows-only explicit `http` |
 
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
@@ -291,7 +305,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
-- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
+- For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
@@ -368,7 +382,7 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`) |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -841,7 +855,7 @@ ouroboros update [OPTIONS]
 | `-y, --yes` | flag | off | Skip confirmation prompt (for scripts) |
 | `--dry-run` | flag | off | Show the commands that would run without executing them |
 | `--prerelease / --no-prerelease` | flag | auto | Include pre-releases (default: only when a pre-release is installed) |
-| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `auto` preserves the configured backend; `none` skips refresh |
+| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `all` refreshes Claude and Codex without changing the configured backend; `auto` preserves the configured backend; `none` skips refresh |
 
 **Examples:**
 
@@ -858,6 +872,9 @@ ouroboros update -y
 # Preview the commands without running them
 ouroboros update --dry-run
 
+# Refresh both Claude Code and Codex integrations
+ouroboros update --runtime all -y
+
 # Upgrade the package but skip runtime integration refresh
 ouroboros update --runtime none -y
 ```
@@ -870,11 +887,18 @@ ouroboros update --runtime none -y
    extras/additional requirements
 3. Verifies that the same environment's console reports at least the target
    version before changing any runtime integration
-4. Refreshes the Claude Code plugin (`marketplace update` + `plugin install` +
-   `plugin update`) when the `claude` CLI is available
-5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
+4. Refreshes the selected host plugin integration
+5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
+   runtime, or `ouroboros setup refresh` for `--runtime all`
 
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
+
+With `--runtime all`, the updater refreshes the Claude plugin, the Codex
+Ouroboros marketplace, and all previously installed runtime artifacts through
+`ouroboros setup refresh`. This path does not rewrite the configured execution
+backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
+active Codex sessions must restart because Codex does not currently retain an
+in-use plugin generation during marketplace cache rotation.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
@@ -1058,6 +1082,11 @@ Interactive TUI monitor for real-time workflow monitoring.
 
 Launch the interactive TUI monitor to observe workflow execution in real-time.
 
+<p align="center">
+  <img src="./images/ooo-tui-monitor.gif" width="760" alt="Terminal recording of ooo tui monitor: a session list with goals and statuses, selecting a session to show its AC execution tree with three failed criteria, then the event log listing received execution events">
+  <br/><sub>Session list &rarr; AC execution tree for one session &rarr; event log (<code>execution.plan.created</code>, <code>execution.ac.capsule.compiled</code>, &hellip;)</sub>
+</p>
+
 ```bash
 ouroboros tui [monitor] [OPTIONS]
 ```
@@ -1143,7 +1172,7 @@ ouroboros mcp serve [OPTIONS]
 | `--workspace-root TEXT` | Confines seed execution to directories under this path. Repeatable. Strongly recommended for network binds; unset means a caller may name any existing directory on the machine as an agent working tree. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -1184,7 +1213,7 @@ MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The str
 
 Reaching an Ouroboros MCP port is enough to call `ouroboros_execute_seed`, which runs caller-supplied seed YAML through a real agent runtime with that runtime's full file and shell authority. The port is therefore as privileged as a shell on the host, and `mcp serve` treats it that way.
 
-The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and the SDK enables DNS-rebinding protection for loopback binds automatically.
+The default bind — `stdio`, or `localhost` for a network transport — needs no credentials: the client already owns the process, and Ouroboros supplies explicit DNS-rebinding protection settings for loopback binds (keeping an empty Origin policy fail-closed rather than inheriting the SDK's permissive browser-origin defaults).
 
 A bind that other machines can reach is refused unless all of the following are supplied:
 
@@ -1195,6 +1224,8 @@ A bind that other machines can reach is refused unless all of the following are 
 `--workspace-root` is not required but should be treated as such for any shared deployment: without it a caller may name any existing directory on the host as an agent's working tree.
 
 Rate limiting (`RateLimitConfig`) is available once an auth method is configured, because the token supplies the per-client identity it buckets by. Without authentication it is refused rather than silently sharing one bucket across all callers.
+
+Scoped IPv6 addresses (those with a zone identifier such as `fe80::1%eth0`) cannot be used as network bind addresses when authentication is configured. The MCP SDK's Pydantic URL parser does not accept zone identifiers in URL authorities — neither raw nor percent-encoded — so authentication metadata (issuer and resource server URLs) cannot be constructed. Ouroboros rejects scoped IPv6 binds at startup with a clear error. This applies both to non-loopback scoped addresses (where auth is mandatory) and to scoped loopback addresses (e.g. `::1%lo`) when an auth token is explicitly passed or inherited from environment configuration. Unauthenticated scoped loopback addresses remain usable since they do not require AuthSettings construction. To resolve: use the address without a zone ID (e.g. `::1` instead of `::1%lo`), bind to a non-link-local address, or remove the auth token for loopback use.
 
 **Startup behavior:**
 
@@ -1254,7 +1285,7 @@ ouroboros mcp info [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 

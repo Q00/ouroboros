@@ -71,23 +71,38 @@ This skill works in two modes. Determine which one **before** attempting any too
    - `screenshot` — visual artifacts
    - `custom` — anything else
 
-3.5. **Acting verification — reproduce and OBSERVE before judging (do not skip for behaviour-bearing artifacts):**
+3.5. **Acting verification fan-out — probe in parallel, then judge (do not skip for behaviour-bearing artifacts):**
    A text judge can be fooled by a hopeful log line. When the artifact actually
-   *does* something (code, an app, an API, a UI) and the runtime exposes acting
-   tools — **computer-use / browser, `Bash`/shell, file reads** — gather real
-   evidence first, ideally via a dedicated verification sub-agent so the main
-   session stays lean:
-   - **Run it** — execute the command / start the app / hit the endpoint.
-   - **Observe the actual effect** — the file written, the endpoint's response,
-     the rendered UI (screenshot via computer-use) — NOT just exit text.
-   - **Probe the applicable adversarial classes** (the QA tool lists them):
-     `misleading_output` (claimed success vs. real effect), `hung_command`
-     (bounded timeout?), `malformed_input`, `stale_state`, `dirty_worktree`, etc.
-   - Capture commands run, outputs, and artifact paths as **evidence**.
-   Pass that evidence into the judge as `reference` (and prefer the observed
-   behaviour over the source text as the `artifact` when they disagree). If no
-   acting tools are available, say so and judge on the text alone — but flag that
-   behaviour was not observed.
+   *does* something (code, an app, an API, a UI), fan out empirical probes
+   using the host's native parallel sub-agent primitive — one probe sub-agent
+   per acting modality the runtime actually exposes, all spawned **in the same
+   message so they run concurrently**:
+   - **process probe** (`Bash`/shell): run the command / start the app / run
+     the declared smoke commands with bounded timeouts; capture exit codes and
+     real output.
+   - **browser probe** (browser-use tools, when the artifact serves HTTP or is
+     a web UI): load it, click the primary flows, capture what actually
+     renders and any console/network errors.
+   - **computer-use probe** (desktop computer-use tools, when the artifact is
+     a GUI/TUI): drive it like a user, screenshot the observed states.
+   - **artifact probe** (file reads): verify declared files/paths exist with
+     real content, not placeholders.
+   Each probe returns structured evidence only — commands run, observed
+   effects, screenshots/paths, pass/fail per probed behaviour. Every probe
+   also hits the applicable adversarial classes (the QA tool lists them):
+   `misleading_output` (claimed success vs. real effect), `hung_command`
+   (bounded timeout?), `malformed_input`, `stale_state`, `dirty_worktree`.
+   Skip a modality only when its tools are absent or the artifact type makes
+   it meaningless — and say which modalities were skipped and why.
+
+   Await all probes, then pass the merged evidence into the judge as
+   `reference` (prefer observed behaviour over source text as the `artifact`
+   when they disagree). **Empirical evidence outranks the judge**: if the
+   judge scores PASS but any probe observed the behaviour failing, present
+   the verdict as REVISE/FAIL on that evidence and say so explicitly — a
+   score contradicted by observation is not a pass. If no acting tools are
+   available at all, judge on the text alone but flag that behaviour was not
+   observed.
 
 4. **Call the `ouroboros_qa` MCP tool:**
    ```
@@ -127,8 +142,11 @@ If the MCP server is not available, adopt the `ouroboros:qa-judge` agent role di
 
 1. Read the canonical agent definition: `<project-root>/src/ouroboros/agents/qa-judge.md`
    (This is the same prompt used by the MCP QA tool, ensuring consistent verdicts.)
-2. Follow the QA Judge framework to evaluate the artifact
-3. Output the verdict in the standard format (must match MCP output shape):
+2. Run the same acting-verification fan-out as step 3.5 (parallel probe
+   sub-agents per available modality; empirical evidence outranks the judge)
+   before judging behaviour-bearing artifacts.
+3. Follow the QA Judge framework to evaluate the artifact
+4. Output the verdict in the standard format (must match MCP output shape):
 
 ```
 QA Verdict [Iteration N]

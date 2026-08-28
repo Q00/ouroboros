@@ -1,5 +1,7 @@
 # Goose runtime
 
+> 한국어: [goose.ko.md](./goose.ko.md)
+
 Ouroboros can run orchestrator workers through the Goose CLI with `runtime_backend: goose`.
 
 The Goose runtime uses the headless Goose task interface documented by Goose:

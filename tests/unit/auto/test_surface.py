@@ -51,6 +51,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "antigravity",
         "grok",
         "zcode",
+        "host",
     }
     frontdoor_enums = (
         auto.AgentRuntimeBackend,
@@ -1422,65 +1423,6 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
 
 
 @pytest.mark.asyncio
-async def test_auto_handler_routes_complete_product_evaluate_and_reflect_from_stage_plan(
-    monkeypatch, tmp_path
-) -> None:
-    from ouroboros.auto.pipeline import AutoPipelineResult
-    from ouroboros.auto.state import AutoStore
-    from ouroboros.mcp.tools import auto_handler as auto_module
-
-    captured: dict[str, object] = {}
-
-    class FakePipeline:
-        def __init__(self, driver, seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
-            evaluator = kwargs["evaluator"]
-            lateral_thinker = kwargs["lateral_thinker"]
-            captured["evaluator_runtime"] = evaluator.qa_handler.agent_runtime_backend
-            captured["evaluator_mode"] = evaluator.qa_handler.opencode_mode
-            captured["lateral_runtime"] = lateral_thinker.handler.agent_runtime_backend
-            captured["lateral_mode"] = lateral_thinker.handler.opencode_mode
-            captured["seed_qa_runtime"] = kwargs[
-                "seed_qa_evaluator"
-            ].qa_handler.agent_runtime_backend
-
-        async def run(self, run_state):  # noqa: ANN001
-            captured["state_runtime"] = run_state.runtime_backend
-            return AutoPipelineResult(
-                status="complete",
-                auto_session_id=run_state.auto_session_id,
-                phase="complete",
-            )
-
-    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
-    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
-    monkeypatch.setattr(
-        auto_module,
-        "resolve_auto_stage_runtime_plan",
-        lambda **_kwargs: AutoStageRuntimePlan(
-            default=StageRuntime("opencode", "plugin"),
-            interview=StageRuntime("gjc", None),
-            execute=StageRuntime("pi", None),
-            evaluate=StageRuntime("codex", None),
-            reflect=StageRuntime("hermes", None),
-        ),
-    )
-
-    result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
-        {"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True}
-    )
-
-    assert result.is_ok
-    assert captured == {
-        "evaluator_runtime": "codex",
-        "evaluator_mode": None,
-        "lateral_runtime": "hermes",
-        "lateral_mode": None,
-        "seed_qa_runtime": "gjc",
-        "state_runtime": "opencode",
-    }
-
-
-@pytest.mark.asyncio
 async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_server_cwd(
     monkeypatch, tmp_path
 ) -> None:
@@ -2565,53 +2507,6 @@ def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) 
     assert load_seed(path).metadata.seed_id == "seed_safe_123"
 
 
-@pytest.mark.asyncio
-async def test_auto_handler_complete_product_uses_configured_ralph_factory(
-    monkeypatch, tmp_path
-) -> None:
-    from ouroboros.auto.pipeline import AutoPipelineResult
-    from ouroboros.auto.state import AutoStore
-    from ouroboros.mcp.tools import auto_handler as auto_module
-
-    class FakeRalphHandler:
-        pass
-
-    configured_ralph = FakeRalphHandler()
-    captured: dict[str, object] = {}
-
-    def build_ralph(runtime_backend, opencode_mode):  # noqa: ANN001
-        captured["factory_runtime_backend"] = runtime_backend
-        captured["factory_opencode_mode"] = opencode_mode
-        return configured_ralph
-
-    class FakePipeline:
-        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
-            captured["ralph_starter_handler"] = kwargs["ralph_starter"].handler
-            captured["ralph_resumer_handler"] = kwargs["ralph_resumer"].handler
-
-        async def run(self, run_state):  # noqa: ANN001
-            return AutoPipelineResult(
-                status="complete",
-                auto_session_id=run_state.auto_session_id,
-                phase="complete",
-            )
-
-    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
-    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
-
-    result = await AutoHandler(
-        agent_runtime_backend="opencode",
-        opencode_mode="plugin",
-        ralph_handler_factory=build_ralph,
-    ).handle({"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True})
-
-    assert result.is_ok
-    assert captured["factory_runtime_backend"] == "opencode"
-    assert captured["factory_opencode_mode"] == "plugin"
-    assert captured["ralph_starter_handler"] is configured_ralph
-    assert captured["ralph_resumer_handler"] is configured_ralph
-
-
 def test_auto_handler_attached_completion_is_not_handoff_started() -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
@@ -2766,3 +2661,48 @@ def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_resu
     assert "Status: blocked" in text
     assert "Artifact state: partial_artifact_generated" in text
     assert "Status: complete" not in text
+
+
+def test_auto_artifact_state_does_not_call_a_seed_that_never_ran_verified() -> None:
+    """A skip-run session completes with a Seed, not with a verified product.
+
+    Nothing executed, so there is no product whose verification could have
+    happened; reporting `complete_verified` is how a renderer ends up printing
+    "Product status: verified" for work that was never run.
+    """
+    from ouroboros.auto.artifact_state import artifact_state_for_result
+
+    assert (
+        artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            partial_product=False,
+            run_handoff_status=None,
+            product_verified=False,
+        )
+        == "complete_unverified"
+    )
+
+
+def test_auto_artifact_state_still_verifies_a_completed_run() -> None:
+    """The narrowing must not withhold verification from work that did run."""
+    from ouroboros.auto.artifact_state import artifact_state_for_result
+
+    assert (
+        artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec_123",
+            job_id="job_123",
+            run_session_id=None,
+            partial_product=False,
+            run_handoff_status="completed",
+            product_verified=True,
+        )
+        == "complete_verified"
+    )

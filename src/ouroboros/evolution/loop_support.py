@@ -11,8 +11,11 @@ import inspect
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from ouroboros.evolution.focus import EvolutionFocus
 
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.conductor import ConductorDirective, stable_payload_digest
@@ -515,8 +518,15 @@ async def emit_generation_started_once(
     generation_number: int,
     phase: str,
     seed: Seed,
+    focus: EvolutionFocus | None = None,
 ) -> None:
-    """Persist the sole started event while allowing later attempts to resume."""
+    """Persist the sole started event while allowing later attempts to resume.
+
+    ``focus`` (when the generation is scoped by prior evaluation evidence)
+    is projected into the event's ``ac_focus`` block so observers can report
+    which ACs this generation is redoing vs. keeping frozen. Only AC
+    descriptions are included — never verify_command/output_assertion.
+    """
     events = await event_store.replay_lineage(lineage_id)
     if any(
         event.type == "lineage.generation.started"
@@ -524,6 +534,14 @@ async def emit_generation_started_once(
         for event in events
     ):
         return
+    active_ac_descriptions: list[str] | None = None
+    if focus is not None:
+        criteria = tuple(getattr(seed, "acceptance_criteria", ()))
+        active_ac_descriptions = [
+            str(getattr(criteria[index], "description", criteria[index]))[:200]
+            for index in focus.active_ac_indices
+            if 0 <= index < len(criteria)
+        ]
     await event_store.append(
         lineage_generation_started(
             lineage_id,
@@ -531,7 +549,29 @@ async def emit_generation_started_once(
             phase,
             seed.metadata.seed_id,
             json.dumps(seed.to_dict()),
+            active_ac_indices=(list(focus.active_ac_indices) if focus is not None else None),
+            frozen_ac_indices=(list(focus.frozen_ac_indices) if focus is not None else None),
+            active_ac_descriptions=active_ac_descriptions,
+            focus_reason=(focus.reason if focus is not None else None),
         )
+    )
+
+
+async def emit_execution_started_once(
+    event_store: EventStore,
+    lineage_id: str,
+    generation_number: int,
+    seed: Seed,
+    focus: EvolutionFocus,
+) -> None:
+    """Persist the final execution working set for a generation."""
+    await emit_generation_started_once(
+        event_store,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        phase=GenerationPhase.EXECUTING.value,
+        seed=seed,
+        focus=focus,
     )
 
 

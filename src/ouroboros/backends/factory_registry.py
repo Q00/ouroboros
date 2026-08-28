@@ -116,9 +116,19 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
         agent_runtime_factory="_create_zcode_runtime",
     ),
     BackendFactorySpec(
+        name="host",
+        runtime_backend="host",
+        agent_runtime_factory="_create_host_runtime",
+    ),
+    BackendFactorySpec(
         name="ourocode",
         llm_backend="ourocode",
         llm_adapter_factory="_create_ourocode_adapter",
+    ),
+    BackendFactorySpec(
+        name="dsh",
+        llm_backend="dsh",
+        llm_adapter_factory="_create_dsh_adapter",
     ),
     BackendFactorySpec(
         name="litellm",

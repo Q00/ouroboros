@@ -1,5 +1,7 @@
 # Ouroboros Runtime Guide: Hermes Agent
 
+> 한국어: [hermes.ko.md](./hermes.ko.md)
+
 This guide covers how to use Ouroboros with the [Hermes Agent](https://github.com/NousResearch/hermes-agent) as an execution runtime.
 
 ## Installation
