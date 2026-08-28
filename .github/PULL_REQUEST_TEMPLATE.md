@@ -11,6 +11,26 @@
 - [ ] `uv run ruff check src/ tests/` and `uv run ruff format --check src/ tests/` clean
 - [ ] `uv run mypy src/` clean (or noted exception)
 
+## PR Boundary Contract
+
+<!-- Keep the review target explicit. Do not let a small user problem silently
+grow into a new lifecycle, rollback, concurrency, filesystem, or ownership
+subsystem. -->
+- User problem:
+- Promised behavior:
+- Inputs and preconditions:
+- Execution conditions:
+- Owned files/subsystems/owners:
+- Non-goals:
+- Verification scenario or command:
+
+### Scope decision
+
+- [ ] This PR stays within the owned surface above.
+- [ ] Any extra risk is a follow-up with a named owner.
+- [ ] If separation leaves immediate user-data or security risk, I requested a maintainer RFC/scope decision.
+
+
 ## R-run comparison (required for `src/ouroboros/auto/` changes)
 
 <!--

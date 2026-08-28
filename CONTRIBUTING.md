@@ -7,6 +7,8 @@ Thank you for your interest in contributing to Ouroboros! This guide covers ever
 - [Quick Setup](#quick-setup)
 - [Development Workflow](#development-workflow)
 - [Ways to Contribute](#ways-to-contribute)
+- [PR Boundary Contract](#pr-boundary-contract)
+
 - [Development Environment](#development-environment)
 - [Code Style Guide](#code-style-guide)
 - [Commit Message Convention](#commit-message-convention)
@@ -64,6 +66,47 @@ uv run --python 3.13 pytest tests/unit/ -q
 - For new features, open an issue first to discuss the approach
 - Label your issue with appropriate tags: `bug`, `enhancement`, `documentation`, etc.
 - Treat actionable issues as structured work artifacts, not casual notes. See [Issue Quality Policy](./docs/contributing/issue-quality-policy.md).
+
+### PR Boundary Contract
+
+Before implementation, write the boundary the PR promises to own. A small user
+problem must not silently grow into a new lifecycle, rollback protocol,
+concurrency model, filesystem authority, or subsystem ownership.
+
+Every implementation issue and PR must state:
+
+1. **User problem** — the observable problem being solved.
+2. **Promised behavior** — what becomes true for the user.
+3. **Inputs and preconditions** — the inputs for which the promise applies.
+4. **Execution conditions** — runtime, platform, lifecycle, and failure conditions in scope.
+5. **Owned surface** — files, subsystems, and existing owners the PR may change.
+6. **Non-goals** — adjacent behavior the PR explicitly does not own.
+7. **Verification** — one or more commands or scenarios that prove the promise.
+
+If the implementation discovers that it needs a new subsystem or a new effect
+owner, stop expanding the patch. Record the discovery as a follow-up or ask a
+maintainer whether an RFC is required. Do not make the current PR absorb new
+lifecycle, rollback, concurrency, or filesystem-authority responsibilities just
+to satisfy review feedback.
+
+The review bot applies this decision contract:
+
+1. Does a finding reproduce under the PR's promised inputs and execution conditions?
+2. Does that finding break the behavior the PR promised?
+3. Would fixing it require a new subsystem or new ownership?
+4. Can the original user problem be solved without the subsystem introduced by the PR?
+5. Would separating the extra scope leave an immediate user-data or security risk?
+
+| Result | Review action |
+|---|---|
+| 1 and 2 are both true | `REQUEST_CHANGES` with current-HEAD evidence. |
+| 3 or 4 is true, and 5 is false | Non-blocking follow-up with an explicit owner; do not expand this PR. |
+| 3 and 5 are true | Stop the PR and ask a maintainer for an RFC/scope decision. Do not prescribe the new architecture inside review comments. |
+| The boundary is missing or ambiguous | Ask once for the missing contract fields; do not invent speculative blockers. |
+
+One root cause gets one consolidated finding. A reviewer must not turn one
+unsupported solution assumption into a sequence of rollback, concurrency,
+filesystem, and lifecycle blockers across repeated rounds.
 
 ### 2. Branch
 

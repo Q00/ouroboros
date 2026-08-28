@@ -73,6 +73,33 @@ Other gates fire conditionally and are easy to trip blind:
 Full reference, including every escape hatch and the release sequence:
 **[docs/contributing/ci-gates.md](docs/contributing/ci-gates.md)**.
 
+
+## Review Boundary Contract
+
+Before changing or reviewing a PR, recover its structured boundary: user
+problem, promised behavior, inputs/preconditions, execution conditions, owned
+subsystems and owners, non-goals, and verification scenario.
+
+Use this five-question decision gate:
+
+1. Does the finding reproduce under the promised inputs and execution conditions?
+2. Does it break the PR's promised contract?
+3. Does fixing it require a new subsystem or new ownership?
+4. Can the original user problem be solved without the PR-introduced subsystem?
+5. Would splitting the extra scope leave immediate user-data or security risk?
+
+Only questions 1 and 2 together justify `REQUEST_CHANGES`. If question 3 or 4
+is true and question 5 is false, create a non-blocking follow-up with a named
+owner; do not expand the current PR. If questions 3 and 5 are true, stop and
+ask the maintainer for an RFC/scope decision instead of designing the new
+subsystem in review comments.
+
+If the boundary is missing, request the missing contract fields once. Never
+turn an unsupported solution assumption into successive lifecycle, rollback,
+concurrency, filesystem-authority, or ownership blockers. Consolidate one root
+cause into one finding. The contributor owns the contract, the review bot owns
+contract violations and direct risks, and the maintainer decides scope
+expansion.
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->
 # Ouroboros — Specification-First AI Development

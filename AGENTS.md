@@ -72,6 +72,37 @@ Other gates fire conditionally and are easy to trip blind:
 Full reference, including every escape hatch and the release sequence:
 **[docs/contributing/ci-gates.md](docs/contributing/ci-gates.md)**.
 
+### Review Boundary Contract
+
+For every PR, recover the contributor's structured boundary before evaluating
+implementation details. The boundary must identify the user problem, promised
+behavior, inputs/preconditions, execution conditions, owned subsystems and
+owners, non-goals, and verification scenario.
+
+Use this five-question decision gate:
+
+1. Does the finding reproduce under the promised inputs and execution conditions?
+2. Does it break the PR's promised contract?
+3. Does fixing it require a new subsystem or new ownership?
+4. Can the original user problem be solved without the PR-introduced subsystem?
+5. Would splitting the extra scope leave immediate user-data or security risk?
+
+Decision rules:
+
+- Questions 1 and 2 true: `REQUEST_CHANGES`, with current-HEAD evidence.
+- Question 3 or 4 true and question 5 false: non-blocking follow-up, named owner,
+  and no scope expansion in the current PR.
+- Questions 3 and 5 true: stop the review escalation and ask the maintainer for
+  an RFC/scope decision. Do not design the new subsystem in the blocker.
+- Missing boundary: request the missing contract fields once; do not invent
+  blockers from an ambiguous or unsupported assumption.
+
+The contributor owns the contract and boundary. The review bot owns only
+contract violations and direct risks. A risk outside the valid boundary is a
+follow-up owned by the appropriate subsystem owner. The maintainer decides
+whether scope expansion is allowed. Consolidate one root cause into one
+finding; never drip the same assumption into repeated rollback, concurrency,
+filesystem, or lifecycle blockers.
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->
 # Ouroboros — Specification-First AI Development
@@ -88,6 +119,8 @@ Most AI coding fails at the input, not the output. Ouroboros fixes this by
 3. **Evolutionary Loops** — Each evaluation cycle feeds back into better specs
 
 ```
+
+
 Interview → Seed → Execute → Evaluate
     ↑                           ↓
     └─── Evolutionary Loop ─────┘
