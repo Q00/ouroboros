@@ -177,3 +177,7 @@ first call fails.
 
 Note that the loopback spawns a second `dsh-acp-demo` process; it does not
 reuse the dsh you are chatting in, so steps 1–3 above still apply.
+
+For source-backed runtime diagnostics beyond this integration path—especially
+plugin/MCP composition, Session recovery, sandbox boundaries, and cross-platform
+failures—see the independent [DeepSeek Harness Handbook](https://github.com/sandbaseai/deepseek-harness-handbook).
