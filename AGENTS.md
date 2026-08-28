@@ -41,6 +41,30 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 
 Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `src/ouroboros/agents/{name}.md` and adopt that role. Use `OUROBOROS_AGENTS_DIR` or `.Codex-plugin/agents/` only for explicit custom overrides.
 
+## Pull Request Boundary Policy
+
+Before implementing or reviewing a PR, read [Review Boundary Contract](CONTRIBUTING.md#review-boundary-contract). Treat the PR description as the review contract.
+
+Contributors MUST declare the user problem, supported inputs and execution conditions, observable contract, touched subsystem and owner, non-goals, and verification evidence. Do not silently widen these while responding to review.
+
+Review agents MUST evaluate every finding in this order:
+
+1. Reproduce it under the PR's promised inputs and execution conditions.
+2. Determine whether it violates the PR's promised contract.
+3. Determine whether the fix requires a new subsystem or ownership boundary.
+4. Determine whether the original user problem can be solved without the subsystem introduced by the PR.
+5. Determine whether splitting the scope leaves an immediate user-data or security risk.
+
+Outcomes are strict:
+
+- Questions 1 and 2 are yes: **Changes Requested**.
+- Questions 3 and 5 are yes: stop the PR and ask a maintainer to revisit the RFC; do not silently absorb the new subsystem or owner.
+- Questions 3 and 4 are yes while question 5 is no: non-blocking follow-up with a named owner and link.
+- Question 5 is yes without the Q3 + Q5 escalation: **Changes Requested** for the immediate user-data or security risk.
+- Outside the declared boundary and no contract violation: not a blocker; record only as a valid, actionable, owned follow-up.
+
+Review severity alone never expands PR scope. Maintainers own scope-expansion decisions.
+
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->
 # Ouroboros — Specification-First AI Development

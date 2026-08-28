@@ -42,6 +42,30 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 
 Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `src/ouroboros/agents/{name}.md` and adopt that role. Use `OUROBOROS_AGENTS_DIR` or `.claude-plugin/agents/` only for explicit custom overrides.
 
+## Pull Request Boundary Policy
+
+Before implementing or reviewing a PR, read [Review Boundary Contract](CONTRIBUTING.md#review-boundary-contract). The PR description is the review contract, not an informal suggestion.
+
+Require contributors to declare: the one user problem; supported inputs and execution conditions; observable contract and invariants; changed subsystem, data/security boundary, and owner; non-goals; and evidence. Do not absorb new lifecycle, rollback, concurrency, filesystem-authority, or other ownership requirements without a maintainer decision.
+
+For every review finding, ask:
+
+1. Does it reproduce under the promised inputs and execution conditions?
+2. Does it break the promised contract?
+3. Does fixing it require a new subsystem or ownership boundary?
+4. Can the original user problem be solved without the subsystem introduced by this PR?
+5. If scope is split, does immediate user-data or security risk remain?
+
+Use these decisions:
+
+- Q1 + Q2: **Changes Requested**.
+- Q3 + Q5: stop and revisit the RFC with the maintainer; do not silently absorb the new subsystem or owner.
+- Q3 + Q4 and not Q5: owned follow-up, not a blocker; require a named owner and link.
+- Q5 without Q3 + Q5 escalation: **Changes Requested** for the immediate user-data or security risk.
+- Outside the declared boundary without a contract violation: not a blocker; do not expand the PR.
+
+Only the maintainer decides scope expansion. Keep review comments tied to the declared boundary and directly evidenced behavior.
+
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->
 # Ouroboros — Specification-First AI Development

@@ -4,6 +4,18 @@
 
 <!-- 1-3 sentences. What does this PR do and why? -->
 
+## Review boundary
+
+<!-- Keep this boundary stable while responding to review. See CONTRIBUTING.md#review-boundary-contract. -->
+- **User problem**: What one concrete user problem does this PR solve?
+- **Inputs and execution conditions**: Which inputs, preconditions, environments, and execution paths are supported?
+- **Promised contract**: What observable behavior and invariants does the PR guarantee?
+- **Implementation boundary and owner**: Which existing subsystem/component changes? Which data or security boundaries are crossed? Who owns it?
+- **Non-goals**: Which inputs, conditions, risks, or adjacent capabilities are intentionally excluded?
+- **Evidence**: Which reproduction steps or tests prove the promised behavior?
+
+<!-- Review findings are blockers only when they reproduce inside this boundary and violate the contract, or when they leave an immediate user-data/security risk. New subsystem/ownership needs go to a maintainer; safe out-of-boundary risks require a named follow-up owner. -->
+
 ## Test plan
 
 <!-- Bulleted checklist of how this PR was verified. -->
