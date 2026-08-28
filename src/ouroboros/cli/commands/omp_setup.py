@@ -27,7 +27,7 @@ def detect_omp_runtime() -> str | None:
     return (omp_path if omp_path and shutil.which(omp_path) else None) or shutil.which("omp")
 
 
-def setup_omp(omp_path: str) -> None:
+def setup_omp(omp_path: str) -> bool:
     """Configure Ouroboros for the OMP (Oh My Pi) CLI runtime.
 
     OMP is a base-package agent runtime in the Pi family: setup records the
@@ -37,6 +37,12 @@ def setup_omp(omp_path: str) -> None:
     not unexpectedly move authoring/evaluation traffic to a different
     provider; when selected explicitly, structured response_format requests
     are enforced cooperatively by that adapter.
+
+    Returns True when the runtime configuration is committed and the managed
+    bridge is installed. Returns False — with no OMP configuration committed —
+    when the bridge write fails, so callers fail closed instead of leaving a
+    selection whose interactive ``ooo`` dispatch silently does not work
+    (PR #2299 review round 1).
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -51,7 +57,7 @@ def setup_omp(omp_path: str) -> None:
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting OMP setup.")
-        return
+        return False
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
@@ -60,19 +66,27 @@ def setup_omp(omp_path: str) -> None:
     orch["runtime_backend"] = "omp"
     orch["omp_cli_path"] = omp_path
 
+    # Bridge activation comes before the config commit: a failed bridge write
+    # must not leave a persisted OMP selection without interactive `ooo`
+    # dispatch.
+    if not install_omp_ooo_bridge():
+        print_error("OMP ooo bridge installation failed — OMP configuration was not changed.")
+        return False
+
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured OMP runtime (CLI: {omp_path})")
     print_info(f"Config saved to: {config_path}")
-    install_omp_ooo_bridge()
+    return True
 
 
 def select_omp_runtime(available: dict[str, str | None]) -> None:
     """Handle the ``omp`` branch of setup's interactive runtime selection.
 
     Prints omp-specific install guidance and exits non-zero when the CLI is
-    missing; otherwise runs the full omp setup flow.
+    missing or the setup flow fails (for example, a failed bridge write);
+    otherwise runs the full omp setup flow.
     """
     import typer
 
@@ -84,7 +98,8 @@ def select_omp_runtime(available: dict[str, str | None]) -> None:
             "OUROBOROS_OMP_CLI_PATH, or configure orchestrator.omp_cli_path."
         )
         raise typer.Exit(1)
-    setup_omp(omp_path)
+    if not setup_omp(omp_path):
+        raise typer.Exit(1)
 
 
 __all__ = ["detect_omp_runtime", "select_omp_runtime", "setup_omp"]

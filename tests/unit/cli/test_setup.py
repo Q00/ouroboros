@@ -11160,6 +11160,67 @@ class TestCopilotSetup:
         )
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
 
+    def test_setup_omp_fails_closed_when_bridge_install_fails(self, tmp_path: Path) -> None:
+        """PR #2299 round 1: a failed bridge write must not commit omp config."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"orchestrator": {"runtime_backend": "claude"}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.omp_setup.install_omp_ooo_bridge",
+                return_value=False,
+            ) as mock_install,
+        ):
+            result = setup_cmd._setup_omp("/opt/bin/omp")
+
+        assert result is False
+        mock_install.assert_called_once_with()
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "claude"
+        assert "omp_cli_path" not in config["orchestrator"]
+        assert not (tmp_path / ".omp" / "agent" / "extensions").exists()
+
+    def test_setup_omp_commits_config_only_after_bridge_success(self, tmp_path: Path) -> None:
+        """Config commit happens after bridge activation, in that order."""
+        calls: list[str] = []
+
+        def fake_install() -> bool:
+            calls.append("bridge")
+            # The config file must still describe the pre-OMP state when the
+            # bridge installer runs.
+            raw = (tmp_path / ".ouroboros" / "config.yaml").read_text(encoding="utf-8")
+            assert "runtime_backend: omp" not in raw
+            return True
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"orchestrator": {"runtime_backend": "claude"}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.omp_setup.install_omp_ooo_bridge",
+                side_effect=fake_install,
+            ),
+        ):
+            result = setup_cmd._setup_omp("/opt/bin/omp")
+
+        assert result is True
+        assert calls == ["bridge"]
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "omp"
+
     def test_install_omp_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
         """The managed OMP bridge should not rewrite an already-current extension."""
         bridge_path = tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"

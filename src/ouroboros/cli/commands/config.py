@@ -857,7 +857,8 @@ def backend(
         elif new_backend == "pi":
             _setup_pi(cli_path)
         elif new_backend == "omp":
-            _setup_omp(cli_path)
+            if _setup_omp(cli_path) is False:
+                setup_failed = True
         elif new_backend == "antigravity":
             _setup_antigravity(cli_path)
         elif new_backend == "grok":
