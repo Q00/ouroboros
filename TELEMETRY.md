@@ -83,7 +83,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | Event | When | Properties (exact set) |
 |---|---|---|
 | `install_completed` | `install.sh` finishes successfully | os, runtime, version, ref |
-| `install_started` | `install.sh` begins | os, version, ref |
+| `install_started` | `install.sh` begins — deliberately per-invocation, NOT daily-deduplicated: each row pairs with (or lacks) an `install_completed` to measure install drop-off and retry behavior, and volume is bounded by install attempts (~hundreds/month) | os, version, ref |
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
@@ -94,6 +94,9 @@ use. Each row below is the exact property set accepted by the serializer.
 
 Notes:
 
+- `install_started` is excluded from the daily-deduplication contract on
+  purpose: retries are the signal (a started-but-never-completed sequence is
+  install drop-off), and installer volume is self-bounding.
 - `mcp_serve_started` and `subagent_dispatch` are daily-deduplicated adoption
   signals (deterministic `$insert_id`, one row per user/day/dimension) — the
   per-session volume and rich per-dispatch properties removed by #2278 stay
