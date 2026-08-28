@@ -467,15 +467,17 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
         assert list(target_path.iterdir()) == []
         assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
 
-    def test_directory_commit_refuses_a_target_that_appears_after_the_check(
+    def test_directory_commit_admits_an_occupied_name_only_through_the_reservation(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A prior existence check must not be trusted at publication time.
+        """Admission is the ``mkdir`` reservation, never an existence check.
 
         POSIX ``rename`` removes an empty destination directory, so a writer that
-        creates the target between a check and the rename would lose it silently.
+        holds the target would lose it silently if publication were admitted by a
+        check. The reservation refuses the name instead, even when every earlier
+        check reports it free.
         """
         source_path = tmp_path / "source"
         target_path = tmp_path / "target"
