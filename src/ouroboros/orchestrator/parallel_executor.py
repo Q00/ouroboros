@@ -5297,7 +5297,11 @@ class ParallelACExecutor:
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         settled: list[ACExecutionResult] = []
-        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
+        # (reason, outcome, verify_cause): every settlement branch names its
+        # own machine-readable cause at classification time — a shared
+        # fallback guess here would misreport e.g. an unavailable digest as
+        # concurrent workspace mutation. `None` folds to `unknown` downstream.
+        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None, str | None]] = {}
 
         for result in results:
             if not result.success:
@@ -5324,6 +5328,7 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     "Final verify gate evidence is unavailable for acceptance.",
                     None,
+                    None,
                 )
                 settled.append(result)
                 continue
@@ -5332,6 +5337,7 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     f"Final workspace verify gate failed: {outcome.reason}",
                     outcome,
+                    outcome.cause,
                 )
                 settled.append(result)
                 continue
@@ -5345,6 +5351,7 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     "Final workspace digest unavailable for acceptance evidence.",
                     outcome,
+                    None,
                 )
                 settled.append(result)
                 continue
@@ -5352,6 +5359,7 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     "Final expected_artifacts missing: " + ", ".join(missing_artifacts),
                     outcome,
+                    _missing_artifacts_cause(missing_artifacts, cwd),
                 )
                 settled.append(result)
                 continue
@@ -5365,6 +5373,7 @@ class ParallelACExecutor:
                         "Final acceptance rejected because coordinator revalidation "
                         "did not replay verify_command.",
                         outcome,
+                        "workspace_mutated",
                     )
                     settled.append(result)
                     continue
@@ -5374,6 +5383,7 @@ class ParallelACExecutor:
                     individual_failures[result.ac_index] = (
                         "Final verify gate workspace digest unavailable for acceptance.",
                         outcome,
+                        None,
                     )
                     settled.append(result)
                     continue
@@ -5389,6 +5399,7 @@ class ParallelACExecutor:
                         "after verify_command completed; replaying verify_command "
                         "is not permitted.",
                         outcome,
+                        "workspace_mutated",
                     )
                     settled.append(result)
                     continue
@@ -5405,7 +5416,13 @@ class ParallelACExecutor:
                 "workspace or its digest could not be revalidated."
             )
             individual_failures = {
-                result.ac_index: (mutation_reason, result.verify_gate_outcome)
+                result.ac_index: (
+                    mutation_reason,
+                    result.verify_gate_outcome
+                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                    else None,
+                    "workspace_mutated",
+                )
                 for result in settled
                 if result.success
             }
@@ -5416,7 +5433,7 @@ class ParallelACExecutor:
             if failure is None:
                 finalized.append(result)
                 continue
-            reason, outcome = failure
+            reason, outcome, verify_cause = failure
             spec = successful_contracts.get(result.ac_index)
             missing_artifacts = (
                 list(outcome.missing_artifacts) if isinstance(outcome, _VerifyGateOutcome) else []
@@ -5439,21 +5456,11 @@ class ParallelACExecutor:
                         "reason": reason,
                         "failure_class": FailureClass.EVIDENCE_MISSING.value,
                         "final_workspace_revalidation": True,
-                        "verify_cause": (
-                            outcome.cause
-                            if isinstance(outcome, _VerifyGateOutcome) and outcome.cause
-                            else "workspace_mutated"
-                        ),
+                        "verify_cause": verify_cause,
                     },
                 )
             )
-            usage_telemetry.capture_ac_verify_failed(
-                cause=(
-                    outcome.cause
-                    if isinstance(outcome, _VerifyGateOutcome) and outcome.cause
-                    else "workspace_mutated"
-                )
-            )
+            usage_telemetry.capture_ac_verify_failed(cause=verify_cause)
             finalized.append(
                 replace(
                     result,
@@ -9878,6 +9885,11 @@ Respond with either ATOMIC or the structured JSON object only.
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
 
         if outcome.environment_unverifiable:
+            # Quarantine preserves the worker result instead of failing it,
+            # but the rejection-cause analytics must still see this branch:
+            # `timeout` and `environment_unverifiable` are documented causes
+            # and would otherwise never reach telemetry.
+            usage_telemetry.capture_ac_verify_failed(cause=outcome.cause)
             return await quarantine_unverifiable_result(
                 result=result,
                 spec=spec,

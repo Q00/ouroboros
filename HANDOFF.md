@@ -179,9 +179,11 @@ src/ouroboros/mcp/server/adapter.py
 - 모든 사용자 요청을 auto로 보내지 않는다.
 - 툴 설명을 길게 만들어 context budget을 소비하지 않는다.
 - activation 개선을 증명하기 전에 전환율 상승을 주장하지 않는다.
-- 기존 텔레메트리 이벤트 계약을 다시 넓히지 않는다. 필요한 분석은 현재
-  `service_active`, `command_run`, `workflow_outcome`, app_version,
-  runtime_backend를 사용한다.
+- 텔레메트리 볼륨 계약은 넓히지 않는다: 이벤트를 되살리더라도 사용자/일당
+  1행(daily dedupe)으로만 수집한다. #2278이 제거한 per-session 볼륨과
+  per-dispatch 상세 속성은 복원하지 않는다. (mcp_serve_started,
+  subagent_dispatch, install_started는 이 규칙 아래에서 의도적으로 복원됨 —
+  attached → used 퍼널과 User-lifecycle 시리즈에 필요.)
 
 ## Next Session Start
 

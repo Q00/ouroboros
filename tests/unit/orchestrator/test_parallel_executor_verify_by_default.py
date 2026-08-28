@@ -2819,3 +2819,93 @@ def test_verify_gate_outcome_cause_roundtrips_and_legacy_checkpoints_decode() ->
     hostile = dict(serialized)
     hostile["cause"] = "/private/path: boom"
     assert _deserialize_verify_gate_outcome(hostile) is None
+
+
+@pytest.mark.asyncio
+async def test_quarantined_outcomes_still_reach_rejection_cause_telemetry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`timeout` and `environment_unverifiable` quarantine instead of failing,
+    but they are documented causes — the analytics event must still fire."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    executor = _make_executor(working_directory=str(tmp_path), verify_command_timeout_seconds=1)
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="slow", verify_command="sleep 5"))
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=ACExecutionResult(ac_index=0, ac_content="slow", success=True),
+        session_id="s",
+        execution_id="e",
+    )
+    assert gated.success is True  # quarantined, not failed
+    assert captured == ["timeout"]
+
+    captured.clear()
+    executor_no_shell = _make_executor(working_directory=str(tmp_path))
+    executor_no_shell._verify_shell_identity = None
+    seed_pipe = _seed_with_specs(
+        AcceptanceCriterionSpec(description="pipe", verify_command="echo ok | tee log")
+    )
+    await executor_no_shell._apply_verify_gate(
+        seed=seed_pipe,
+        ac_index=0,
+        result=ACExecutionResult(ac_index=0, ac_content="pipe", success=True),
+        session_id="s",
+        execution_id="e",
+    )
+    assert captured == ["environment_unverifiable"]
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_classifies_missing_artifact_not_as_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A final-boundary artifact loss must be reported as artifacts_missing,
+    never guessed as concurrent workspace mutation."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",))
+    )
+    passing = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    assert passing.passed is True
+
+    target.unlink()  # a sibling deleted the artifact after the atomic gate
+
+    results = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=passing,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert results[0].success is False
+    assert captured == ["artifacts_missing"]
