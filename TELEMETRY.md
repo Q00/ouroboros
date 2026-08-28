@@ -87,8 +87,19 @@ use. Each row below is the exact property set accepted by the serializer.
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
 | `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
 Notes:
+
+- `cause` on `ac_verify_failed` names which structural branch of the
+  deterministic verify gate rejected the attempt — e.g.
+  `artifacts_missing_found_elsewhere` means the expected artifact exists in
+  the workspace but not at the contract path (the worker-`cd` signature), and
+  `workspace_mutated` means files changed while verification ran. It never
+  carries the AC text, command, path, artifact name, or any output; those
+  stay in the local event store (`execution.verify.failed`), which also
+  records `verify_cause` and the local-only `verify_cwd` for per-session
+  debugging.
 - `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
   `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
   Every other value folds to `direct` before serialization.

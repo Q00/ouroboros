@@ -2699,3 +2699,123 @@ async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
     assert outcome.passed is False
+
+
+# ---------------------------------------------------------------------------
+# Rejection-cause vocabulary (verify_cause) — machine-readable failure causes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_stamps_machine_readable_causes(tmp_path: Any) -> None:
+    """Each gate failure branch stamps its closed-vocabulary cause; passing
+    outcomes stay unattributed. Rejection analytics must never have to parse
+    the prose `reason` strings."""
+    executor = _make_executor(working_directory=str(tmp_path))
+
+    passed = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="ok", verify_command="exit 0"),
+        cwd=str(tmp_path),
+    )
+    assert passed.cause is None
+
+    nonzero = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="bad", verify_command="exit 3"),
+        cwd=str(tmp_path),
+    )
+    assert nonzero.cause == "exit_nonzero"
+
+    mismatch = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(
+            description="doc",
+            verify_command="printf 'BUILD SUCCESS'",
+            output_assertion="FAILURE",
+        ),
+        cwd=str(tmp_path),
+    )
+    assert mismatch.cause == "output_assertion_unmatched"
+
+    invalid = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec.model_construct(
+            description="assertion only",
+            verify_command=None,
+            expected_artifacts=(),
+            output_assertion="READY",
+        ),
+        cwd=str(tmp_path),
+    )
+    assert invalid.cause == "invalid_contract"
+
+    missing = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec.model_construct(
+            description="artifact",
+            verify_command=None,
+            expected_artifacts=("dist/report.md",),
+            output_assertion=None,
+        ),
+        cwd=str(tmp_path),
+    )
+    assert missing.cause == "artifacts_missing"
+
+    (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+    mutated = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="read-only", verify_command="rm keep.txt"),
+        cwd=str(tmp_path),
+    )
+    assert mutated.cause == "workspace_mutated"
+
+
+@pytest.mark.asyncio
+async def test_missing_artifact_found_elsewhere_flags_worker_cd_signature(
+    tmp_path: Any,
+) -> None:
+    """The contract path absent at the gate cwd but present under a
+    subdirectory is the worker-`cd` failure mode discovered in real user
+    transcripts -- it must classify distinctly from a never-created artifact."""
+    nested = tmp_path / "packages" / "app" / "dist"
+    nested.mkdir(parents=True)
+    (nested / "report.md").write_text("built", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="artifact",
+        verify_command=None,
+        expected_artifacts=("dist/report.md",),
+        output_assertion=None,
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.cause == "artifacts_missing_found_elsewhere"
+
+
+def test_verify_gate_outcome_cause_roundtrips_and_legacy_checkpoints_decode() -> None:
+    from ouroboros.orchestrator.parallel_executor import (
+        _deserialize_verify_gate_outcome,
+        _serialize_verify_gate_outcome,
+    )
+
+    original = _VerifyGateOutcome(
+        passed=False,
+        reason="verify_command exited with status 3",
+        output_tail="boom",
+        cause="exit_nonzero",
+    )
+    serialized = _serialize_verify_gate_outcome(original)
+    assert serialized is not None
+    assert serialized["cause"] == "exit_nonzero"
+    assert _deserialize_verify_gate_outcome(serialized) == original
+
+    # Checkpoints written before `cause` existed omit the key and must still
+    # decode (as unattributed) so cached non-idempotent verify results survive
+    # a version upgrade.
+    legacy = dict(serialized)
+    del legacy["cause"]
+    decoded = _deserialize_verify_gate_outcome(legacy)
+    assert decoded is not None
+    assert decoded.cause is None
+
+    # A cause outside the closed vocabulary is rejected, not forwarded.
+    hostile = dict(serialized)
+    hostile["cause"] = "/private/path: boom"
+    assert _deserialize_verify_gate_outcome(hostile) is None

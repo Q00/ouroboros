@@ -1384,3 +1384,33 @@ class TestNoticeRace:
         assert len(printed) == 1, (
             f"expected exactly one notice print, got {len(printed)}: {stderrs}"
         )
+
+
+class TestAcVerifyFailed:
+    """Closed-vocabulary rejection-cause telemetry for the AC verify gate."""
+
+    def test_forwards_closed_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_ac_verify_failed(cause="artifacts_missing_found_elsewhere")
+        telemetry.flush(timeout=2.0)
+
+        event = sent[0]
+        assert event["event"] == "ac_verify_failed"
+        props = event["properties"]
+        assert props["cause"] == "artifacts_missing_found_elsewhere"
+        assert set(props) <= telemetry._AC_VERIFY_FAILED_KEYS
+
+    @pytest.mark.parametrize("hostile", ("/private/seed.yaml: boom", "AcmeCause", None))
+    def test_folds_unaudited_cause_to_unknown(
+        self, sent: list[dict[str, Any]], hostile: str | None
+    ) -> None:
+        telemetry.capture_ac_verify_failed(cause=hostile)
+        telemetry.flush(timeout=2.0)
+
+        assert sent[0]["properties"]["cause"] == "unknown"
+        if hostile is not None:
+            assert hostile not in json.dumps(sent[0])
+
+    def test_vocabulary_matches_the_gate_ssot(self) -> None:
+        from ouroboros.orchestrator.verify_gate_outcome import _VERIFY_GATE_CAUSES
+
+        assert telemetry._AC_VERIFY_CAUSES == _VERIFY_GATE_CAUSES

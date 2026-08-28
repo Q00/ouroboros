@@ -286,6 +286,33 @@ _SERVICE_ACTIVE_KEYS = frozenset(
         "ci",
     }
 )
+# The AC verify-gate rejection-cause event. `cause` mirrors the orchestrator's
+# closed _VERIFY_GATE_CAUSES vocabulary (SSOT pairing with
+# orchestrator/verify_gate_outcome.py -- edit both together): which structural
+# reason the deterministic verify gate rejected an AC attempt for. Never a
+# command, path, artifact name, or output.
+_AC_VERIFY_FAILED_KEYS = frozenset(
+    {
+        "cause",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_AC_VERIFY_CAUSES = frozenset(
+    {
+        "invalid_contract",
+        "artifacts_missing",
+        "artifacts_missing_found_elsewhere",
+        "environment_unverifiable",
+        "timeout",
+        "exit_nonzero",
+        "output_assertion_unmatched",
+        "workspace_mutated",
+    }
+)
+_UNKNOWN_VERIFY_CAUSE = "unknown"
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -825,6 +852,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _WORKFLOW_OUTCOME_KEYS
     if event == "service_active":
         return _SERVICE_ACTIVE_KEYS
+    if event == "ac_verify_failed":
+        return _AC_VERIFY_FAILED_KEYS
     return None
 
 
@@ -929,6 +958,23 @@ def capture_tool_call(
                 "status": status,
                 "error_type": error_type,
             },
+        )
+    except Exception:
+        pass
+
+
+def capture_ac_verify_failed(cause: str | None) -> None:
+    """Capture one deterministic verify-gate rejection with its closed cause.
+
+    ``cause`` is produced by the orchestrator's own gate branches, but this
+    boundary still folds anything outside the audited ``_AC_VERIFY_CAUSES``
+    vocabulary to a fixed ``unknown`` literal -- a future gate branch (or a
+    replayed/spoofed value) is counted, never forwarded verbatim.
+    """
+    try:
+        capture(
+            "ac_verify_failed",
+            {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
         )
     except Exception:
         pass
@@ -1137,6 +1183,7 @@ def _reset_for_tests() -> None:
 
 __all__ = [
     "capture",
+    "capture_ac_verify_failed",
     "capture_cli_command",
     "capture_job_outcome",
     "capture_service_active",

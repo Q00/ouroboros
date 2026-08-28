@@ -50,6 +50,7 @@ from weakref import ref
 import anyio
 from rich.console import Console
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -422,6 +423,7 @@ from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
     _mapping_has_exact_keys,
+    _missing_artifacts_cause,
     _missing_expected_artifacts,
     _revalidate_cached_verify_gate_outcome,
     _serialize_verify_gate_outcome,
@@ -5165,9 +5167,11 @@ class ParallelACExecutor:
                             "reason": reason,
                             "failure_class": "evidence_missing",
                             "final_workspace_revalidation": True,
+                            "verify_cause": "workspace_mutated",
                         },
                     )
                 )
+                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
                 revalidated.append(
                     replace(
                         result,
@@ -5203,9 +5207,11 @@ class ParallelACExecutor:
                             "failure_class": "evidence_missing",
                             "final_workspace_revalidation": True,
                             "verify_replay_blocked": True,
+                            "verify_cause": "workspace_mutated",
                         },
                     )
                 )
+                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
                 revalidated.append(
                     replace(
                         result,
@@ -5433,7 +5439,19 @@ class ParallelACExecutor:
                         "reason": reason,
                         "failure_class": FailureClass.EVIDENCE_MISSING.value,
                         "final_workspace_revalidation": True,
+                        "verify_cause": (
+                            outcome.cause
+                            if isinstance(outcome, _VerifyGateOutcome) and outcome.cause
+                            else "workspace_mutated"
+                        ),
                     },
+                )
+            )
+            usage_telemetry.capture_ac_verify_failed(
+                cause=(
+                    outcome.cause
+                    if isinstance(outcome, _VerifyGateOutcome) and outcome.cause
+                    else "workspace_mutated"
                 )
             )
             finalized.append(
@@ -9692,6 +9710,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="output_assertion requires verify_command",
                 output_tail="",
                 workspace_digest=workspace_digest(),
+                cause="invalid_contract",
             )
 
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
@@ -9702,6 +9721,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 missing_artifacts=missing_artifacts,
                 workspace_digest=workspace_digest(),
+                cause=_missing_artifacts_cause(missing_artifacts, cwd),
             )
 
         command = spec.verify_command
@@ -9730,6 +9750,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     output_tail=output_tail,
                     workspace_mutated=True,
                     workspace_digest=workspace_after,
+                    cause="workspace_mutated",
                 )
             return None
 
@@ -9747,6 +9768,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_before,
                 environment_unverifiable=True,
+                cause="environment_unverifiable",
             )
         run = await run_with_shell(
             (verify_shell_path, "-c", command),
@@ -9762,6 +9784,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_before,
                 environment_unverifiable=True,
+                cause="environment_unverifiable",
             )
         if run.timed_out:
             mutated = workspace_mutation_outcome("")
@@ -9773,6 +9796,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_digest(),
                 environment_unverifiable=True,
+                cause="timeout",
             )
 
         combined = run.output
@@ -9787,6 +9811,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
+                cause="exit_nonzero",
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -9794,6 +9819,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="output_assertion not satisfied by verify_command output",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
+                cause="output_assertion_unmatched",
             )
         return _VerifyGateOutcome(
             passed=True,
@@ -9889,9 +9915,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     "reason": outcome.reason,
                     "failure_class": FailureClass.EVIDENCE_MISSING.value,
                     "output_tail": outcome.output_tail,
+                    # Machine-readable rejection cause plus the exact cwd the
+                    # gate ran from. Both stay in the LOCAL event store; only
+                    # the closed-vocabulary cause reaches telemetry below.
+                    "verify_cause": outcome.cause,
+                    "verify_cwd": cwd,
                 },
             )
         )
+        usage_telemetry.capture_ac_verify_failed(cause=outcome.cause)
         log.warning(
             "parallel_executor.ac.verify_gate_failed",
             session_id=session_id,

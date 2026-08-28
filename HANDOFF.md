@@ -1,70 +1,193 @@
-# Handoff Document
+# Handoff — MCP 활성 사용자 → Ouroboros 제품 사용 전환
 
-> Last Updated: 2026-08-09
-> Session: auto blocked 최소화 오버홀 — transient 재시도·체인 패리티·blocked UX
+> Last Updated: 2026-08-27
+> Status: 구현 진행 중 (instructions → tool descriptions → host routing)
 
----
+## Goal
 
-## Status of the previous plan (2026-08-06 세션)
+MCP가 연결된 사용자에게 `ooo` 문법을 먼저 학습시키는 것이 아니라, 사용자의
+자연어 요청이 요구사항 명확화·명세화·검증 실행에 적합할 때 호스트 모델이
+Ouroboros 진입 툴을 선제적으로 선택하도록 만든다.
 
-이전 HANDOFF의 hidden-checklist convergence loop 계획(답안지 은닉 + 트레이스 힌트 루프 + run→eval→evolve 단일 체인)은 **PR #1916으로 머지 완료**. 후속: #1921(detached evolve 신호 릴레이), #1913(lifecycle 간 verified evidence 보존). 구현 산출물: `orchestrator/retry_hints.py`, `orchestrator/contract_redaction.py`, `mcp/tools/run_evaluate_chain.py`, `mcp/tools/evaluate_ralph_chain.py`, docs/hidden-checklist-convergence/.
+## Evidence
 
-이전 세션의 별도 미커밋 작업(seed preflight 게이트 + blocked 이벤트 관측성)은 stash pop 충돌 해소 후 `feat/auto-seed-preflight-blocked-obs` 브랜치의 `2fe806a61`로 커밋됨. 충돌 해소 핵심: watchdog이 새 EventStore 대신 `runtime_event_store`를 공유해야 blocked 이벤트가 attention relay에 도달한다 (upstream의 dashboard URL 픽커는 유지).
+최근 30일 PostHog 실측:
 
----
+- MCP service 사용자: 2,086
+- 이후 `command_run` 도달 사용자: 807
+- service → any command 전환율: 38.7%
+- 첫 명령 상위: interview 303, brownfield 75, setup 64, qa 52,
+  config 50, update 47, auto 43, run 39, pm 38
 
-## Goal (이번 세션)
+운영 명령도 섞여 있으므로 실제 product activation은 38.7%보다 낮다.
+툴 설명만 개선하는 것으로는 부족하다. 툴 설명은 모델이 이미 툴을 발견한 뒤에만
+작동한다. 가장 넓은 공통 개입 지점은 모든 MCP 호스트가 받는 server
+`instructions`다.
 
-`ooo auto`의 빈발 blocked를 구조적으로 줄인다. Vision #1157 계약: "복구 가능한 프로세스/인터뷰 비수렴은 BLOCKED로 끝나면 안 된다. blocked는 예산 소진·안전·권한·명시적 인간 확인의 최후 수단."
+## Decision
 
-## Root causes (전수 조사 결과 — file:line 증거 확보)
+세 층을 함께 수정한다.
 
-pipeline.py에만 mark_blocked 76곳, interview_driver.py 13곳. 분류 결과의 핵심 비대칭: **예산(BUDGET) 클래스만 실제 bound가 있고, HEALABLE/INFRA 클래스는 카운터도 재시도도 없이 첫 실패에 즉사한다** — 시스템이 이미 깊게 고민한 곳(repair 5회, evaluate 3라운드, persona 5종)에서는 재시도하면서, 고민 안 한 곳(단발 LLM 호출)에서는 즉시 포기하는 구조.
+1. **Server instructions**: `render_mcp_server_instructions()` 첫 문단에
+   `WHEN TO USE OUROBOROS` 라우팅 규칙을 추가한다.
+2. **Entry-tool descriptions**: interview, start_auto, start_execute_seed를
+   `Use when / Result / Do not use when` 구조로 고친다.
+3. **Host natural-language routing**: 명시적 `ooo` 문자열 없이도 모호한 요청,
+   다단계 기능, 마이그레이션, 고위험·검증 요청을 적절한 진입 툴에 연결한다.
 
-1. **체인 패리티 부재 (최대 발견)**: `auto/adapters.py:270-271`(HandlerRunStarter)과 `:334-335`(HandlerSynchronousRunStarter)가 `auto_evaluate/auto_evolve: False` 하드코딩. `snapshot_run_successor_policy`(run_evaluate_chain.py:28-33)는 명시적 bool을 config(기본 True)보다 우선하므로 **기본 모드 auto의 run은 #1916 수렴 체인에서 완전히 배제**된다. 의도 주석("auto가 자체 평가 경로 소유")은 complete_product=True에만 참 — 기본 모드는 run handoff 후 auto가 끝나므로 아무도 평가하지 않았다. 계약 테스트 test_adapters_client_gates.py:38-39,100-101이 이 게이트를 고정하고 있었음.
-2. **transient 즉사 3연대 (pipeline.py)**: seed QA(2909/2920/2932), evaluator(3372/3381/3388), lateral(3792/3801/3808) — 타임아웃/예외/`.error` 모두 재시도 0회로 mark_blocked. RFC #809 주석 스스로 "transient는 예산을 소모하면 안 된다"고 명시하면서 재시도는 미구현.
-3. **인터뷰 한 라운드 즉사**: interview_driver.py 1278/1291 — 한 라운드의 60s 타임아웃/예외가 max_rounds=50 예산을 통째로 버림. backend.resume 브랜치(702-706)는 start 브랜치의 closure 폴백(1350)을 시도하지 않음.
-4. **resume dead end 버그**: `_recoverable_phase_for_tool`의 REVIEW 집합에 `seed_reviewer` 누락 — pre-run 리뷰 타임아웃(순수 transient)이 영구 dead end. seed_repairer는 같은 이유로 이미 추가돼 있었음(주석 4867).
-5. **blocked UX**: `_print_result`는 prose blocker만 출력, resume_capability NONE + goal 부재 시 다음 단계 안내가 아예 없음.
+기본 라우팅:
 
-## What was done (이번 세션, Sonnet 5 서브에이전트 4개 분업)
+```text
+요구사항이 모호하거나 AC가 없음      → ouroboros_interview
+큰 작업을 명확화부터 실행까지 요청    → ouroboros_start_auto
+이미 Seed가 있음                     → ouroboros_start_execute_seed
+```
 
-- **WS-A** (`auto/pipeline.py`): 사이트 2의 transient 3연대에 bounded 재시도(`_TRANSIENT_TOOL_ATTEMPTS=3`, 백오프 (1,5)s, deadline 체크 유지). 소진 시에만 기존 문구로 블록 + 신설 error_code `seed_qa_transient_exhausted`/`evaluator_transient_exhausted`/`lateral_transient_exhausted` + `auto.seed_qa.blocked` 이벤트. `seed_reviewer`를 REVIEW resume 집합에 추가. 예산 카운터 불소모 보장.
-- **WS-B** (`cli/commands/auto.py`, `skills/auto/SKILL.md`): blocked 터미널에 구조화 패널(stage/reason code/open questions/정확한 resume 명령), non-resumable 시 명시 안내. SKILL.md에 신설 코드 문서화 + 호스트 플레이북(transient_exhausted → 자동 resume 1회 후에만 유저 에스컬레이션; fact-gap → open questions를 답변형 질문으로 제시, YAML 수동 편집 요구 금지).
-- **WS-C** (`auto/adapters.py`): HandlerRunStarter의 하드코딩 제거 → 기본 모드 auto run이 config(`execution.auto_evaluate/auto_evolve`, 기본 ON)를 따라 #1916 체인 편입. HandlerSynchronousRunStarter(complete_product)는 자체 EVALUATE/RALPH 소유라 False 유지. **오너 확인 필요한 행동 변경.**
-- **WS-D** (`auto/interview_driver.py`): 라운드 호출에 bounded 재시도(라운드 예산 불소모), backend start/resume 재시도 + resume 브랜치에도 closure 폴백 확장. error_code `interview_round_transient_exhausted`/`interview_backend_transient_exhausted`.
+## Implementation Plan
 
-(최종 테스트/머지 상태는 세션 마지막 커밋 메시지 참조.)
+### 1. MCP 공통 instructions를 outcome-first로 재배치
 
-## What was deliberately NOT touched
+대상: `src/ouroboros/backends/capabilities.py::render_mcp_server_instructions`
 
-- run/ralph starter의 2회 제한(1707/1753/1775/1893) — 중복 enqueue 방지 설계. resume 시 같은 blocker 재출력되는 자기루프는 알려진 트레이드오프.
-- seed_preflight 게이트(2871) — 오너 결정: 사실 부족은 사람에게 묻는다. 수리는 UX(질문 제시)로.
-- `seed_qa_ambiguity_unrepairable` — 점수 게이밍 제거의 짝. 블록이 정답.
-- Ralph stop_reason 4종(oscillation 제외) — 예산 소진, 직접 BLOCKED 유지 (`_maybe_route_ralph_oscillation_to_lateral` 문서화된 결정).
+추가할 핵심 의미:
 
-## Known remaining gaps (다음 세션 후보)
+```text
+WHEN TO USE OUROBOROS
 
-1. **stagnation×safe-default persona 고갈**: stagnation 개입 2회가 CONTRARIAN·ARCHITECT를 소모하면 safe-default lateral이 첫 호출에 `unstuck_exhausted`(시도 0회) — persona 풀 분리 필요 (interview_driver.py 1746-1748 × 1893-1896).
-2. **unmapped tool_name dead end 잔여**: `auto_pipeline`(6곳)·`probe_runner`·`intent_guard`·`runtime_watchdog`·`reference_candidate_bridge` 등은 여전히 resume 불가. 특히 804(ledger open gaps)는 Vision #1157이 명시한 "인터뷰 비수렴 BLOCKED 금지" 위반.
-3. **`recovery_guard_tripped` sticky 재블록**(3239/3679): 새 artifact hash 없이는 resume이 verbatim 재출력.
-4. #1650 인터뷰 UX 역전(시스템이 생각하고 유저는 고르기) — 별도 트랙, 자식 이슈 #1638→#1652→#1651→#1653→#1654/5→#1656.
+Use proactively before implementation when a request is ambiguous, lacks
+acceptance criteria, spans multiple implementation steps, is a migration, or
+requires high-confidence execution and verification.
+
+Default entry points:
+- unclear request → ouroboros_interview
+- substantial end-to-end task → ouroboros_start_auto
+- existing Seed → ouroboros_start_execute_seed
+
+Do not wait for the literal word "ooo" when the natural-language request
+clearly matches these cases.
+```
+
+제약:
+
+- 전체 UTF-8 크기 2,048 bytes 미만 유지
+- `WHEN TO USE`를 tool discovery와 fan-out보다 앞에 둔다.
+- 런타임별 구체 툴명(`ToolSearch`, `Task/Agent`)은 넣지 않는다.
+- 범용 단일 파일 수정·단순 질문에는 Ouroboros를 강제하지 않는다.
+
+### 2. 진입 툴 설명 세 개 개선
+
+대상:
+
+- `src/ouroboros/mcp/tools/authoring_handlers.py`
+  - `ouroboros_interview`
+- `src/ouroboros/mcp/tools/auto_handler.py`
+  - `ouroboros_start_auto`
+- `src/ouroboros/mcp/tools/execution_handlers.py`
+  - `ouroboros_start_execute_seed`
+
+설명 계약:
+
+- interview: 구현 전, 모호함·범위·AC 부족 시 사용. 닫힌 요구사항 상태를 만든다.
+- start_auto: 다단계·마이그레이션·고위험 end-to-end 작업의 기본 진입점.
+  interview → A-grade Seed → execution handoff를 수행한다.
+- start_execute_seed: 기존 Seed가 있을 때만 사용. raw/모호 요청에는 사용하지 않는다.
+
+내부 아키텍처, polling 방법, 장황한 파라미터 설명은 진입 설명에서 제외하고 기존
+파라미터 schema와 응답 계약에 남긴다.
+
+### 3. Host routing 문구 정렬
+
+대상:
+
+- `src/ouroboros/codex/ouroboros.md`
+- 필요 시 런타임별 생성 가이드/패키지 산출물
+
+현재 자연어 매핑은 "clarify requirements", "generate seed", "run seed"처럼
+Ouroboros 용어를 이미 아는 사용자 표현에 치우쳐 있다. 다음 일반 표현을 추가한다.
+
+- "이 기능 만들어줘", "끝까지 검증해서 구현해줘" → start_auto 후보
+- "요구사항이 애매해", "범위부터 잡자" → interview
+- "이 Seed 실행해" → start_execute_seed
+
+호스트는 사용자의 의도와 현재 artifact 유무를 확인해 라우팅하며, 자연어 요청을
+무조건 auto로 보내지 않는다.
+
+### 4. Activation analytics 추가
+
+PostHog 대시보드 `1985514`에 다음 Insight를 추가한다.
+
+- Service → product command conversion
+- First product command distribution
+- Interview → Seed conversion
+- Auto/Run → workflow_outcome conversion
+- app_version별 product activation
+- runtime_backend별 product activation
+
+Product command 집합:
+
+```text
+interview, auto, run, pm, qa, seed, evaluate
+```
+
+`setup`, `config`, `update`, `status`, `brownfield`는 사용량에는 포함할 수 있지만
+product activation 성공으로 계산하지 않는다.
+
+## Acceptance Criteria
+
+1. `render_mcp_server_instructions()` 결과가 2,048 bytes 미만이다.
+2. instructions 첫 섹션이 `WHEN TO USE OUROBOROS`이며 interview/auto/run의
+   구분과 literal `ooo`를 기다리지 말라는 규칙을 포함한다.
+3. instructions는 provider-neutral하며 `ToolSearch`, `Task/Agent`를 포함하지 않는다.
+4. 세 진입 툴 설명이 각각 Use when, Result, Do not use when 의미를 포함한다.
+5. 모호한 자연어 요청은 interview, 큰 end-to-end 요청은 start_auto,
+   Seed 제공 요청은 start_execute_seed로 매핑되는 계약 테스트가 있다.
+6. 단순 질문·작은 명확한 수정은 자동으로 Ouroboros에 라우팅하지 않는다.
+7. PostHog에 service → product command 및 첫 product command Insight가 생성되고
+   쿼리가 정상 실행된다.
+8. 릴리즈 전 7일과 릴리즈 후 7일의 전환율을 app_version 기준으로 비교할 수 있다.
+
+## Verification
+
+```bash
+uv run pytest tests/unit/backends/test_capabilities.py -q
+uv run pytest \
+  tests/unit/mcp/tools/test_interview.py \
+  tests/unit/mcp/tools/test_auto_handler.py \
+  tests/unit/mcp/tools/test_execution_handlers.py -q
+uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/
+```
+
+실제 테스트 경로가 다르면 기존 handler별 테스트 파일을 사용한다. 새 테스트 전용
+파일을 만들기 전에 현재 description/definition 테스트 위치를 먼저 찾는다.
 
 ## Important Files
 
-```
-src/ouroboros/auto/pipeline.py          # transient 재시도 3사이트 + resume 매핑 (5,404줄)
-src/ouroboros/auto/adapters.py          # 체인 패리티 (270, 334)
-src/ouroboros/auto/interview_driver.py  # 라운드/백엔드 재시도
-src/ouroboros/auto/resume_render.py     # resume 안내 렌더러 (WS-B가 CLI에서 소비)
-src/ouroboros/cli/commands/auto.py      # blocked 패널 + _print_result(1406-1497)
-src/ouroboros/mcp/tools/run_evaluate_chain.py    # snapshot_run_successor_policy(28-33)
-src/ouroboros/mcp/tools/execution_handlers.py    # 체인 트리거(2644-2656)
-tests/unit/auto/test_adapters_client_gates.py    # 체인 게이트 계약 테스트
+```text
+src/ouroboros/backends/capabilities.py
+tests/unit/backends/test_capabilities.py
+src/ouroboros/mcp/tools/authoring_handlers.py
+src/ouroboros/mcp/tools/auto_handler.py
+src/ouroboros/mcp/tools/execution_handlers.py
+src/ouroboros/codex/ouroboros.md
+src/ouroboros/mcp/server/adapter.py
 ```
 
-## Notes
+## Risks / Non-goals
 
-- 검증: `uv run pytest tests/unit/auto/ tests/unit/cli/ -q` + relay/start_auto 단일 파일. **tests/unit/mcp 풀런 금지**(실서버 누수 사고 전력).
-- blocked 관측성 배선(auto.session.blocked/preflight/qa → attention relay)은 `2fe806a61`에 포함 — emitter와 relay가 같은 EventStore를 공유해야 동작.
-- 관련 메모리: seed-preflight-gate-and-qa-escalation.md, hidden-checklist-convergence-plan.md(완료 처리 필요), auto-freedom-and-convergence-overhaul.md.
+- MCP 연결만으로 매 세션 팝업·홍보 문구를 띄우지 않는다.
+- 모든 사용자 요청을 auto로 보내지 않는다.
+- 툴 설명을 길게 만들어 context budget을 소비하지 않는다.
+- activation 개선을 증명하기 전에 전환율 상승을 주장하지 않는다.
+- 기존 텔레메트리 이벤트 계약을 다시 넓히지 않는다. 필요한 분석은 현재
+  `service_active`, `command_run`, `workflow_outcome`, app_version,
+  runtime_backend를 사용한다.
+
+## Next Session Start
+
+1. 최신 `main`에서 새 브랜치 생성.
+2. 관련 GitHub issue 생성 후 PR에 연결.
+3. server instructions byte budget 테스트를 먼저 강화.
+4. instructions → tool descriptions → host routing 순서로 구현.
+5. 코드 배포 후 PostHog Insight 생성·검증.
+6. 7일 뒤 app_version cohort 전환율 비교.
