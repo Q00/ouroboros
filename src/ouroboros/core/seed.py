@@ -386,7 +386,9 @@ class SeedMetadata(BaseModel, frozen=True):
         ambiguity_score: The ambiguity score at generation time.
         gate_forced: Whether Gen-1 generation bypassed the ambiguity gate with
             ``force=True``. ``None`` means the historical or non-Gen-1 path
-            did not record a gate decision.
+            did not record a gate decision. This serialized value is
+            informational; session publication requires a server-owned
+            generation receipt and never trusts Seed YAML as authority.
         interview_id: Reference to the source interview.
         generation_mode: Provenance label for how the Seed was synthesized.
             ``"normal"`` is the legacy ledger-complete path; degraded recovery

@@ -17,6 +17,7 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+from ouroboros.mcp.tools.seed_handoff import SeedGenerationReceiptRegistry
 from ouroboros.mcp.tools.subagent import build_generate_seed_subagent
 from ouroboros.mcp.types import ToolInputType
 
@@ -148,6 +149,33 @@ class TestPluginPathForce:
         assert result.value.meta["force"] is False
         assert result.value.meta["gate_forced"] is False
         assert result.value.meta["_subagent"]["context"]["force"] is False
+
+    @pytest.mark.asyncio
+    async def test_delegated_seed_gets_server_owned_generation_receipt(self) -> None:
+        state = _state_with_persisted_score(
+            session_id="sess-delegated-receipt",
+            score=0.8,
+            completed=False,
+        )
+        receipts = SeedGenerationReceiptRegistry()
+        handler = GenerateSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            generation_receipts=receipts,
+        )
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+            AsyncMock(return_value=Result.ok(state)),
+        ):
+            result = await handler.handle({"session_id": "sess-delegated-receipt", "force": True})
+
+        assert result.is_ok
+        seed_id = result.value.meta["seed_id"]
+        assert result.value.meta["_subagent"]["context"]["seed_id"] == seed_id
+        assert f"`{seed_id}`" in result.value.meta["_subagent"]["prompt"]
+        receipt = receipts.resolve(seed_id)
+        assert receipt is not None
+        assert receipt.gate_forced is True
 
 
 # ---------------------------------------------------------------------------

@@ -539,6 +539,7 @@ def get_ouroboros_tools(
         mcp_tool_prefix=resolved_prefix,
         opencode_mode=opencode_mode,
         seed_handoff_registry=seed_handoff_registry,
+        generation_receipts=seed_handoff_registry.generation_receipts,
     )
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
@@ -547,6 +548,7 @@ def get_ouroboros_tools(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
+        generation_receipts=seed_handoff_registry.generation_receipts,
     )
     evaluate = EvaluateHandler(
         llm_backend=llm_backend,

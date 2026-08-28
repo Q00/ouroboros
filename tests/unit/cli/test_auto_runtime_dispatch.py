@@ -86,8 +86,12 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     start_kwargs = handlers["start_execute"].call_args.kwargs
 
     assert interview_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
-    assert generate_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
-    assert execute_kwargs == {"agent_runtime_backend": runtime, "opencode_mode": None}
+    assert generate_kwargs["agent_runtime_backend"] == runtime
+    assert generate_kwargs["opencode_mode"] is None
+    assert execute_kwargs["agent_runtime_backend"] == runtime
+    assert execute_kwargs["opencode_mode"] is None
+    assert generate_kwargs["generation_receipts"] is execute_kwargs["generation_receipts"]
+    assert start_kwargs["generation_receipts"] is execute_kwargs["generation_receipts"]
     assert start_kwargs.get("agent_runtime_backend") == runtime
     assert start_kwargs.get("opencode_mode") is None
 

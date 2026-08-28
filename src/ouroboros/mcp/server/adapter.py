@@ -2279,6 +2279,7 @@ def create_ouroboros_server(
         llm_backend=evaluate_llm_backend,
         session_signal_hub=session_signal_hub,
         seed_handoff_registry=seed_handoff_registry,
+        generation_receipts=seed_handoff_registry.generation_receipts,
     )
     synapse_signal = SynapseSignalHandler(
         SessionSignalMailbox(
@@ -2405,6 +2406,7 @@ def create_ouroboros_server(
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
+        generation_receipts=seed_handoff_registry.generation_receipts,
     )
     conductor_action_tools = frozenset(
         {
@@ -2472,15 +2474,7 @@ def create_ouroboros_server(
             event_store=event_store,
             default_project_dir=effective_cwd,
         ),
-        GenerateSeedHandler(
-            interview_engine=interview_engine,
-            seed_generator=seed_generator,
-            llm_adapter=llm_adapter,
-            llm_backend=interview_llm_backend,
-            event_store=event_store,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        generate_seed,
         MeasureDriftHandler(event_store=event_store),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,

@@ -75,6 +75,7 @@ from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.run_successors import build_run_successor_handler
+from ouroboros.mcp.tools.seed_handoff import SeedGenerationReceiptRegistry
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.package_profiles import (
@@ -545,6 +546,10 @@ async def _run_auto(
 
     authoring_opencode_mode = demote_plugin_opencode_mode(runtime_plan.interview.opencode_mode)
     execute_opencode_mode = demote_plugin_opencode_mode(runtime_plan.execute.opencode_mode)
+    # Seed generation and execution share one process-local provenance authority.
+    # This lets an auto run preserve the server-side gate decision without
+    # trusting the Seed YAML that is handed between the two handlers.
+    generation_receipts = SeedGenerationReceiptRegistry()
     interview = InterviewHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,
         opencode_mode=authoring_opencode_mode,
@@ -552,15 +557,18 @@ async def _run_auto(
     generate_seed = GenerateSeedHandler(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,
         opencode_mode=authoring_opencode_mode,
+        generation_receipts=generation_receipts,
     )
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_plan.execute.runtime_backend,
         opencode_mode=execute_opencode_mode,
+        generation_receipts=generation_receipts,
     )
     start_execute = StartExecuteSeedHandler(
         execute_handler=execute_seed,
         agent_runtime_backend=runtime_plan.execute.runtime_backend,
         opencode_mode=execute_opencode_mode,
+        generation_receipts=generation_receipts,
         # Without the successor stack a finished run reports
         # ``evaluation_status="enqueue_failed"`` and nothing grades it.
         start_evaluate_handler=build_run_successor_handler(

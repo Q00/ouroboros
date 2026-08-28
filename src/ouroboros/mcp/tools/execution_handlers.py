@@ -56,6 +56,7 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
+from ouroboros.mcp.tools.seed_handoff import SeedGenerationReceiptRegistry
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -686,6 +687,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     # when the ``host`` backend is selected (no-op for every other backend).
     host_dispatch_bridge: Any | None = field(default=None, repr=False)
     seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
+    generation_receipts: SeedGenerationReceiptRegistry | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _process_local_resume_owners: dict[str, OrchestratorRunner] = field(
         default_factory=dict,
@@ -1404,6 +1406,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
             )
 
+        generation_receipt = (
+            self.generation_receipts.resolve(seed.metadata.seed_id)
+            if self.generation_receipts is not None
+            else None
+        )
+
         verification_working_dir = self._resolve_verification_working_dir(
             seed,
             resolved_cwd,
@@ -1666,6 +1674,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         seed,
                         execution_id=execution_id,
                         session_id=session_id,
+                        generation_receipt=generation_receipt,
                     )
                     if prepared.is_err:
                         prepared_details = prepared.error.details
@@ -2366,6 +2375,7 @@ class StartExecuteSeedHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     start_evaluate_handler: "StartEvaluateHandler | None" = field(default=None, repr=False)
     seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
+    generation_receipts: SeedGenerationReceiptRegistry | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -2374,6 +2384,7 @@ class StartExecuteSeedHandler:
             event_store=self._event_store,
             agent_runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
+            generation_receipts=self.generation_receipts,
         )
         # Process-lifetime idempotency map: idempotency_key -> tool result
         # meta dict. Entries are added once on first call and reused on

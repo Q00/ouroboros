@@ -71,6 +71,7 @@ from ouroboros.core.seed_contract_prompt import (
     render_auto_recursion_guard,
     render_seed_contract_for_execution,
 )
+from ouroboros.core.seed_provenance import SeedGenerationReceipt
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, heartbeat_lock, release_lock
 from ouroboros.observability.logging import get_logger
@@ -8454,6 +8455,7 @@ class OrchestratorRunner:
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         force_sequential_levels: bool = False,
+        generation_receipt: SeedGenerationReceipt | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -8475,11 +8477,13 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
-        session_result = await self.prepare_session(
-            seed,
-            execution_id=execution_id,
-            session_id=session_id,
-        )
+        prepare_kwargs: dict[str, Any] = {
+            "execution_id": execution_id,
+            "session_id": session_id,
+        }
+        if generation_receipt is not None:
+            prepare_kwargs["generation_receipt"] = generation_receipt
+        session_result = await self.prepare_session(seed, **prepare_kwargs)
         if session_result.is_err:
             return Result.err(session_result.error)
 
@@ -8543,6 +8547,8 @@ class OrchestratorRunner:
         seed: Seed,
         execution_id: str | None = None,
         session_id: str | None = None,
+        *,
+        generation_receipt: SeedGenerationReceipt | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
         """Create and persist the orchestration session before execution begins.
 
@@ -8556,7 +8562,10 @@ class OrchestratorRunner:
         """
         with publication_evidence_sink():
             return await self._prepare_session_scoped(
-                seed, execution_id=execution_id, session_id=session_id
+                seed,
+                execution_id=execution_id,
+                session_id=session_id,
+                generation_receipt=generation_receipt,
             )
 
     async def _prepare_session_scoped(
@@ -8564,6 +8573,8 @@ class OrchestratorRunner:
         seed: Seed,
         execution_id: str | None = None,
         session_id: str | None = None,
+        *,
+        generation_receipt: SeedGenerationReceipt | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
         # The verify-command gate runs here, at new-session preparation, so
         # sessions already in flight are never re-judged under a gate that was
@@ -8634,8 +8645,12 @@ class OrchestratorRunner:
                 "project_identity": project_identity,
                 "project_workspace": self._effective_cwd(),
             }
-            if seed.metadata.gate_forced is not None:
-                create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
+            if (
+                generation_receipt is not None
+                and generation_receipt.seed_id == seed.metadata.seed_id
+            ):
+                if generation_receipt.gate_forced is not None:
+                    create_session_kwargs["gate_forced"] = generation_receipt.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:

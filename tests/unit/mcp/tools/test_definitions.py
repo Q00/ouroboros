@@ -1998,6 +1998,7 @@ class TestOuroborosTools:
         assert start_execute_handler._execute_handler.agent_runtime_backend == "codex"
         assert start_execute_handler._execute_handler.llm_backend == "litellm"
         assert generate_handler.llm_backend == "litellm"
+        assert generate_handler.generation_receipts is execute_handler.generation_receipts
         assert interview_handler_instance.llm_backend == "litellm"
         assert evaluate_handler_instance.llm_backend == "litellm"
         assert qa_handler.llm_backend == "litellm"
