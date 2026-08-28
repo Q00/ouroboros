@@ -628,10 +628,52 @@ class TestCapture:
         telemetry.flush(timeout=2.0)
         assert [event["event"] for event in sent] == ["service_active"]
 
-    def test_subagent_dispatch_is_not_collected(self, sent: list[dict[str, Any]]) -> None:
-        telemetry.capture_subagent_dispatch({"phase": "emitted", "payload_count": 5})
+    def test_subagent_dispatch_is_one_daily_row_with_closed_dimensions(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        """Reinstated as an adoption signal: one row per user/day/phase/kind,
+        and the rich per-dispatch properties removed by #2278 stay removed."""
+        rich = {
+            "phase": "emitted",
+            "fanout_kind": "lateral_panel",
+            "payload_count": 5,
+            "host_family": "codex",
+        }
+        telemetry.capture_subagent_dispatch(rich)
+        telemetry.capture_subagent_dispatch(rich)  # same day/dims -> suppressed
+        telemetry.capture_subagent_dispatch({"phase": "submitted", "fanout_kind": "lateral_panel"})
         telemetry.flush(timeout=2.0)
-        assert sent == []
+
+        dispatches = [event for event in sent if event["event"] == "subagent_dispatch"]
+        assert len(dispatches) == 2
+        props = dispatches[0]["properties"]
+        assert props["phase"] == "emitted"
+        assert props["fanout_kind"] == "lateral_panel"
+        assert set(props) <= telemetry._SUBAGENT_DISPATCH_KEYS
+        assert "payload_count" not in props
+        assert "host_family" not in props
+
+    def test_subagent_dispatch_folds_unaudited_dimensions(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_subagent_dispatch(
+            {"phase": "acme_phase", "fanout_kind": "/private/path: boom"}
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["phase"] == "unknown"
+        assert props["fanout_kind"] == "unknown"
+
+    def test_mcp_serve_started_is_one_daily_row_per_transport(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_mcp_serve_started("stdio")
+        telemetry.capture_mcp_serve_started("stdio")  # same day/transport -> suppressed
+        telemetry.capture_mcp_serve_started("attacker-transport")  # folds to unknown
+        telemetry.flush(timeout=2.0)
+
+        serves = [event for event in sent if event["event"] == "mcp_serve_started"]
+        assert [event["properties"]["transport"] for event in serves] == ["stdio", "unknown"]
+        assert all(set(e["properties"]) <= telemetry._MCP_SERVE_STARTED_KEYS for e in serves)
 
     def test_daily_insert_id_is_stable_for_same_dimension(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_tool_call("ouroboros_interview", ok=True)

@@ -639,6 +639,13 @@ async def _run_mcp_server(
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
+    # One daily-deduplicated "MCP attached" row per user — the denominator of
+    # the attached → used activation funnel (hosts spawn `mcp serve` per
+    # session, so without the dedupe this was #2278's removed volume).
+    from ouroboros import telemetry as usage_telemetry
+
+    usage_telemetry.capture_mcp_serve_started(transport)
+
     # Resolve once so both stores share one durable authority even if config
     # changes while the long-lived MCP process is starting.
     try:

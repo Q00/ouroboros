@@ -83,13 +83,22 @@ use. Each row below is the exact property set accepted by the serializer.
 | Event | When | Properties (exact set) |
 |---|---|---|
 | `install_completed` | `install.sh` finishes successfully | os, runtime, version, ref |
+| `install_started` | `install.sh` begins | os, version, ref |
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
+| `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
+| `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
 | `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
 Notes:
+
+- `mcp_serve_started` and `subagent_dispatch` are daily-deduplicated adoption
+  signals (deterministic `$insert_id`, one row per user/day/dimension) — the
+  per-session volume and rich per-dispatch properties removed by #2278 stay
+  removed. `mcp_serve_started` is the top of the activation funnel ("MCP
+  attached"), distinct from `service_active` ("made a tool request").
 
 - `cause` on `ac_verify_failed` names which structural branch of the
   deterministic verify gate rejected the attempt — e.g.

@@ -884,6 +884,10 @@ _banner
 
 _telemetry_notice
 
+# Installs are rare, so install_started needs no daily dedupe: paired with
+# install_completed it measures install drop-off by version and ref.
+_telemetry_ping install_started "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
+
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
 HAS_PIPX=false
