@@ -396,6 +396,22 @@ def test_rollout_malformed_tool_calls_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_malformed_tool_calls_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {"role": "assistant", "toolCalls": {"not": "a list"}},
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 @pytest.mark.parametrize("variant", ["trace", "turn"])
 def test_rollout_identifier_mismatch_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
@@ -458,6 +474,19 @@ def test_rollout_symlink_fails_closed(tmp_path: Path, monkeypatch: pytest.Monkey
     path.unlink()
     path.symlink_to(target)
     messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_symlinked_parent_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    real_zcode = tmp_path / "real-zcode"
+    path.parents[2].rename(real_zcode)
+    (tmp_path / ".zcode").symlink_to(real_zcode, target_is_directory=True)
+
+    messages = runtime._convert_event(event, None)
+
     assert [message.type for message in messages] == ["assistant"]
 
 
