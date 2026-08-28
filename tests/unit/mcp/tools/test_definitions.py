@@ -2003,6 +2003,27 @@ class TestOuroborosTools:
         assert evaluate_handler_instance.llm_backend == "litellm"
         assert qa_handler.llm_backend == "litellm"
 
+    def test_get_ouroboros_tools_shares_receipt_authority_with_auto(self) -> None:
+        """Auto handlers reuse the factory's authoritative generation graph."""
+        from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler
+
+        tools = get_ouroboros_tools(include_auto=True)
+        auto = next(handler for handler in tools if isinstance(handler, AutoHandler))
+        start_auto = next(handler for handler in tools if isinstance(handler, StartAutoHandler))
+        generate = next(handler for handler in tools if isinstance(handler, GenerateSeedHandler))
+        start_execute = next(
+            handler for handler in tools if isinstance(handler, StartExecuteSeedHandler)
+        )
+        interview = next(handler for handler in tools if isinstance(handler, InterviewHandler))
+
+        assert auto.interview_handler is interview
+        assert auto.generate_seed_handler is generate
+        assert auto.start_execute_seed_handler is start_execute
+        assert start_auto.interview_handler is interview
+        assert start_auto.generate_seed_handler is generate
+        assert start_auto.start_execute_seed_handler is start_execute
+        assert generate.generation_receipts is start_execute._execute_handler.generation_receipts
+
     def test_llm_handler_factories_preserve_backend_selection(self) -> None:
         """Convenience factories preserve explicit llm backend selection."""
         assert generate_seed_handler(llm_backend="litellm").llm_backend == "litellm"

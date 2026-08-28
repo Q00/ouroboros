@@ -241,6 +241,9 @@ def interview_handler(
 
 def auto_handler(
     *,
+    interview_handler: InterviewHandler | None = None,
+    generate_seed_handler: GenerateSeedHandler | None = None,
+    start_execute_seed_handler: StartExecuteSeedHandler | None = None,
     llm_backend: str | None = None,
     runtime_backend: str | None = None,
     mcp_manager: object | None = None,
@@ -251,6 +254,9 @@ def auto_handler(
     from ouroboros.mcp.tools.auto_handler import AutoHandler
 
     return AutoHandler(
+        interview_handler=interview_handler,
+        generate_seed_handler=generate_seed_handler,
+        start_execute_seed_handler=start_execute_seed_handler,
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
@@ -261,6 +267,9 @@ def auto_handler(
 
 def start_auto_handler(
     *,
+    interview_handler: InterviewHandler | None = None,
+    generate_seed_handler: GenerateSeedHandler | None = None,
+    start_execute_seed_handler: StartExecuteSeedHandler | None = None,
     llm_backend: str | None = None,
     runtime_backend: str | None = None,
     mcp_manager: object | None = None,
@@ -276,6 +285,9 @@ def start_auto_handler(
     from ouroboros.mcp.tools.auto_handler import StartAutoHandler
 
     return StartAutoHandler(
+        interview_handler=interview_handler,
+        generate_seed_handler=generate_seed_handler,
+        start_execute_seed_handler=start_execute_seed_handler,
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
@@ -572,6 +584,9 @@ def get_ouroboros_tools(
     auto = (
         (
             auto_handler(
+                interview_handler=interview,
+                generate_seed_handler=generate_seed,
+                start_execute_seed_handler=start_execute,
                 llm_backend=llm_backend,
                 runtime_backend=runtime_backend,
                 mcp_manager=resolved_manager,
@@ -579,6 +594,9 @@ def get_ouroboros_tools(
                 opencode_mode=opencode_mode,
             ),
             start_auto_handler(
+                interview_handler=interview,
+                generate_seed_handler=generate_seed,
+                start_execute_seed_handler=start_execute,
                 llm_backend=llm_backend,
                 runtime_backend=runtime_backend,
                 mcp_manager=resolved_manager,
