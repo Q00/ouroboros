@@ -113,6 +113,7 @@ _CLI_PATH_ENV_BY_BACKEND = {
     "ourocode": "OUROBOROS_OUROCODE_CLI_PATH",
     "dsh": "OUROBOROS_DSH_CLI_PATH",
     "pi": "OUROBOROS_PI_CLI_PATH",
+    "omp": "OUROBOROS_OMP_CLI_PATH",
     "zcode": "OUROBOROS_ZCODE_CLI_PATH",
 }
 
@@ -686,6 +687,7 @@ def backend(
     [dim]    ouroboros config backend gjc       # switch to GJC[/dim]
     [dim]    ouroboros config backend goose     # switch to Goose[/dim]
     [dim]    ouroboros config backend pi        # switch to Pi CLI[/dim]
+    [dim]    ouroboros config backend omp       # switch to Oh My Pi (omp)[/dim]
     [dim]    ouroboros config backend zcode     # switch to Zcode[/dim]
     """
     data, config_path = _load_config()
@@ -702,7 +704,7 @@ def backend(
             )
         console.print(
             "\n[dim]Switch with: ouroboros config backend "
-            "<claude|codex|hermes|gemini|gjc|goose|pi|antigravity|grok|zcode>[/dim]\n"
+            "<claude|codex|hermes|gemini|gjc|goose|pi|omp|antigravity|grok|zcode>[/dim]\n"
         )
         return
 
@@ -746,6 +748,10 @@ def backend(
         from ouroboros.config import get_pi_cli_path
 
         cli_path = get_pi_cli_path()
+    elif new_backend == "omp":
+        from ouroboros.config import get_omp_cli_path
+
+        cli_path = get_omp_cli_path()
     elif new_backend == "antigravity":
         from ouroboros.config import get_antigravity_cli_path
 
@@ -785,6 +791,12 @@ def backend(
                 "Set OUROBOROS_PI_CLI_PATH, configure orchestrator.pi_cli_path "
                 "in config.yaml, or install pi on PATH and retry."
             )
+        elif new_backend == "omp":
+            print_error(
+                "omp CLI not found.\n"
+                "Set OUROBOROS_OMP_CLI_PATH, configure orchestrator.omp_cli_path "
+                "in config.yaml, or install omp on PATH and retry."
+            )
         elif new_backend == "zcode":
             print_error(
                 "zcode CLI not found.\n"
@@ -810,6 +822,7 @@ def backend(
         _setup_goose,
         _setup_grok,
         _setup_hermes,
+        _setup_omp,
         _setup_pi,
         _setup_zcode,
     )
@@ -843,6 +856,8 @@ def backend(
             _setup_goose(cli_path)
         elif new_backend == "pi":
             _setup_pi(cli_path)
+        elif new_backend == "omp":
+            _setup_omp(cli_path)
         elif new_backend == "antigravity":
             _setup_antigravity(cli_path)
         elif new_backend == "grok":

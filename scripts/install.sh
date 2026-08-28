@@ -951,6 +951,7 @@ HAS_GOOSE=false
 HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
+HAS_OMP=false
 HAS_GJC=false
 HAS_DSH=false
 DSH_PLUGIN_SPEC="github:Q00/ouroboros#main&path:integrations/dsh-plugin"
@@ -994,6 +995,10 @@ if command -v gjc &>/dev/null; then
   _ok "GJC found: $(which gjc)"
   HAS_GJC=true
 fi
+if command -v omp &>/dev/null; then
+  _ok "OMP found: $(which omp)"
+  HAS_OMP=true
+fi
 if command -v dsh &>/dev/null; then
   _ok "DeepSeek Harness found: $(which dsh)"
   HAS_DSH=true
@@ -1010,6 +1015,7 @@ RUNTIME_COUNT=0
 [ "$HAS_COPILOT" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_PI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_GJC" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_OMP" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
@@ -1032,11 +1038,12 @@ _runtime_to_extras() {
     copilot) EXTRAS="[tui]"; RUNTIME="copilot" ;;
     pi)      EXTRAS="[tui]"; RUNTIME="pi" ;;
     gjc)     EXTRAS="[tui]"; RUNTIME="gjc" ;;
+    omp)     EXTRAS="[tui]"; RUNTIME="omp" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
     "")      EXTRAS="[tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
-      _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
+      _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, omp, all"
       exit 1
       ;;
   esac
@@ -1049,7 +1056,7 @@ EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
-supported = {'claude', 'claude_mcp', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc'}
+supported = {'claude', 'claude_mcp', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc', 'omp'}
 try:
     lines = open(os.environ['EXISTING_CONFIG']).read().splitlines()
     in_orchestrator = False
@@ -1095,7 +1102,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
     _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
     _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 11 "OMP" "Oh My Pi (omp) CLI bridge (${PACKAGE_NAME}[tui])"
+    _choice 12 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
     case "${choice:-1}" in
@@ -1108,7 +1116,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
       8) _runtime_to_extras "copilot" ;;
       9) _runtime_to_extras "pi" ;;
       10) _runtime_to_extras "gjc" ;;
-      11) _runtime_to_extras "all" ;;
+      11) _runtime_to_extras "omp" ;;
+      12) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
@@ -1136,6 +1145,8 @@ elif [ "$HAS_PI" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "pi"
 elif [ "$HAS_GJC" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "gjc"
+elif [ "$HAS_OMP" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "omp"
 else
   # No runtime CLI on PATH yet — first install. Always prompt when interactive
   # so the user picks deliberately rather than silently defaulting to claude.
@@ -1152,7 +1163,8 @@ else
     _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
     _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
     _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 11 "OMP" "Oh My Pi (omp) CLI bridge (${PACKAGE_NAME}[tui])"
+    _choice 12 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _choice 0 "None" "Base CLI only; choose a backend later"
     _prompt "Select [1]: "
     read -r choice
@@ -1167,7 +1179,8 @@ else
       8) _runtime_to_extras "copilot" ;;
       9) _runtime_to_extras "pi" ;;
       10) _runtime_to_extras "gjc" ;;
-      11) _runtime_to_extras "all" ;;
+      11) _runtime_to_extras "omp" ;;
+      12) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else

@@ -615,6 +615,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Oh My Pi (``omp``) is a Pi-family coding agent speaking the same
+        # JSON event protocol as Pi, so it drives the same generic runtime /
+        # LLM adapter surfaces. Runtime-only differences (``--resume`` for
+        # session resume, ``glob`` instead of ``find``) live in
+        # ``orchestrator/omp_runtime.py``.
+        name="omp",
+        aliases=("omp_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=True,
+        switchable_runtime=True,
+        cli_name="omp",
+        cli_config_key="omp_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="gjc",
         aliases=("gajae-code", "gajae_code"),
         supports_runtime=True,

@@ -559,6 +559,31 @@ class TestConfigBackend:
         assert result.exit_code == 1
         assert "OUROBOROS_PI_CLI_PATH" in result.output
 
+    def test_switch_to_omp_honors_configured_cli_path(self, config_dir: Path) -> None:
+        """config backend omp should honor explicit env/config path helpers."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
+            patch("shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup._setup_omp") as mock_setup,
+        ):
+            result = runner.invoke(app, ["backend", "omp"])
+
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/opt/omp/bin/omp")
+
+    def test_switch_to_omp_reports_missing_cli_path(self, config_dir: Path) -> None:
+        """config backend omp should surface omp-specific guidance when no CLI is found."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_omp_cli_path", return_value=None),
+            patch("shutil.which", return_value=None),
+        ):
+            result = runner.invoke(app, ["backend", "omp"])
+
+        assert result.exit_code == 1
+        assert "OUROBOROS_OMP_CLI_PATH" in result.output
+
     def test_switch_to_zcode_honors_configured_cli_path(self, config_dir: Path) -> None:
         """config backend zcode should use the app-bundle/config path and the
         runtime-only setup helper instead of claiming success without writing."""

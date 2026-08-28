@@ -11052,6 +11052,43 @@ class TestCopilotSetup:
 
         assert runtimes["pi"] == str(explicit)
 
+    def test_detect_runtimes_picks_up_omp_from_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`_detect_runtimes()` should report omp when the binary is on PATH."""
+        fake = tmp_path / "omp"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.delenv("OUROBOROS_OMP_CLI_PATH", raising=False)
+
+        def fake_which(name: str) -> str | None:
+            return str(fake) if name == "omp" else None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["omp"] == str(fake)
+
+    def test_detect_runtimes_honours_explicit_omp_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """OUROBOROS_OMP_CLI_PATH wins over the bare PATH lookup."""
+        explicit = tmp_path / "from-env-omp"
+        explicit.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_OMP_CLI_PATH", str(explicit))
+
+        def fake_which(name: str) -> str | None:
+            if name == str(explicit):
+                return str(explicit)
+            if name == "omp":
+                return str(tmp_path / "from-path-omp")
+            return None
+
+        with patch("shutil.which", side_effect=fake_which):
+            runtimes = setup_cmd._detect_runtimes()
+
+        assert runtimes["omp"] == str(explicit)
+
     def test_setup_pi_writes_runtime_without_switching_llm_backend(self, tmp_path: Path) -> None:
         """Pi setup preserves the existing LLM backend unless explicitly changed."""
         config_dir = tmp_path / ".ouroboros"
@@ -11087,6 +11124,52 @@ class TestCopilotSetup:
         )
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
         assert 'return { action: handled ? "handled" : "continue" }' in bridge_source
+
+    def test_setup_omp_writes_runtime_without_switching_llm_backend(self, tmp_path: Path) -> None:
+        """OMP setup preserves the existing LLM backend unless explicitly changed."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "claude"},
+                    "llm": {"backend": "codex"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._setup_omp("/opt/bin/omp")
+
+        config_path = tmp_path / ".ouroboros" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        bridge_path = tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        assert config["orchestrator"]["runtime_backend"] == "omp"
+        assert config["orchestrator"]["omp_cli_path"] == "/opt/bin/omp"
+        assert config["llm"]["backend"] == "codex"
+        assert bridge_path.exists()
+        bridge_source = bridge_path.read_text(encoding="utf-8")
+        assert 'omp.registerCommand("ooo"' in bridge_source
+        assert 'omp.on("input"' in bridge_source
+        assert (
+            '[...entry.args, "dispatch", "--runtime", "omp", "--cwd", ctx.cwd, text]'
+            in bridge_source
+        )
+        assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge_source
+
+    def test_install_omp_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
+        """The managed OMP bridge should not rewrite an already-current extension."""
+        bridge_path = tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._install_omp_ooo_bridge() is True
+            first_mtime = bridge_path.stat().st_mtime_ns
+            assert setup_cmd._install_omp_ooo_bridge() is True
+
+        assert bridge_path.stat().st_mtime_ns == first_mtime
 
     def test_install_pi_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
         """The managed Pi bridge should not rewrite an already-current extension."""

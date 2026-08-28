@@ -18,6 +18,7 @@ from ouroboros.providers.factory import (
 from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
+from ouroboros.providers.omp_llm_adapter import OmpLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
@@ -85,6 +86,11 @@ class TestResolveLLMBackend:
         """Pi aliases normalize to pi."""
         assert resolve_llm_backend("pi") == "pi"
         assert resolve_llm_backend("pi_cli") == "pi"
+
+    def test_resolves_omp_aliases(self) -> None:
+        """OMP aliases normalize to omp."""
+        assert resolve_llm_backend("omp") == "omp"
+        assert resolve_llm_backend("omp_cli") == "omp"
 
     def test_resolves_gjc_aliases(self) -> None:
         """GJC aliases normalize to gjc."""
@@ -156,6 +162,18 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="pi", cli_path="/tmp/pi")
         assert isinstance(adapter, PiLLMAdapter)
         assert adapter._cli_path == "/tmp/pi"
+
+    def test_creates_omp_adapter(self) -> None:
+        """OMP backend returns OmpLLMAdapter."""
+        adapter = create_llm_adapter(backend="omp", cli_path="/tmp/omp")
+        assert isinstance(adapter, OmpLLMAdapter)
+        assert adapter._cli_path == "/tmp/omp"
+
+    def test_omp_interview_use_case_bypasses_permissions(self) -> None:
+        """OMP interview driver mirrors Pi's text-only bypass permission convention."""
+        assert (
+            resolve_llm_permission_mode(backend="omp", use_case="interview") == "bypassPermissions"
+        )
 
     def test_creates_gjc_adapter(self) -> None:
         """GJC backend returns GjcLLMAdapter."""

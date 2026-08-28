@@ -37,6 +37,7 @@ import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.commands import ooo_bridges
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
@@ -46,7 +47,16 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
-from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
+from ouroboros.cli.commands.omp_setup import (
+    detect_omp_runtime as _detect_omp_runtime,
+)
+from ouroboros.cli.commands.omp_setup import (
+    select_omp_runtime,
+)
+from ouroboros.cli.commands.omp_setup import setup_omp as _setup_omp  # noqa: F401
+from ouroboros.cli.commands.ooo_bridges import (
+    install_pi_ooo_bridge as _install_pi_ooo_bridge,
+)
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
 from ouroboros.cli.commands.setup_completion import print_setup_completion
 from ouroboros.cli.formatters import console
@@ -208,6 +218,16 @@ def _commit_runtime_activation(
         print_error(f"{runtime_name} setup could not commit runtime configuration: {exc}")
         return False
     return True
+
+
+# Re-exported setup-module attributes. Tests, setup_refresh, and the config
+# backend command resolve these names on this module (including via
+# monkey-patching); plain assignments keep ruff from pruning them as unused
+# imports the way aliased from-imports were.
+_OMP_OOO_BRIDGE_FILENAME = ooo_bridges.OMP_OOO_BRIDGE_FILENAME
+_PI_OOO_BRIDGE_FILENAME = ooo_bridges.PI_OOO_BRIDGE_FILENAME
+_install_omp_ooo_bridge = ooo_bridges.install_omp_ooo_bridge
+_pi_ooo_bridge_source_text = ooo_bridges.pi_ooo_bridge_source_text_for_install
 
 
 def _ensure_claude_mcp_entry() -> None:
@@ -385,6 +405,9 @@ def _detect_runtimes() -> dict[str, str | None]:
     except Exception:
         pi_path = None
     runtimes["pi"] = (pi_path if pi_path and shutil.which(pi_path) else None) or shutil.which("pi")
+
+    # OMP (Oh My Pi): omp_setup owns the explicit-path-config-then-PATH rule.
+    runtimes["omp"] = _detect_omp_runtime()
 
     # GJC: explicit-path config first, then PATH.
     try:
@@ -3636,66 +3659,8 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     return True
 
 
-_PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
 _GJC_OOO_BRIDGE_SUBDIR = "ouroboros-ooo-bridge"
 _GJC_OOO_BRIDGE_FILENAME = "index.ts"
-
-
-def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed Pi bridge should use for this install."""
-    if _is_source_tree_ouroboros_build():
-        return sys.executable, ["-m", "ouroboros"]
-    try:
-        version = importlib_metadata.version("ouroboros-ai")
-    except importlib_metadata.PackageNotFoundError:
-        return sys.executable, ["-m", "ouroboros"]
-    if ".dev" in version:
-        return sys.executable, ["-m", "ouroboros"]
-    return shutil.which("ouroboros") or "ouroboros", []
-
-
-def _pi_ooo_bridge_source_text() -> str:
-    """Return the managed Pi extension source for ``ooo`` frontdoor dispatch."""
-    command, args = _detect_pi_bridge_dispatch_entry()
-    return pi_ooo_bridge_source_text(command=command, args=args)
-
-
-def _install_pi_ooo_bridge() -> bool:
-    """Install the managed Pi extension that routes interactive ``ooo`` input.
-
-    Pi auto-discovers global extensions in ``~/.pi/agent/extensions/*.ts``.
-    Writing a single managed file there avoids modifying Pi itself or any
-    third-party package such as roach-pi, while making the bridge available to
-    every Pi-based/customized session after ``/reload`` or restart.
-    """
-    import hashlib
-
-    dest = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
-    content = _pi_ooo_bridge_source_text()
-    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-    existing_hash: str | None = None
-    if dest.exists():
-        try:
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-        except OSError:
-            existing_hash = None
-
-    if existing_hash == new_hash:
-        print_info(f"Pi ooo bridge already up to date: {dest}")
-        return True
-
-    try:
-        _atomic_write_text(dest, content)
-    except OSError as exc:
-        print_warning(f"Could not install Pi ooo bridge at {dest}: {exc}")
-        return False
-
-    print_success(
-        f"{'Updated' if existing_hash is not None else 'Installed'} Pi ooo bridge: {dest}"
-    )
-    print_info("Restart Pi or run /reload in an existing Pi session to load the bridge.")
-    return True
 
 
 def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
@@ -4769,7 +4734,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode, host).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, omp, gjc, antigravity, grok, zcode, host).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4816,6 +4781,7 @@ def setup(
     [dim]    ouroboros setup --runtime kiro       # use Kiro CLI[/dim]
     [dim]    ouroboros setup --runtime copilot    # use GitHub Copilot CLI[/dim]
     [dim]    ouroboros setup --runtime pi         # use Pi CLI[/dim]
+    [dim]    ouroboros setup --runtime omp        # use OMP (Oh My Pi)[/dim]
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup --runtime gjc        # use GJC[/dim]
     [dim]    ouroboros setup --runtime zcode      # use Zcode[/dim]
@@ -4908,6 +4874,7 @@ def setup(
                 "  • Kiro CLI:    https://kiro.dev/docs/cli/\n"
                 "  • Copilot CLI: https://docs.github.com/copilot/github-copilot-in-the-cli\n"
                 "  • Pi CLI:      npm install -g --ignore-scripts @earendil-works/pi-coding-agent\n"
+                "  • OMP CLI:     install Oh My Pi so `omp` is on PATH\n"
                 "  • GJC CLI:     npm install -g gajae-code"
             )
             raise typer.Exit(1)
@@ -5034,6 +5001,8 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_pi(pi_path)
+    elif selected in ("omp", "omp_cli"):
+        select_omp_runtime(available)
     elif selected in ("gjc", "gajae-code", "gajae_code"):
         gjc_path = available.get("gjc")
         if not gjc_path:

@@ -173,7 +173,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
   <sub>한 대에서 실행한 <code>ouroboros setup refresh</code>. 그 컴퓨터에 실제로 깔려 있는 호스트에만, 각 호스트가 기대하는 형태로 설치합니다. Codex에는 규칙과 스킬, Hermes에는 스킬, OpenCode에는 플러그인과 <code>AGENTS.md</code>, Pi와 GJC에는 브리지. 내 컴퓨터에서는 13개 중 설치돼 있는 것만 나옵니다.</sub>
 </p>
 
-> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
+> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, OMP CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
@@ -270,7 +270,7 @@ ouroboros setup                         # 런타임 설정
 ```
 homebrew-core에는 아직 등록되지 않은 자가 호스팅 탭입니다. PyPI에 게시된 것과 동일한 패키지를 설치합니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.ko.md) · [Codex CLI](./docs/runtime-guides/codex.ko.md) · [Hermes](./docs/runtime-guides/hermes.ko.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.ko.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.ko.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [OMP (Oh My Pi)](./docs/runtime-guides/omp.md) · [Goose](./docs/runtime-guides/goose.ko.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -484,7 +484,7 @@ src/ouroboros/
 ├── resilience/     4가지 정체 패턴 감지, 5가지 측면 페르소나
 ├── observability/  3요소 드리프트 측정, 자동 회고
 ├── persistence/    Event Sourcing (SQLAlchemy + aiosqlite), 체크포인트
-├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, GJC, Goose, Antigravity, Grok, Zcode)
+├── orchestrator/   런타임 추상화 레이어 (Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, OMP, GJC, Goose, Antigravity, Grok, Zcode)
 ├── core/           타입, 에러, Seed, 온톨로지, 보안
 ├── providers/      LiteLLM 어댑터 (100+ 모델)
 ├── mcp/            MCP 클라이언트/서버

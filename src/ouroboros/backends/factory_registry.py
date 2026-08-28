@@ -92,6 +92,13 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
         agent_runtime_factory="_create_pi_runtime",
     ),
     BackendFactorySpec(
+        name="omp",
+        llm_backend="omp",
+        runtime_backend="omp",
+        llm_adapter_factory="_create_omp_adapter",
+        agent_runtime_factory="_create_omp_runtime",
+    ),
+    BackendFactorySpec(
         name="gjc",
         llm_backend="gjc",
         runtime_backend="gjc",

@@ -92,6 +92,9 @@ _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
 # configured default model, so generic Claude default ids map to the CLI's
 # own ``"default"`` sentinel, exactly like antigravity and grok above.
 _ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
+# OMP (Oh My Pi, the ``omp`` CLI): Pi-family agent; its model comes from its
+# own config/roles, so generic Claude defaults map to the ``"default"`` sentinel.
+_OMP_LLM_BACKENDS = frozenset({"omp", "omp_cli"})
 # Every backend whose default model is the backend-safe ``"default"`` sentinel
 # rather than a runnable shipped id, because the CLI selects its model via
 # config (not a ``--model`` flag). Roster-level normalization must cover the
@@ -108,6 +111,7 @@ _SENTINEL_DEFAULT_BACKENDS = (
     | _ANTIGRAVITY_LLM_BACKENDS
     | _GROK_LLM_BACKENDS
     | _ZCODE_LLM_BACKENDS
+    | _OMP_LLM_BACKENDS
 )
 _ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
@@ -120,6 +124,7 @@ _GJC_DEFAULT_MODEL = "default"
 _ANTIGRAVITY_DEFAULT_MODEL = "default"
 _GROK_DEFAULT_MODEL = "default"
 _ZCODE_DEFAULT_MODEL = "default"
+_OMP_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -1409,6 +1414,15 @@ def get_pi_cli_path() -> str | None:
     return None
 
 
+def __getattr__(name: str) -> object:
+    """Lazy re-export for the OMP CLI-path getter (module-size split)."""
+    if name == "get_omp_cli_path":
+        from ouroboros.config._omp_cli import get_omp_cli_path
+
+        return get_omp_cli_path
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def get_gjc_cli_path() -> str | None:
     """Get GJC CLI path from environment variable or config file.
 
@@ -2097,6 +2111,8 @@ def _default_model_for_backend(
         return _GROK_DEFAULT_MODEL
     if resolved in _ZCODE_LLM_BACKENDS:
         return _ZCODE_DEFAULT_MODEL
+    if resolved in _OMP_LLM_BACKENDS:
+        return _OMP_DEFAULT_MODEL
     return default_model
 
 

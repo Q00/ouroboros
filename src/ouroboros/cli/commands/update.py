@@ -59,6 +59,7 @@ _RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
     "copilot": ("OUROBOROS_COPILOT_CLI_PATH", "copilot_cli_path", "copilot"),
     "goose": ("OUROBOROS_GOOSE_CLI_PATH", "goose_cli_path", "goose"),
     "pi": ("OUROBOROS_PI_CLI_PATH", "pi_cli_path", "pi"),
+    "omp": ("OUROBOROS_OMP_CLI_PATH", "omp_cli_path", "omp"),
     "gjc": ("OUROBOROS_GJC_CLI_PATH", "gjc_cli_path", "gjc"),
     "antigravity": ("OUROBOROS_ANTIGRAVITY_CLI_PATH", "antigravity_cli_path", "agy"),
     "grok": ("OUROBOROS_GROK_CLI_PATH", "grok_cli_path", "grok"),

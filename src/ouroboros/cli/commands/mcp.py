@@ -91,6 +91,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     KIRO = "kiro"
     PI = "pi"
+    OMP = "omp"
     ZCODE = "zcode"
     DSH = "dsh"
 

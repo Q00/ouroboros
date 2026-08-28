@@ -37,6 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **opencode**: Subagent bridge plugin (`src/ouroboros/opencode/plugin/ouroboros-bridge.ts`) — routes MCP `ouroboros_*` tool calls with a `_subagent` parameter into OpenCode's native Task subagent panes via `session.promptAsync`. Fire-and-forget dispatch returns from the hook in ~10ms, eliminating the blocking 200s+ latency of the previous `session.prompt` approach. Installed automatically by `ouroboros setup`. See [OpenCode Subagent Bridge](docs/guides/opencode-subagent-bridge.md).
 - **lateral_think**: Parallel multi-persona dispatch — `ouroboros_lateral_think` now accepts `persona="all"` or `personas=["hacker","architect",...]` to fan out to multiple lateral-thinking personas in a single call. Each persona runs in its own Task pane with an independent LLM context, eliminating anchoring bias across alternatives. Uses new `_subagents` (plural) JSON contract, implemented server-side via `build_lateral_multi_subagent()` and plugin-side via MAX_FANOUT=10 parallel `promptAsync` with per-payload dedupe and error isolation.
 - **opencode/bridge**: Plugin v23 recognizes `_subagents` array for parallel fan-out. Per-payload validation, truncation, and dedupe. One failed dispatch does not abort the rest. New `ouroboros_subagents` and `ouroboros_dispatch_errors` metadata fields. Backwards compatible with v22 single-payload `_subagent` contract.
+- **providers**: OMP (Oh My Pi) LLM adapter (`OmpLLMAdapter`) for `--llm-backend omp` —
+  `omp` / `omp_cli` registered as LLM- and interview-driver-capable in the backend
+  registry and provider factory; generic default models normalize to the backend-safe
+  `default` sentinel so OMP picks its own configured model
+- **runtime**: OMP CLI runtime (`OmpRuntime`, `orchestrator.runtime_backend: omp`) —
+  Pi-family JSON-mode subprocess adapter (`omp --mode json <prompt>`, same JSONL event
+  protocol as Pi) with native `--resume` targeted resume and native
+  `--append-system-prompt` / `--tools` / `--no-tools` delivery; Claude-style tool names
+  map to OMP's vocabulary (`Glob`/`LS` → `glob`; OMP has no `ls` built-in)
+- **setup/installer**: `ouroboros setup --runtime omp` wires the managed OMP bridge
+  (`~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`, timeout env
+  `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`), `ouroboros config backend omp` switches to it, and
+  `scripts/install.sh` adds OMP to its runtime menu; spawned-CLI discovery env
+  `PI_CODING_AGENT_DIR` is denied from untrusted repo `.env` files
+- **docs**: OMP CLI runtime guide plus omp entries across the config reference, runtime
+  capability matrix, architecture, getting-started, CLI reference, skill capability
+  guides, and READMEs
 
 ### Fixed
 - **skills**: Renamed the packaged `resume` skill to `resume-session` so Claude Code's built-in `/resume` session picker is no longer shadowed. Use `ooo resume-session` or `/ouroboros:resume-session` for the Ouroboros in-flight session listing.

@@ -1817,6 +1817,37 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="pi") == "default"
             assert get_assertion_extraction_model(backend="pi") == "default"
 
+    def test_omp_backend_uses_default_model_sentinel(self) -> None:
+        """Backend-aware defaults avoid cross-provider model names for OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
+    def test_omp_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Existing default configs should remain usable after switching to OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_qa_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
     def test_gjc_backend_uses_default_model_sentinel(self) -> None:
         """Backend-aware defaults avoid cross-provider model names for GJC."""
         with (
