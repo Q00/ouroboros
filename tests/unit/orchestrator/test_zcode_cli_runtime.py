@@ -404,6 +404,30 @@ def test_rollout_malformed_json_fails_closed(
     assert [message.type for message in messages] == ["assistant"]
 
 
+def test_rollout_over_limit_integer_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record_text = path.read_text(encoding="utf-8").strip()
+    path.write_text(
+        record_text[:-1] + ',"oversized":' + ("9" * 5_000) + "}\n",
+        encoding="utf-8",
+    )
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is unavailable on this platform")
+def test_rollout_fifo_fails_closed_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.unlink()
+    os.mkfifo(path)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
 def test_rollout_symlink_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
     target = path.with_suffix(".target")
