@@ -643,6 +643,84 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
         assert target_path.joinpath("operator.txt").read_text(encoding="utf-8") == "theirs"
         assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
 
+    def test_unpinnable_reservation_does_not_occupy_the_final_name(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reservation that cannot be pinned must not survive the failure.
+
+        Leaving it at the final name makes every later replay see a collision
+        that never resolves, with the previous generation still hidden in its
+        backup sibling — the failure mode this whole fallback exists to remove.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_open = os.open
+
+        def _refuse_to_pin_the_reservation(path: object, *args: object, **kwargs: object) -> int:
+            if (
+                isinstance(path, str | bytes | os.PathLike)
+                and Path(os.fsdecode(path)) == target_path
+            ):
+                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(codex_artifacts.os, "open", _refuse_to_pin_the_reservation)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EMFILE
+        assert not target_path.exists(), "an unpinned reservation was left at the final name"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_release_failure_after_the_rename_keeps_the_publication_committed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The rename commits, so releasing the descriptor cannot fail the commit.
+
+        Reporting the release as a failed publication would send the caller into
+        a rollback that deletes the generation already live and strands the
+        previous one in its backup sibling.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_open = os.open
+        real_close = os.close
+        reservations: list[int] = []
+
+        def _record_the_reservation(path: object, *args: object, **kwargs: object) -> int:
+            descriptor = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+            if (
+                isinstance(path, str | bytes | os.PathLike)
+                and Path(os.fsdecode(path)) == target_path
+            ):
+                reservations.append(descriptor)
+            return descriptor
+
+        def _refuse_to_release_the_reservation(descriptor: int) -> None:
+            real_close(descriptor)
+            if descriptor in reservations:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        monkeypatch.setattr(codex_artifacts.os, "open", _record_the_reservation)
+        monkeypatch.setattr(codex_artifacts.os, "close", _refuse_to_release_the_reservation)
+
+        codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert reservations, "the directory branch did not pin a reservation"
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+        assert not source_path.exists()
+
     def test_existing_target_reported_by_renameat2_is_not_degraded(
         self,
         tmp_path: Path,

@@ -461,10 +461,30 @@ def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
     bounded to an empty directory: a racing writer with any content in it makes
     the rename fail with ``ENOTEMPTY`` and keeps their tree. Closing it fully
     needs ``RENAME_NOREPLACE``, which by definition this branch does not have.
+
+    Descriptor failures are held to the same contract. Failing to pin the
+    reservation removes it — inside the same bounded window, never a non-empty
+    replacement — so a failed publication does not leave the final name occupied
+    for the next replay. Failing to release the descriptor after the rename
+    changes nothing: the rename already committed, so the close is housekeeping
+    and must not turn a live generation into a reported failure.
     """
     if source_path.is_dir() and not source_path.is_symlink():
         os.mkdir(target_path)
-        reservation = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            reservation = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
+        except BaseException:
+            # Leaving an unpinned reservation at the final name would make every
+            # later replay see a collision that never resolves, with the previous
+            # generation still hidden in its backup sibling. Removing it is
+            # exposed to the mkdir-to-open window described above and to nothing
+            # else: rmdir refuses a non-empty directory, so a racing writer who
+            # put anything there keeps it.
+            try:
+                os.rmdir(target_path)
+            except OSError:
+                pass
+            raise
         try:
             # POSIX rename removes an empty destination directory, so this only
             # consumes the reservation made above. A writer that filled it in
@@ -474,7 +494,14 @@ def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
             _release_directory_reservation(reservation, target_path)
             raise
         finally:
-            os.close(reservation)
+            # The rename is the commit boundary, so releasing the descriptor is
+            # housekeeping. Letting it raise would report an already-published
+            # directory as a failed commit, and the rollback would then delete
+            # the live generation and strand the previous one in its backup.
+            try:
+                os.close(reservation)
+            except OSError:
+                pass
         return
 
     os.link(source_path, target_path, follow_symlinks=False)
