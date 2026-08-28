@@ -135,6 +135,7 @@ def run_command(
     name: str,
     timeout: int,
     env: dict[str, str] | None = None,
+    redact_values: set[str] | None = None,
 ) -> CommandResult:
     stdout_path = log_dir / f"{name}.stdout.log"
     stderr_path = log_dir / f"{name}.stderr.log"
@@ -142,6 +143,7 @@ def run_command(
     if env:
         merged_env.update(env)
     sensitive_values = _sensitive_values(command, merged_env)
+    sensitive_values.update(redact_values or set())
     persisted_command = _redact_command(command, sensitive_values)
     try:
         completed = subprocess.run(
@@ -309,6 +311,10 @@ asyncio.run(main())
         name="mcp_stdio_smoke",
         timeout=timeout,
         env={str(k): str(v) for k, v in (configured.get("env") or {}).items()},
+        redact_values=_sensitive_values(
+            launcher,
+            {str(k): str(v) for k, v in (configured.get("env") or {}).items()},
+        ),
     )
     details: dict[str, Any] = redact_secrets(
         {"launcher": launcher, "command_result": _jsonable(result.__dict__)}
@@ -478,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         [
             "ps",
             "-axo",
-            "pid,ppid,stat,pcpu,pmem,etime,command",
+            "pid,ppid,stat,pcpu,pmem,etime,comm",
         ],
         cwd=repo,
         log_dir=log_dir,
