@@ -258,7 +258,13 @@ def test_rollout_replayed_exact_identity_after_newer_turn_fails_closed(
     [
         ("sessionId", "sess_12345678-1234-1234-1234-123456789abd"),
         ("sessionId", None),
+        ("sessionId", 7),
         ("traceId", None),
+        ("traceId", 7),
+        ("traceId", ""),
+        ("turnId", None),
+        ("turnId", 7),
+        ("turnId", ""),
     ],
 )
 def test_rollout_foreign_or_malformed_history_record_fails_closed(
@@ -275,11 +281,12 @@ def test_rollout_foreign_or_malformed_history_record_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+@pytest.mark.parametrize("mode", [0o660, 0o602])
 def test_rollout_group_or_world_writable_file_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
 ) -> None:
     runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
-    path.chmod(0o666)
+    path.chmod(mode)
 
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
