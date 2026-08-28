@@ -79,7 +79,7 @@ _SECRET_KEY_RE = __import__("re").compile(
     __import__("re").I,
 )
 _SECRET_VALUE_RE = __import__("re").compile(
-    r"(sk-[A-Za-z0-9][A-Za-z0-9._-]{7,}|(?:api[_-]?key|token|secret|password|credential)[=:][^\s,]+)",
+    r"(sk-[A-Za-z0-9][A-Za-z0-9._-]{7,}|(?:api[_-]?key|token|secret|password|credential)[=:][^\s,]+|(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[^\s,]+)",
     __import__("re").I,
 )
 

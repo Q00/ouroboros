@@ -184,6 +184,35 @@ def test_redacts_launcher_arguments_and_process_output(tmp_path: Path) -> None:
     assert "<redacted>" in persisted
 
 
+def test_redacts_structured_authorization_header_in_persisted_reports(tmp_path: Path) -> None:
+    harness = _load_harness()
+    secret = "definitely-secret-2289"
+    config = tmp_path / ".mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": "ouroboros",
+                        "args": ["--header", f"Authorization: Bearer {secret}"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entry = harness.read_mcp_entry(config)
+    check = harness.Check("config", "pass", "loaded", entry)
+    report = harness.write_markdown_report(tmp_path, [check])
+    checks_path = tmp_path / "checks.json"
+    checks_path.write_text(json.dumps([harness._jsonable(check.__dict__)]), encoding="utf-8")
+
+    combined = report.read_text(encoding="utf-8") + checks_path.read_text(encoding="utf-8")
+    assert secret not in combined
+    assert "<redacted>" in combined
+
+
 def test_effective_codex_entry_uses_codex_home_and_configured_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
