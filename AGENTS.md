@@ -45,7 +45,7 @@ Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent
 
 Before implementing or reviewing a PR, read [Review Boundary Contract](CONTRIBUTING.md#review-boundary-contract). Treat the PR description as the review contract.
 
-Contributors MUST declare the user problem, supported inputs and execution conditions, observable contract, touched subsystem and owner, non-goals, and verification evidence. Do not silently widen these while responding to review.
+Contributors MUST declare the user problem, supported inputs and execution conditions, observable contract, touched subsystem and owner, non-goals, and verification evidence. Do not silently widen these while responding to review. A declared boundary narrows implementation scope but cannot waive an existing public or repository contract, an approved issue or RFC requirement, or a maintainer decision; conflicts require maintainer approval or RFC review.
 
 Review agents MUST evaluate every finding in this order:
 

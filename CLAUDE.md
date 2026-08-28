@@ -62,9 +62,9 @@ Use these decisions:
 - Q3 + Q5: stop and revisit the RFC with the maintainer; do not silently absorb the new subsystem or owner.
 - Q3 + Q4 and not Q5: owned follow-up, not a blocker; require a named owner and link.
 - Q5 without Q3 + Q5 escalation: **Changes Requested** for the immediate user-data or security risk.
-- Outside the declared boundary without a contract violation: not a blocker; do not expand the PR.
+- Outside the declared boundary without a contract violation: not a blocker; record a valid, actionable finding only as an owned follow-up with a named owner and tracking link; do not expand the PR.
 
-Only the maintainer decides scope expansion. Keep review comments tied to the declared boundary and directly evidenced behavior.
+Only the maintainer decides scope expansion. Keep review comments tied to the declared boundary and directly evidenced behavior. The declared boundary cannot waive existing public or repository contracts, approved issue or RFC requirements, or maintainer decisions.
 
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->

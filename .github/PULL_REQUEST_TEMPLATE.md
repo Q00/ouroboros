@@ -6,7 +6,7 @@
 
 ## Review boundary
 
-<!-- Keep this boundary stable while responding to review. See CONTRIBUTING.md#review-boundary-contract. -->
+<!-- Keep this boundary stable while responding to review. See CONTRIBUTING.md#review-boundary-contract and CONTRIBUTING.md#five-question-review-rubric. -->
 - **User problem**: What one concrete user problem does this PR solve?
 - **Inputs and execution conditions**: Which inputs, preconditions, environments, and execution paths are supported?
 - **Promised contract**: What observable behavior and invariants does the PR guarantee?

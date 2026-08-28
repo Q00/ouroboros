@@ -159,7 +159,7 @@ Commit the metadata changes before creating `v0.50.7`. The tag-triggered release
 
 ## Review Boundary Contract
 
-Review speed depends on whether the PR boundary is explicit. A focused PR gives contributors, review bots, and maintainers the same contract to evaluate. Every code PR MUST define the following before implementation and keep it current in the PR description:
+Review speed depends on whether the PR boundary is explicit. A focused PR gives contributors, review bots, and maintainers the same contract to evaluate. Every PR that changes code, documentation, or operational guidance MUST define the following before implementation and keep it current in the PR description:
 
 | Boundary field | Required declaration |
 |----------------|----------------------|
@@ -168,6 +168,8 @@ Review speed depends on whether the PR boundary is explicit. A focused PR gives 
 | Implementation boundary | Existing subsystems and components changed, data or security boundaries crossed, and the current owner |
 | Non-goals | Unsupported inputs or conditions and related risks intentionally excluded from this PR |
 | Evidence | Reproduction steps or tests that prove each promised behavior under the declared conditions |
+
+The declared boundary narrows implementation scope; it MUST NOT waive an existing public or repository contract, an approved issue or RFC requirement, or a maintainer decision. If a proposed non-goal conflicts with one of those baseline obligations, the contributor MUST ask the maintainer to approve a scope change or revisit the RFC before implementation.
 
 Do not begin from an unsupported solution assumption and then absorb every lifecycle, rollback, concurrency, or authority concern that follows from it. If implementation reveals a new subsystem or ownership boundary, stop and let a maintainer decide whether the PR expands, splits, or returns to RFC discussion.
 
