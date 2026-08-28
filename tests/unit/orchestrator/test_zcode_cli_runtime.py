@@ -253,6 +253,20 @@ def test_rollout_replayed_exact_identity_after_newer_turn_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_replayed_target_after_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    newer = json.loads(json.dumps(matched))
+    newer["turnId"] = "turn-newer"
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (newer, matched)) + "\n",
+        encoding="utf-8",
+    )
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -400,6 +414,15 @@ def test_rollout_malformed_json_fails_closed(
 ) -> None:
     runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
     path.write_text("{not-json}\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_deeply_nested_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.write_text("[" * 2_000 + "null" + "]" * 2_000 + "\n", encoding="utf-8")
     messages = runtime._convert_event(event, None)
     assert [message.type for message in messages] == ["assistant"]
 
