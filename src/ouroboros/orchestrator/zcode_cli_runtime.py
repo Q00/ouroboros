@@ -563,9 +563,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             ),
         ]
 
-    def _read_trusted_rollout_history(
-        self, session_id: str
-    ) -> list[dict[str, Any]] | None:
+    def _read_trusted_rollout_history(self, session_id: str) -> list[dict[str, Any]] | None:
         """Return one immutable, filename-bound ZCode session history.
 
         Rollout records cross a verification-authority boundary.  Keep every
