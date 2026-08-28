@@ -574,7 +574,12 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
         try:
             path_stat = rollout_path.lstat()
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
             fd = os.open(rollout_path, flags)
             try:
                 fd_stat = os.fstat(fd)
@@ -614,7 +619,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 continue
             try:
                 candidate = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
                 return None
             if not isinstance(candidate, dict):
                 return None
