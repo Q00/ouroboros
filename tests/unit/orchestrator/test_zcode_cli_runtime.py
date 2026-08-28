@@ -28,7 +28,9 @@ from typing import Any
 
 import pytest
 
+from ouroboros.core.filesystem_capability import open_nofollow_directory_chain
 from ouroboros.orchestrator.adapter import ParamSupport
+import ouroboros.orchestrator.zcode_cli_runtime as zcode_cli_runtime_module
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
 _FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "zcode"
@@ -488,6 +490,45 @@ def test_rollout_symlinked_parent_fails_closed(
     messages = runtime._convert_event(event, None)
 
     assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_parent_replacement_cannot_redirect_leaf_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    displaced_zcode = tmp_path / "displaced-zcode"
+    attacker_zcode = tmp_path / "attacker-zcode"
+    attacker_rollout = attacker_zcode / "cli" / "rollout"
+    attacker_rollout.mkdir(parents=True)
+    attacker_record = json.loads(path.read_text(encoding="utf-8"))
+    attacker_record["request"]["messages"][2]["content"] = "attacker"
+    (attacker_rollout / path.name).write_text(
+        json.dumps(attacker_record) + "\n",
+        encoding="utf-8",
+    )
+
+    replaced = False
+
+    def replacing_chain(target: str | os.PathLike[str]):
+        nonlocal replaced
+        chain = open_nofollow_directory_chain(target)
+        if not replaced:
+            replaced = True
+            path.parents[2].rename(displaced_zcode)
+            (tmp_path / ".zcode").symlink_to(attacker_zcode, target_is_directory=True)
+        return chain
+
+    monkeypatch.setattr(
+        zcode_cli_runtime_module,
+        "open_nofollow_directory_chain",
+        replacing_chain,
+    )
+
+    messages = runtime._convert_event(event, None)
+
+    assert replaced is True
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
+    assert messages[1].content == "ok"
 
 
 def test_rollout_oversized_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
