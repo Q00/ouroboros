@@ -37,6 +37,10 @@ from typing import Any
 
 import structlog
 
+from ouroboros.core.filesystem_capability import (
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -572,28 +576,25 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         history.  ``None`` means the complete file failed trust validation.
         """
         rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
+        rollout_name = rollout_path.name
         try:
-            # O_NOFOLLOW protects only the leaf.  A symlinked directory such
-            # as ~/.zcode would still redirect the trusted rollout lookup, so
-            # require every component below HOME to be a real directory.
-            home = Path.home()
-            parent = rollout_path.parent
-            while parent != home:
-                parent_stat = parent.lstat()
-                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-                    return None
-                if home not in parent.parents:
-                    return None
-                parent = parent.parent
-            path_stat = rollout_path.lstat()
+            # Hold a no-follow descriptor for every parent component and open
+            # the leaf relative to that capability.  A lexical parent can be
+            # replaced at any point after this call; the read remains bound to
+            # the already-opened directory inode rather than re-resolving the
+            # pathname (closing the parent-replacement TOCTOU).
+            if not nofollow_directory_capabilities_available():
+                return None
+            parent_chain = open_nofollow_directory_chain(rollout_path.parent)
             flags = (
                 os.O_RDONLY
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0)
                 | getattr(os, "O_NONBLOCK", 0)
             )
-            fd = os.open(rollout_path, flags)
+            fd: int | None = None
             try:
+                fd = os.open(rollout_name, flags, dir_fd=parent_chain.leaf_fd)
                 fd_stat = os.fstat(fd)
                 getuid = getattr(os, "getuid", None)
                 current_uid = getuid() if callable(getuid) else None
@@ -602,10 +603,6 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                     or (current_uid is not None and fd_stat.st_uid != current_uid)
                     or fd_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
                     or fd_stat.st_size > _MAX_ZCODE_ROLLOUT_BYTES
-                    # Bind validation and reads to the same inode. This also
-                    # closes the symlink/rename race on platforms lacking
-                    # O_NOFOLLOW.
-                    or (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino)
                 ):
                     return None
                 chunks: list[bytes] = []
@@ -621,7 +618,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                     return None
                 text = payload.decode("utf-8")
             finally:
-                os.close(fd)
+                if fd is not None:
+                    os.close(fd)
+                parent_chain.close()
         except (OSError, UnicodeError):
             return None
 
