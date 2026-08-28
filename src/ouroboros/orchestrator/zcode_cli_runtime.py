@@ -619,7 +619,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 continue
             try:
                 candidate = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 return None
             if not isinstance(candidate, dict):
                 return None
@@ -684,15 +684,14 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             return []
 
         # A terminal summary may only consume the current, uniquely ordered
-        # receipt history. If this session has advanced to another trace/turn
-        # after the matched snapshot, the summary is stale and cannot recover
-        # evidence from an older turn.
-        first_matching_index = matching_indexes[0]
+        # receipt history. Any record for another trace/turn makes the file
+        # ambiguous: the matching snapshot may be a stale replay regardless of
+        # whether the foreign record appears before or after it.
         last_matching_index = matching_indexes[-1]
         if any(
             candidate.get("sessionId") == session_id
             and (candidate.get("traceId") != trace_id or candidate.get("turnId") != turn_id)
-            for candidate in records[first_matching_index + 1 :]
+            for candidate in records
         ):
             return []
 
