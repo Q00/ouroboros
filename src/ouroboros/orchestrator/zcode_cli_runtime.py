@@ -625,6 +625,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             return None
 
         records: list[dict[str, Any]] = []
+        previous_messages: list[Any] | None = None
+
         for line in text.splitlines():
             if not line.strip():
                 continue
@@ -650,6 +652,39 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 and record_turn_id.strip()
             ):
                 return None
+            request = candidate.get("request")
+            if not isinstance(request, dict):
+                return None
+            messages = request.get("messages")
+            if not isinstance(messages, list):
+                return None
+            # ZCode normally writes cumulative ``full`` snapshots, but some
+            # turns emit a ``delta`` snapshot after the initial request.  The
+            # verifier consumes one canonical cumulative history; reconstruct
+            # the delta only when its offset is an exact append point.  A
+            # malformed/gapped delta remains fail-closed rather than silently
+            # dropping tool receipts.
+            messages_kind = request.get("messagesKind", "full")
+            if messages_kind == "delta":
+                offset = request.get("messageOffset")
+                if (
+                    previous_messages is None
+                    or isinstance(offset, bool)
+                    or not isinstance(offset, int)
+                    or offset != len(previous_messages)
+                ):
+                    return None
+                canonical_messages = [*previous_messages, *messages]
+                request = {
+                    **request,
+                    "messages": canonical_messages,
+                    "messagesKind": "full",
+                    "messageOffset": 0,
+                }
+                candidate = {**candidate, "request": request}
+            elif messages_kind != "full":
+                return None
+            previous_messages = list(request["messages"])
             records.append(candidate)
         return records
 
@@ -711,6 +746,21 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # prior snapshot as a prefix. A rewrite or conflicting call under the
         # same identity makes the entire history ambiguous and fail-closed.
         previous_messages: list[Any] | None = None
+
+        def comparable_messages(messages: list[Any]) -> list[Any]:
+            """Ignore only ZCode's non-semantic ephemeral cache marker."""
+            normalized: list[Any] = []
+            for message in messages:
+                if isinstance(message, dict) and message.get("cacheControl") == {
+                    "type": "ephemeral"
+                }:
+                    normalized.append(
+                        {key: value for key, value in message.items() if key != "cacheControl"}
+                    )
+                else:
+                    normalized.append(message)
+            return normalized
+
         for index in matching_indexes:
             candidate_request = records[index].get("request")
             candidate_messages = (
@@ -718,10 +768,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             )
             if not isinstance(candidate_messages, list):
                 return []
-            if (
-                previous_messages is not None
-                and candidate_messages[: len(previous_messages)] != previous_messages
-            ):
+            if previous_messages is not None and comparable_messages(
+                candidate_messages[: len(previous_messages)]
+            ) != comparable_messages(previous_messages):
                 return []
             previous_messages = candidate_messages
 

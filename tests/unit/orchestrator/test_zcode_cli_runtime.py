@@ -202,6 +202,66 @@ def test_rollout_cumulative_messages_deduplicate_exact_replays(
     ]
 
 
+def test_rollout_delta_snapshot_is_reconstructed_before_receipt_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"].update({"messagesKind": "full", "messageOffset": 0, "messageCount": 3})
+    delta = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messagesKind": "delta",
+            "messageOffset": 3,
+            "messageCount": 5,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+                },
+                {
+                    "role": "tool",
+                    "toolCallId": "call-2",
+                    "toolName": "Read",
+                    "content": "x",
+                    "isError": False,
+                },
+            ],
+        },
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(delta) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+@pytest.mark.parametrize("message_offset", [2, 4, True, "3"])
+def test_rollout_delta_snapshot_with_invalid_offset_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message_offset: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"].update({"messagesKind": "full", "messageOffset": 0})
+    delta = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messagesKind": "delta",
+            "messageOffset": message_offset,
+            "messages": [],
+        },
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(delta) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_conflicting_duplicate_call_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -227,6 +287,40 @@ def test_rollout_conflicting_exact_identity_records_fail_closed(
     }
     path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_full_snapshot_may_drop_ephemeral_cache_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"]["messages"][0]["cacheControl"] = {"type": "ephemeral"}
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"][0].pop("cacheControl")
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
 
 
 def test_rollout_exact_turn_superseded_by_newer_turn_fails_closed(
