@@ -392,6 +392,7 @@ class TestMCPStartupAutoCleanup:
                 "ouroboros.mcp.server.adapter.create_ouroboros_server",
                 return_value=mock_server,
             ),
+            patch("ouroboros.telemetry.capture_service_active") as capture_service,
         ):
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
@@ -401,6 +402,7 @@ class TestMCPStartupAutoCleanup:
         # Cleanup still ran despite the failure: adapter shutdown owns store
         # closure, so the WAL checkpoint path is reached even when serve fails.
         mock_server.shutdown.assert_awaited_once()
+        capture_service.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_event_store_init_failure_aborts_startup(self) -> None:

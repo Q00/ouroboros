@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import random
+import platform
 import re
 import socket
 import subprocess
@@ -262,7 +262,7 @@ class TestDistinctIdValidation:
             encoding="utf-8",
         )
 
-        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.capture("service_active", {"service": "mcp"})
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -294,7 +294,7 @@ class TestDistinctIdValidation:
             encoding="utf-8",
         )
 
-        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.capture("service_active", {"service": "mcp"})
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -491,7 +491,7 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.capture("service_active", {"service": "mcp"})
             telemetry.flush(timeout=2.0)
         finally:
             os.chmod(state_dir, 0o700)
@@ -515,7 +515,7 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.capture("service_active", {"service": "mcp"})
             telemetry.flush(timeout=2.0)
         finally:
             os.chmod(state_dir, 0o700)
@@ -533,7 +533,7 @@ class TestIdentityFailClosed:
         state_dir.mkdir(parents=True)
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.capture("service_active", {"service": "mcp"})
             telemetry.flush(timeout=2.0)
             result = telemetry.distinct_id()
         finally:
@@ -555,14 +555,14 @@ class TestIdentityFailClosed:
         )
         os.chmod(state_dir, 0o500)
         try:
-            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.capture("service_active", {"service": "mcp"})
             telemetry.flush(timeout=2.0)
             assert sent == []
             assert telemetry.distinct_id() == ""
         finally:
             os.chmod(state_dir, 0o700)
 
-        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 2})
+        telemetry.capture("service_active", {"service": "mcp"})
         telemetry.flush(timeout=2.0)
 
         assert len(sent) == 1
@@ -573,393 +573,118 @@ class TestIdentityFailClosed:
 
 
 class TestCapture:
-    def test_event_shape(self, sent: list[dict[str, Any]]) -> None:
+    def test_lifecycle_command_shape(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
         telemetry.set_context(runtime_backend="codex")
-        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True, duration_ms=12.34)
+        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
         telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        event = sent[0]
+
+        assert len(sent) == 2
+        service_event, event = sent
+        assert service_event["event"] == "service_active"
         assert event["event"] == "command_run"
         assert event["distinct_id"] == telemetry.distinct_id()
-        props = event["properties"]
-        assert props["command"] == "run"
-        assert props["tool"] == "ouroboros_start_execute_seed"
-        assert props["source"] == "mcp"
-        assert props["is_funnel"] is True
-        assert props["phase"] == "submission"
-        assert props["accepted"] is True
-        assert "ok" not in props
-        assert props["duration_ms"] == 12.3
-        assert props["runtime_backend"] == "codex"
-        assert props["app_version"]
-        assert props["os"]
+        assert event["properties"] == {
+            "command": "run",
+            "service": "mcp",
+            "status": "accepted",
+            "$insert_id": event["properties"]["$insert_id"],
+            "runtime_backend": "codex",
+            "app_version": telemetry.__version__,
+            "os": platform.system().lower(),
+        }
 
-    def test_unmapped_tool_still_captured(self, sent: list[dict[str, Any]]) -> None:
+    def test_failed_internal_command_is_retained(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_tool_call(
             "ouroboros_checklist_verify", ok=False, error_type="MCPToolError"
         )
         telemetry.flush(timeout=2.0)
-        assert sent[0]["properties"]["command"] == "checklist_verify"
-        assert sent[0]["properties"]["is_funnel"] is False
-        assert sent[0]["properties"]["error_type"] == "MCPToolError"
-        assert sent[0]["properties"]["phase"] == "completion"
-        assert sent[0]["properties"]["ok"] is False
 
-    def test_subagent_dispatch_event_keeps_only_closed_values(
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert props["command"] == "checklist_verify"
+        assert props["status"] == "failed"
+        assert props["error_type"] == "MCPToolError"
+
+    def test_blocked_seed_is_distinct_from_exception_failure(
         self, sent: list[dict[str, Any]]
     ) -> None:
-        telemetry.capture_subagent_dispatch(
-            {
-                "phase": "emitted",
-                "fanout_kind": "lateral_persona_panel",
-                "payload_count": 5,
-                "invocation_surface": "mcp_host",
-                "dispatch_authority": "mcp_host",
-                "host_family": "claude_code",
-                "host_identity_status": "known",
-                "host_capability": "undeclared",
-                "capability_source": "none",
-                "delivery_mode": "inline_host",
-                "execution_preference": "parallel",
-                "fallback_strategy": "sequential",
-                "configured_worker_backend": "gemini",
-                "host_worker_mismatch": True,
-                "decision_reason": "host_capability_undeclared",
-                "contract_version": "v2",
-                "fanout_reentry_available": True,
-                "fanout_id": "fanout_private",
-                "prompt": "/private/repo/secret",
-            }
-        )
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=False, blocked=True)
         telemetry.flush(timeout=2.0)
 
-        assert len(sent) == 1
-        event = sent[0]
-        assert event["event"] == "subagent_dispatch"
-        props = event["properties"]
-        assert props["host_family"] == "claude_code"
-        assert props["configured_worker_backend"] == "gemini"
-        assert props["host_worker_mismatch"] is True
-        assert "fanout_id" not in props
-        assert "prompt" not in props
-        assert "private" not in str(props)
+        command = next(event for event in sent if event["event"] == "command_run")
+        assert command["properties"]["command"] == "seed"
+        assert command["properties"]["status"] == "blocked"
+        assert "error_type" not in command["properties"]
 
-    def test_subagent_dispatch_folds_custom_backend_and_rejects_open_enums(
+    def test_successful_internal_and_polling_commands_are_dropped(
         self, sent: list[dict[str, Any]]
     ) -> None:
-        telemetry.capture_subagent_dispatch(
-            {
-                "phase": "emitted",
-                "fanout_kind": "private_customer_fanout",
-                "host_family": "private-client-name",
-                "configured_worker_backend": "private-backend",
-            }
-        )
-        telemetry.flush(timeout=2.0)
-
-        props = sent[0]["properties"]
-        assert props["configured_worker_backend"] == "other"
-        assert "fanout_kind" not in props
-        assert "host_family" not in props
-
-    def test_non_ouroboros_tool_skipped(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_tool_call("ouroboros_fetch_artifact", ok=True)
+        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
         telemetry.capture_tool_call("some_other_tool", ok=True)
+        telemetry.flush(timeout=2.0)
+        assert [event["event"] for event in sent] == ["service_active"]
+
+    def test_subagent_dispatch_is_not_collected(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_subagent_dispatch({"phase": "emitted", "payload_count": 5})
         telemetry.flush(timeout=2.0)
         assert sent == []
 
-    def test_hostile_tool_name_is_replaced_not_forwarded(self, sent: list[dict[str, Any]]) -> None:
-        """A caller-controlled name that merely starts with "ouroboros_" is
-        not automatically a real registered tool -- e.g. a path smuggled
-        past a boundary bug upstream. capture_tool_call must never let it
-        become the `tool`/`command` property value."""
-        hostile = "ouroboros_/home/alice/private-project"
-        telemetry.capture_tool_call(hostile, ok=False, error_type="KeyError")
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        event = sent[0]
-        assert event["properties"]["tool"] == "ouroboros_unknown_tool"
-        assert event["properties"]["command"] == "unknown_tool"
-        # Assert on the full serialized event, not just the two fields
-        # above -- proves the hostile string can't leak through any other
-        # property (e.g. error_type) either.
-        assert "alice" not in repr(event)
-        assert "private-project" not in repr(event)
-        assert hostile not in repr(event)
-
-    def test_hostile_tool_name_variants_are_all_replaced(self, sent: list[dict[str, Any]]) -> None:
-        """Uppercase, dots, and other non-snake-case punctuation are just as
-        invalid as a path -- the charset gate is exact, not a blocklist of
-        specific dangerous characters."""
-        for hostile in ("ouroboros_Evil.Tool", "ouroboros_evil tool", "ouroboros_EVIL_TOOL!"):
-            telemetry.capture_tool_call(hostile, ok=True)
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 3
-        for event in sent:
-            assert event["properties"]["tool"] == "ouroboros_unknown_tool"
-            assert event["properties"]["command"] == "unknown_tool"
-
-    def test_canonical_tool_name_passes_through_unchanged(self, sent: list[dict[str, Any]]) -> None:
-        """The backstop must not false-positive on real tool names -- a
-        canonical, registered name still gets its funnel mapping."""
+    def test_daily_insert_id_is_stable_for_same_dimension(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.capture_tool_call("ouroboros_interview", ok=True)
+        telemetry.capture_tool_call("ouroboros_interview", ok=False, error_type="TimeoutError")
         telemetry.flush(timeout=2.0)
 
-        assert len(sent) == 1
-        assert sent[0]["properties"]["tool"] == "ouroboros_interview"
-        assert sent[0]["properties"]["command"] == "interview"
-        assert sent[0]["properties"]["is_funnel"] is True
+        commands = [event for event in sent if event["event"] == "command_run"]
+        assert len(commands) == 3
+        assert commands[0]["properties"]["$insert_id"] == commands[1]["properties"]["$insert_id"]
+        assert commands[0]["properties"]["$insert_id"] != commands[2]["properties"]["$insert_id"]
 
-    def test_overlong_tool_name_is_replaced(self, sent: list[dict[str, Any]]) -> None:
-        """A name that is otherwise charset-valid but exceeds the length
-        bound (no real tool name is anywhere close to 64 chars) is still
-        not a real tool -- must not pass through as free text."""
-        overlong = "ouroboros_" + ("a" * 65)
-        telemetry.capture_tool_call(overlong, ok=True)
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        assert sent[0]["properties"]["tool"] == "ouroboros_unknown_tool"
-        assert sent[0]["properties"]["command"] == "unknown_tool"
-        assert overlong not in repr(sent[0])
-
-    def test_registered_extension_tool_name_is_replaced_not_forwarded(
+    def test_durable_job_outcome_keeps_only_terminal_fields(
         self, sent: list[dict[str, Any]]
     ) -> None:
-        """A name that is charset-valid AND shaped exactly like a real tool
-        -- but isn't one this project actually ships -- is a REGISTERED
-        extension/custom tool (register_tool() accepts arbitrary names), not
-        a lookup failure. It must still never carry an identifying name
-        through `tool`/`command`."""
-        hostile = "ouroboros_acme_private_project"
-        telemetry.capture_tool_call(hostile, ok=True)
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        event = sent[0]
-        assert event["properties"]["tool"] == "ouroboros_extension_tool"
-        assert event["properties"]["command"] == "extension_tool"
-        assert "acme" not in repr(event)
-        assert "private_project" not in repr(event)
-        assert hostile not in repr(event)
-
-    def test_unknown_and_extension_literals_stay_distinct(self, sent: list[dict[str, Any]]) -> None:
-        """ouroboros_unknown_tool (charset-invalid -- a lookup failure) and
-        ouroboros_extension_tool (charset-valid but not audited -- a real
-        registered non-Ouroboros tool) must not collapse into each other:
-        the literal ouroboros_unknown_tool itself is charset-valid and not
-        in the canonical set, so the extension-tool check must special-case
-        it rather than re-mapping it a second time."""
-        telemetry.capture_tool_call(telemetry._UNKNOWN_TOOL_NAME, ok=True)
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        assert sent[0]["properties"]["tool"] == "ouroboros_unknown_tool"
-        assert sent[0]["properties"]["command"] == "unknown_tool"
-
-    def test_canonical_tool_names_are_subsets_of_the_audited_set(self) -> None:
-        """The funnel/polling/submission maps must never name a tool that
-        isn't in the audited canonical set -- if they drift apart, a real
-        tool could silently start getting extension-tool-mangled, or a
-        typo'd/renamed entry in one of the smaller sets would go unnoticed."""
-        assert set(telemetry._TOOL_FUNNEL) <= telemetry._CANONICAL_TOOL_NAMES
-        assert telemetry._POLLING_TOOLS <= telemetry._CANONICAL_TOOL_NAMES
-        assert telemetry._ASYNC_SUBMISSION_TOOLS <= telemetry._CANONICAL_TOOL_NAMES
-
-    def test_polling_tools_sampled(self, sent: list[dict[str, Any]]) -> None:
-        # Sampling is a per-call random draw (see telemetry._poll_rng), not a
-        # deterministic 1-in-50 counter, so the batch needs a seed that is
-        # known (precomputed offline) to produce exactly one hit in 50 draws.
-        telemetry._poll_rng.seed(1)
-        for _ in range(telemetry._POLL_SAMPLE_RATE):
-            telemetry.capture_tool_call("ouroboros_job_status", ok=True)
-        telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        assert sent[0]["properties"]["sample_rate"] == telemetry._POLL_SAMPLE_RATE
-
-    @pytest.mark.parametrize(
-        "tool",
-        ("ouroboros_lineage_status", "ouroboros_project_status"),
-    )
-    def test_all_public_status_tools_are_sampled(
-        self,
-        sent: list[dict[str, Any]],
-        tool: str,
-    ) -> None:
-        telemetry._poll_rng.seed(1)  # see test_polling_tools_sampled
-        for _ in range(telemetry._POLL_SAMPLE_RATE):
-            telemetry.capture_tool_call(tool, ok=True)
-        telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        assert sent[0]["properties"]["sample_rate"] == telemetry._POLL_SAMPLE_RATE
-
-    @pytest.mark.parametrize(
-        ("job_type", "terminal_status", "meta", "verified", "reported_approval"),
-        (
-            ("evaluate", "completed", {"final_approved": True}, True, True),
-            ("evaluate", "failed", {"final_approved": True}, False, True),
-            ("evaluate", "cancelled", {"final_approved": True}, False, True),
-            ("evaluate", "interrupted", {"final_approved": True}, False, True),
-            ("execute_seed", "completed", {"final_approved": True}, False, True),
-            ("evaluate", "completed", {}, False, None),
-            ("evaluate", "completed", {"final_approved": False}, False, False),
-            ("evaluate", "completed", {"final_approved": "true"}, False, None),
-        ),
-    )
-    def test_durable_job_outcome_distinguishes_verified_success(
-        self,
-        sent: list[dict[str, Any]],
-        job_type: str,
-        terminal_status: str,
-        meta: dict[str, Any],
-        verified: bool,
-        reported_approval: bool | None,
-    ) -> None:
+        telemetry.set_context(runtime_backend="codex")
         telemetry.capture_job_outcome(
             "job_private_id",
-            job_type,
-            terminal_status=terminal_status,
-            result_meta=meta,
-        )
-        telemetry.flush(timeout=2.0)
-        event = sent[0]
-        assert event["event"] == "workflow_outcome"
-        assert event["properties"]["phase"] == "terminal"
-        assert event["properties"]["verified"] is verified
-        assert event["properties"].get("final_approved") is reported_approval
-        assert "job_private_id" not in json.dumps(event)
-
-    def test_extension_job_type_is_replaced_not_forwarded(self, sent: list[dict[str, Any]]) -> None:
-        """job_type is caller-controlled the same way an MCP tool name is:
-        JobManager.start_job() accepts an arbitrary string, so an unaudited
-        job type must never carry an identifying name through `command`."""
-        hostile = "acme_private_project"
-        telemetry.capture_job_outcome(
-            "job-1", hostile, terminal_status="completed", result_meta={"final_approved": True}
-        )
-        telemetry.flush(timeout=2.0)
-
-        assert len(sent) == 1
-        event = sent[0]
-        assert event["properties"]["command"] == "extension_job"
-        assert hostile not in repr(event)
-
-    def test_extension_job_type_never_earns_verified(self, sent: list[dict[str, Any]]) -> None:
-        """An extension job must not earn verified=true just because it
-        isn't literally "evaluate" -- `verified` compares the RAW job_type,
-        never the folded `command`, and folding must not change that."""
-        telemetry.capture_job_outcome(
-            "job-1",
-            "acme_private_project",
+            "evaluate",
             terminal_status="completed",
             result_meta={"final_approved": True},
         )
         telemetry.flush(timeout=2.0)
 
-        assert sent[0]["properties"]["verified"] is False
-        assert sent[0]["properties"]["command"] == "extension_job"
-
-    @pytest.mark.parametrize(
-        ("terminal_status", "meta", "reason", "action"),
-        (
-            ("cancelled", {}, "cancelled", "retry"),
-            ("interrupted", {"interrupted_from_shutdown": True}, "cancelled", "retry"),
-            ("failed", {"failed_from_progress_accounting_stall": True}, "timeout", "retry"),
-            ("failed", {"failure_reason_code": "config"}, "config", "setup"),
-            ("failed", {"failure_reason_code": "auth"}, "auth", "login"),
-            ("failed", {"failure_reason_code": "validation"}, "validation", "inspect_logs"),
-            ("failed", {}, "unknown", "inspect_logs"),
-        ),
-    )
-    def test_failed_outcome_emits_closed_reason_and_action(
-        self,
-        sent: list[dict[str, Any]],
-        terminal_status: str,
-        meta: dict[str, Any],
-        reason: str,
-        action: str,
-    ) -> None:
-        telemetry.capture_job_outcome(
-            "job-private-id",
-            "execute_seed",
-            terminal_status=terminal_status,
-            result_meta=meta,
-        )
-        telemetry.flush(timeout=2.0)
-
         props = sent[0]["properties"]
-        assert props["failure_reason_code"] == reason
-        assert props["recovery_action"] == action
-        assert "job-private-id" not in json.dumps(sent[0])
+        assert props["command"] == "evaluate"
+        assert props["terminal_status"] == "completed"
+        assert props["verified"] is True
+        assert props["runtime_backend"] == "codex"
+        assert "job_private_id" not in json.dumps(sent[0])
 
-    def test_failed_outcome_does_not_forward_raw_error_or_unknown_metadata(
-        self, sent: list[dict[str, Any]]
-    ) -> None:
+    def test_failed_outcome_keeps_closed_reason(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
             "job-private-id",
             "execute_seed",
             terminal_status="failed",
             result_meta={
-                "error": "secret prompt /Users/private/project",
-                "failure_reason_code": "not-a-real-code",
+                "failure_reason_code": "validation",
+                "error": "secret /Users/private/project",
             },
         )
         telemetry.flush(timeout=2.0)
 
         props = sent[0]["properties"]
-        assert props["failure_reason_code"] == "unknown"
-        assert props["recovery_action"] == "inspect_logs"
-        assert "secret prompt" not in json.dumps(sent[0])
-        assert "/Users/private/project" not in json.dumps(sent[0])
-
-    @pytest.mark.parametrize(
-        ("job_type", "expected_command"),
-        (
-            ("execute_seed", "run"),
-            ("evolve_step", "evolve"),
-            ("auto", "auto"),
-            ("evaluate", "evaluate"),
-            ("ralph", "ralph"),
-        ),
-    )
-    def test_shipped_job_types_keep_their_funnel_commands(
-        self,
-        sent: list[dict[str, Any]],
-        job_type: str,
-        expected_command: str,
-    ) -> None:
-        telemetry.capture_job_outcome("job-1", job_type, terminal_status="completed")
-        telemetry.flush(timeout=2.0)
-        assert sent[0]["properties"]["command"] == expected_command
-
-    @pytest.mark.parametrize("job_type", ("detached_probe", "detached_nested_probe"))
-    def test_internal_shipped_job_types_pass_through_unfolded(
-        self,
-        sent: list[dict[str, Any]],
-        job_type: str,
-    ) -> None:
-        """detached_worker.py's process-lifetime probes are shipped and
-        non-identifying -- audited into the canonical set so they aren't
-        mislabeled as a foreign extension_job."""
-        telemetry.capture_job_outcome("job-1", job_type, terminal_status="completed")
-        telemetry.flush(timeout=2.0)
-        assert sent[0]["properties"]["command"] == job_type
-
-    def test_job_funnel_keys_are_subset_of_canonical_job_types(self) -> None:
-        assert set(telemetry._JOB_FUNNEL) <= telemetry._CANONICAL_JOB_TYPES
-
-    def test_funnel_mapping_covers_all_stages(self) -> None:
-        commands = set(telemetry._TOOL_FUNNEL.values())
-        assert {"interview", "seed", "run", "evolve", "auto", "evaluate", "qa"} <= commands
+        assert props["command"] == "run"
+        assert props["terminal_status"] == "failed"
+        assert props["failure_reason_code"] == "validation"
+        assert "secret" not in json.dumps(sent[0])
 
     def test_never_raises_when_post_fails(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
-        def boom(batch: list[dict[str, Any]]) -> None:
-            raise OSError("network down")
-
-        monkeypatch.setattr(telemetry, "_post", boom)
+        monkeypatch.setattr(telemetry, "_post", lambda _batch: (_ for _ in ()).throw(OSError()))
         telemetry.capture_tool_call("ouroboros_interview", ok=True)
         telemetry.flush(timeout=2.0)
 
@@ -1058,183 +783,77 @@ def test_genuine_process_ci_still_stamps_ci_true(
 
 
 class TestExactPropertySets:
-    """Regression: the declared TELEMETRY.md table and the executable
-    per-variant allowlist must match key-for-key, not just "subset of a
-    generic base+context union". A prior round's union-based allowlist over-
-    granted every event every base+context key regardless of what that
-    event's row in TELEMETRY.md actually declared (e.g. mcp_serve_started
-    picked up python_version and all 4 backend fields; the two command_run
-    variants were indistinguishable).
-    """
-
-    def test_command_run_mcp_completion_exact_keys(
+    def test_command_run_mcp_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(
-            runtime_backend="claude",
-            execute_runtime_backend="claude",
-            interview_llm_backend="anthropic",
-            evaluate_llm_backend="anthropic",
-        )
-        telemetry.capture_tool_call(
-            "ouroboros_evaluate", ok=True, duration_ms=12.3, error_type="TimeoutError"
-        )
+        telemetry.set_context(runtime_backend="claude", execute_runtime_backend="ignored")
+        telemetry.capture_tool_call("ouroboros_evaluate", ok=False, error_type="TimeoutError")
         telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        props = sent[0]["properties"]
-        keys = set(props)
-
-        assert keys <= telemetry._COMMAND_RUN_MCP_KEYS
-        assert keys == {
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert set(props) == {
             "command",
-            "tool",
-            "source",
-            "is_funnel",
-            "phase",
-            "ok",
-            "duration_ms",
+            "service",
+            "status",
             "error_type",
+            "$insert_id",
             "runtime_backend",
-            "execute_runtime_backend",
-            "interview_llm_backend",
-            "evaluate_llm_backend",
-            "first_command_surface",
             "app_version",
             "os",
-            "python_version",
         }
-        assert "accepted" not in props
-        assert "sample_rate" not in props
 
-    def test_command_run_mcp_submission_exact_keys(
+    def test_command_run_cli_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
-        telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        props = sent[0]["properties"]
-        keys = set(props)
-
-        assert keys <= telemetry._COMMAND_RUN_MCP_KEYS
-        assert keys == {
-            "command",
-            "tool",
-            "source",
-            "is_funnel",
-            "phase",
-            "accepted",
-            "first_command_surface",
-            "app_version",
-            "os",
-            "python_version",
-        }
-        assert "ok" not in props  # submission receipts have accepted, never ok
-        assert props["accepted"] is True
-        assert props["phase"] == "submission"
-
-    def test_command_run_cli_exact_keys_even_with_context_set(
-        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
-    ) -> None:
-        _no_ambient_frontdoor_or_ci(monkeypatch)
-        # Global context carries backend keys regardless of source -- the cli
-        # variant must strip them even though they're genuinely set, proving
-        # this is per-variant enforcement and not just "nobody happened to
-        # set context in this test".
-        telemetry.set_context(
-            runtime_backend="claude",
-            execute_runtime_backend="claude",
-            interview_llm_backend="anthropic",
-            evaluate_llm_backend="anthropic",
-        )
+        telemetry.set_context(runtime_backend="claude")
         telemetry.capture_cli_command("run")
         telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        props = sent[0]["properties"]
-        keys = set(props)
 
-        assert keys <= telemetry._COMMAND_RUN_CLI_KEYS
-        assert keys == {"command", "source", "is_funnel", "app_version", "os", "python_version"}
-        for undeclared in (
-            "tool",
-            "phase",
-            "ok",
-            "accepted",
-            "duration_ms",
-            "error_type",
-            "sample_rate",
-            "runtime_backend",
-            "execute_runtime_backend",
-            "interview_llm_backend",
-            "evaluate_llm_backend",
-        ):
-            assert undeclared not in props, f"cli command_run leaked {undeclared!r}"
+        assert set(sent[0]["properties"]) == {
+            "command",
+            "service",
+            "status",
+            "$insert_id",
+            "app_version",
+            "os",
+        }
 
     def test_workflow_outcome_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _no_ambient_frontdoor_or_ci(monkeypatch)
-        telemetry.set_context(
-            runtime_backend="claude",
-            execute_runtime_backend="claude",
-            interview_llm_backend="anthropic",
-            evaluate_llm_backend="anthropic",
-        )
+        telemetry.set_context(runtime_backend="claude")
         telemetry.capture_job_outcome(
             "job-x", "evaluate", terminal_status="completed", result_meta={"final_approved": True}
         )
         telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        props = sent[0]["properties"]
-        keys = set(props)
 
-        assert keys <= telemetry._WORKFLOW_OUTCOME_KEYS
-        assert keys == {
+        assert set(sent[0]["properties"]) == {
             "command",
-            "phase",
             "terminal_status",
-            "ok",
             "verified",
-            "final_approved",
             "$insert_id",
             "runtime_backend",
-            "execute_runtime_backend",
-            "interview_llm_backend",
-            "evaluate_llm_backend",
             "app_version",
             "os",
-            "python_version",
         }
 
-    def test_mcp_serve_started_exact_keys_excludes_python_version_and_backends(
+    def test_service_active_exact_keys(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:
         _no_ambient_frontdoor_or_ci(monkeypatch)
-        # Set context anyway -- mcp_serve_started must drop it regardless.
-        telemetry.set_context(
-            runtime_backend="claude",
-            execute_runtime_backend="claude",
-            interview_llm_backend="anthropic",
-            evaluate_llm_backend="anthropic",
-        )
-        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 12})
+        telemetry.set_context(runtime_backend="codex")
+        telemetry.capture_service_active()
         telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        props = sent[0]["properties"]
-        keys = set(props)
 
-        assert keys <= telemetry._MCP_SERVE_STARTED_KEYS
-        assert keys == {
-            "transport",
-            "tool_count",
-            "first_command_surface",
+        assert set(sent[0]["properties"]) == {
+            "service",
+            "$insert_id",
+            "runtime_backend",
             "app_version",
             "os",
         }
-        assert "python_version" not in props
-        for backend_key in telemetry._CONTEXT_ALLOWLIST:
-            assert backend_key not in props
 
 
 class TestCliCapture:
@@ -1242,7 +861,7 @@ class TestCliCapture:
         telemetry.capture_cli_command("init")
         telemetry.flush(timeout=2.0)
         assert sent[0]["properties"]["command"] == "interview"
-        assert sent[0]["properties"]["source"] == "cli"
+        assert sent[0]["properties"]["service"] == "cli"
 
     def test_internal_commands_skipped(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_cli_command("dispatch")
@@ -1267,7 +886,7 @@ class TestCliCapture:
         assert len(sent) == 1
         event = sent[0]
         assert event["properties"]["command"] == "extension_command"
-        assert event["properties"]["is_funnel"] is False
+        assert event["properties"]["status"] == "invoked"
         assert hostile not in repr(event)
 
     def test_canonical_cli_command_passes_through_unchanged(
@@ -1281,62 +900,6 @@ class TestCliCapture:
         assert set(telemetry._CLI_FUNNEL) <= telemetry._CANONICAL_CLI_COMMANDS
         is_funnel_names = {"auto", "init", "interview", "seed", "run", "qa", "pm"}
         assert is_funnel_names <= telemetry._CANONICAL_CLI_COMMANDS
-
-
-class TestFrontdoor:
-    def test_claude_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
-        monkeypatch.delenv("CODEX_SANDBOX_NETWORK_DISABLED", raising=False)
-        monkeypatch.setenv("CLAUDECODE", "1")
-        assert telemetry._detect_frontdoor() == "claude"
-
-    def test_codex_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CLAUDECODE", raising=False)
-        monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
-        assert telemetry._detect_frontdoor() == "codex"
-
-    def test_no_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("CLAUDECODE", raising=False)
-        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
-        monkeypatch.delenv("CODEX_SANDBOX_NETWORK_DISABLED", raising=False)
-        assert telemetry._detect_frontdoor() is None
-
-
-class TestFirstCommandSurface:
-    @pytest.mark.parametrize(
-        "surface", ("setup_complete", "readme_quickstart", "getting_started", "unknown")
-    )
-    def test_explicit_fixed_enum_wins(self, monkeypatch: pytest.MonkeyPatch, surface: str) -> None:
-        monkeypatch.setenv("OUROBOROS_FIRST_COMMAND_SURFACE", surface)
-        (Path.home() / ".ouroboros").mkdir()
-        (Path.home() / ".ouroboros" / "first_command_surface").write_text(
-            "readme_quickstart\n", encoding="utf-8"
-        )
-        (Path.home() / ".ouroboros" / "config.yaml").write_text("{}\n", encoding="utf-8")
-
-        assert telemetry._detect_first_command_surface() == surface
-
-    def test_install_hint_survives_setup(self, tmp_path: Path) -> None:
-        state_dir = tmp_path / ".ouroboros"
-        state_dir.mkdir()
-        (state_dir / "first_command_surface").write_text("readme_quickstart\n", encoding="utf-8")
-        (state_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
-
-        assert telemetry._detect_first_command_surface() == "readme_quickstart"
-
-    def test_config_is_fallback_when_hint_is_absent(self, tmp_path: Path) -> None:
-        state_dir = tmp_path / ".ouroboros"
-        state_dir.mkdir()
-        (state_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
-
-        assert telemetry._detect_first_command_surface() == "setup_complete"
-
-    def test_invalid_hint_without_config_is_unknown(self, tmp_path: Path) -> None:
-        state_dir = tmp_path / ".ouroboros"
-        state_dir.mkdir()
-        (state_dir / "first_command_surface").write_text("private-url\n", encoding="utf-8")
-
-        assert telemetry._detect_first_command_surface() == "unknown"
 
 
 class TestNotice:
@@ -1428,7 +991,7 @@ class TestNotice:
         assert repaired["notice_shown"] is True
         assert repaired["distinct_id"] == valid_id
 
-        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.capture("service_active", {"service": "mcp"})
         telemetry.flush(timeout=2.0)
         assert len(sent) == 1
         assert sent[0]["distinct_id"] == valid_id
@@ -1821,94 +1384,3 @@ class TestNoticeRace:
         assert len(printed) == 1, (
             f"expected exactly one notice print, got {len(printed)}: {stderrs}"
         )
-
-
-class TestUnbiasedPollSampling:
-    """Regression: polling-tool sampling must stay 1/50 per call, not per
-    process (telemetry._poll_rng, replacing a per-process call counter).
-
-    A per-process counter always samples call #1, so a short-lived MCP
-    process that polls once or twice before exiting would be captured at
-    close to 1:1 while still reporting `sample_rate=50` -- an up-to-50x
-    over-count concentrated in exactly the processes least representative of
-    steady-state usage. An independent per-call random draw keeps the
-    probability 1/50 regardless of how long a given process lives.
-    """
-
-    def test_first_call_is_not_structurally_captured(self, sent: list[dict[str, Any]]) -> None:
-        # Precomputed offline: random.Random(1).random() == 0.1344 >= 1/50,
-        # so the very first polling draw with this seed is a miss. A
-        # per-process counter would have captured it regardless (call #1
-        # always sampled) -- this is exactly the bias being fixed.
-        telemetry._poll_rng.seed(1)
-        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
-        telemetry.flush(timeout=2.0)
-        assert sent == []
-
-    def test_seeded_draw_below_threshold_is_captured(self, sent: list[dict[str, Any]]) -> None:
-        # Precomputed offline: random.Random(31).random() == 0.0123 < 1/50.
-        telemetry._poll_rng.seed(31)
-        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
-        telemetry.flush(timeout=2.0)
-        assert len(sent) == 1
-        assert sent[0]["properties"]["sample_rate"] == telemetry._POLL_SAMPLE_RATE
-
-    def test_multi_process_sampling_matches_precomputed_expectation(self, tmp_path: Path) -> None:
-        """Fresh processes must NOT all capture their first polling call.
-
-        Ten fresh processes, each seeding telemetry._poll_rng with a
-        different precomputed seed and making exactly ONE polling capture
-        (their "call #1"). The old per-process-counter bug would have
-        captured every single one of these (5/5 CAPTURED). The expected
-        outcome per seed is precomputed offline from the same
-        random.Random(seed).random() draw the production code makes, so
-        this is a zero-flake proof that fresh-process sampling is unbiased.
-        """
-        # Precomputed offline (random.Random(seed).random() vs. 1/50):
-        # captured: 31, 139, 165, 206, 281 -- skipped: 1, 2, 3, 4, 5
-        seeds = [1, 2, 3, 4, 5, 31, 139, 165, 206, 281]
-        threshold = 1.0 / telemetry._POLL_SAMPLE_RATE
-        expected = [
-            "CAPTURED" if random.Random(seed).random() < threshold else "SKIPPED" for seed in seeds
-        ]
-        assert "CAPTURED" in expected and "SKIPPED" in expected, (
-            "seed selection must cover both outcomes or this test can't "
-            "distinguish the fix from the old always-captures-call-1 bug"
-        )
-
-        script_path = tmp_path / "sampling_worker.py"
-        script_path.write_text(
-            "import sys\n"
-            "from ouroboros import telemetry\n"
-            "\n"
-            "telemetry._poll_rng.seed(int(sys.argv[1]))\n"
-            "captured = []\n"
-            "telemetry._post = lambda batch: captured.extend(batch)\n"
-            "telemetry.capture_tool_call('ouroboros_job_status', ok=True)\n"
-            "telemetry.flush(timeout=2.0)\n"
-            "print('CAPTURED' if captured else 'SKIPPED')\n",
-            encoding="utf-8",
-        )
-
-        repo_root = Path(__file__).resolve().parents[2]
-        observed = []
-        for seed in seeds:
-            home = tmp_path / f"home_{seed}"
-            home.mkdir()
-            env = os.environ.copy()
-            env["HOME"] = str(home)
-            env["PYTHONPATH"] = str(repo_root / "src")
-            env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
-            for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
-                env.pop(key, None)
-            completed = subprocess.run(
-                [sys.executable, str(script_path), str(seed)],
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-            observed.append(completed.stdout.strip())
-
-        assert observed == expected, f"seeds={seeds} expected={expected} observed={observed}"

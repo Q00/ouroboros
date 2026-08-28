@@ -3,6 +3,9 @@
 > Completed: 2026-08-13
 > Branch: `main` worktree
 
+> Historical note: the v2 lean telemetry contract removed the PostHog
+> onboarding-surface dimension and its installer hint.
+
 ## Summary
 
 Added privacy-safe onboarding-surface attribution and clarified the first-run
