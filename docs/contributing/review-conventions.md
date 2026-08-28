@@ -42,12 +42,39 @@ Treat these as concepts, not an exhaustive heading template; the authoritative
 contract may add or rename sections without changing how contributors should
 interpret the review.
 
+## Boundary before direction
+
+Structural review starts from the contributor-declared PR Boundary Contract,
+not from every architecture the reviewer can imagine. The contract states the
+user problem, promised behavior, inputs and execution conditions, owned
+surface, non-goals, and verification.
+
+For each finding, the bot asks:
+
+1. Does it reproduce under the promised inputs and execution conditions?
+2. Does it break the promised behavior?
+3. Would fixing it require a new subsystem or new ownership?
+4. Can the user problem be solved without the subsystem introduced by the PR?
+5. Would separating that extra scope leave immediate user-data or security risk?
+
+Only questions 1 and 2 together make a blocker. Questions 3 or 4 without the
+immediate risk in question 5 become a named-owner follow-up; they do not expand
+the current PR. Questions 3 and 5 together stop the PR for a maintainer
+RFC/scope decision. The review bot does not design the expanded architecture
+inside a blocker.
+
+This prevents a small user problem from turning into a sequence of
+reviewer-required lifecycle, rollback, concurrency, filesystem-authority, and
+ownership changes. One root cause gets one consolidated finding.
+
+
 Two consequences worth internalizing:
 
-- **Your PR is graded against the issue, not against your PR description.** A
-  vague issue produces a vague grade; a requirement you decided was out of
-  scope reads as *Partially met* unless you say in the PR why it is deferred.
-  This is why [issue quality](./issue-quality-policy.md) is enforced.
+- **Your PR is graded against the linked issue plus the PR Boundary Contract.**
+  A vague issue or missing boundary is a request for clarification, not license
+  to invent a broader solution. Explicitly record deferred requirements and
+  non-goals so they can be routed to an owner-assigned follow-up.
+
 - **The bot reproduces things.** Findings routinely cite a probe it ran —
   *"a focused probe classified such a companion as `decide_later` and made it
   skip-eligible"*, *"A focused runtime probe with `process.wait()` returning
@@ -99,8 +126,11 @@ signs that the next round will not be the last one:
 - The blocker count is **not trending down** after three rounds.
 - You are arguing about **which inputs are legitimate** rather than about what
   the code does.
-- You find yourself thinking *"the reviewer keeps finding edge cases"*. Edge
-  cases that keep existing are not edge cases. They are the shape.
+- You find yourself thinking *"the reviewer keeps finding edge cases"*. First
+  check whether they reproduce inside the declared boundary and break the
+  promised contract. Outside-boundary cases are follow-ups unless separation
+  leaves immediate user-data or security risk.
+
 
 ### What asking it actually looks like
 
@@ -152,16 +182,20 @@ In all three, specific line findings exposed an authority, parsing, or
 compatibility boundary. The durable repair stated that boundary in code and
 tests instead of patching each observed example.
 
-### Not an escape hatch
+### Not an escape hatch or a scope-expansion license
 
-This is not permission to dismiss a finding you do not want to fix. "The
-structure is wrong" is a claim that has to survive step 3 above — a different
-shape that still solves the original problem. Without that, it is just a
-disagreement, and the reviewer is probably right.
+The boundary contract cannot dismiss a finding that reproduces under the
+promised conditions and breaks the promised behavior. It also cannot be used
+by the reviewer to force a new subsystem into the current PR. A different
+shape must still solve the original user problem; new ownership requires a
+named follow-up or a maintainer RFC decision.
 
-## The recurring blockers
 
-Ordered by how often they appear in review bodies.
+## Recurring in-boundary blockers
+
+The examples below are blockers only when the affected input or behavior is
+inside the declared PR contract. Otherwise, route them to the responsible
+owner as follow-up work.
 
 ### 1. Validate untrusted input — never coerce it
 
@@ -177,8 +211,8 @@ accepted values.
 
 ### 2. Honor the public schema and never report silent success
 
-A code path that accepts a request, does nothing, and reports success is
-always a blocker:
+A code path that accepts a promised request, does nothing, and reports success
+is a blocker because it violates the declared public contract:
 
 > "The public tool schema accepts `answers`, but plugin mode only examines the
 > singular `answer` variable. A request such as `{"session_id": id, "answers":
