@@ -573,6 +573,18 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         """
         rollout_path = Path.home() / ".zcode" / "cli" / "rollout" / f"model-io-{session_id}.jsonl"
         try:
+            # O_NOFOLLOW protects only the leaf.  A symlinked directory such
+            # as ~/.zcode would still redirect the trusted rollout lookup, so
+            # require every component below HOME to be a real directory.
+            home = Path.home()
+            parent = rollout_path.parent
+            while parent != home:
+                parent_stat = parent.lstat()
+                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+                    return None
+                if home not in parent.parents:
+                    return None
+                parent = parent.parent
             path_stat = rollout_path.lstat()
             flags = (
                 os.O_RDONLY
@@ -722,6 +734,32 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         messages = request.get("messages") if isinstance(request, dict) else None
         if not isinstance(messages, list):
             return []
+
+        # Validate evidence-bearing shapes across the complete cumulative
+        # snapshot before selecting the current-turn suffix.  Otherwise a
+        # malformed older turn can be hidden by the user-boundary slice while
+        # later receipts are still granted evidential force.
+        for message in messages:
+            if not isinstance(message, dict):
+                return []
+            tool_calls = message.get("toolCalls")
+            if "toolCalls" in message and not isinstance(tool_calls, list):
+                return []
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        return []
+                    call_id = call.get("id")
+                    tool_name = call.get("name")
+                    tool_input = call.get("input")
+                    if not (
+                        isinstance(call_id, str)
+                        and call_id.strip()
+                        and isinstance(tool_name, str)
+                        and tool_name.strip()
+                        and isinstance(tool_input, dict)
+                    ):
+                        return []
 
         # ``messagesKind=full`` snapshots contain the whole resumed session,
         # including tool receipts from older turns.  A terminal summary is
