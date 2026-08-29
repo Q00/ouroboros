@@ -39,28 +39,24 @@ Thank you for your interest in contributing to Ouroboros! This guide covers ever
 
 ```bash
 git clone https://github.com/Q00/ouroboros && cd ouroboros
-uv sync
-uv run ouroboros --version   # verify
-uv run pytest tests/unit/ -q # run tests
 ```
 
-> **`uv sync` is not the whole loop.** The checked-in `.mcp.json` points at the
-> **published PyPI package**, so a clone that you edit is not the code your
-> client runs. Before your first change, read
-> [The Development Loop](./docs/contributing/developing.md) — it covers pointing
-> the tooling at your working tree, where config and state live, and the fastest
-> way to verify each kind of change.
+Prepare a supported test environment with
+[Testing Guide](./docs/contributing/testing-guide.md#prepare-an-environment).
+Do not use `--all-extras`: the Claude SDK/MCP 1 profile and the MCP 2 server
+profile are intentionally incompatible.
+
+> **Environment setup is not the whole loop.** The checked-in `.mcp.json`
+> points at the **published PyPI package**, so a clone that you edit is not the
+> code your client runs. Before your first change, read
+> [The Development Loop](./docs/contributing/developing.md).
 
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
-This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for core local development. Use Python 3.13 when the change needs LiteLLM, and Python 3.12 when reproducing the pull-request test job. Core and non-LiteLLM contributor environments support Python 3.12-3.14; LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13.
-
-```bash
-uv sync --python 3.13                  # base dependencies on the preferred current interpreter
-uv sync --python 3.13 --all-extras     # include optional backends/extras, including LiteLLM
-uv run --python 3.13 ouroboros --version
-uv run --python 3.13 pytest tests/unit/ -q
-```
+This repository's `.python-version` defaults source checkouts to **stable Python
+3.14** for core local development. Python 3.12 is the pull-request parity
+profile, and LiteLLM-bearing environments support Python 3.12-3.13. The Testing
+Guide owns the executable profile selector.
 
 ---
 
@@ -382,7 +378,7 @@ uv run ruff check src/ tests/
 - **Minimum supported**: Python 3.12
 - **Test matrix**: Python 3.12, 3.13, and 3.14 for core/non-LiteLLM profiles; Python 3.12 and 3.13 for LiteLLM-bearing profiles
 - **Source-checkout default**: `.python-version` selects stable Python 3.14 for local development
-- Use `uv sync --python 3.13 --all-extras` before `uv run --python 3.13 ...` for current LiteLLM-bearing contributor environments. Python 3.12 remains supported for lower-bound validation.
+- Use the profile selector in the Testing Guide; do not combine dependency groups through `--all-extras`.
 - Use modern Python features (type unions `|`, match statements, etc.)
 
 ---

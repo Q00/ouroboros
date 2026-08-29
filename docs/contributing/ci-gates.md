@@ -74,18 +74,11 @@ set.
 Run the documented format check before pushing. A formatting-only failure costs
 a full CI round trip.
 
-> **Local test isolation.** `tests/conftest.py` now redirects `$HOME` before
-> collection and gives each test and xdist worker isolated state. Unit MCP tests
-> may start bounded loopback servers or subprocesses, but they do not require the
-> developer's active server or real `~/.ouroboros` state. Reproduce CI with:
->
-> ```bash
-> uv run --python 3.12 --no-sync pytest tests/ \
->   -n 4 --dist worksteal --durations=25 -m "not performance" -q
-> ```
->
-> Tests that intentionally inspect a real runtime or external service must pass
-> its location explicitly. See [Testing Guide](./testing-guide.md).
+> **Local test isolation.** `tests/conftest.py` redirects `$HOME`, clears an
+> inherited `CODEX_HOME`, and gives each test and xdist worker isolated state.
+> Unit MCP tests may start bounded loopback servers or subprocesses, but they do
+> not require the developer's active server or real user state. The Testing
+> Guide owns the executable parity command and environment selector.
 
 ### Issue link present (`pr-hygiene.yml`)
 
