@@ -20,7 +20,6 @@ import typer
 from typer.testing import CliRunner
 import yaml
 
-from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _codex_uses_profile_v2,  # real fn bound at import; bypasses the autouse probe guard
@@ -10227,12 +10226,12 @@ class TestGjcSetup:
 
         assert detected["gjc"] == "/opt/bin/gjc"
 
-    def test_setup_gjc_writes_config_artifact_and_bridge(
+    def test_setup_gjc_installs_exact_bridge_and_is_idempotent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
+        config_path = config_dir / "config.yaml"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
         agent_dir = tmp_path / "gjc-agent"
         monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
 
@@ -10240,32 +10239,74 @@ class TestGjcSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
         ):
-            setup_cmd._setup_gjc("/opt/bin/gjc")
-            setup_cmd._setup_gjc("/opt/bin/gjc")
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
+            bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+            first = bridge_path.read_bytes()
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
 
-        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert bridge_path.read_bytes() == first
+        assert not (agent_dir / "rules" / "ouroboros-skill-capability-guide.md").exists()
+        assert first == setup_cmd._gjc_bridge_source_text().encode("utf-8")
+        assert (config_dir / "credentials.yaml").exists()
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "gjc"
         assert config["orchestrator"]["gjc_cli_path"] == "/opt/bin/gjc"
         assert config["llm"]["backend"] == "gjc"
-
-        guide_path = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
-        assert guide_path.read_text(encoding="utf-8") == render_backend_skill_capability_guide(
-            "gjc"
-        )
-
-        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-        bridge = bridge_path.read_text(encoding="utf-8")
-        assert not (
-            agent_dir / "extensions" / "ouroboros-ooo-bridge" / "ouroboros-ooo-bridge.ts"
-        ).exists()
+        bridge = first.decode("utf-8")
         assert '"dispatch", "--runtime", "gjc"' in bridge
         assert '"--cwd", cwd' in bridge
         assert "process.env.OUROBOROS_CLI" in bridge
         assert "DEFAULT_COMMAND" in bridge
-        assert '"-m", "ouroboros"' in bridge
-        assert "{ cwd, env, timeout: TIMEOUT_MS }" in bridge
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge
         assert "_OUROBOROS_GJC_BRIDGE_DEPTH" in bridge
+
+    def test_setup_gjc_cli_exits_nonzero_for_bridge_collision(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge_path.parent.mkdir(parents=True)
+        custom = "// operator bridge\n"
+        bridge_path.write_text(custom, encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"gjc": "/opt/bin/gjc"},
+            ),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+        ):
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "gjc", "--non-interactive"])
+
+        assert result.exit_code == 1
+        assert bridge_path.read_text(encoding="utf-8") == custom
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_gjc_does_not_commit_when_bridge_write_fails(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text", side_effect=OSError("read-only")
+            ),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(tmp_path / "gjc-agent")}),
+        ):
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is False
+
+        assert (
+            yaml.safe_load(config_path.read_text(encoding="utf-8"))["orchestrator"][
+                "runtime_backend"
+            ]
+            == "claude"
+        )
 
     def test_register_kiro_mcp_server_creates_fresh_entry(self, tmp_path: Path) -> None:
         """Fresh setup writes a valid entry with the Kiro env vars baked in."""
