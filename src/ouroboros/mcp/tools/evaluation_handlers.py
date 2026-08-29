@@ -1556,10 +1556,14 @@ class LateralThinkHandler(BridgeAwareMixin):
             name="ouroboros_lateral_think",
             description=(
                 "Generate alternative thinking approaches using lateral thinking personas. "
-                "Use this tool when stuck on a problem to get fresh perspectives from "
+                "Use when: stuck on a problem, going in circles, the same fix has "
+                "failed twice, or progress has stalled — call proactively on these "
+                "signals; do not wait for the user to ask for 'lateral' or 'unstuck'. "
+                "Result: fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "
                 "architect (restructures approach), or contrarian (challenges assumptions). "
+                "Do not use when: work is progressing normally with no stagnation signal. "
                 "Set persona='all' (or pass personas=['hacker','architect',...]) to "
                 "fan out to MULTIPLE personas in parallel — each runs in its own "
                 "Task pane with an independent LLM context (no cross-contamination)."

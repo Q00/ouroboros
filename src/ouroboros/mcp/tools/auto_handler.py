@@ -694,8 +694,18 @@ class StartAutoHandler:
         return MCPToolDefinition(
             name="ouroboros_start_auto",
             description=(
-                "Start ooo auto in the background and return auto_session_id + "
-                "job_id immediately. Resume with the returned auto_session_id; "
+                "Default entry point for substantial end-to-end work: "
+                "multi-step features, migrations, and high-risk changes that "
+                "need verified execution. "
+                "Use when: the user wants a task taken from clarification "
+                "through verified execution — even if they never say 'ooo'. "
+                "Result: bounded interview → A-grade Seed → execution handoff, "
+                "started in the background and returning auto_session_id + "
+                "job_id immediately. "
+                "Do not use when: the request is a simple question or small "
+                "unambiguous edit, or a validated Seed already exists "
+                "(use ouroboros_start_execute_seed). "
+                "Resume with the returned auto_session_id; "
                 "poll with ouroboros_job_status / ouroboros_job_wait and read "
                 "final state via ouroboros_job_result."
             ),
