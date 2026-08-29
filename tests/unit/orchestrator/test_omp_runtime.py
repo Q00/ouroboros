@@ -562,16 +562,20 @@ def test_runtime_factory_passes_omp_stream_timeout_overrides() -> None:
 
 def test_runtime_factory_falls_back_to_path_when_configured_omp_path_is_stale() -> None:
     """PR #2299 round 5: a stale configured omp path must not shadow a valid PATH install."""
+    import os
+
+    from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
     def fake_which(name: str) -> str | None:
         return "/usr/bin/omp" if name == "omp" else None
 
+    config = OuroborosConfig(
+        orchestrator=OrchestratorConfig(omp_cli_path="/missing/configured/omp")
+    )
     with (
-        patch(
-            "ouroboros.config._omp_cli.get_omp_cli_path",
-            return_value="/missing/configured/omp",
-        ),
+        patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": ""}),
+        patch("ouroboros.config._omp_cli.load_config", return_value=config),
         patch("shutil.which", side_effect=fake_which),
     ):
         runtime = create_agent_runtime(backend="omp", cwd="/tmp/project")

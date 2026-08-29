@@ -311,7 +311,9 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     "opencode": "get_opencode_cli_path",
     "goose": "get_goose_cli_path",
     "pi": "get_pi_cli_path",
-    "omp": "get_omp_cli_path",
+    # omp resolves through the canonical validated resolver (independently
+    # checked env > config > PATH), mirroring runtime construction exactly.
+    "omp": "resolve_omp_cli_path",
     "gjc": "get_gjc_cli_path",
     "antigravity": "get_antigravity_cli_path",
     "grok": "get_grok_cli_path",

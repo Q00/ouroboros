@@ -371,11 +371,15 @@ async def test_zero_exit_omp_error_event_returns_provider_error() -> None:
 async def test_omp_completion_uses_configured_cli_path() -> None:
     adapter = OmpLLMAdapter(cli_path="/tmp/omp", cwd="/tmp/project")
 
+    from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
+
     def fake_which(name: str) -> str | None:
         return "/opt/omp/bin/omp" if name == "/opt/omp/bin/omp" else None
 
+    config = OuroborosConfig(orchestrator=OrchestratorConfig(omp_cli_path="/opt/omp/bin/omp"))
     with (
-        patch("ouroboros.config._omp_cli.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
+        patch.dict("os.environ", {"OUROBOROS_OMP_CLI_PATH": ""}),
+        patch("ouroboros.config._omp_cli.load_config", return_value=config),
         patch("shutil.which", side_effect=fake_which),
     ):
         assert adapter._get_configured_cli_path() == "/opt/omp/bin/omp"
@@ -386,14 +390,17 @@ async def test_omp_configured_cli_path_falls_back_to_path_when_stale() -> None:
     """PR #2299 round 5: direct adapter construction skips a stale configured path."""
     adapter = OmpLLMAdapter(cli_path="/tmp/omp", cwd="/tmp/project")
 
+    from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
+
     def fake_which(name: str) -> str | None:
         return "/usr/bin/omp" if name == "omp" else None
 
+    config = OuroborosConfig(
+        orchestrator=OrchestratorConfig(omp_cli_path="/missing/configured/omp")
+    )
     with (
-        patch(
-            "ouroboros.config._omp_cli.get_omp_cli_path",
-            return_value="/missing/configured/omp",
-        ),
+        patch.dict("os.environ", {"OUROBOROS_OMP_CLI_PATH": ""}),
+        patch("ouroboros.config._omp_cli.load_config", return_value=config),
         patch("shutil.which", side_effect=fake_which),
     ):
         assert adapter._get_configured_cli_path() == "/usr/bin/omp"

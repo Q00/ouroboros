@@ -43,28 +43,48 @@ def get_omp_cli_path() -> str | None:
     return None
 
 
+def _runnable_omp_candidate(candidate: str | None) -> str | None:
+    """Return the expanded candidate when it resolves to a runnable executable."""
+    if not candidate:
+        return None
+    expanded = str(Path(candidate).expanduser())
+    return expanded if shutil.which(expanded) else None
+
+
 def resolve_omp_cli_path() -> str | None:
     """Resolve a runnable OMP CLI path (canonical validated precedence).
 
     This is the single owner of OMP executable selection; every OMP
     construction path (setup detection, ``config backend omp``, the
-    orchestrator runtime factory, and the provider factory/adapter) resolves
-    through it (PR #2299 review rounds 4-5).
+    orchestrator runtime factory, the provider factory/adapter, and catalog
+    discovery) resolves through it (PR #2299 review rounds 4-6).
 
-    Priority:
+    Each source is validated independently in declared order, so a stale
+    higher-priority candidate falls through to the next source instead of
+    masking it:
+
         1. OUROBOROS_OMP_CLI_PATH environment variable, when runnable
         2. config.yaml orchestrator.omp_cli_path, when runnable
         3. ``omp`` on PATH
 
-    A configured candidate that does not resolve is skipped in favor of the
-    next source, so a stale configured path never shadows a valid PATH
-    installation. Returns None when no source resolves.
+    The environment and configuration candidates are deliberately read and
+    validated separately — never collapsed into one value before validation —
+    so a stale environment override cannot hide a runnable configured CLI.
+    Returns None when no source resolves.
     """
+    env_candidate = _runnable_omp_candidate(os.environ.get("OUROBOROS_OMP_CLI_PATH", "").strip())
+    if env_candidate:
+        return env_candidate
+
     try:
-        candidate = get_omp_cli_path()
+        configured = load_config().orchestrator.omp_cli_path
     except Exception:
-        candidate = None
-    return (candidate if candidate and shutil.which(candidate) else None) or shutil.which("omp")
+        configured = None
+    config_candidate = _runnable_omp_candidate(configured)
+    if config_candidate:
+        return config_candidate
+
+    return shutil.which("omp")
 
 
 __all__ = ["get_omp_cli_path", "resolve_omp_cli_path"]

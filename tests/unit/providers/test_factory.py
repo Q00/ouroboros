@@ -172,15 +172,19 @@ class TestCreateLLMAdapter:
 
     def test_creates_omp_adapter_with_stale_config_fallback(self) -> None:
         """PR #2299 round 5: stale configured omp path falls back to a valid PATH install."""
+        import os
+
+        from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
 
         def fake_which(name: str) -> str | None:
             return "/usr/bin/omp" if name == "omp" else None
 
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(omp_cli_path="/missing/configured/omp")
+        )
         with (
-            patch(
-                "ouroboros.config._omp_cli.get_omp_cli_path",
-                return_value="/missing/configured/omp",
-            ),
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": ""}),
+            patch("ouroboros.config._omp_cli.load_config", return_value=config),
             patch("shutil.which", side_effect=fake_which),
         ):
             adapter = create_llm_adapter(backend="omp")

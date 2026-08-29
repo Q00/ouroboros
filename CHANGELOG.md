@@ -50,10 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`, timeout env
   `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`), `ouroboros config backend omp` switches to it, and
   `scripts/install.sh` adds OMP to its runtime menu; every OMP construction path (setup
-  detection, `config backend omp`, orchestrator runtime factory, provider factory/adapter)
-  resolves the executable through one validated
+  detection, `config backend omp`, orchestrator runtime factory, provider factory/adapter,
+  and model-catalog discovery) resolves the executable through one validated
   `OUROBOROS_OMP_CLI_PATH` > `orchestrator.omp_cli_path` > `PATH` resolver owned by
-  `config/_omp_cli.py`, so a stale configured path falls back to a valid PATH installation;
+  `config/_omp_cli.py`, which validates each source independently so a stale
+  higher-priority candidate falls through to the next source;
   bridge publication and the config commit run as one setup transaction (config serialized
   and written atomically, both effects rolled back on failure), and spawned-CLI discovery
   env `PI_CODING_AGENT_DIR` is denied from untrusted repo `.env` files
