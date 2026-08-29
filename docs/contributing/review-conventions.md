@@ -44,10 +44,13 @@ interpret the review.
 
 Two consequences worth internalizing:
 
-- **Your PR is graded against the issue, not against your PR description.** A
-  vague issue produces a vague grade; a requirement you decided was out of
-  scope reads as *Partially met* unless you say in the PR why it is deferred.
-  This is why [issue quality](./issue-quality-policy.md) is enforced.
+- **Your PR is graded against its declared boundary and every baseline contract
+  that boundary cannot waive.** The issue supplies the requested outcome; the
+  PR description declares supported conditions and non-goals; public contracts,
+  approved RFCs and maintainer decisions remain binding. This is why
+  [issue quality](./issue-quality-policy.md) and the
+  [Review Boundary Contract](../../CONTRIBUTING.md#review-boundary-contract)
+  both matter.
 - **The bot reproduces things.** Findings routinely cite a probe it ran —
   *"a focused probe classified such a companion as `decide_later` and made it
   skip-eligible"*, *"A focused runtime probe with `process.wait()` returning
@@ -159,9 +162,11 @@ structure is wrong" is a claim that has to survive step 3 above — a different
 shape that still solves the original problem. Without that, it is just a
 disagreement, and the reviewer is probably right.
 
-## The recurring blockers
+## Recurring defect classes
 
-Ordered by how often they appear in review bodies.
+These are common evidence sources, not unconditional scope expansion. Apply the
+Review Boundary Contract before deciding whether a reproduced defect blocks the
+current PR or becomes an owned follow-up.
 
 ### 1. Validate untrusted input — never coerce it
 
@@ -246,6 +251,13 @@ Before your first push, walk your own diff and answer:
 Writing that reasoning into the PR description is not ceremony. The bot reads
 it, and a stated, justified scope boundary is treated differently from a
 requirement that is simply unmet.
+
+## Verification honesty
+
+State what was run, what could not run, and what residual risk remains. A green
+focused suite is not a full-suite claim, and an unavailable runtime is not a
+successful smoke test. Review can classify an explicit gap; it cannot recover a
+check that the PR silently implies was completed.
 
 ## Mechanics
 

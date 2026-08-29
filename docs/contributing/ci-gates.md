@@ -75,17 +75,18 @@ uv run pytest
 Run `ruff format` **before** pushing, not after CI complains: the format check
 is a required gate and a formatting-only failure costs a full CI round trip.
 
-> **Local test caveat (shared worktrees).** A full `tests/unit/mcp` run has
-> leaked to the real server and the real `~/.ouroboros` state in the past. When
-> iterating locally inside a shared worktree, scope the run:
+> **Local test isolation.** `tests/conftest.py` now redirects `$HOME` before
+> collection and gives each test and xdist worker isolated state. Unit MCP tests
+> may start bounded loopback servers or subprocesses, but they do not require the
+> developer's active server or real `~/.ouroboros` state. Reproduce CI with:
 >
 > ```bash
-> uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp \
->   --ignore=tests/e2e -n auto --dist worksteal
+> uv run --python 3.12 --no-sync pytest tests/ \
+>   -n 4 --dist worksteal --durations=25 -m "not performance" -q
 > ```
 >
-> CI runs the full suite in a clean container — that is where `tests/unit/mcp`
-> belongs. See [Testing Guide](./testing-guide.md).
+> Tests that intentionally inspect a real runtime or external service must pass
+> its location explicitly. See [Testing Guide](./testing-guide.md).
 
 ### Issue link present (`pr-hygiene.yml`)
 

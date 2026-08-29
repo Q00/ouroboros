@@ -53,7 +53,7 @@ uv run pytest tests/unit/ -q # run tests
 
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
-This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Core and non-LiteLLM contributor environments support Python 3.12-3.14. LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
+This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for core local development. Use Python 3.13 when the change needs LiteLLM, and Python 3.12 when reproducing the pull-request test job. Core and non-LiteLLM contributor environments support Python 3.12-3.14; LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13.
 
 ```bash
 uv sync --python 3.13                  # base dependencies on the preferred current interpreter
@@ -88,59 +88,16 @@ git checkout -b docs/your-changes   # for documentation
 - Use the `Result[T, E]` type instead of exceptions for expected failures
 - Write tests alongside your code
 
-### 4. Test
+### 4. Test and Static Checks
 
-```bash
-# Full unit test suite
-uv run pytest tests/unit/ -v
+Run the narrow owning test while iterating, then the non-mutating PR-parity
+commands in [Testing Guide](./docs/contributing/testing-guide.md). Conditional
+checks, including the `ooo auto` domain boundary and its documented escape
+hatch, live in [CI Gates](./docs/contributing/ci-gates.md).
 
-# Specific module
-uv run pytest tests/unit/evaluation/ -v
-
-# With coverage
-uv run pytest tests/unit/ --cov=src/ouroboros --cov-report=term-missing
-```
-
-See [Testing Guide](./docs/contributing/testing-guide.md) for more details.
-
-### 5. Lint and Format
-
-```bash
-# Check
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
-
-# Auto-fix
-uv run ruff check --fix src/ tests/
-uv run ruff format src/ tests/
-
-# Type check
-uv run mypy src/ouroboros
-
-# ooo auto product boundary check (Q00/ouroboros#725)
-python3 scripts/check-auto-boundary.py
-```
-
-The last command enforces that the `ooo auto` core source files do
-not introduce domain-specific keywords (`github`, `pull_request`,
-`jira`, `slack`, …). Domain workflows belong in UserLevel plugins,
-not in `ooo auto`. The CI workflow `ooo-auto-boundary` runs the same
-check on every PR.
-
-Coverage is the union of (a) every `*.py` under `src/ouroboros/auto/`
-and (b) `src/ouroboros/cli/commands/auto.py`, so any new module added
-under the auto package is scanned automatically. Forbidden keywords
-are matched as case-insensitive substrings, which catches realistic
-identifier forms such as `GitHubClient`, `github_client`, `JiraIssue`,
-or `SlackNotifier`. The script also fails loud if a load-bearing
-anchor file (declared in `ANCHOR_FILES` inside the script) is missing,
-so a refactor that renames or removes one of those files cannot
-silently strip enforcement coverage — update `ANCHOR_FILES` in the
-same PR.
-
-If a forbidden keyword is genuinely necessary on a line (rare),
-append `# domain-keyword-allowed: <reason>` and include rationale in
-the PR description.
+UserLevel plugins are domain-specific extensions dispatched through
+`src/ouroboros/plugin/`; product-neutral `ooo auto` code must not absorb those
+workflows.
 
 ### 6. Submit PR
 
@@ -169,28 +126,10 @@ push — most review rounds are lost to objections you can preempt.
 
 ### Release Maintenance
 
-Before creating a release tag, synchronize every version-bearing plugin artifact in the release commit:
-
-```bash
-python scripts/sync-plugin-version.py --write --version 0.50.7
-python scripts/sync-plugin-version.py --require-canonical --version 0.50.7
-git diff --check
-```
-
-The metadata change must be committed before the tag exists, and because `main`
-is protected it can only get there through a PR. Squash-merging mints a new
-commit SHA, so create `v0.50.7` on the **merged** `main` commit — tagging the
-pre-merge commit produces a tag that points at a commit `main` never contained:
-
-```bash
-git checkout main && git pull origin main --ff-only
-git tag -a v0.50.7 -m "Release v0.50.7" && git push origin v0.50.7
-```
-
-The tag-triggered release workflow repeats the read-only check and refuses to build when the tag version and tracked metadata differ. It also owns the PyPI publish — never run `uv publish` locally.
-
-The full sequence, including the release-notes convention, is in
+The release sequence has one canonical home:
 [CI Gates and Branch Protection](./docs/contributing/ci-gates.md#releases).
+It owns metadata synchronization, `uv lock`, the release PR, post-merge tag
+creation, generated notes, and the rule that PyPI publication runs only in CI.
 
 ---
 
@@ -379,32 +318,9 @@ cp .env.example .env
 
 ### Running Tests
 
-```bash
-# Unit tests (fast, no network)
-uv run pytest tests/unit/ -v
-
-# Integration tests (requires MCP server)
-uv run pytest tests/integration/ -v
-
-# E2E tests (full system)
-uv run pytest tests/e2e/ -v
-
-# Skip slow tests for fast iteration
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e
-```
-
-### Testing Specific Features
-
-```bash
-# TUI tests
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e -k "tui or tree"
-
-# Evaluation pipeline
-uv run pytest tests/unit/evaluation/ -v
-
-# Orchestrator
-uv run pytest tests/unit/orchestrator/ -v
-```
+Use [Testing Guide](./docs/contributing/testing-guide.md) for the test topology,
+hermetic `$HOME`, xdist isolation, targeted commands, CI parity, and real-surface
+verification. Do not maintain another command matrix here.
 
 ### Pre-commit Hooks (Optional)
 
@@ -532,34 +448,16 @@ Closes #42"
 
 ## Project Structure
 
-```
-src/ouroboros/
-  core/          # Foundation: Result type, Seed, errors, context
-  bigbang/       # Phase 0: Interview and seed generation
-  routing/       # Phase 1: PAL Router (model tier selection)
-  execution/     # Phase 2: Double Diamond execution
-  resilience/    # Phase 3: Stagnation detection, lateral thinking
-  evaluation/    # Phase 4: Three-stage evaluation pipeline
-  secondary/     # Phase 5: TODO registry
-  orchestrator/  # Runtime abstraction and orchestration
-  providers/     # LLM provider adapters (LiteLLM)
-  persistence/   # Event sourcing, checkpoints
-  tui/           # Terminal UI (Textual)
-  cli/           # CLI commands (Typer)
-  mcp/           # Model Context Protocol server/client
-  config/        # Configuration management
+The canonical ownership map is [Architecture for Contributors](./docs/contributing/architecture-overview.md).
+It distinguishes authoring, runtime execution, verification, durable state,
+read models, presentation and plugin boundaries using packages that exist on
+the current tree.
 
-tests/
-  unit/          # Fast, isolated tests (no network, no DB)
-  integration/   # Tests with real dependencies
-  e2e/           # End-to-end CLI tests
-  fixtures/      # Shared test data
-
-.claude-plugin/  # Plugin definitions (skills, agents, hooks)
-  agents/        # Custom agent prompts
-  skills/        # Plugin skill definitions
-  hooks/         # Plugin hooks
-```
+The canonical test topology and isolation contract are in
+[Testing Guide](./docs/contributing/testing-guide.md). In particular,
+`tests/unit/mcp/` is hermetic even when a test starts a bounded loopback server
+or subprocess; broader MCP server and multi-process coverage lives under
+`tests/integration/mcp/`.
 
 ---
 
@@ -619,301 +517,73 @@ class ExecutionStrategy(Protocol):
 
 ## Documentation Coverage
 
-This section defines **which documentation files must be updated when a specific source file or code path changes**. Reviewers should verify that all relevant doc files are updated before merging any PR that touches the listed source paths.
+Documentation follows the source that owns the observable contract. Do not add a
+manually copied inventory of commands, runtimes, packages, or config fields when
+the repository can derive that inventory in a contract test.
 
-### Source of Truth
+### Canonical Homes
 
-The authoritative implementation directories are:
-
-| Directory | What it controls |
-|-----------|-----------------|
-| `src/ouroboros/cli/commands/` | All user-facing CLI commands and flags |
-| `src/ouroboros/orchestrator/` | Orchestrator runtime, session management, parallel execution |
-| `src/ouroboros/config/` | Configuration schema and defaults |
-
----
-
-### CLI Commands → Doc Mapping
-
-Any change to a file under `src/ouroboros/cli/commands/` requires reviewing and updating the corresponding documentation:
-
-#### `init.py` — `ouroboros init` / `ouroboros init start`
-
-Flags covered: `--resume`, `--state-dir`, `--orchestrator`, `--runtime`, `--llm-backend`, `--debug`
-
-**Must update:**
-- `docs/cli-reference.md` — `init` command section (flags, examples)
-- `docs/getting-started.md` — interview workflow description
-- `docs/getting-started.md` — introductory `ooo init` / `ouroboros init` examples
-- `docs/getting-started.md` — onboarding flow
-
-**Also check:**
-- `docs/runtime-guides/claude-code.md` and `docs/runtime-guides/codex.md` — if `--orchestrator` or `--runtime` behavior changes
-
-#### `run.py` — `ouroboros run workflow`
-
-Flags covered: `--orchestrator/--no-orchestrator`, `--resume`, `--mcp-config`, `--mcp-tool-prefix`, `--dry-run`, `--debug`, `--sequential`, `--runtime`, `--no-qa`
-
-**Must update:**
-- `docs/cli-reference.md` — `run` command section (flags, examples, defaults)
-- `docs/getting-started.md` — execution workflow description
-- `docs/getting-started.md` — `ooo run` / `ouroboros run` examples
-
-**Also check:**
-- `docs/runtime-guides/claude-code.md` and `docs/runtime-guides/codex.md` — if `--runtime` semantics change
-- `docs/runtime-capability-matrix.md` — if a runtime backend is added or removed
-
-#### `config.py` — `ouroboros config`
-
-Subcommands: `show`, `backend`, `init`, `set`, `validate`
-
-`config` subcommands are implemented command surfaces. Keep their behavior aligned with the authoritative [`docs/cli-reference.md`](./docs/cli-reference.md) `config` section.
-
-**Must update:**
-- `docs/cli-reference.md` — `config` command section
-- `docs/getting-started.md` — configuration management section
-
-#### `status.py` — `ouroboros status`
-
-Implemented subcommands: `auto`, `run`
-
-Placeholder subcommands on `main`: `executions`, `execution`, `health`
-
-> **Note**: Only the placeholder subcommands listed above should be marked `[Placeholder — not yet implemented]` in docs until real persistence or health-check behavior is wired in. Do not mark implemented `status` subcommands as placeholders.
-
-**Must update:**
-- `docs/cli-reference.md` — `status` command section
-
-#### `mcp.py` — `ouroboros mcp`
-
-**Must update:**
-- `docs/cli-reference.md` — `mcp` command section
-- `docs/api/mcp.md` — MCP server/client configuration
-
-#### `setup.py` — `ouroboros setup`
-
-**Must update:**
-- `docs/cli-reference.md` — `setup` command section
-- `docs/getting-started.md` — setup step in onboarding
-
-#### `tui.py` — `ouroboros tui`
-
-**Must update:**
-- `docs/cli-reference.md` — `tui` command section
-- `docs/guides/tui-usage.md` — TUI usage guide
-
-#### `cancel.py` — `ouroboros cancel`
-
-**Must update:**
-- `docs/cli-reference.md` — `cancel` command section
-
----
-
-### Orchestrator → Doc Mapping
-
-Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentation:
-
-| Source file | Must update |
-|-------------|-------------|
-| `runtime_factory.py` | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` — if a backend is added, removed, or changes its `NotImplementedError` status |
-| `adapter.py` (`ClaudeAgentAdapter`) | `docs/runtime-guides/claude-code.md` — permission modes, session flow |
-| `codex_cli_runtime.py` (`CodexCliRuntime`) | `docs/runtime-guides/codex.md` — permission modes, `--runtime codex` behavior |
-| `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/opencode.md` — permission modes, `--runtime opencode` behavior |
-| `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
-| `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |
-| `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution and coordinator review gate |
-| `session.py` | `docs/cli-reference.md` — session ID format, resume semantics |
-| `workflow_state.py` | `docs/architecture.md` — AC state machine, `ActivityType` values; `docs/guides/tui-usage.md` — if activity display changes |
-| `dependency_analyzer.py` | `docs/architecture.md` — dependency level computation description |
-| `execution_strategy.py` | `docs/architecture.md` — execution strategy types (`code`, `research`, `analysis`); `docs/guides/seed-authoring.md` if strategy selection is user-facing |
-| `mcp_config.py` / `mcp_tools.py` | `docs/api/mcp.md` — MCP config YAML schema |
-| `command_dispatcher.py` | `docs/architecture.md` — command dispatch model |
-| `level_context.py` | `docs/architecture.md` — level context description |
-
-**Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. Runtime backend availability is registry-owned; when `runtime_backend_choices()` or setup support changes, update the runtime capability matrix, setup docs, and per-runtime guide/gap documentation together.
-
----
-
-### Capability Graph → Doc Mapping
-
-Changes that add, remove, rename, or reinterpret a skill execution capability
-must keep the capability graph and generated runtime instructions in sync.
-
-| Source path | Must update |
-|-------------|-------------|
-| `skills/*/SKILL.md` | `docs/runtime-guides/skill-capability-guides.md` if `required_capabilities` changes or the skill depends on a new abstract runtime action |
-| `src/ouroboros/backends/capabilities.py` | `docs/runtime-guides/skill-capability-guides.md`; renderer/package snapshot tests for Codex, Hermes, Claude, and setup-owned runtime artifacts |
-| `src/ouroboros/runtime_instruction_artifacts.py` | `docs/runtime-guides/skill-capability-guides.md`; `docs/cli-reference.md` setup section if install paths or managed surfaces change |
-| Packaged guide snapshots such as `.claude-plugin/SKILL_CAPABILITY_GUIDE.md` | Update when `render_backend_skill_capability_guide(<backend>)` output changes |
-
-Before submitting a capability graph PR, run the checklist in
-[`docs/runtime-guides/skill-capability-guides.md`](./docs/runtime-guides/skill-capability-guides.md#contributor-checklist-for-capability-changes).
-
----
-
-### Configuration → Doc Mapping
-
-Changes under `src/ouroboros/config/` affect configuration reference documentation:
-
-| Source class | Config key path | Must update |
+| Change surface | Executable authority | Documentation home |
 |---|---|---|
-| `OrchestratorConfig` | `orchestrator.*` | `docs/cli-reference.md` — `--runtime` flag; `README.md` config snippet |
-| `LLMConfig` | `llm.*` | `docs/architecture.md`, `docs/api/core.md` — model defaults |
-| `EconomicsConfig` / `TierConfig` | `economics.*` | `docs/architecture.md` — tier descriptions |
-| `ClarificationConfig` | `clarification.*` | `docs/guides/seed-authoring.md` — ambiguity threshold |
-| `ExecutionConfig` | `execution.*` | `docs/architecture.md` — iteration limits |
-| `ResilienceConfig` | `resilience.*` | `docs/architecture.md` — stagnation/lateral thinking |
-| `EvaluationConfig` | `evaluation.*` | `docs/architecture.md` — three-stage evaluation |
-| `ConsensusConfig` | `consensus.*` | `docs/architecture.md` — Stage 3 consensus |
-| `DriftConfig` | `drift.*` | `docs/architecture.md` — drift monitoring thresholds |
-| `PersistenceConfig` | `persistence.*` | `docs/getting-started.md` — database path |
+| CLI command or flag | `src/ouroboros/cli/main.py` and the owning command module | `docs/cli-reference.md`; `docs/getting-started.md` for common flows |
+| Runtime or LLM backend | backend registries, `AgentRuntime.capabilities`, runtime/provider factories | runtime capability matrix, config reference, owning runtime guide |
+| Config key or precedence | `src/ouroboros/config/models.py` and `loader.py` | `docs/config-reference.md`; developing/getting-started when workflow-visible |
+| Evaluation behavior | `src/ouroboros/evaluation/` and orchestrator verification wiring | evaluation pipeline and execution-vs-evaluation guides |
+| TUI interaction | screen `BINDINGS`, event reducers, widgets | TUI usage guide and its maintained translations |
+| Skill or agent capability | root `skills/*/SKILL.md`, agent prompts, backend capability graph | skill capability guide and the owning workflow/runtime guide |
+| UserLevel plugin contract | plugin schemas, firewall, lockfile and dispatch code | UserLevel plugin RFC and plugin-facing guides |
+| Contributor workflow | workflows, scripts, tests and branch-protection API | contributor architecture, testing guide and CI gates |
 
-When a **new config key** is added to any model class, check `README.md` and `docs/getting-started.md` for any sample `config.yaml` snippets that may need updating.
+### Source-Derived Contracts
 
-**`config/loader.py`**: If the config file search path, environment variable names (e.g., `OUROBOROS_CONFIG`), or YAML loading logic change, update:
-- `docs/getting-started.md` — config file location instructions
-- `docs/config-reference.md` — environment variable overrides section
-- `README.md` — any config bootstrap snippet
+The repository already checks several documentation relationships from source:
 
----
+- `test_cli_surface_docs_contract.py` binds CLI registration to command claims.
+- `test_runtime_skill_capability_docs.py` binds runtime registries to setup docs.
+- `test_tui_usage_docs_contract.py` binds TUI bindings to English/Korean guides.
+- `test_install_ref_docs_contract.py` binds installer examples to shell behavior.
+- `test_contributor_context_docs_contract.py` rejects retired package context,
+  orphaned root policy files, missing source paths and test-guide drift.
 
-### Evaluation Pipeline → Doc Mapping
+When adding a new public surface, extend the nearest source-derived contract
+instead of appending another static mapping here.
 
-Changes under `src/ouroboros/evaluation/` affect:
+### User-Visible Change Checklist
 
-| Source file | Must update |
-|-------------|-------------|
-| `pipeline.py` | `docs/architecture.md` — Stage descriptions (Stage 1 Mechanical, Stage 2 Semantic, Stage 3 Consensus); `docs/guides/evaluation-pipeline.md` |
-| `trigger.py` | `docs/architecture.md` — consensus trigger thresholds; `docs/guides/evaluation-pipeline.md` — when Stage 3 is invoked |
-| `mechanical.py` | `docs/guides/evaluation-pipeline.md` — Stage 1 check list |
-| `models.py` | `docs/api/core.md` — evaluation result types |
-| `artifact_collector.py` | `docs/architecture.md` — artifact collection description |
-
----
-
-### TUI Source → Doc Mapping
-
-Changes under `src/ouroboros/tui/` that alter the visible interface or user interactions affect:
-
-| Source path | Must update |
-|-------------|-------------|
-| `screens/dashboard_v3.py` | `docs/guides/tui-usage.md` — dashboard layout, key bindings |
-| `widgets/ac_tree.py` | `docs/guides/tui-usage.md` — AC tree display; `docs/architecture.md` if AC state rendering changes |
-| `widgets/drift_meter.py` | `docs/guides/tui-usage.md` — drift meter description |
-| `widgets/phase_progress.py` | `docs/guides/tui-usage.md` — phase progress bar description |
-| `screens/lineage_selector.py` / `lineage_detail.py` | `docs/guides/tui-usage.md` — lineage navigation section |
-| Any new screen added to `screens/` | `docs/guides/tui-usage.md` — add a new section; `docs/cli-reference.md` if a new key binding or `tui` sub-command is introduced |
-
-> **Note**: TUI key bindings visible in `screens/*.py` (`BINDINGS = [...]`) are user-facing and must be listed in `docs/guides/tui-usage.md`.
-
----
-
-### Skills / Plugin → Doc Mapping
-
-Changes under `skills/` (YAML skill definitions used by Claude and Codex) or `src/ouroboros/plugin/` affect:
-
-| Source path | Must update |
-|-------------|-------------|
-| `skills/codex.md` | `docs/runtime-guides/codex.md` — if skill instructions change |
-| `skills/*.yaml`, `skills/*/SKILL.md`, or `src/ouroboros/agents/*.md` | `docs/` guide that describes the affected skill/agent behaviour; `docs/runtime-guides/skill-capability-guides.md` if required capabilities change |
-| `src/ouroboros/plugin/skills/executor.py` | `docs/architecture.md` — skill execution model |
-| `src/ouroboros/plugin/agents/registry.py` | `docs/architecture.md` — agent registry; `docs/runtime-capability-matrix.md` if supported agents change per runtime |
-
-> **Note**: `skills/` YAML files are a user-visible configuration surface. Any new skill must be listed in the relevant runtime guide before the PR is merged.
-
----
-
-### New Command or Flag Checklist
-
-When adding a **new CLI command or flag**, use this checklist before submitting a PR:
-
-- [ ] `docs/cli-reference.md` updated with the new command/flag, its type, default, and at least one example
-- [ ] `docs/getting-started.md` updated if the flag changes workflow behavior
-- [ ] `docs/getting-started.md` reviewed — update if a common flow is affected
-- [ ] `README.md` reviewed — update the quick-start snippet if the new command changes day-1 usage
-- [ ] If the feature is a placeholder/stub: docs must include `> **Note**: This feature is not yet implemented.`
-
-### New Runtime Backend Checklist
-
-When adding support for a **new runtime backend** (e.g., new entry in `AgentRuntimeBackend` enum):
-
-- [ ] `docs/runtime-capability-matrix.md` — add a new row
-- [ ] `docs/runtime-guides/` — create a new guide file `<runtime>.md`
-- [ ] `docs/cli-reference.md` — add the backend name to `--runtime` option description
-- [ ] `docs/getting-started.md` — update prerequisites section
-- [ ] Remove any `[Not yet available]` or `NotImplementedError` markers once fully shipped
+- [ ] Update the owning reference when observable behavior changes.
+- [ ] Exercise the real CLI, MCP, runtime, plugin, or UI surface.
+- [ ] Add or extend a source-derived documentation contract when a finite registry
+      or schema can drift.
+- [ ] Check all maintained locales when the same user-facing claim is duplicated.
+- [ ] Record remaining documentation work in a GitHub issue with a named owner;
+      do not maintain a second backlog file.
 
 ### Documentation Issue Severity Rubric
 
-When a reviewer or contributor identifies a documentation problem, classify it by severity for urgency and triage. Apply the [Review Boundary Contract](#review-boundary-contract) first: severity does not independently decide whether a PR comment blocks.
+Severity determines urgency, not PR scope. Apply the
+[Review Boundary Contract](#review-boundary-contract) before deciding whether a
+documentation finding blocks the current change.
 
-| Severity | Issue marker | Definition | User Impact | Merge Policy |
-|----------|--------------|------------|-------------|--------------|
-| **Critical** | `documentation` label + `**Severity:** critical` in the issue/PR body | The documented information is **factually wrong**: a command, flag, path, or option described in the docs does not exist or behaves differently than described. | User follows the docs and **fails** — the command errors, the path is missing, or the flag is rejected. | **Changes Requested** when it reproduces under the PR's declared conditions and violates its contract, or when it creates immediate user-data/security risk. Otherwise use an owned follow-up. |
-| **High** | `documentation` label + `**Severity:** high` in the issue/PR body | The documentation is **misleading**: information is technically present but framed in a way that causes confusion, omits a required step, or implies an unimplemented capability. | User follows the docs and **proceeds incorrectly** — they finish the step but reach a wrong state or have false expectations. | Apply the boundary and contract test. Do not block by severity alone; link a named owner for valid out-of-boundary follow-up. |
-| **Medium** | `documentation` label + `**Severity:** medium` in the issue/PR body | The documentation has **inconsistent style or terminology** or an ambiguity that does not make the documented path incorrect. | User is mildly confused by inconsistency but can still succeed. | **Non-blocking.** Can merge; assign an owner when follow-up is needed. |
-| **Low** | `documentation` label + `**Severity:** low` in the issue/PR body | The documentation has a **minor cosmetic gap** or an edge case missing where another safe documented path exists. | User experiences minor friction at most; no incorrect outcome. | **Non-blocking.** Address opportunistically. |
+| Severity | Meaning | Typical effect |
+|---|---|---|
+| Critical | A documented command, path, flag, or safety step is wrong and causes failure or loss | Fix in the owning change when in boundary or immediate-risk; otherwise open an owned urgent issue |
+| High | The reader can complete the step but reaches a materially wrong state or expectation | Changes requested only when it violates the declared/baseline contract |
+| Medium | Ambiguous or inconsistent guidance with a working safe path | Non-blocking owned follow-up |
+| Low | Cosmetic or alternate-path omission | Opportunistic follow-up |
 
-#### Severity Examples
-
-| Example | Severity | Why |
-|---------|----------|-----|
-| `docs/cli-reference.md` lists `--foo` flag that does not exist in the source | Critical | User runs the command and gets "no such option" |
-| `docs/getting-started.md` omits `uv sync` before `uv run ouroboros` | Critical | User's first command fails with ModuleNotFoundError |
-| `opencode` listed as a working `--runtime` value without `[Not yet available]` | High | User configures `--runtime opencode` and gets a confusing `NotImplementedError` |
-| `OUROBOROS_AGENT_RUNTIME` written as `OUROBOROS_RUNTIME_BACKEND` in one file | High | User sets the wrong env var and the setting silently has no effect |
-| Docs recommend `export OUROBOROS_MAX_PARALLEL=2` but the variable does not exist | High | User sets the variable; parallelism is not actually limited (false expectation) |
-| A major config section (`economics:`, `evaluation:`) entirely absent from docs | High | User who needs non-default configuration for that section has no documentation to follow; they omit a required step |
-| `claude-code` vs `claude_code` used interchangeably across different docs files | Medium | Minor confusion; both forms resolve correctly in the CLI |
-| Section headings use Title Case in some files and Sentence case in others | Medium | Style inconsistency; no functional impact |
-| A minor config section (`drift:` thresholds) absent from docs; defaults are safe | Medium | User can operate with defaults; gap only matters for advanced tuning |
-| An alternative invocation (`ouroboros tui` bare vs `ouroboros tui monitor`) absent | Low | User can use the documented form; no incorrect outcome |
-
-#### How to Apply the Rubric in PRs
-
-1. **When reviewing a docs-affecting PR**, scan each changed file against the [Documentation Decay Detection](#documentation-decay-detection) checks below and classify any finding using the table above.
-2. **When filing a GitHub issue** for a documentation problem, add the existing `documentation` label and include a body line such as `**Severity:** critical`, `**Severity:** high`, `**Severity:** medium`, or `**Severity:** low`.
-3. **When writing a PR description** that fixes a documentation problem, state the severity in the PR summary (e.g., _"Fixes documentation severity: critical — `--resume` flag was listed with wrong default"_).
-4. **Apply the Review Boundary Contract before severity:** direct contract violations and immediate user-data/security risks require changes; valid risks outside the boundary require a linked follow-up with a named owner; new subsystem or ownership plus immediate risk requires maintainer/RFC escalation.
-5. **Track open documentation findings in GitHub issues** with the `documentation` label; do not rely on a separate register file unless one is introduced and kept current.
-
-> **Current open documentation issues** are tracked with the [`documentation`](https://github.com/Q00/ouroboros/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation) label.
-
----
+Use the existing `documentation` label and state the severity and reproduced
+user impact in the issue body.
 
 ### Documentation Decay Detection
 
-To catch doc drift during development, reviewers should check:
-
-1. **Flag parity**: Run `ouroboros <cmd> --help` and compare every flag to `docs/cli-reference.md`. Any mismatch is a documentation bug.
-2. **Placeholder honesty**: If a command's implementation body is `# Placeholder implementation`, the corresponding doc entry must say `[Placeholder — not yet implemented]`.
-3. **Runtime parity**: `claude`, `codex`, and `opencode` are all fully-implemented backends. Any doc that lists a backend as available must have a corresponding runtime guide in `docs/runtime-guides/`.
-4. **Config key drift**: After any change to `src/ouroboros/config/models.py`, grep for the changed key name across `docs/` to find stale references.
-5. **TUI key bindings**: If `screens/*.py` `BINDINGS` arrays change, verify `docs/guides/tui-usage.md` reflects the new keys.
-6. **Skills registry drift**: If a new `skills/*.yaml` file is added, check that `docs/runtime-guides/codex.md` or the relevant guide mentions it.
-7. **Orchestrator new file**: If a new `.py` file is added to `src/ouroboros/orchestrator/`, add it to the Orchestrator → Doc Mapping table above before the PR is merged.
-
-```bash
-# Quick doc-drift scan: compare CLI help output with cli-reference.md
-uv run ouroboros init --help
-uv run ouroboros run workflow --help
-uv run ouroboros config --help
-uv run ouroboros status --help
-
-# Find stale config key references
-grep -r "opencode_permission_mode\|runtime_backend\|codex_cli_path" docs/
-
-# Find any 'opencode' reference in docs that lacks the [Not yet available] marker
-grep -rn "opencode" docs/ | grep -v "Not yet available" | grep -v "semantic-link-rot" | grep -v "cli-audit"
-
-# Check TUI key bindings are documented
-grep -rn "BINDINGS" src/ouroboros/tui/screens/ | grep -v "__pycache__"
-
-# List skill YAML files to cross-check against runtime guides
-ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
-```
-
----
+1. Derive command, runtime, config, skill and binding inventories from source.
+2. Treat the code, workflow, schema or branch-protection API as executable
+   authority; docs explain it but do not override it.
+3. Run the relevant docs contract tests plus the real documented command.
+4. Reject placeholder, availability, path and precedence claims that cannot be
+   reproduced on the current tree.
+5. Move point-in-time plans to `docs/history/` and mark them non-normative rather
+   than leaving them beside current work orders.
 
 ## Contributor Docs
 

@@ -237,12 +237,7 @@ required services. See [Testing Guide](./testing-guide.md).
 
 ## Before you open the PR
 
-```bash
-uv run ruff format src/ tests/ && uv run ruff check src/ tests/ --fix
-uv run mypy src/ouroboros
-uv run pytest
-```
-
-Then read [Review Conventions](./review-conventions.md) — the reviewer is
-strict and predictable, and most rounds are lost to objections you can
-preempt. Gate details are in [CI Gates](./ci-gates.md).
+Run the current, non-mutating PR-parity commands in
+[Testing Guide](./testing-guide.md#before-opening-a-pr). Conditional gates,
+branch protection and release behavior live in [CI Gates](./ci-gates.md).
+Then read [Review Conventions](./review-conventions.md) before the first push.

@@ -215,7 +215,7 @@ disable_error_code = [
 ]
 
 [tool.pytest.ini_options]
-# asyncio_mode = "auto" per project-context.md
+# Async tests use automatic mode; see docs/contributing/testing-guide.md.
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

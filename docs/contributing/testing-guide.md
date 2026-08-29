@@ -1,211 +1,158 @@
 # Testing Guide
 
-How to write and run tests for Ouroboros.
+This page describes the current test topology, isolation contract, and commands
+used by CI. The workflow files are executable authority; this page explains how
+to reproduce them locally.
 
-## Test Structure
+## Test Topology
 
-```
-tests/
-  conftest.py              # Shared fixtures (event_store, mock adapters)
-  fixtures/                # Test data files
-  unit/                    # Fast, isolated tests
-    core/                  # tests for src/ouroboros/core/
-    evaluation/            # tests for src/ouroboros/evaluation/
-    orchestrator/          # tests for src/ouroboros/orchestrator/
-    tui/                   # tests for src/ouroboros/tui/
-    ...                    # mirrors src/ structure
-  integration/             # Tests with real dependencies
-    mcp/                   # MCP integration tests
-  e2e/                     # End-to-end CLI tests
-    test_cli_commands.py
-    test_full_workflow.py
-    test_session_persistence.py
-```
+| Suite | Location | Purpose |
+|---|---|---|
+| Unit | `tests/unit/` | Isolated domain, adapter, CLI, MCP, persistence and UI contracts |
+| Integration | `tests/integration/` | Cross-component behavior and real package/runtime boundaries |
+| End to end | `tests/e2e/` | User-visible CLI and workflow scenarios |
+| Conformance | `tests/conformance/` | Versioned protocol and Workflow IR contracts |
+| Canonical | `tests/canonical/` | Opt-in product-reality scenarios such as `cli-todo` |
+| Fixtures | `tests/fixtures/` | Shared package, config and protocol inputs |
 
-## Running Tests
+Unit MCP tests are hermetic and do not require a pre-existing external service.
+Some deliberately create loopback HTTP servers or subprocesses inside the
+isolated test environment. Broader server, package and multi-process behavior
+lives under `tests/integration/mcp/`.
 
-### All Unit Tests
+## Hermetic Home and Process Isolation
 
-```bash
-uv run pytest tests/unit/ -v
-```
+`tests/conftest.py` redirects `$HOME` before collection. This matters because
+config, default EventStore paths, logs, worktrees, module-level constants and
+spawned subprocesses can otherwise reach the developer's real
+`~/.ouroboros` state.
 
-### Specific Module
+Isolation has two levels:
 
-```bash
-# Evaluation pipeline
-uv run pytest tests/unit/evaluation/ -v
+1. A session-wide temporary home is installed before test modules import.
+2. An autouse fixture gives each test a separate home.
 
-# Orchestrator (including parallel execution, strategies)
-uv run pytest tests/unit/orchestrator/ -v
+Additional session fixtures give each xdist worker private heartbeat and
+cancellation directories. Tests that need a specific home may override `$HOME`
+inside the test after the autouse fixture runs.
 
-# TUI
-uv run pytest tests/unit/tui/ -v
-```
+Do not remove this chokepoint to fix one test. A test that requires real user
+state must receive that state explicitly through a fixture or a subprocess
+environment.
 
-### With Coverage
+## Prepare an Environment
 
-```bash
-uv run pytest tests/unit/ --cov=src/ouroboros --cov-report=term-missing
-```
-
-### Skip Slow Tests
-
-MCP tests require network and external servers. Skip them for fast iteration:
+The pull-request test profile uses Python 3.12 with MCP and LiteLLM test groups:
 
 ```bash
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e
+uv sync --python 3.12 --dev --group mcp-test --group litellm-test
 ```
 
-### TUI-Specific Tests
+Python 3.14 intentionally omits LiteLLM, which does not support that interpreter
+profile. See [Platform Support](../platform-support.md) for the package matrix.
+
+## Fast Iteration
+
+Run the narrowest owning suite first:
 
 ```bash
-uv run pytest tests/ --ignore=tests/unit/mcp --ignore=tests/integration/mcp --ignore=tests/e2e -k "tui or tree"
+uv run --python 3.12 --no-sync pytest tests/unit/<area> -q
+uv run --python 3.12 --no-sync pytest tests/unit/<file>.py::test_name -q
 ```
 
-### E2E Tests
-
-End-to-end tests exercise the full CLI:
+Examples:
 
 ```bash
-uv run pytest tests/e2e/ -v
+uv run --python 3.12 --no-sync pytest tests/unit/orchestrator -q
+uv run --python 3.12 --no-sync pytest tests/unit/mcp -q
+uv run --python 3.12 --no-sync pytest tests/unit/cli/test_setup.py -q
 ```
 
-Note: `test_run_workflow_verbose` is a known pre-existing failure; do not block on it.
-
-## Writing Tests
-
-### Naming Conventions
-
-- Test files: `test_<module>.py`
-- Test classes: `Test<Feature>`
-- Test functions: `test_<behavior>` or `test_<scenario>_<expected_result>`
-
-```python
-# tests/unit/evaluation/test_mechanical.py
-class TestMechanicalVerifier:
-    async def test_lint_check_passes_on_clean_code(self): ...
-    async def test_coverage_below_threshold_fails(self): ...
-    async def test_timeout_returns_failure(self): ...
-```
-
-### Async Tests
-
-The project uses `asyncio_mode = "auto"` in pytest config, so async tests just need the `async` keyword:
-
-```python
-async def test_semantic_evaluator_returns_result():
-    evaluator = SemanticEvaluator(mock_adapter, config)
-    result = await evaluator.evaluate(context)
-    assert result.is_ok
-```
-
-### Testing with Result Type
-
-Always check `is_ok` / `is_err` before accessing `.value` or `.error`:
-
-```python
-async def test_pipeline_returns_approval():
-    result = await pipeline.evaluate(context)
-    assert result.is_ok
-    eval_result = result.value
-    assert eval_result.final_approved is True
-    assert eval_result.highest_stage_completed == 2
-
-async def test_pipeline_returns_error_on_bad_input():
-    result = await pipeline.evaluate(bad_context)
-    assert result.is_err
-    assert "validation" in result.error.message.lower()
-```
-
-### Mocking LLM Adapters
-
-For unit tests, mock the LLM adapter to avoid real API calls:
-
-```python
-from unittest.mock import AsyncMock, MagicMock
-from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
-
-def make_mock_adapter(response_content: str) -> MagicMock:
-    adapter = MagicMock()
-    adapter.complete = AsyncMock(return_value=Result.ok(
-        CompletionResponse(content=response_content, model="test-model")
-    ))
-    return adapter
-
-async def test_semantic_evaluator():
-    adapter = make_mock_adapter('{"score": 0.9, "ac_compliance": true, ...}')
-    evaluator = SemanticEvaluator(adapter)
-    result = await evaluator.evaluate(context)
-    assert result.is_ok
-```
-
-### Testing Frozen Dataclasses
-
-Since most data models are frozen, test construction and property access:
-
-```python
-def test_check_result_is_immutable():
-    result = CheckResult(check_type=CheckType.LINT, passed=True, message="OK")
-    with pytest.raises(AttributeError):
-        result.passed = False  # Should fail -- frozen
-
-def test_mechanical_result_failed_checks():
-    checks = (
-        CheckResult(check_type=CheckType.LINT, passed=True, message="OK"),
-        CheckResult(check_type=CheckType.TEST, passed=False, message="Failed"),
-    )
-    result = MechanicalResult(passed=False, checks=checks)
-    assert len(result.failed_checks) == 1
-    assert result.failed_checks[0].check_type == CheckType.TEST
-```
-
-### Testing TUI Components
-
-Use Textual's test framework:
-
-```python
-from textual.app import App, ComposeResult
-
-async def test_dashboard_renders():
-    """Test that dashboard screen mounts without error."""
-    class TestApp(App):
-        def compose(self) -> ComposeResult:
-            yield DashboardScreenV3()
-
-    async with TestApp().run_test() as pilot:
-        # Verify the screen renders
-        assert pilot.app.screen is not None
-```
-
-### Common Pitfalls
-
-1. **Falsy-0 checks**: Always use `is not None` for index comparisons
-   ```python
-   # Bad
-   if current_ac_index:  # Fails when index is 0
-   # Good
-   if current_ac_index is not None:
-   ```
-
-2. **Reactive mutation in Textual**: Do not mutate a reactive dict in-place then reassign the same reference. Create a new dict.
-
-3. **Frozen dataclass creation**: Cannot set attributes after construction. Build all values before creating the object.
-
-## Test Categories
-
-| Category | Location | Speed | Dependencies | When to Run |
-|----------|----------|-------|--------------|-------------|
-| Unit | `tests/unit/` | Fast (<30s) | None | Every change |
-| Integration | `tests/integration/` | Medium | Network, MCP | Before PR |
-| E2E | `tests/e2e/` | Slow | Full system | Before release |
-
-## CI Commands
+For a broad local correctness pass matching `.github/workflows/test.yml`:
 
 ```bash
-# What CI runs (approximately):
-uv run ruff check src/ tests/
+uv run --python 3.12 --no-sync pytest tests/ \
+  -n 4 --dist worksteal --durations=25 -m "not performance" -q
+```
+
+Performance tests run separately and serially:
+
+```bash
+uv run --python 3.12 --no-sync pytest tests/ \
+  -m performance -n 0 --durations=10 -q
+```
+
+## What CI Runs
+
+`.github/workflows/test.yml` is authoritative:
+
+- Pull requests run the correctness suite on Python 3.12.
+- Pushes to `main` and `develop` run Python 3.12, 3.13 and 3.14.
+- Python 3.12 on a push also emits coverage.
+- Performance budgets run on pushes as an advisory serial job.
+- The isolated Claude SDK/MCP 1 profile has its own compatibility job.
+
+Lint, type checking, TypeScript bridge checks, native TUI checks and conditional
+repository gates are described in [CI Gates and Branch Protection](./ci-gates.md).
+
+## Test Design
+
+### Assert behavior at the owning boundary
+
+- Domain tests assert typed values and state transitions.
+- Adapter tests assert the provider/runtime contract, including timeout and
+  cleanup behavior.
+- Persistence tests assert idempotency, interruption recovery and cold replay.
+- CLI/MCP tests assert the public result and exit/error contract.
+- UI reducer tests assert event folding; a visual or interactive change also
+  needs a real rendered surface check.
+
+Do not derive expected values from the output under test. Do not use a fallback
+value equal to the override whose precedence you intend to prove.
+
+### Async tests
+
+`pyproject.toml` sets `asyncio_mode = "auto"` and function-scoped event loops.
+Write an async test as an `async def`; use bounded awaits and signals rather than
+fixed sleeps.
+
+### Parallel safety
+
+The default CI correctness suite uses xdist. Any process-external mutable
+resource must be namespaced per test run or per worker:
+
+- use temporary directories instead of fixed paths;
+- bind port `0` instead of a fixed port;
+- use unique database/container names;
+- restore patched environment and module globals;
+- never rely on the developer's real home or global git config.
+
+A test that passes alone but fails under `-n 4 --dist worksteal` has an isolation
+defect until proven otherwise.
+
+### External and native smokes
+
+Opt-in tests that require an installed runtime use explicit environment guards.
+They are evidence in addition to, not a replacement for, deterministic contract
+tests. Record the runtime version and command in the PR.
+
+## Before Opening a PR
+
+Run the required checks and any conditional gate for the changed paths:
+
+```bash
 uv run ruff format --check src/ tests/
-uv run mypy src/ouroboros --ignore-missing-imports
-uv run pytest tests/unit/ -v --cov=src/ouroboros
+uv run ruff check src/ tests/
+uv run mypy src/ouroboros
+uv run --python 3.12 --no-sync pytest tests/ \
+  -n 4 --dist worksteal --durations=25 -m "not performance" -q
+(cd src/ouroboros/opencode/plugin && bun install && bunx tsc --noEmit && bun test)
 ```
+
+Then exercise the actual surface: invoke the CLI command, call the MCP tool,
+run the runtime smoke, or render the UI. A green helper test does not prove a
+user-facing workflow.
+
+There is no standing list of known failures. If the baseline fails, reproduce
+it on the exact base SHA and report the evidence rather than declaring it
+pre-existing from memory.

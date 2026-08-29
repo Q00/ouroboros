@@ -30,7 +30,6 @@ replayable execution contract on your choice of runtime backend.
 
 ### Architecture
 
-- [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
 - [Native-Windows Codex Desktop HTTP task persistence](./rfc/windows-codex-desktop-http-task.md) - Proposed explicit opt-in loopback HTTP MCP task for native Codex Desktop
 - [Routing B — Route Admission](./rfc/routing-b-route-admission.md) - Deterministic, provider-neutral route contract and Admission Kernel
 - [Routing C — Compatibility Projection](./rfc/routing-c-route-compat.md) - Bridge existing model/effort routing into the Admission Kernel
@@ -70,11 +69,11 @@ replayable execution contract on your choice of runtime backend.
 - [The Development Loop](./contributing/developing.md) - Run your own code, not the published package: local MCP, config, state, fastest verification per change type
 - [Review Conventions](./contributing/review-conventions.md) - What the review bot demands, with evidence from real reviews
 - [CI Gates and Branch Protection](./contributing/ci-gates.md) - Required checks, local reproduction, release order
-- [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
+- [Architecture for Contributors](./contributing/architecture-overview.md) - Current code ownership and authority boundaries
 - [Source Tour](./contributing/source-tour.md) - Three core mechanisms mapped to file:line coordinates, for teardown writers and reviewers
 - [Agent OS Kernel Terminology](./contributing/agent-os-kernel-terminology.md) - Locked vocabulary for `AgentRuntimeContext`, `ControlPlane`, `ControlContract`, `Directive`, `ControlBus`, and `IOJournal`
 - [ControlContract](./contributing/control-contract.md) - Control-plane schema, terminality, replay, and idempotency invariants
-- [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
+- [Testing Guide](./contributing/testing-guide.md) - Hermetic homes, xdist isolation, CI commands, and real-surface verification
 - [Verifier Evidence Policy](./contributing/verifier-evidence-policy.md) - Core verifier boundary: avoid runner-specific parsers, classify evidence-form mismatches, and preserve anti-fabrication semantics
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
@@ -89,33 +88,6 @@ for current AgentOS sequencing.
 - [AgentOS Release Readiness (2026-05-29)](./history/agentos/release-readiness.md) - Historical release triage and verification snapshot
 - [AgentOS Issue Sequencing Graph (2026-05-29)](./history/agentos/issue-sequencing-graph.md) - Historical issue-state and work-order snapshot
 - [Master Roadmap 2026-07](./history/master-roadmap-2026-07.md) - Superseded PR-A through PR-K execution plan with final dispositions
-
-
-## Key Concepts
-
-### The Six Phases
-
-1. **Big Bang (Phase 0)** - Socratic and ontological questioning to crystallize requirements into a Seed (Ambiguity <= 0.2)
-2. **PAL Router (Phase 1)** - Progressive Adaptive LLM selection (Frugal -> Standard -> Frontier)
-3. **Double Diamond (Phase 2)** - Discover, Define, Design, Deliver with recursive decomposition
-4. **Resilience (Phase 3)** - Stagnation detection and lateral thinking via persona rotation
-5. **Evaluation (Phase 4)** - Three-stage verification (Mechanical, Semantic, Consensus)
-6. **Secondary Loop (Phase 5)** - TODO registry and batch processing
-
-### Economic Model
-
-| Tier | Cost | When |
-|:----:|:----:|------|
-| FRUGAL | 1x | complexity < 0.4 |
-| STANDARD | 10x | complexity < 0.7 |
-| FRONTIER | 30x | critical decisions |
-
-### Core Principles
-
-- **Frugal by default, rigorous in verification** - Start with the simplest approach, escalate only when needed
-- **Ambiguity threshold** - A requirement scoring above 0.2 does not proceed to Seed generation unless `force` is passed explicitly
-- **Lateral thinking** - When stuck, switch persona and think differently rather than retry harder
-
 ## Quick Links
 
 - [GitHub Repository](https://github.com/Q00/ouroboros)

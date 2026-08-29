@@ -247,6 +247,24 @@ SkillExecutionCapability(
 - Regenerate or update setup-owned instruction artifacts when rendered guide output changes
 - Follow `docs/runtime-guides/skill-capability-guides.md` before merging capability changes
 
+## 9. Blocking Work in Async Code
+
+Do not run blocking file, subprocess, database, or CPU-heavy work on the event
+loop. Keep genuinely asynchronous I/O in the async API; offload an unavoidable
+blocking synchronous call with `asyncio.to_thread` and keep its timeout and
+cancellation contract explicit.
+
+Use a direct synchronous function when the work is a small pure transform. An
+`async def` wrapper does not make CPU or blocking I/O asynchronous.
+
+## 10. SQLAlchemy Row Shape
+
+When a SQLAlchemy Core query selects table rows that will become domain models,
+consume `result.mappings()` and convert each row at the repository boundary.
+Use `result.scalars()` only when the select intentionally returns one scalar or
+one ORM entity. Calling `scalars()` on a multi-column Core row drops every
+column except the first.
+
 ## Summary Table
 
 | Pattern | When to Use | Key File |
@@ -259,3 +277,5 @@ SkillExecutionCapability(
 | TUI SSOT | UI state management | `tui/app.py`, `tui/events.py` |
 | Seed immutability | Workflow specification | `core/seed.py` |
 | Capability graph | Runtime-specific skill execution | `backends/capabilities.py` |
+| Async blocking boundary | Blocking work called from async code | owning async caller |
+| SQLAlchemy row shape | Core rows converted to domain models | `persistence/` repositories |

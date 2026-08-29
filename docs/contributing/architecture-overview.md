@@ -1,174 +1,145 @@
 # Architecture Overview for Contributors
 
-This document explains how Ouroboros's components fit together so you can orient yourself quickly when working on any part of the codebase.
+This page is the code-ownership map for the current repository. It answers two
+questions: where a behavior is owned, and which boundary must stay authoritative
+when that behavior changes.
 
-## High-Level Flow
+This page does not redefine product behavior. Use the code-backed CLI, config,
+runtime and evaluation references plus the owning issue or RFC for the boundary
+you are changing. Historical roadmaps under `docs/history/` are evidence, not
+current work orders.
 
-```
-User Input
-    |
-    v
-Phase 0: Big Bang (Interview)
-    | Ambiguity <= 0.2
-    v
-Immutable Seed (YAML)
-    |
-    v
-Phase 1: PAL Router ──> Select model tier (Frugal/Standard/Frontier)
-    |
-    v
-Phase 2: Double Diamond ──> Decompose ACs, execute via runtime backend
-    |                         (parallel or sequential)
-    |
-    v
-Phase 3: Resilience ──> Detect stagnation, rotate personas if stuck
-    |
-    v
-Phase 4: Evaluation ──> Stage 1: Mechanical (lint/test)
-    |                    Stage 2: Semantic (LLM evaluation)
-    |                    Stage 3: Consensus (multi-model vote, if triggered)
-    |
-    v
-Phase 5: Secondary Loop ──> Process deferred TODOs
-    |
-    +──> Cycle back if needed
+## End-to-End Flow
+
+```text
+User request or existing Seed
+  -> CLI / MCP / packaged skill / runtime bridge
+  -> optional interview and Seed authoring
+  -> an entry point resolves run inputs and constructs OrchestratorRunner
+  -> direct or parallel acceptance-criterion execution through an AgentRuntime
+  -> orchestrator verification plus EventStore acceptance fencing
+  -> durable events, checkpoints, and artifact records
+  -> recovery reads durable state; projections render status and dashboards
 ```
 
-## Module Dependency Map
+The execution path is not a numbered package pipeline. Model and harness
+selection, decomposition, retries, verification, and recovery are policies
+inside the live orchestrator. The retired model-routing package is not the
+current `src/ouroboros/router/` command dispatcher, and the compatibility-only
+`src/ouroboros/execution/` package does not own execution.
 
-```
-                        core/
-                    (types, errors, seed)
-                     /    |    \
-                    /     |     \
-              bigbang/  routing/  execution/
-                  |       |         |
-                  +-------+---------+
-                          |
-                    orchestrator/
-                    (runner, adapter,
-                     parallel_executor,
-                     execution_strategy)
-                          |
-                    +-----+-----+
-                    |           |
-              evaluation/   resilience/
-                    |
-              persistence/
-              (event_store)
-                    |
-              +-----+-----+
-              |           |
-            tui/        cli/
-```
+## Authority Boundaries
 
-## Key Module Guide
+| Boundary | Primary owner and fence | Important consumers |
+|---|---|---|
+| User intent and acceptance contract | `src/ouroboros/core/seed.py`; authoring paths may propose candidates but only the resulting Seed carries the run contract | `auto/`, `bigbang/`, `pm/`, `orchestrator/` |
+| Run construction and lifecycle | `src/ouroboros/orchestrator/runner.py`; durable lifecycle and terminal writes are fenced by `src/ouroboros/persistence/event_store.py` | CLI run, MCP execution, evolution |
+| Runtime capability and construction | `AgentRuntime.capabilities` in `src/ouroboros/orchestrator/adapter.py`, `src/ouroboros/backends/`, and `runtime_factory.py` | setup, config, execution handlers |
+| LLM-only completion | `src/ouroboros/providers/` | interview, semantic evaluation, advisory lanes |
+| Attempt execution and effects | direct/resume paths in `runner.py`; parallel paths in `parallel_executor.py` and `leaf_dispatcher.py` | dashboards, verification, recovery |
+| Final AC acceptance | orchestrator verifier outcome plus the EventStore's atomic acceptance fence | projections, evaluate/evolve successors |
+| Durable facts | event factories in `src/ouroboros/events/` and orchestrator code; storage in `src/ouroboros/persistence/` | status, replay, project map, dashboards |
+| Evidence and deliver analysis | `src/ouroboros/harness/`; the current TraceGuard live path is observe-only unless an owning contract explicitly wires it | evaluation, benchmarks and projections |
+| Read models | `src/ouroboros/project_map.py`, harness projection builders, dashboard reducers and TUI | humans and automation; never execution authority |
+| Plugin capability and lifecycle | `src/ouroboros/plugin/`; top-level command fallback in `src/ouroboros/cli/main.py` | CLI plugin dispatch and UserLevel workflows |
 
-### core/ -- Foundation Layer
+Two rules follow from this table:
 
-**When to touch**: Adding new domain types, error categories, or modifying the Seed schema.
+1. A projection may summarize an authoritative event, but it may not invent a
+   new execution or acceptance decision.
+2. Runtime and LLM backends are separate selectors. A runtime executes agent
+   work; an LLM adapter produces completions for authoring or evaluation.
 
-| File | Purpose |
-|------|---------|
-| `types.py` | `Result[T, E]` type, type aliases |
-| `errors.py` | Error hierarchy (`ValidationError`, `ProviderError`, etc.) |
-| `seed.py` | Immutable `Seed` Pydantic model -- the workflow "constitution" |
-| `context.py` | Runtime workflow context |
-| `ac_tree.py` | Acceptance criteria tree structure |
-| `ontology_aspect.py` | AOP-based ontological analysis (`OntologicalAspect`, `AnalysisResult`) |
-| `ontology_questions.py` | Centralized Socratic/ontological question engine |
+## Package Ownership Map
 
-### evaluation/ -- Phase 4: Three-Stage Pipeline
+### Front Doors and Host Integration
 
-**When to touch**: Adding check types, modifying evaluation logic, changing consensus rules.
+| Package | Owns |
+|---|---|
+| `src/ouroboros/cli/` | Typer commands, terminal UX, setup and maintenance commands |
+| `src/ouroboros/mcp/` | MCP SDK mapping, tools, jobs, resources, server lifecycle |
+| `src/ouroboros/router/` | Shared `ooo` command parsing and skill dispatch; not model routing |
+| root `skills/` | Authored workflow skill bundles that are packaged into the wheel |
+| `src/ouroboros/skills/` | Packaged-skill discovery and artifact helpers |
+| `src/ouroboros/agents/` | Bundled agent prompt assets and loading |
+| `src/ouroboros/codex/`, `src/ouroboros/hermes/`, `src/ouroboros/opencode/`, `src/ouroboros/kiro/`, `src/ouroboros/copilot/`, `src/ouroboros/gjc_bridge/` | Host-specific setup artifacts and bridges |
 
-| File | Purpose |
-|------|---------|
-| `models.py` | Data models: `CheckType`, `CheckResult`, `SemanticResult`, `Vote`, `EvaluationResult` |
-| `mechanical.py` | Stage 1: Shell-command checks (lint, test, build, static, coverage) |
-| `semantic.py` | Stage 2: LLM-based evaluation (AC compliance, drift, goal alignment) |
-| `consensus.py` | Stage 3: Multi-model voting + deliberative consensus (Advocate/Devil/Judge) |
-| `trigger.py` | Trigger matrix: 6 conditions that escalate to Stage 3 |
-| `pipeline.py` | Orchestrator: runs stages sequentially, respects config and triggers |
+### Authoring and Product Programs
 
-**Data flow**: `EvaluationContext` -> `MechanicalVerifier` -> `SemanticEvaluator` -> `ConsensusTrigger` -> `ConsensusEvaluator` -> `EvaluationResult`
+| Package | Owns |
+|---|---|
+| `src/ouroboros/bigbang/` | Interview engine, ambiguity work, Seed generation |
+| `src/ouroboros/interview_adapters/` | Confirmation-required reference candidates and glossary adapters |
+| `src/ouroboros/pm/` | Stable PM import and handoff facade; detailed document generation remains in `bigbang/` |
+| `src/ouroboros/auto/` | Goal-to-Seed-to-run supervision and bounded recovery |
+| `src/ouroboros/evolution/` | Wonder/Reflect and convergence workflows |
+| `src/ouroboros/resilience/` | Stagnation classification and lateral strategies |
 
-### orchestrator/ -- Runtime Abstraction and Orchestration
+### Kernel and Execution
 
-**When to touch**: Modifying execution behavior, parallel scheduling, strategy patterns.
+| Package | Owns |
+|---|---|
+| `src/ouroboros/core/` | Seed and domain types, project identity, safety and control contracts |
+| `src/ouroboros/orchestrator/` | Run assembly, runtime execution, routing policy, verification wiring, resume |
+| `src/ouroboros/backends/` | Backend names, capabilities, factory metadata and model catalogs |
+| `src/ouroboros/providers/` | LLM-only adapters and completion contracts |
+| `src/ouroboros/runtime/` | Shared runtime lifecycle and watchdog utilities |
+| `src/ouroboros/profiles/`, `src/ouroboros/strategies/` | Data-driven execution profiles and strategy helpers |
 
-| File | Purpose |
-|------|---------|
-| `adapter.py` | `ClaudeAgentAdapter` -- wraps Claude Agent SDK (one of several runtime adapters) |
-| `runner.py` | `OrchestratorRunner` -- main execution loop, AC iteration |
-| `parallel_executor.py` | Parallel AC execution with dependency analysis |
-| `execution_strategy.py` | `ExecutionStrategy` protocol + Code/Research/Analysis implementations |
-| `level_context.py` | Inter-level context passing for parallel execution |
-| `workflow_state.py` | TUI activity tracking during execution |
+`src/ouroboros/execution/` is an empty compatibility package. Do not add new
+execution logic there. New live execution behavior belongs to an existing
+orchestrator collaborator or to a newly approved collaborator under the
+orchestrator boundary.
 
-### tui/ -- Terminal User Interface
+### Verification, State, and Observation
 
-**When to touch**: Adding widgets, screens, or modifying event handling.
+| Package | Owns |
+|---|---|
+| `src/ouroboros/evaluation/` | Mechanical, semantic, and consensus evaluation |
+| `src/ouroboros/verification/` | Typed verification extraction and models |
+| `src/ouroboros/harness/` | Evidence normalization, deliver gates and rebuildable projections |
+| `src/ouroboros/events/` | Durable event types and event factories |
+| `src/ouroboros/persistence/` | EventStore, checkpoints, artifacts and dashboard picker indexes |
+| `src/ouroboros/project_map.py` | Read-only cross-run Project Map projection |
+| `src/ouroboros/observability/` | Logging, drift and retrospective reports |
 
-| File | Purpose |
-|------|---------|
-| `app.py` | `OuroborosTUI` main app -- screen management, event subscription |
-| `events.py` | `TUIState` dataclass, message types, `create_message_from_event()` |
-| `screens/dashboard_v3.py` | Active dashboard: Double Diamond bar + AC tree + node detail |
-| `screens/logs.py` | Log viewer with level filtering |
-| `screens/execution.py` | Execution timeline and details |
-| `screens/debug.py` | State inspector and raw events |
-| `widgets/` | Reusable widgets: `ac_tree`, `drift_meter`, `cost_tracker`, etc. |
+### Presentation and Configuration
 
-**State flow**: `EventStore` --> `app._subscribe_to_events()` (0.5s poll) --> `create_message_from_event()` --> `post_message()` --> screen handlers
+| Package | Owns |
+|---|---|
+| `src/ouroboros/tui/` | Textual monitoring UI |
+| `src/ouroboros/dashboard/`, `src/ouroboros/dashboard_web/` | Event-folded boards and web presentation |
+| `src/ouroboros/config_tui/` | Interactive configuration UI |
+| `src/ouroboros/config/` | Config schema, loading, environment trust and precedence |
+| `src/ouroboros/plugin/` | UserLevel plugin manifests, permissions, hooks and dispatch |
 
-**Key rule**: `app.py` owns `_state.ac_tree` as the single source of truth. Dashboard renders from app state.
+## Where to Start
 
-### providers/ -- LLM Abstraction
+| Change | Read first | Verify first |
+|---|---|---|
+| Interview or Seed semantics | `bigbang/`, `core/seed.py`, owning RFC | focused Big Bang/core tests and one authoring surface |
+| Runtime backend | backend capability registry, runtime factory, sibling runtime | runtime factory, adapter contract, setup and native smoke |
+| LLM backend | provider factory and sibling adapter | provider contract and response-format tests |
+| AC execution or resume | runner, parallel executor, execution authority | exact changed path plus cold replay and terminal tests |
+| Final acceptance | orchestrator verify-gate outcomes and the EventStore acceptance fence | negative corpus proving false evidence is rejected |
+| Harness projection or deliver analysis | harness projection/deliver modules and their owning RFC | offline/observe-only evidence and projection tests |
+| Persistence | event/artifact schema and EventStore | idempotency, interruption, cold replay, malformed state |
+| CLI or MCP | canonical command/tool registry | real CLI/tool invocation, not only helper tests |
+| Dashboard or TUI | authoritative event and shared reducer | reducer test plus rendered/manual surface check |
+| Plugin behavior | manifest schema, firewall, hook owner | permission and end-to-end plugin tests |
 
-| File | Purpose |
-|------|---------|
-| `base.py` | `LLMAdapter` protocol, `CompletionConfig`, `Message` |
-| `litellm_adapter.py` | LiteLLM implementation (100+ model support) |
+## Change Rules
 
-### persistence/ -- Event Sourcing
+1. Read the owning issue or RFC before changing a boundary.
+2. Keep public behavior in one owner; remove duplicate interpretation instead of
+   synchronizing copies.
+3. Do not let a runtime adapter, dashboard, or worker self-report mint final
+   acceptance; preserve the EventStore acceptance fence.
+4. Persist enough identity to resume or fail closed; never reconstruct authority
+   from labels, paths, or prose.
+5. Add a regression at the boundary that failed, then exercise the real user
+   surface described in [The Development Loop](./developing.md).
 
-| File | Purpose |
-|------|---------|
-| `event_store.py` | `EventStore` -- append-only event storage (SQLite) |
-| `checkpoint.py` | Checkpoint/recovery for session resumption |
-| `schema.py` | Database schema definitions |
-
-## How the Six Phases Connect
-
-### Phase 0 -> Phase 2: Seed drives execution
-
-The `Seed` object flows from Big Bang interview through PAL Router to Double Diamond execution. The `seed.task_type` field selects the `ExecutionStrategy`, and `seed.acceptance_criteria` become the execution tree nodes.
-
-### Phase 2 <-> Phase 4: Execution produces artifacts for evaluation
-
-Each AC execution produces an artifact (code or document). The `EvaluationContext` wraps this artifact with the AC text, goal, and constraints for the pipeline to evaluate.
-
-### Phase 4 -> Phase 3: Evaluation failure triggers resilience
-
-When evaluation fails repeatedly, the resilience system detects stagnation patterns and rotates to a different persona (Hacker, Researcher, Simplifier, Architect).
-
-### Orchestrator ties it together
-
-`OrchestratorRunner` in `orchestrator/runner.py` is the main loop that:
-1. Loads the Seed
-2. Gets the ExecutionStrategy for `seed.task_type`
-3. Iterates over ACs (parallel or sequential)
-4. Calls the configured runtime backend (e.g., `ClaudeAgentAdapter`, `CodexCLIRuntime`)
-5. Collects results and emits events to `EventStore`
-6. TUI picks up events via polling
-
-## Adding a New Feature: Checklist
-
-1. **Identify the module**: Use the module guide above
-2. **Read existing code**: Understand the patterns before changing
-3. **Add types first**: Define data models in the appropriate `models.py`
-4. **Implement logic**: Follow existing patterns (Result type, frozen dataclasses)
-5. **Write tests**: Unit tests in `tests/unit/<module>/`
-6. **Update exports**: Add to `__init__.py` and `__all__`
-7. **Run full suite**: `uv run pytest tests/unit/ -v`
+The repository is large and active. File counts and package counts are omitted
+deliberately because they become stale without helping a contributor choose an
+owner.
