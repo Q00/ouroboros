@@ -749,9 +749,12 @@ def backend(
 
         cli_path = get_pi_cli_path()
     elif new_backend == "omp":
-        from ouroboros.config import get_omp_cli_path
+        from ouroboros.cli.commands.setup import _detect_omp_runtime
 
-        cli_path = get_omp_cli_path()
+        # Canonical OMP resolution (validated env/config candidate, then
+        # PATH): a stale configured path must not shadow a valid PATH
+        # installation (PR #2299 review round 4).
+        cli_path = _detect_omp_runtime()
     elif new_backend == "antigravity":
         from ouroboros.config import get_antigravity_cli_path
 

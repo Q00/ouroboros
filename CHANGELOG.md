@@ -48,7 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   map to OMP's vocabulary (`Glob`/`LS` → `glob`; OMP has no `ls` built-in)
 - **setup/installer**: `ouroboros setup --runtime omp` wires the managed OMP bridge
   (`~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`, timeout env
-  `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`), `ouroboros config backend omp` switches to it, and
+  `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`), `ouroboros config backend omp` switches to it using
+  the canonical validated `OUROBOROS_OMP_CLI_PATH` > `orchestrator.omp_cli_path` > `PATH`
+  precedence (a stale configured path falls back to a valid PATH installation), and
   `scripts/install.sh` adds OMP to its runtime menu; bridge publication and the config
   commit run as one setup transaction (config serialized and written atomically, both
   effects rolled back on failure), and spawned-CLI discovery env `PI_CODING_AGENT_DIR`
