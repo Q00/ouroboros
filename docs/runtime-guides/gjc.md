@@ -2,11 +2,11 @@
 
 Run Ouroboros workflow execution on top of the locally installed `gjc` CLI.
 
-The GJC runtime is a subprocess adapter. Ouroboros owns the workflow engine,
+The GJC runtime is an SDK-backed adapter. Ouroboros owns the workflow engine,
 Seed decomposition, checkpointing, evaluation handoff, and `ooo` skill
-dispatch. For each runtime task it starts a GJC RPC session, sends the
-normalized agent-runtime frames, and converts recognized GJC agent events into
-Ouroboros `AgentMessage` values.
+dispatch. For each runtime task it starts GJC's Coordinator MCP server, creates
+a Broker-managed SDK session, and maps durable GJC turn state into Ouroboros
+`AgentMessage` values.
 
 ## Mental Model
 
@@ -20,13 +20,13 @@ User / CLI / MCP
 Ouroboros runtime adapter
       |
       | 2a. ooo shortcut? handle inside Ouroboros before GJC starts
-      | 2b. normal task? spawn GJC RPC mode
+      | 2b. normal task? create a GJC SDK session
       v
-gjc --mode rpc
+gjc mcp-serve coordinator
       |
-      | 3. GJC loads its own settings, extensions, tools, model auth
+      | 3. Broker -> SessionRouter -> AgentSession
       v
-GJC agent events
+GJC durable turns and questions
 ```
 
 So "GJC is an Ouroboros runtime" means step 2b exists and is selectable. It
@@ -83,30 +83,26 @@ ouroboros run workflow --runtime gjc seed.yaml
 For a normal execution task, Ouroboros launches:
 
 ```text
-gjc --mode rpc
+gjc mcp-serve coordinator
 ```
 
-and then speaks the GJC RPC protocol for the task:
+It then uses GJC's supported Coordinator MCP contract:
 
-1. Wait for the initial `ready` frame.
-2. Optionally send `set_model(provider/modelId)` when the caller provided a
-   model override.
-3. Send the composed task `prompt`.
-4. Treat the prompt acknowledgement as delivery confirmation only. A prompt ack
-   is **not** task completion.
-5. Stream recognized agent events until `agent_end`.
+1. `gjc_coordinator_start_session` creates a Broker-managed SDK session and
+   submits the initial prompt with a caller-owned idempotency key.
+2. `gjc_coordinator_await_turn` reads durable turn state until completion,
+   failure, cancellation, or a structured question.
+3. `gjc_coordinator_read_tail` recovers bounded last-assistant output when the
+   terminal turn does not inline its final response.
+4. `gjc_coordinator_list_questions` and
+   `gjc_coordinator_submit_question_answer` preserve question correlation across
+   an Ouroboros `RuntimeHandle` resume.
+5. `gjc_coordinator_stop_session` closes completed ephemeral sessions through
+   SDK lifecycle authority.
 
-Ouroboros recognizes GJC agent events that map to `AgentMessage` output,
-including assistant text deltas/final text, runtime handles, and terminal agent
-state. The adapter fails closed on frames that would require host-side UI or
-capabilities Ouroboros does not provide. Unsupported `workflow_gate`,
-`host_tool`, `host_uri`, and `extension_ui` frames are surfaced as runtime
-errors instead of being ignored or treated as model text.
-
-GJC may report provider/model failures as assistant messages with
-`stopReason: "error"` while the process still exits with status `0`.
-Ouroboros treats those assistant stop reasons as runtime errors instead of
-relying only on the process return code.
+Ouroboros never reads GJC endpoint records or credentials and never opens a
+private SDK WebSocket. GJC's Broker and `SessionRouter` remain the sole owners
+of endpoint discovery, authentication, generation fencing, and turn delivery.
 
 ## What `ooo` Means With GJC
 
@@ -182,9 +178,9 @@ This is separate from `orchestrator.runtime_backend`.
 The GJC LLM adapter supports structured `response_format` requests through soft
 enforcement: Ouroboros injects a strict JSON/schema instruction, extracts the
 JSON payload from GJC's response, and validates `json_schema` payloads before
-returning them. GJC RPC mode does not currently provide a hard tool-envelope or
-provider-native schema enforcement flag, so malformed structured responses are
-retried and then surfaced as provider errors.
+returning them. The GJC SDK surface does not currently provide a hard
+provider-native schema envelope, so malformed structured responses are retried
+and then surfaced as provider errors.
 
 Use GJC as the runtime backend when you want GJC to execute Seed tasks; use
 `llm.backend: gjc` when the authoring/evaluation flow can accept adapter-level
@@ -194,30 +190,27 @@ JSON extraction and validation rather than provider-native schema enforcement.
 
 | Capability | Status |
 |------------|--------|
-| Headless execution | Yes, through `gjc --mode rpc` |
-| Skill shortcut dispatch | Yes, before spawning GJC |
-| Native targeted resume | No in v1; `targeted_resume=False` and checkpointing stays at the Ouroboros lineage layer |
-| Structured event stream | Yes, RPC agent events parsed by the GJC runtime |
-| Native permission override | No; RPC mode is headless but exposes no per-invocation approval flag, so `permission_mode_support=ignored` |
+| Headless execution | Yes, through Coordinator MCP and Broker-managed SDK sessions |
+| Skill shortcut dispatch | Yes, before starting a GJC session |
+| Native targeted resume | Yes, through SDK session IDs and question-bound runtime handles |
+| Structured event/state | Yes, durable Coordinator turn and question projections |
+| Native permission override | No; the SDK session keeps GJC's configured permission policy, so `permission_mode_support=ignored` |
 | Structured schema responses as LLM backend | Soft-enforced and validated |
-| Hard tool/schema envelope | No in v1 |
-| GJC extension loading | GJC-owned; setup installs the bridge into `<agent-dir>/extensions` |
-| Interactive GJC `ooo` frontdoor | Yes, via managed setup-installed extension |
+| Hard tool/schema envelope | No |
+| GJC extension loading | GJC-owned; Ouroboros setup installs the bridge artifact, but activation depends on the GJC extension policy |
+| Interactive GJC `ooo` frontdoor | Via GJC's configured MCP/skill path; the optional filesystem extension is not part of the SDK backend contract |
 
-## v1 Limitations
+## Limitations
 
-- No native session continuity or targeted resume is declared in v1. Ouroboros
-  can checkpoint at the workflow/event-store layer, but the GJC runtime does not
-  advertise native targeted resume.
-- No native approval-mode switch is exposed by GJC RPC mode. Runner-driven
-  execution records the forced permission request for audit continuity, while
-  the runtime capability truthfully reports that the CLI does not enforce it.
-- No hard tool envelope or provider-native JSON schema enforcement is exposed to
-  the LLM adapter. Structured output is soft-enforced by prompt instruction,
-  extraction, validation, and retry.
-- Unsupported host-interaction frames fail closed. `workflow_gate`, `host_tool`,
-  `host_uri`, and `extension_ui` frames are errors until Ouroboros implements an
-  explicit host contract for them.
+- GJC owns the active tool and permission policy. Ouroboros tool allow-lists and
+  permission-mode overrides are reported as ignored rather than silently
+  claiming enforcement.
+- LLM structured output remains prompt-enforced and validated after the turn;
+  GJC does not expose a provider-native output-schema envelope through this SDK
+  route.
+- Coordinator-created sessions and turn journals are durable. Cleanup failures
+  do not replace a completed result; the next Coordinator startup can reconcile
+  retained state through GJC's own lifecycle authority.
 
 ## Troubleshooting
 

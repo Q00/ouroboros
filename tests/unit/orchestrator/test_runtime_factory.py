@@ -600,8 +600,8 @@ def test_create_gjc_runtime_uses_configured_cli_path() -> None:
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "gjc"
 
 
-def test_create_gjc_runtime_accepts_stream_timeout_overrides() -> None:
-    """GJC RPC runtime can disable quiet-stream guards explicitly."""
+def test_create_gjc_runtime_accepts_sdk_timeout_overrides() -> None:
+    """GJC SDK runtime maps explicit stream budgets onto its turn timeout."""
     with patch(
         "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
         return_value=object(),
@@ -610,13 +610,12 @@ def test_create_gjc_runtime_accepts_stream_timeout_overrides() -> None:
             backend="gjc",
             cli_path="/tmp/gjc",
             cwd="/tmp/project",
-            startup_output_timeout_seconds=0,
-            stdout_idle_timeout_seconds=0,
+            startup_output_timeout_seconds=30,
+            stdout_idle_timeout_seconds=45,
         )
 
     assert isinstance(runtime, GjcRuntime)
-    assert runtime._startup_output_timeout_seconds is None
-    assert runtime._stdout_idle_timeout_seconds is None
+    assert runtime._timeout == 45
 
 
 def test_create_zcode_runtime_accepts_stream_timeout_overrides() -> None:
