@@ -809,6 +809,53 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                     ):
                         return []
 
+        # Validate tool results in the complete cumulative history before
+        # selecting the current-turn suffix.  Otherwise malformed or
+        # unmatched results from an earlier turn can be hidden by the latest
+        # user boundary while later receipts are still promoted.
+        history_calls: dict[str, str] = {}
+        history_results: dict[str, tuple[str, bool, str]] = {}
+        for message in messages:
+            tool_calls = message.get("toolCalls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    call_id = call["id"]
+                    call_name = call["name"]
+                    call_input = json.dumps(
+                        call["input"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                    )
+                    signature = f"{call_name}\x00{call_input}"
+                    prior_call = history_calls.get(call_id)
+                    if prior_call is not None and prior_call != signature:
+                        return []
+                    history_calls[call_id] = signature
+            if message.get("role") != "tool":
+                continue
+            result_id = message.get("toolCallId")
+            result_name = message.get("toolName")
+            result_error = message.get("isError")
+            if (
+                not isinstance(result_id, str)
+                or not result_id.strip()
+                or not isinstance(result_name, str)
+                or not result_name.strip()
+                or not isinstance(result_error, bool)
+                or result_id not in history_calls
+            ):
+                return []
+            expected_name = history_calls[result_id].split("\x00", 1)[0]
+            if result_name != expected_name:
+                return []
+            history_result_signature = (
+                result_name,
+                result_error,
+                str(message.get("content") or ""),
+            )
+            prior_result = history_results.get(result_id)
+            if prior_result is not None and prior_result != history_result_signature:
+                return []
+            history_results[result_id] = history_result_signature
+
         # ``messagesKind=full`` snapshots contain the whole resumed session,
         # including tool receipts from older turns.  A terminal summary is
         # bound to one turn, so accept only the suffix after that turn's final

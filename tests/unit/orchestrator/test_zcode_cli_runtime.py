@@ -508,6 +508,40 @@ def test_rollout_malformed_tool_calls_in_prior_turn_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+@pytest.mark.parametrize("mutation", ["unmatched", "missing_error"])
+def test_rollout_invalid_tool_result_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    prior_result = {
+        "role": "tool",
+        "toolCallId": "prior-call",
+        "toolName": "Bash",
+        "content": "passed",
+        "isError": False,
+    }
+    if mutation == "unmatched":
+        prior_result["toolCallId"] = "missing-call"
+    else:
+        prior_result.pop("isError")
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "prior-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        prior_result,
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 @pytest.mark.parametrize("variant", ["trace", "turn"])
 def test_rollout_identifier_mismatch_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
