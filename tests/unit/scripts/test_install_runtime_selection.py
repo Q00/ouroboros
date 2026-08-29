@@ -1501,7 +1501,12 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties"}
         events[payload["event"]] = payload
 
-    assert set(events) == {"install_completed"}
+    assert set(events) == {"install_started", "install_completed"}
+    assert set(events["install_started"]["properties"].keys()) == {
+        "os",
+        "version",
+        "ref",
+    }
     assert set(events["install_completed"]["properties"].keys()) == {
         "os",
         "runtime",

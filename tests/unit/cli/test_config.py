@@ -508,6 +508,18 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/usr/bin/gjc")
 
+    def test_switch_to_gjc_fails_when_setup_returns_false(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_gjc_cli_path", return_value=None),
+            patch("shutil.which", return_value="/usr/bin/gjc"),
+            patch("ouroboros.cli.commands.setup._setup_gjc", return_value=False),
+        ):
+            result = runner.invoke(app, ["backend", "gjc"])
+
+        assert result.exit_code == 1
+        assert "Could not switch backend to gjc" in result.output
+
     def test_switch_to_gjc_honors_configured_cli_path(self, config_dir: Path) -> None:
         """config backend gjc should honor explicit env/config path helpers."""
         with (
