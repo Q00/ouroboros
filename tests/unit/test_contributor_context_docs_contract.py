@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 
@@ -21,6 +22,11 @@ STALE_ROOT_CONTEXT = (
     REPO_ROOT / "Code-Review-Claude.md",
     REPO_ROOT / "Code-Review-Codex.md",
     REPO_ROOT / "project-context.md",
+)
+PARITY_COMMAND_CONSUMERS = (
+    REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / "CLAUDE.md",
+    REPO_ROOT / "docs" / "contributing" / "ci-gates.md",
 )
 REMOVED_PACKAGE_MARKERS = (
     "routing/",
@@ -80,6 +86,21 @@ def test_obsolete_root_policy_artifacts_are_absent() -> None:
     present = [str(path.relative_to(REPO_ROOT)) for path in STALE_ROOT_CONTEXT if path.exists()]
 
     assert not present, f"Obsolete root context still looks authoritative: {present}"
+
+
+def test_pytest_session_clears_inherited_codex_home() -> None:
+    assert "CODEX_HOME" not in os.environ
+
+
+def test_pr_parity_commands_have_one_executable_owner() -> None:
+    stale_command = "uv run ruff format src/ tests/ && uv run ruff check src/ tests/ --fix"
+    duplicates = [
+        str(path.relative_to(REPO_ROOT))
+        for path in PARITY_COMMAND_CONSUMERS
+        if stale_command in path.read_text(encoding="utf-8")
+    ]
+
+    assert not duplicates, f"Mutating PR-parity command is duplicated in: {duplicates}"
 
 
 def test_testing_guide_names_the_real_isolation_and_ci_boundaries() -> None:

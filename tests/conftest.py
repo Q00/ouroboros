@@ -54,6 +54,11 @@ _SESSION_HOME = Path(tempfile.mkdtemp(prefix="ouroboros-test-home-"))
 atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
 os.environ.setdefault("UV_CACHE_DIR", str(_REAL_HOME / ".cache" / "uv"))
 os.environ["HOME"] = str(_SESSION_HOME)
+# Codex resolves its config and artifact roots from CODEX_HOME before HOME.
+# A parent Codex/Codex-App session therefore bypasses the HOME chokepoint. Clear
+# that inherited override before collection; tests that exercise an explicit
+# Codex home set it themselves after the autouse fixtures run.
+os.environ.pop("CODEX_HOME", None)
 # Exposed so tests can assert import-time constants were captured under the
 # isolated home rather than the developer's real ``~``.
 os.environ["_OUROBOROS_TEST_SESSION_HOME"] = str(_SESSION_HOME)

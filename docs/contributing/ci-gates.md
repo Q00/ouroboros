@@ -66,14 +66,13 @@ defect, not as noise.
 
 ### Reproduce the required checks locally
 
-```bash
-uv run ruff format src/ tests/ && uv run ruff check src/ tests/ --fix
-uv run mypy src/ouroboros
-uv run pytest
-```
+Run the non-mutating command block in
+[Testing Guide](./testing-guide.md#before-opening-a-pr). This page owns gate
+meaning and applicability; the Testing Guide owns the executable local command
+set.
 
-Run `ruff format` **before** pushing, not after CI complains: the format check
-is a required gate and a formatting-only failure costs a full CI round trip.
+Run the documented format check before pushing. A formatting-only failure costs
+a full CI round trip.
 
 > **Local test isolation.** `tests/conftest.py` now redirects `$HOME` before
 > collection and gives each test and xdist worker isolated state. Unit MCP tests

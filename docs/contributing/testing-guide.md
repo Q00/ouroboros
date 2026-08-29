@@ -22,14 +22,15 @@ lives under `tests/integration/mcp/`.
 
 ## Hermetic Home and Process Isolation
 
-`tests/conftest.py` redirects `$HOME` before collection. This matters because
-config, default EventStore paths, logs, worktrees, module-level constants and
-spawned subprocesses can otherwise reach the developer's real
-`~/.ouroboros` state.
+`tests/conftest.py` redirects `$HOME` and clears an inherited `CODEX_HOME`
+before collection. This matters because config, default EventStore paths, logs,
+worktrees, Codex setup artifacts, module-level constants and spawned
+subprocesses can otherwise reach the developer's real state.
 
 Isolation has two levels:
 
-1. A session-wide temporary home is installed before test modules import.
+1. A session-wide temporary home is installed before test modules import, and
+   Codex falls back to that home unless a test explicitly sets `CODEX_HOME`.
 2. An autouse fixture gives each test a separate home.
 
 Additional session fixtures give each xdist worker private heartbeat and

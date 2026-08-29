@@ -99,7 +99,7 @@ UserLevel plugins are domain-specific extensions dispatched through
 `src/ouroboros/plugin/`; product-neutral `ooo auto` code must not absorb those
 workflows.
 
-### 6. Submit PR
+### 5. Submit PR
 
 `main` is protected — direct pushes are rejected for everyone, owner included.
 Every change lands through a squash-merged PR.

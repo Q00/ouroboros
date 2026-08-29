@@ -77,15 +77,10 @@ have no effect on a client until you repoint it at local source. See
 including the owner. Every change lands through a squash-merged PR, so a
 release tag must be created on the merged `main` commit — not before.
 
-Four checks are required to merge — reproduce them locally first:
-
-```bash
-uv run ruff format src/ tests/ && uv run ruff check src/ tests/ --fix
-uv run mypy src/ouroboros
-uv run pytest
-```
-
-(`Ruff Lint`, `MyPy Type Check`, `Test Python 3.12`, `Bridge TypeScript`.)
+The required local command set has one canonical home:
+[docs/contributing/testing-guide.md](docs/contributing/testing-guide.md#before-opening-a-pr).
+It covers `Ruff Lint`, `MyPy Type Check`, `Test Python 3.12`, and
+`Bridge TypeScript` without mutating the tree.
 
 Other gates fire conditionally and are easy to trip blind:
 
