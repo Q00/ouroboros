@@ -67,6 +67,11 @@ _own_pid_payload: str | None = None
 # Shutdown pacing: how long to wait for the serve loop / background jobs to
 # unwind before escalating (closing fd 0) or proceeding with store cleanup.
 _SHUTDOWN_DRAIN_GRACE_SECONDS = 5.0
+# How long the serve task must survive (or finish cleanly) before the daily
+# `mcp_serve_started` attachment row is recorded — long enough for a network
+# transport's bind/listen failure to surface, short enough to be irrelevant
+# for a once-per-day metric.
+_ATTACH_CONFIRM_SECONDS = 3.0
 _JOB_DRAIN_GRACE_SECONDS = 5.0
 
 # Idle WAL relief: long-lived idle servers pin the shared SQLite WAL (passive
@@ -920,10 +925,31 @@ async def _run_mcp_server(
             _idle_wal_checkpoint(), name="ouroboros-mcp-idle-checkpoint"
         )
 
-        await asyncio.wait(
+        # One daily-deduplicated "MCP attached" row per user — the denominator
+        # of the attached → used activation funnel. The row must reflect a
+        # server that actually reached its serve loop: a transport that fails
+        # to bind/listen (e.g. "address already in use") completes serve_task
+        # immediately with an exception and must not count. Wait out a short
+        # confirmation window; a serve task still running afterwards — or one
+        # that already finished cleanly (a real, short session) — is an
+        # authoritative attachment.
+        done, _pending = await asyncio.wait(
             {serve_task, stop_task},
+            timeout=_ATTACH_CONFIRM_SECONDS,
             return_when=asyncio.FIRST_COMPLETED,
         )
+        serve_failed_before_ready = (
+            serve_task.done() and not serve_task.cancelled() and serve_task.exception() is not None
+        )
+        if not serve_failed_before_ready:
+            from ouroboros import telemetry as usage_telemetry
+
+            usage_telemetry.capture_mcp_serve_started(transport)
+        if not done:
+            await asyncio.wait(
+                {serve_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
     finally:
         # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
         # EventStore.close() always gets to collapse the WAL.

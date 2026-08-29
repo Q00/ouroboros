@@ -2398,9 +2398,14 @@ class StartExecuteSeedHandler:
         return MCPToolDefinition(
             name="ouroboros_start_execute_seed",
             description=(
-                "Start a seed execution in the background and return a job ID immediately. "
-                "Use ouroboros_ac_tree_hud for live progress snapshots and "
+                "Execute an existing Seed specification. "
+                "Use when: a validated Seed (file path or YAML) already exists. "
+                "Result: a background execution returning a job ID immediately; "
+                "use ouroboros_ac_tree_hud for live progress snapshots and "
                 "ouroboros_job_result for terminal output. "
+                "Do not use when: the request is raw or ambiguous natural "
+                "language with no Seed (use ouroboros_interview or "
+                "ouroboros_start_auto instead). "
                 "In plugin mode, execution is delegated to an OpenCode Task pane and "
                 "job_id is None — results appear in the Task pane instead of being "
                 "pollable via job_status/job_result. "

@@ -3664,7 +3664,6 @@ _GJC_OOO_BRIDGE_FILENAME = "index.ts"
 
 
 def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed GJC bridge should use for this install."""
     if _is_source_tree_ouroboros_build():
         return sys.executable, ["-m", "ouroboros"]
     try:
@@ -3677,7 +3676,6 @@ def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
 
 
 def _gjc_bridge_source_text() -> str | None:
-    """Return the packaged managed GJC bridge extension source."""
     from importlib import resources
 
     try:
@@ -3705,9 +3703,6 @@ def _gjc_bridge_source_text() -> str | None:
 
 
 def _install_gjc_ooo_bridge() -> bool:
-    """Install the managed GJC extension that routes interactive ``ooo`` input."""
-    import hashlib
-
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
     dest = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
@@ -3716,68 +3711,76 @@ def _install_gjc_ooo_bridge() -> bool:
         print_warning("Could not locate packaged GJC ooo bridge source.")
         return False
 
-    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    existing_hash: str | None = None
-    if dest.exists():
-        try:
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-        except OSError:
-            existing_hash = None
-
-    if existing_hash == new_hash:
+    expected = content.encode("utf-8")
+    try:
+        dest_snapshot = _snapshot_path(dest, follow_links=False)
+    except OSError as exc:
+        print_warning(f"Could not inspect existing GJC ooo bridge at {dest}: {exc}")
+        return False
+    if dest_snapshot.kind == "file" and dest_snapshot.contents == expected:
         print_info(f"GJC ooo bridge already up to date: {dest}")
         return True
+    if dest_snapshot.kind != "missing":
+        print_warning(f"Refusing to overwrite existing GJC ooo bridge: {dest}")
+        return False
 
     try:
-        _atomic_write_text(dest, content)
+        _atomic_write_text(dest, content, expected_current=dest_snapshot)
     except OSError as exc:
         print_warning(f"Could not install GJC ooo bridge at {dest}: {exc}")
         return False
 
-    print_success(
-        f"{'Updated' if existing_hash is not None else 'Installed'} GJC ooo bridge: {dest}"
-    )
+    print_success(f"Installed GJC ooo bridge: {dest}")
     print_info("Restart GJC or run /reload in an existing GJC session to load the bridge.")
     return True
 
 
-def _setup_gjc(gjc_path: str) -> None:
-    """Configure Ouroboros for the GJC CLI runtime."""
+def _setup_gjc(gjc_path: str) -> bool:
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-
+    config_snapshot = _snapshot_path(config_path, follow_links=False)
+    config_dict: object = {}
+    if config_snapshot.kind == "file":
+        config_dict = yaml.safe_load((config_snapshot.contents or b"").decode("utf-8")) or {}
+    elif config_snapshot.kind != "missing":
+        print_error("~/.ouroboros/config.yaml is not a regular file — aborting GJC setup.")
+        return False
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-        return
-
-    orch = config_dict.get("orchestrator")
-    if not isinstance(orch, dict):
-        orch = {}
-        config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "gjc"
-    orch["gjc_cli_path"] = gjc_path
-
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "gjc"
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-
+        return False
+    if not _install_gjc_ooo_bridge():
+        return False
+    try:
+        if config_snapshot.kind == "missing":
+            create_default_config(config_dir)
+            config_snapshot = _snapshot_path(config_path, follow_links=False)
+            config_dict = yaml.safe_load((config_snapshot.contents or b"").decode("utf-8")) or {}
+            if not isinstance(config_dict, dict):
+                raise ConfigError("Generated config.yaml top-level is not a mapping")
+        orch = config_dict.get("orchestrator")
+        if not isinstance(orch, dict):
+            orch = {}
+            config_dict["orchestrator"] = orch
+        orch["runtime_backend"] = "gjc"
+        orch["gjc_cli_path"] = gjc_path
+        llm = config_dict.get("llm")
+        if not isinstance(llm, dict):
+            llm = {}
+            config_dict["llm"] = llm
+        llm["backend"] = "gjc"
+        _atomic_write_text(
+            config_path,
+            yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+            expected_current=config_snapshot,
+        )
+    except (OSError, ConfigError) as exc:
+        print_error(f"Could not save GJC configuration to {config_path}: {exc}")
+        return False
     print_success(f"Configured GJC runtime (CLI: {gjc_path})")
     print_info(f"Config saved to: {config_path}")
-    _install_runtime_instruction_artifact("gjc")
-    _install_gjc_ooo_bridge()
+    return True
 
 
 def _setup_gemini(gemini_path: str) -> None:
@@ -5011,7 +5014,8 @@ def setup(
                 "Install it, set OUROBOROS_GJC_CLI_PATH, or configure orchestrator.gjc_cli_path."
             )
             raise typer.Exit(1)
-        _setup_gjc(gjc_path)
+        if not _setup_gjc(gjc_path):
+            raise typer.Exit(1)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:

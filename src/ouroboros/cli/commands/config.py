@@ -854,7 +854,8 @@ def backend(
         elif new_backend == "gemini":
             _setup_gemini(cli_path)
         elif new_backend == "gjc":
-            _setup_gjc(cli_path)
+            if _setup_gjc(cli_path) is False:
+                setup_failed = True
         elif new_backend == "goose":
             _setup_goose(cli_path)
         elif new_backend == "pi":
