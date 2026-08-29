@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ouroboros.config import get_omp_cli_path
+from ouroboros.config import resolve_omp_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
@@ -65,8 +65,14 @@ class OmpLLMAdapter(CodexCliLLMAdapter):
         self._last_omp_event_kind: str | None = None
 
     def _get_configured_cli_path(self) -> str | None:
-        """Resolve OMP CLI path from config helpers."""
-        return get_omp_cli_path()
+        """Resolve the OMP CLI through the canonical validated resolver.
+
+        Unlike the sibling Pi/GJC hooks (raw configured candidate), OMP
+        resolves through :func:`ouroboros.config.resolve_omp_cli_path` so a
+        stale configured path falls back to a runnable PATH installation
+        instead of leaking into subprocess execution (PR #2299 round 5).
+        """
+        return resolve_omp_cli_path()
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """OMP JSON mode has no separate permission-mode flag surface here."""

@@ -228,11 +228,11 @@ def _create_pi_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 
 
 def _create_omp_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
-    from ouroboros.config import get_omp_cli_path
+    from ouroboros.config import resolve_omp_cli_path
     from ouroboros.orchestrator.omp_runtime import OmpRuntime
 
     return OmpRuntime(
-        cli_path=request.cli_path or get_omp_cli_path(),
+        cli_path=request.cli_path or resolve_omp_cli_path(),
         startup_output_timeout_seconds=request.startup_output_timeout_seconds,
         stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
         **_runtime_kwargs(request),

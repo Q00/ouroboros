@@ -567,7 +567,7 @@ class TestConfigBackend:
 
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
-            patch("ouroboros.config.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
+            patch("ouroboros.config._omp_cli.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
             patch("shutil.which", side_effect=fake_which),
             patch("ouroboros.cli.commands.setup._setup_omp") as mock_setup,
         ):
@@ -580,7 +580,7 @@ class TestConfigBackend:
         """config backend omp should surface omp-specific guidance when no CLI is found."""
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
-            patch("ouroboros.config.get_omp_cli_path", return_value=None),
+            patch("ouroboros.config._omp_cli.get_omp_cli_path", return_value=None),
             patch("shutil.which", return_value=None),
         ):
             result = runner.invoke(app, ["backend", "omp"])
@@ -596,7 +596,7 @@ class TestConfigBackend:
 
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
-            patch("ouroboros.config.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
+            patch("ouroboros.config._omp_cli.get_omp_cli_path", return_value="/opt/omp/bin/omp"),
             patch("shutil.which", side_effect=fake_which),
             patch("ouroboros.cli.commands.setup._setup_omp", return_value=False),
         ):
@@ -615,7 +615,9 @@ class TestConfigBackend:
 
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
-            patch("ouroboros.config.get_omp_cli_path", return_value="/missing/configured/omp"),
+            patch(
+                "ouroboros.config._omp_cli.get_omp_cli_path", return_value="/missing/configured/omp"
+            ),
             patch("shutil.which", side_effect=fake_which),
             patch("ouroboros.cli.commands.setup._setup_omp") as mock_setup,
         ):

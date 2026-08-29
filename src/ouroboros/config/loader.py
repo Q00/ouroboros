@@ -1415,11 +1415,11 @@ def get_pi_cli_path() -> str | None:
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-export for the OMP CLI-path getter (module-size split)."""
-    if name == "get_omp_cli_path":
-        from ouroboros.config._omp_cli import get_omp_cli_path
+    """Lazy re-exports for the OMP CLI-path helpers (module-size split)."""
+    if name in ("get_omp_cli_path", "resolve_omp_cli_path"):
+        from ouroboros.config import _omp_cli
 
-        return get_omp_cli_path
+        return getattr(_omp_cli, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

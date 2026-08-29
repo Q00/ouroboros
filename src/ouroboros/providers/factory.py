@@ -20,11 +20,11 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
-    get_omp_cli_path,
     get_ourocode_cli_path,
     get_pi_cli_path,
     get_runtime_profile,
     get_zcode_cli_path,
+    resolve_omp_cli_path,
 )
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -261,7 +261,7 @@ def _create_pi_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
 
 def _create_omp_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     return OmpLLMAdapter(
-        cli_path=request.cli_path or get_omp_cli_path(),
+        cli_path=request.cli_path or resolve_omp_cli_path(),
         cwd=request.cwd,
         permission_mode=request.permission_mode,
         allowed_tools=request.allowed_tools,

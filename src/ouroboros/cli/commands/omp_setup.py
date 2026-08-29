@@ -9,7 +9,6 @@ historic underscore names.
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 import yaml
 
@@ -21,14 +20,15 @@ from ouroboros.cli.formatters.panels import print_error, print_info, print_succe
 
 
 def detect_omp_runtime() -> str | None:
-    """Resolve the omp CLI: explicit env/config path first, then PATH."""
-    from ouroboros.config import get_omp_cli_path
+    """Resolve the omp CLI: explicit env/config path first, then PATH.
 
-    try:
-        omp_path = get_omp_cli_path()
-    except Exception:
-        omp_path = None
-    return (omp_path if omp_path and shutil.which(omp_path) else None) or shutil.which("omp")
+    Thin delegation to the canonical validated resolver owned by
+    :mod:`ouroboros.config._omp_cli` (setup, config switching, runtime
+    construction, and provider construction all share it).
+    """
+    from ouroboros.config import resolve_omp_cli_path
+
+    return resolve_omp_cli_path()
 
 
 def setup_omp(omp_path: str) -> bool:

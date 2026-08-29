@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 
 from ouroboros.config.loader import ConfigError, load_config
 
@@ -23,6 +24,10 @@ def get_omp_cli_path() -> str | None:
 
     Returns:
         Path to OMP CLI binary or None.
+
+    The result is the *configured* candidate only — it is not validated.
+    Construction paths must use :func:`resolve_omp_cli_path`, which owns
+    the validated env/config/PATH precedence.
     """
     env_path = os.environ.get("OUROBOROS_OMP_CLI_PATH", "").strip()
     if env_path:
@@ -38,4 +43,28 @@ def get_omp_cli_path() -> str | None:
     return None
 
 
-__all__ = ["get_omp_cli_path"]
+def resolve_omp_cli_path() -> str | None:
+    """Resolve a runnable OMP CLI path (canonical validated precedence).
+
+    This is the single owner of OMP executable selection; every OMP
+    construction path (setup detection, ``config backend omp``, the
+    orchestrator runtime factory, and the provider factory/adapter) resolves
+    through it (PR #2299 review rounds 4-5).
+
+    Priority:
+        1. OUROBOROS_OMP_CLI_PATH environment variable, when runnable
+        2. config.yaml orchestrator.omp_cli_path, when runnable
+        3. ``omp`` on PATH
+
+    A configured candidate that does not resolve is skipped in favor of the
+    next source, so a stale configured path never shadows a valid PATH
+    installation. Returns None when no source resolves.
+    """
+    try:
+        candidate = get_omp_cli_path()
+    except Exception:
+        candidate = None
+    return (candidate if candidate and shutil.which(candidate) else None) or shutil.which("omp")
+
+
+__all__ = ["get_omp_cli_path", "resolve_omp_cli_path"]

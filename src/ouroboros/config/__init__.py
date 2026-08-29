@@ -87,6 +87,7 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
+    resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
     ClarificationConfig,
@@ -190,6 +191,7 @@ __all__ = [
     "get_dsh_cli_path",
     "get_dsh_config_path",
     "get_omp_cli_path",
+    "resolve_omp_cli_path",
     "get_pi_cli_path",
     "get_zcode_cli_path",
     "get_qa_model",

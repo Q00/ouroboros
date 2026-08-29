@@ -2,6 +2,7 @@
 
 import builtins
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -168,6 +169,24 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="omp", cli_path="/tmp/omp")
         assert isinstance(adapter, OmpLLMAdapter)
         assert adapter._cli_path == "/tmp/omp"
+
+    def test_creates_omp_adapter_with_stale_config_fallback(self) -> None:
+        """PR #2299 round 5: stale configured omp path falls back to a valid PATH install."""
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/bin/omp" if name == "omp" else None
+
+        with (
+            patch(
+                "ouroboros.config._omp_cli.get_omp_cli_path",
+                return_value="/missing/configured/omp",
+            ),
+            patch("shutil.which", side_effect=fake_which),
+        ):
+            adapter = create_llm_adapter(backend="omp")
+
+        assert isinstance(adapter, OmpLLMAdapter)
+        assert adapter._cli_path == "/usr/bin/omp"
 
     def test_omp_interview_use_case_bypasses_permissions(self) -> None:
         """OMP interview driver mirrors Pi's text-only bypass permission convention."""
