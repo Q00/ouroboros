@@ -291,7 +291,10 @@ async def _prepare_conductor_successor_seed(
     raw_directive = (
         raw_argument_directive if raw_argument_directive is not None else raw_seed_directive
     )
-    if raw_directive is None:
+    if raw_directive is None or (isinstance(raw_directive, Mapping) and not raw_directive):
+        # Fresh generated Seeds carry an empty placeholder for the optional
+        # conductor directive. It is not a successor request and therefore must
+        # not demand successor-only authorization fields.
         return Result.ok(seed_content)
     if is_resume:
         return Result.err(
