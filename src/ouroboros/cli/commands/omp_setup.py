@@ -8,11 +8,15 @@ historic underscore names.
 
 from __future__ import annotations
 
+from pathlib import Path
 import shutil
 
 import yaml
 
-from ouroboros.cli.commands.ooo_bridges import install_omp_ooo_bridge
+from ouroboros.cli.commands.ooo_bridges import (
+    OMP_OOO_BRIDGE_FILENAME,
+    install_omp_ooo_bridge,
+)
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 
 
@@ -39,21 +43,27 @@ def setup_omp(omp_path: str) -> bool:
     are enforced cooperatively by that adapter.
 
     Returns True when the runtime configuration is committed and the managed
-    bridge is installed. Returns False — with no OMP configuration committed —
-    when the bridge write fails, so callers fail closed instead of leaving a
-    selection whose interactive ``ooo`` dispatch silently does not work
-    (PR #2299 review round 1).
+    bridge is installed. Returns False — with the pre-setup config, bridge,
+    and credentials state restored — when either durable effect fails, so
+    callers fail closed instead of leaving a selection whose interactive
+    ``ooo`` dispatch silently does not work or a truncated config file
+    (PR #2299 review rounds 1 and 3).
     """
+    # Call-scoped seam: setup.py owns the activation transaction and imports
+    # this module at import time, so a module-level import would be circular
+    # (same pattern as ooo_bridges' atomic-writer seam).
+    from ouroboros.cli.commands.setup import _commit_runtime_activation
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting OMP setup.")
@@ -66,15 +76,22 @@ def setup_omp(omp_path: str) -> bool:
     orch["runtime_backend"] = "omp"
     orch["omp_cli_path"] = omp_path
 
-    # Bridge activation comes before the config commit: a failed bridge write
-    # must not leave a persisted OMP selection without interactive `ooo`
-    # dispatch.
-    if not install_omp_ooo_bridge():
-        print_error("OMP ooo bridge installation failed — OMP configuration was not changed.")
+    # Serialize before any durable state changes, then publish bridge and
+    # config as one transaction: a failed bridge write must not leave a
+    # persisted OMP selection without interactive `ooo` dispatch, and a
+    # failed config write must not truncate the existing config or leave a
+    # newly installed/changed bridge behind.
+    runtime_content = yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+    if not _commit_runtime_activation(
+        runtime_name="OMP",
+        host_path=Path.home() / ".omp" / "agent" / "extensions" / OMP_OOO_BRIDGE_FILENAME,
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=runtime_content,
+        register_host=install_omp_ooo_bridge,
+        create_defaults=create_default_config,
+    ):
         return False
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured OMP runtime (CLI: {omp_path})")
     print_info(f"Config saved to: {config_path}")

@@ -11221,6 +11221,63 @@ class TestCopilotSetup:
         config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "omp"
 
+    def test_setup_omp_serialization_failure_leaves_no_partial_state(self, tmp_path: Path) -> None:
+        """PR #2299 round 3: serializer failure must not truncate config or install a bridge."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        original_bytes = yaml.safe_dump(
+            {"orchestrator": {"runtime_backend": "claude"}},
+            sort_keys=False,
+        ).encode("utf-8")
+        (config_dir / "config.yaml").write_bytes(original_bytes)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("yaml.dump", side_effect=yaml.YAMLError("simulated serializer failure")),
+        ):
+            with pytest.raises(yaml.YAMLError):
+                setup_cmd._setup_omp("/opt/bin/omp")
+
+        assert (config_dir / "config.yaml").read_bytes() == original_bytes
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "claude"
+        assert "omp_cli_path" not in config["orchestrator"]
+        assert not (tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts").exists()
+
+    def test_setup_omp_config_write_failure_rolls_back_bridge(self, tmp_path: Path) -> None:
+        """PR #2299 round 3: a failed config commit must not leave a new bridge installed."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        original_bytes = yaml.safe_dump(
+            {"orchestrator": {"runtime_backend": "claude"}},
+            sort_keys=False,
+        ).encode("utf-8")
+        (config_dir / "config.yaml").write_bytes(original_bytes)
+        bridge_path = tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
+
+        real_atomic_write = setup_cmd._atomic_write_text
+
+        def fail_config_writes(path: Path, content: str, **kwargs: object) -> object:
+            if path.name == "config.yaml":
+                raise OSError("simulated config write failure")
+            return real_atomic_write(path, content, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text",
+                side_effect=fail_config_writes,
+            ),
+        ):
+            result = setup_cmd._setup_omp("/opt/bin/omp")
+
+        assert result is False
+        assert (config_dir / "config.yaml").read_bytes() == original_bytes
+        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["orchestrator"]["runtime_backend"] == "claude"
+        assert "omp_cli_path" not in config["orchestrator"]
+        assert not bridge_path.exists()
+
     def test_install_omp_ooo_bridge_is_idempotent(self, tmp_path: Path) -> None:
         """The managed OMP bridge should not rewrite an already-current extension."""
         bridge_path = tmp_path / ".omp" / "agent" / "extensions" / "ouroboros-ooo-bridge.ts"
