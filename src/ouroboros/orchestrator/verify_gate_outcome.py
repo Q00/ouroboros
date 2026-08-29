@@ -24,6 +24,42 @@ from ouroboros.core.seed import (
 _VERIFY_OUTPUT_TAIL_CHARS = 2000
 _WORKSPACE_DIGEST_CHARS = 64
 
+# Machine-readable cause vocabulary for verify-gate failures. The gate already
+# distinguishes these paths internally but used to flatten them into prose
+# `reason` strings; `cause` keeps the distinction durable so rejection-cause
+# analytics (and telemetry) never have to parse prose. Closed set — extend the
+# vocabulary here, never pass free text through `cause`.
+_VERIFY_GATE_CAUSES = frozenset(
+    {
+        "invalid_contract",
+        "artifacts_missing",
+        # The expected artifact exists in the workspace but NOT at the
+        # contract path under the verify cwd — the signature of a worker that
+        # `cd`-ed into a subdirectory while the gate ran from the root.
+        "artifacts_missing_found_elsewhere",
+        "environment_unverifiable",
+        "timeout",
+        "exit_nonzero",
+        "output_assertion_unmatched",
+        "workspace_mutated",
+    }
+)
+
+_ARTIFACT_ELSEWHERE_SCAN_LIMIT = 50_000
+# Directory names skipped by the elsewhere-scan; mirrors the executor's
+# workspace-fingerprint ignore list (kept local to avoid an import cycle).
+_ELSEWHERE_SCAN_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+
 
 def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     """Inspect at most one key beyond a finite durable-contract schema."""
@@ -62,6 +98,8 @@ class _VerifyGateOutcome:
     # Distinct from a failing command: nothing was judged, so the AC is
     # quarantined as unverifiable rather than reported as a worker failure.
     environment_unverifiable: bool = False
+    # One of _VERIFY_GATE_CAUSES when passed is False; None when passed.
+    cause: str | None = None
 
 
 def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
@@ -84,6 +122,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
                 or any(char not in "0123456789abcdef" for char in outcome.workspace_digest)
             )
         )
+        or (outcome.cause is not None and outcome.cause not in _VERIFY_GATE_CAUSES)
     ):
         raise RuntimeError("verify gate outcome exceeds its durable evidence bounds")
     return {
@@ -94,6 +133,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         "workspace_mutated": outcome.workspace_mutated,
         "workspace_digest": outcome.workspace_digest,
         "environment_unverifiable": outcome.environment_unverifiable,
+        "cause": outcome.cause,
     }
 
 
@@ -111,10 +151,13 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     )
     # Checkpoints written before the quarantine flag existed stay readable:
     # re-running a non-idempotent verify_command is worse than defaulting one
-    # boolean that only ever suppressed a pass.
-    expected_keys = legacy_keys | {"environment_unverifiable"}
+    # boolean that only ever suppressed a pass. The same applies to `cause`,
+    # added later still — every historical key combination stays decodable.
+    quarantine_keys = legacy_keys | {"environment_unverifiable"}
     if not (
-        _mapping_has_exact_keys(value, expected_keys) or _mapping_has_exact_keys(value, legacy_keys)
+        _mapping_has_exact_keys(value, quarantine_keys | {"cause"})
+        or _mapping_has_exact_keys(value, quarantine_keys)
+        or _mapping_has_exact_keys(value, legacy_keys)
     ):
         return None
     assert isinstance(value, Mapping)
@@ -126,6 +169,9 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     workspace_digest = value.get("workspace_digest")
     environment_unverifiable = value.get("environment_unverifiable", False)
     if not isinstance(environment_unverifiable, bool):
+        return None
+    cause = value.get("cause")
+    if cause is not None and cause not in _VERIFY_GATE_CAUSES:
         return None
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
@@ -152,6 +198,7 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
         workspace_mutated=workspace_mutated,
         workspace_digest=workspace_digest,
         environment_unverifiable=environment_unverifiable,
+        cause=cause,
     )
 
 
@@ -183,6 +230,63 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     return tuple(missing)
 
 
+def _missing_artifacts_found_elsewhere(missing: tuple[str, ...], cwd: str) -> bool:
+    """Detect the worker-`cd` signature: the artifact exists, at another root.
+
+    A contract path like ``dist/report.md`` that is absent under ``cwd`` but
+    present as a path *suffix* somewhere else in the workspace (e.g.
+    ``packages/app/dist/report.md``) means the work most likely happened in a
+    subdirectory the worker ``cd``-ed into while the gate ran from the root —
+    a distinct, fixable failure mode versus the artifact never being created.
+    Best-effort and bounded: annotation only, never part of pass/fail, so any
+    filesystem surprise or hitting the scan limit degrades to False.
+    """
+    suffixes = []
+    for artifact in missing:
+        # Only plain relative contract paths participate; entries already
+        # annotated by _missing_expected_artifacts (escapes, invalid paths)
+        # carry a diagnostic suffix and cannot match a real file path.
+        candidate = artifact.strip().strip("/")
+        if candidate and "(" not in candidate:
+            suffixes.append(tuple(Path(candidate).parts))
+    if not suffixes:
+        return False
+    try:
+        root = Path(cwd).resolve()
+        scanned = 0
+        stack = [root]
+        while stack:
+            directory = stack.pop()
+            for entry in directory.iterdir():
+                scanned += 1
+                if scanned > _ARTIFACT_ELSEWHERE_SCAN_LIMIT:
+                    return False
+                name = entry.name
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    if name not in _ELSEWHERE_SCAN_IGNORED_DIRECTORIES:
+                        stack.append(entry)
+                    continue
+                relative_parts = entry.relative_to(root).parts
+                for suffix in suffixes:
+                    if len(relative_parts) > len(suffix) and (
+                        relative_parts[-len(suffix) :] == suffix
+                    ):
+                        return True
+        return False
+    except OSError:
+        return False
+
+
+def _missing_artifacts_cause(missing: tuple[str, ...], cwd: str) -> str:
+    return (
+        "artifacts_missing_found_elsewhere"
+        if _missing_artifacts_found_elsewhere(missing, cwd)
+        else "artifacts_missing"
+    )
+
+
 def _revalidate_cached_verify_gate_outcome(
     *,
     spec: AcceptanceCriterionSpec,
@@ -210,4 +314,5 @@ def _revalidate_cached_verify_gate_outcome(
         workspace_mutated=outcome.workspace_mutated,
         workspace_digest=outcome.workspace_digest,
         environment_unverifiable=outcome.environment_unverifiable,
+        cause=_missing_artifacts_cause(missing_artifacts, cwd),
     )
