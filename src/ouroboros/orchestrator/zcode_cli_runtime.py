@@ -856,6 +856,13 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 return []
             history_results[result_id] = history_result_signature
 
+        # Every tool call in the cumulative snapshot must have exactly one
+        # semantically matching result.  Checking only result-to-call would
+        # allow a dangling call from an older turn to be hidden by the
+        # current-turn suffix selected below.
+        if history_calls.keys() != history_results.keys():
+            return []
+
         # ``messagesKind=full`` snapshots contain the whole resumed session,
         # including tool receipts from older turns.  A terminal summary is
         # bound to one turn, so accept only the suffix after that turn's final
