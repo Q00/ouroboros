@@ -231,7 +231,35 @@ uv run --python 3.13 pytest tests/unit/ -q
 
 ### Windows users
 
-Use WSL 2 for the supported Windows path, then run the Linux install commands from inside the WSL distribution. Windows 11 Home can run WSL 2; if `wsl --install` or distro installation fails, see [Windows WSL 2 troubleshooting](guides/windows-wsl-troubleshooting.md).
+Two paths. Pick by the host you use:
+
+**Native Windows (PowerShell) — experimental.** Nothing needs to be installed
+first: the script installs Git and uv through winget when they are missing, uv
+downloads its own Python, and the plugin's MCP server runs through `uvx`.
+
+```powershell
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+Options go through environment variables, same names as `install.sh`
+(`OUROBOROS_INSTALL_RUNTIME`, `OUROBOROS_INSTALL_RECONFIGURE`,
+`OUROBOROS_INSTALL_PRE`), or bind the script and pass parameters:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1))) -Runtime claude -Reconfigure
+```
+
+Open a new PowerShell window afterwards so the PATH change applies. Use
+Windows Terminal for `ouroboros config` (the TUI needs ANSI support; `cmd.exe`
+is not supported). The PowerShell installer sends no telemetry. Limits are
+listed in [platform support](platform-support.md#windows-native-caveats); in
+short, Claude Code works and Codex CLI does not.
+
+**WSL 2 — supported.** Run the Linux install command from inside the WSL
+distribution. This is the path for Codex CLI and for every feature in the
+support matrix. Windows 11 Home can run WSL 2; if `wsl --install` or distro
+installation fails, see
+[Windows WSL 2 troubleshooting](guides/windows-wsl-troubleshooting.md).
 
 ### Prerequisites
 
