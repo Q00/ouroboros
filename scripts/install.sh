@@ -1026,18 +1026,18 @@ _runtime_to_extras() {
   case "$1" in
     claude) EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
     claude-sdk) EXTRAS="[claude-sdk,tui]"; RUNTIME="claude-sdk" ;;
-    claude-cli) EXTRAS="[claude-cli,tui]"; RUNTIME="claude-cli" ;;
-    codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
-    opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
+    claude-cli) EXTRAS="[mcp,tui]"; RUNTIME="claude-cli" ;;
+    codex)   EXTRAS="[mcp,tui]"; RUNTIME="codex" ;;
+    opencode) EXTRAS="[mcp,tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
-    gemini)  EXTRAS="[tui]"; RUNTIME="gemini" ;;
-    goose)   EXTRAS="[tui]"; RUNTIME="goose" ;;
-    kiro)    EXTRAS="[tui]"; RUNTIME="kiro" ;;
-    copilot) EXTRAS="[tui]"; RUNTIME="copilot" ;;
-    pi)      EXTRAS="[tui]"; RUNTIME="pi" ;;
-    gjc)     EXTRAS="[tui]"; RUNTIME="gjc" ;;
+    gemini)  EXTRAS="[mcp,tui]"; RUNTIME="gemini" ;;
+    goose)   EXTRAS="[mcp,tui]"; RUNTIME="goose" ;;
+    kiro)    EXTRAS="[mcp,tui]"; RUNTIME="kiro" ;;
+    copilot) EXTRAS="[mcp,tui]"; RUNTIME="copilot" ;;
+    pi)      EXTRAS="[mcp,tui]"; RUNTIME="pi" ;;
+    gjc)     EXTRAS="[mcp,tui]"; RUNTIME="gjc" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
-    "")      EXTRAS="[tui]"; RUNTIME="" ;;
+    "")      EXTRAS="[mcp,tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
       _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
@@ -1090,15 +1090,15 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
     _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 5 "Gemini" "Gemini CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 6 "Goose" "Goose CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 7 "Kiro" "Kiro CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
@@ -1147,15 +1147,15 @@ else
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
     _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 5 "Gemini" "Gemini CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 6 "Goose" "Goose CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 7 "Kiro" "Kiro CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _choice 0 "None" "Base CLI only; choose a backend later"
     _prompt "Select [1]: "
@@ -1175,9 +1175,9 @@ else
       *) _runtime_to_extras "claude" ;;
     esac
   else
-    # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
+    # Pipe mode (curl | bash): install the MCP v2 + settings GUI default profile.
     _blank
-    _warn "No runtime detected in non-interactive mode; installing the base package."
+    _warn "No runtime detected in non-interactive mode; installing MCP v2 + settings GUI."
     _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
     _runtime_to_extras ""
   fi
