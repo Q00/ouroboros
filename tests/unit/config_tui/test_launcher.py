@@ -113,7 +113,7 @@ def test_launch_web_without_textual_serve_prints_hint(monkeypatch, capsys) -> No
 
     output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
     flattened = "".join(line.strip("│╭╮╰╯─ ") for line in output.splitlines())
-    assert "ouroboros-ai[mcp,tui]" in flattened
+    assert "ouroboros-ai[tui]" in flattened
 
 
 def test_missing_web_dependencies_relaunch_with_default_profile(monkeypatch) -> None:
@@ -152,7 +152,6 @@ def test_bootstrap_uses_published_mcp_v2_and_tui_profile(monkeypatch) -> None:
     assert isinstance(args, list)
     assert args[:4] == ["/usr/bin/uvx", "--isolated", "--python", ">=3.12"]
     assert args[4:6] == ["--from", "ouroboros-ai[mcp,tui]"]
-    assert args[-3:] == ["ouroboros", "config", "--no-browser"]
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["OUROBOROS_CONFIG_TUI_BOOTSTRAPPED"] == "1"

@@ -24,10 +24,11 @@ from ouroboros.cli.formatters.panels import print_error, print_info
 # Note the escaped brackets: rich would otherwise treat [tui] as a markup tag.
 _TUI_INSTALL_HINT = (
     "Settings GUI dependencies not installed.\n\n"
-    "Install with:\n"
-    "  pip install 'ouroboros-ai\\[mcp,tui]'\n\n"
-    "Or run directly with uvx:\n"
-    "  uvx --python '>=3.12' --from 'ouroboros-ai\\[mcp,tui]' ouroboros config"
+    "Install in the current environment:\n"
+    "  pip install 'ouroboros-ai\\[tui]'\n\n"
+    "Or run in an isolated MCP v2 profile with uvx:\n"
+    "  uvx --isolated --python '>=3.12' --from 'ouroboros-ai\\[mcp,tui]' "
+    "ouroboros config"
 )
 
 
@@ -145,7 +146,7 @@ def _launch_web(
         if _relaunch_with_tui_profile():
             return
         print_error(_TUI_INSTALL_HINT)
-        print_info("Manual fallback: run [bold]uv run ouroboros config[/] in a regular terminal.")
+        print_info("Manual fallback: install [bold]ouroboros-ai\\[tui][/] in this environment.")
         raise SystemExit(1)
 
     if port in (None, 0):

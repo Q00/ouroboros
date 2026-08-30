@@ -1157,7 +1157,7 @@ else
     _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
-    _choice 0 "None" "Base CLI only; choose a backend later"
+    _choice 0 "MCP 2 default" "Install MCP 2 + settings GUI; choose a compatible backend later"
     _prompt "Select [1]: "
     read -r choice
     case "${choice:-1}" in
@@ -1178,7 +1178,7 @@ else
     # Pipe mode (curl | bash): install the MCP v2 + settings GUI default profile.
     _blank
     _warn "No runtime detected in non-interactive mode; installing MCP v2 + settings GUI."
-    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+    _info "Pick an MCP v2-compatible backend afterwards with: ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
     _runtime_to_extras ""
   fi
 fi

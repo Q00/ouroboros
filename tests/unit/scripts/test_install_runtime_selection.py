@@ -306,6 +306,18 @@ def test_piped_installer_defaults_to_mcp_v2_and_settings_gui(tmp_path: Path) -> 
     assert "--with textual-serve==1.1.3" in calls
 
 
+def test_runtime_less_mcp_v2_guidance_lists_only_compatible_backends(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path, local_repo=False, piped=True)
+
+    assert result.returncode == 0, result.stderr
+    guidance = next(
+        line for line in result.stdout.splitlines() if "Pick an MCP v2-compatible backend" in line
+    )
+    assert "claude-cli" in guidance
+    assert "|claude|" not in guidance
+    assert "claude-sdk" not in guidance
+
+
 def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
     config = tmp_path / "home" / ".ouroboros" / "config.yaml"
     config.parent.mkdir(parents=True)
