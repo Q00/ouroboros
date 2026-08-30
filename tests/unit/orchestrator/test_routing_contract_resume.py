@@ -1205,6 +1205,37 @@ def test_resume_without_argument_preserves_persisted_non_default_tier(
     assert resumed._model_router.base_tier == requested_tier
 
 
+def test_unsupported_backend_tier_request_persists_dormant_resume_contract() -> None:
+    adapter = _adapter()
+    adapter.runtime_backend = "gjc"
+    adapter.llm_backend = "gjc"
+    original = OrchestratorRunner(
+        adapter,
+        AsyncMock(),
+        MagicMock(),
+        base_model_tier="standard",
+    )
+
+    assert original._model_router is None
+    assert original._requested_model_tier is None
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
+    assert persisted["model_routing"]["enabled"] is False
+    assert persisted["model_routing"]["requested_model_tier"] is None
+
+    resumed_adapter = _adapter()
+    resumed_adapter.runtime_backend = "gjc"
+    resumed_adapter.llm_backend = "gjc"
+    resumed = OrchestratorRunner(resumed_adapter, AsyncMock(), MagicMock())
+
+    assert (
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted}) is False
+    )
+    assert resumed._model_router is None
+    assert resumed._requested_model_tier is None
+
+
 @pytest.mark.parametrize(
     ("persisted_effort", "current_effort"),
     [("low", "high"), ("high", None), (None, "low")],

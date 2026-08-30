@@ -1,796 +1,200 @@
-"""Unit tests for GjcRuntime."""
+"""Contract tests for the GJC SDK-backed agent runtime."""
 
 from __future__ import annotations
 
-import asyncio
-import json
-from typing import Any
-from unittest.mock import patch
-
 import pytest
 
-from ouroboros.orchestrator.adapter import ParamSupport
-from ouroboros.orchestrator.gjc_runtime import GjcRuntime
-from ouroboros.orchestrator.runtime_param_negotiation import (
-    negotiate_execution_params,
+from ouroboros.gjc.sdk_client import (
+    GjcCoordinatorQuestion,
+    GjcCoordinatorSession,
+    GjcCoordinatorTurn,
 )
+from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
+from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+from ouroboros.orchestrator.runtime_param_negotiation import negotiate_execution_params
 
 
-class _FakeStream:
-    def __init__(self, lines: list[str], *, never: bool = False) -> None:
-        self._never = never
-        encoded = "".join(f"{line}\n" for line in lines).encode()
-        self._buffer = bytearray(encoded)
-
-    async def read(self, n: int = -1) -> bytes:
-        if self._never:
-            await asyncio.sleep(3600)
-        if not self._buffer:
-            return b""
-        if n < 0 or n >= len(self._buffer):
-            data = bytes(self._buffer)
-            self._buffer.clear()
-            return data
-        data = bytes(self._buffer[:n])
-        del self._buffer[:n]
-        return data
-
-
-class _FakeStdin:
-    def __init__(self, process: _FakeProcess) -> None:
-        self._process = process
-        self.writes: list[dict[str, Any]] = []
+class FakeClient:
+    def __init__(self, turns: list[GjcCoordinatorTurn]) -> None:
+        self.turns = list(turns)
+        self.connected = False
         self.closed = False
+        self.started: list[tuple[str, str | None, str | None]] = []
+        self.sent: list[tuple[str, str, str | None]] = []
+        self.answers: list[tuple[GjcCoordinatorQuestion, str, str | None]] = []
 
-    def write(self, data: bytes) -> None:
-        self.writes.append(json.loads(data.decode()))
+    async def connect(self) -> None:
+        self.connected = True
 
-    async def drain(self) -> None:
-        return None
-
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
-        self._process.stdin_eof.set()
 
-
-class _FakeProcess:
-    def __init__(
+    async def start_session(
         self,
-        stdout_lines: list[str],
-        stderr_lines: list[str] | None = None,
-        returncode: int = 0,
+        prompt: str,
         *,
-        never_stdout: bool = False,
+        model: str | None = None,
+        mpreset: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> GjcCoordinatorSession:
+        del mpreset
+        self.started.append((prompt, model, idempotency_key))
+        return GjcCoordinatorSession("session-1", "turn-1")
+
+    async def send_prompt(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        queue: bool = False,
+        idempotency_key: str | None = None,
+    ) -> str:
+        del queue
+        self.sent.append((session_id, prompt, idempotency_key))
+        return "turn-2"
+
+    async def submit_question_answer(
+        self,
+        question: GjcCoordinatorQuestion,
+        answer: str,
+        *,
+        idempotency_key: str | None = None,
     ) -> None:
-        self.stdin_eof = asyncio.Event()
-        self.stdin = _FakeStdin(self)
-        self.stdout = _FakeStream(stdout_lines, never=never_stdout)
-        self.stderr = _FakeStream(stderr_lines or [])
-        self._returncode = returncode
-        self.returncode = None
-        self.terminated = False
-        self.pid = 1234
+        self.answers.append((question, answer, idempotency_key))
 
-    async def wait(self) -> int:
-        await self.stdin_eof.wait()
-        self.returncode = self._returncode
-        return self.returncode
+    async def await_turn(self, session_id: str, turn_id: str) -> GjcCoordinatorTurn:
+        del session_id, turn_id
+        return self.turns.pop(0)
 
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = self._returncode
-        self.stdin_eof.set()
-
-    def kill(self) -> None:
-        self.returncode = self._returncode
-        self.stdin_eof.set()
+    async def read_last_assistant(self, session_id: str, *, lines: int = 400) -> str:
+        del session_id, lines
+        return "tail"
 
 
-def _event(event: dict[str, object]) -> str:
-    return json.dumps(event)
+def _factory(client: FakeClient):
+    return lambda **_kwargs: client
 
 
-@pytest.mark.asyncio
-async def test_missing_ready_times_out_and_terminates() -> None:
-    process = _FakeProcess([], never_stdout=True)
-    runtime = GjcRuntime(
-        cli_path="/tmp/gjc", cwd="/tmp/project", startup_output_timeout_seconds=0.01
+def _turn(
+    text: str, *, status: str = "completed", question: GjcCoordinatorQuestion | None = None
+) -> GjcCoordinatorTurn:
+    return GjcCoordinatorTurn(
+        session_id="session-1",
+        turn_id="turn-1",
+        status=status,
+        text=text,
+        error=None if status in {"completed", "waiting_for_answer"} else "failed",
+        question=question,
+        raw={},
     )
 
-    with patch("asyncio.create_subprocess_exec", return_value=process):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
 
-    result = messages[-1]
-    assert result.is_error
-    assert result.data["error_type"] == "TimeoutError"
-    assert process.terminated
-    assert process.stdin.closed
+@pytest.mark.asyncio
+async def test_execute_task_maps_sdk_turn_to_runtime_result() -> None:
+    client = FakeClient([_turn("Done")])
+    runtime = GjcRuntime(
+        cli_path="/opt/gjc",
+        cwd="/tmp/project",
+        model="openai-codex/gpt-5.6-sol",
+        coordinator_client_factory=_factory(client),
+    )
+
+    messages = [message async for message in runtime.execute_task("Do it", tools=["read"])]
+
+    assert messages[-1].content == "Done"
+    assert messages[-1].data == {"subtype": "success", "transport": "gjc-coordinator-mcp"}
+    assert messages[-1].resume_handle is not None
+    assert messages[-1].resume_handle.native_session_id == "session-1"
+    assert len(client.started) == 1
+    assert client.started[0][:2] == (
+        "## Tooling Guidance\nPrefer these tools:\n- read\n\nDo it",
+        "openai-codex/gpt-5.6-sol",
+    )
+    assert client.started[0][2] is not None
+    assert client.connected and client.closed
 
 
 @pytest.mark.asyncio
-async def test_non_ready_before_ready_is_protocol_error() -> None:
-    process = _FakeProcess([_event({"type": "agent_start"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-
-    with patch("asyncio.create_subprocess_exec", return_value=process):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "GjcProtocolError"
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "frame_type",
-    ["workflow_gate", "host_tool_call", "host_uri_request", "extension_ui_request", "mystery"],
-)
-async def test_unsupported_first_frame_raises_unsupported_and_terminates(frame_type: str) -> None:
-    process = _FakeProcess([_event({"type": frame_type, "id": "frame-1"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-
-    with patch("asyncio.create_subprocess_exec", return_value=process):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
-    assert frame_type in messages[-1].content
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-async def test_prompt_success_false_is_command_error() -> None:
-    process = _FakeProcess(
+async def test_question_round_trip_uses_resume_handle_binding() -> None:
+    question = GjcCoordinatorQuestion(
+        session_id="session-1",
+        turn_id="turn-1",
+        question_id="q-1",
+        answer_binding="binding-1",
+        prompt="Choose one",
+        options=("A", "B"),
+        multi=False,
+    )
+    client = FakeClient(
         [
-            _event({"type": "ready"}),
-            _event({"type": "response", "id": "wrong", "success": False, "error": "no"}),
+            _turn("", status="waiting_for_answer", question=question),
+            _turn("Finished"),
         ]
     )
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
 
-    with patch("asyncio.create_subprocess_exec", return_value=process):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
+    first = [message async for message in runtime.execute_task("Start")][-1]
+    assert first.is_error
+    assert first.data["error_type"] == "GjcQuestionRequired"
+    assert first.resume_handle is not None
 
-    assert messages[-1].is_error
-    # A wrong id before prompt ack is a strict protocol failure.
-    assert messages[-1].data["error_type"] == "GjcProtocolError"
-    assert process.terminated
+    second = [
+        message
+        async for message in runtime.execute_task(
+            "My custom answer",
+            resume_handle=first.resume_handle,
+        )
+    ][-1]
+    assert second.content == "Finished"
 
-
-@pytest.mark.asyncio
-async def test_prompt_same_id_success_false_is_command_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    _event(
-                        {
-                            "type": "response",
-                            "id": payload["id"],
-                            "command": "prompt",
-                            "success": False,
-                            "error": "denied",
-                        }
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].content == "denied"
-    assert messages[-1].data["error_type"] == "GjcCommandError"
-    assert process.terminated
+    assert len(client.answers) == 1
+    assert client.answers[0][:2] == (question, "My custom answer")
+    assert client.answers[0][2] == first.resume_handle.metadata["gjc_idempotency_key"]
+    assert client.sent == []
 
 
 @pytest.mark.asyncio
-async def test_ack_message_update_agent_end_success_and_stdin_pipe_closed() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "message_update",
-                                    "assistantMessageEvent": {"type": "text_delta", "delta": "Hel"},
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "agent_end",
-                                    "messages": [
-                                        {
-                                            "role": "assistant",
-                                            "content": [{"type": "text", "text": "Hello"}],
-                                        }
-                                    ],
-                                }
-                            ),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process) as mock_exec,
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert mock_exec.call_args.args == ("/tmp/gjc", "--mode", "rpc", "--no-session")
-    assert mock_exec.call_args.kwargs["stdin"] == asyncio.subprocess.PIPE
-    assert mock_exec.call_args.kwargs["stdin"] != asyncio.subprocess.DEVNULL
-    assert [m.content for m in messages if m.type == "assistant"] == ["Hel"]
-    assert messages[-1].content == "Hello"
-    assert messages[-1].data == {"subtype": "success", "returncode": 0}
-    assert messages[-1].resume_handle is None
-    assert process.stdin.closed
-
-
-@pytest.mark.asyncio
-async def test_late_same_id_success_false_is_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "message_update",
-                                    "assistantMessageEvent": {"type": "text_delta", "delta": "x"},
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": False,
-                                    "error": "late bad",
-                                }
-                            ),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].content == "late bad"
-    assert messages[-1].data["error_type"] == "GjcCommandError"
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-async def test_assistant_stop_reason_error_with_zero_exit_is_runtime_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "agent_end",
-                                    "messages": [
-                                        {
-                                            "role": "assistant",
-                                            "content": [],
-                                            "stopReason": "error",
-                                            "errorMessage": "OpenAI API error (401)",
-                                        }
-                                    ],
-                                }
-                            ),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].content == "OpenAI API error (401)"
-    assert messages[-1].data["error_type"] == "ProviderError"
-
-
-@pytest.mark.asyncio
-async def test_malformed_json_is_malformed_gjc_event() -> None:
-    process = _FakeProcess([_event({"type": "ready"}), "not-json"])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    _event(
-                        {
-                            "type": "response",
-                            "id": payload["id"],
-                            "command": "prompt",
-                            "success": True,
-                        }
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].content == "Malformed GJC JSON event: not-json"
-    assert messages[-1].data["error_type"] == "MalformedGjcEvent"
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "frame_type",
-    [
-        "workflow_gate",
-        "extension_ui_request",
-        "host_tool_call",
-        "host_tool_cancel",
-        "host_uri_request",
-        "host_uri_cancel",
-        "mystery",
-    ],
-)
-async def test_unsupported_frames_raise_unsupported_and_terminate(frame_type: str) -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event({"type": frame_type, "id": "frame-1", "gate_id": "gate-1"}),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
-    assert frame_type in messages[-1].content
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-async def test_nonzero_exit_is_gjc_exit_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})], stderr_lines=["boom"], returncode=7)
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event(
-                                {
-                                    "type": "agent_end",
-                                    "messages": [{"role": "assistant", "content": "done"}],
-                                }
-                            ),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].content == "boom"
-    assert messages[-1].data == {"subtype": "error", "error_type": "GjcExitError", "returncode": 7}
-
-
-@pytest.mark.asyncio
-async def test_tool_lifecycle_events_are_ignored_and_stream_succeeds() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    "\n".join(
-                        [
-                            _event(
-                                {
-                                    "type": "response",
-                                    "id": payload["id"],
-                                    "command": "prompt",
-                                    "success": True,
-                                }
-                            ),
-                            _event(
-                                {"type": "tool_execution_start", "id": "tool-1", "name": "read"}
-                            ),
-                            _event({"type": "tool_execution_end", "id": "tool-1", "success": True}),
-                            _event(
-                                {
-                                    "type": "agent_end",
-                                    "messages": [{"role": "assistant", "content": "done"}],
-                                }
-                            ),
-                        ]
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].content == "done"
-    assert messages[-1].data == {"subtype": "success", "returncode": 0}
-    assert process.stdin.closed
-
-
-@pytest.mark.asyncio
-async def test_wrong_command_prompt_ack_is_protocol_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (
-                    _event(
-                        {
-                            "type": "response",
-                            "id": payload["id"],
-                            "command": "set_model",
-                            "success": True,
-                        }
-                    )
-                    + "\n"
-                ).encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "GjcProtocolError"
-
-
-@pytest.mark.asyncio
-async def test_unsupported_frame_during_prompt_ack_phase_is_unsupported() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            proc.stdout._buffer.extend(
-                (_event({"type": "host_tool_call", "id": "tool-1"}) + "\n").encode()
-            )
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
-
-
-@pytest.mark.asyncio
-async def test_unsupported_frame_during_set_model_ack_phase_is_unsupported() -> None:
-    process = _FakeProcess(
-        [_event({"type": "ready"}), _event({"type": "host_tool_call", "id": "tool-1"})]
+async def test_resume_handle_awaits_existing_turn_without_new_prompt() -> None:
+    client = FakeClient([_turn("Recovered")])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+    handle = RuntimeHandle(
+        backend="gjc",
+        native_session_id="session-1",
+        cwd="/tmp/project",
+        metadata={"turn_id": "turn-1", "gjc_operation_phase": "awaiting"},
     )
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project", model="openai/gpt-4.1")
 
-    with patch("asyncio.create_subprocess_exec", return_value=process):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
+    message = [item async for item in runtime.execute_task("Do not resend", resume_handle=handle)][
+        -1
+    ]
 
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
-
-
-def test_capabilities_are_non_resumable_structured_skill_dispatch() -> None:
-    caps = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project").capabilities
-
-    assert caps.skill_dispatch is True
-    assert caps.targeted_resume is False
-    assert caps.structured_output is True
-    assert caps.permission_mode_support is ParamSupport.IGNORED
-    assert caps.empty_tool_restriction_support is ParamSupport.IGNORED
+    assert message.content == "Recovered"
+    assert client.sent == []
 
 
-def test_empty_tools_negotiation_reports_gjc_degradation() -> None:
-    caps = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project").capabilities
+@pytest.mark.asyncio
+async def test_failed_sdk_turn_is_runtime_error() -> None:
+    client = FakeClient([_turn("", status="failed")])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
 
-    degradations = negotiate_execution_params(
-        caps,
+    message = [item async for item in runtime.execute_task("Do it")][-1]
+
+    assert message.is_error
+    assert message.data["error_type"] == "GjcTurnError"
+    assert message.content == "failed"
+
+
+def test_capabilities_use_sdk_resume_and_translate_no_permission_or_tool_envelope() -> None:
+    runtime = GjcRuntime(cwd="/tmp/project")
+    assert runtime.capabilities.targeted_resume is True
+    assert runtime.capabilities.structured_output is True
+    assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
+    assert runtime.capabilities.empty_tool_restriction_support is ParamSupport.IGNORED
+
+    negotiated = negotiate_execution_params(
+        runtime.capabilities,
         system_prompt=None,
         tools=[],
-        permission_mode=None,
+        permission_mode="bypassPermissions",
     )
-
-    assert len(degradations) == 1
-    assert degradations[0].parameter == "tools"
-    assert degradations[0].support is ParamSupport.IGNORED
-
-
-def _envelope(event: dict[str, object], *, seq: int = 1) -> str:
-    return _event(
-        {
-            "protocol_version": 2,
-            "session_id": "session-1",
-            "seq": seq,
-            "frame_id": f"frame-{seq}",
-            "type": "event",
-            "payload": {"event_type": event.get("type"), "event": event},
-        }
-    )
-
-
-@pytest.mark.asyncio
-async def test_protocol_v2_enveloped_stream_success() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            frames = [
-                _event(
-                    {
-                        "type": "response",
-                        "id": payload["id"],
-                        "command": "prompt",
-                        "success": True,
-                    }
-                ),
-                _envelope({"type": "agent_start"}, seq=1),
-                _envelope(
-                    {
-                        "type": "message_update",
-                        "assistantMessageEvent": {"type": "thinking_delta", "delta": "hmm"},
-                    },
-                    seq=2,
-                ),
-                _envelope(
-                    {
-                        "type": "message_update",
-                        "assistantMessageEvent": {"type": "text_delta", "delta": "Hel"},
-                    },
-                    seq=3,
-                ),
-                _envelope(
-                    {
-                        "type": "message_update",
-                        "assistantMessageEvent": {"type": "text_delta", "delta": "lo"},
-                    },
-                    seq=4,
-                ),
-                _envelope({"type": "tool_execution_update", "toolCallId": "t1"}, seq=5),
-                _envelope({"type": "some_future_event"}, seq=6),
-                _envelope(
-                    {
-                        "type": "agent_end",
-                        "messages": [
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "Hello"}],
-                            }
-                        ],
-                    },
-                    seq=7,
-                ),
-            ]
-            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    result = messages[-1]
-    assert not result.is_error
-    assert result.content == "Hello"
-    deltas = [msg.content for msg in messages if msg.type == "assistant"]
-    assert deltas == ["Hel", "lo"]
-    assert process.stdin.closed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "frame_type",
-    [
-        "workflow_gate",
-        "extension_ui_request",
-        "host_tool_call",
-        "host_tool_cancel",
-        "host_uri_request",
-        "host_uri_cancel",
-    ],
-)
-async def test_protocol_v2_enveloped_host_interaction_fails_closed(
-    frame_type: str,
-) -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            frames = [
-                _event(
-                    {
-                        "type": "response",
-                        "id": payload["id"],
-                        "command": "prompt",
-                        "success": True,
-                    }
-                ),
-                _envelope({"type": frame_type, "id": "frame-1", "gate_id": "gate-1"}),
-            ]
-            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
-    assert frame_type in messages[-1].content
-    assert process.terminated
-
-
-@pytest.mark.asyncio
-async def test_protocol_v2_malformed_envelope_is_protocol_error() -> None:
-    process = _FakeProcess([_event({"type": "ready"})])
-    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
-    original_send = runtime._send_command
-
-    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
-        await original_send(proc, payload)
-        if payload["type"] == "prompt":
-            frames = [
-                _event(
-                    {
-                        "type": "response",
-                        "id": payload["id"],
-                        "command": "prompt",
-                        "success": True,
-                    }
-                ),
-                _event({"type": "event", "payload": {"event_type": "agent_start"}}),
-            ]
-            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
-
-    with (
-        patch.object(runtime, "_send_command", side_effect=send_and_append),
-        patch("asyncio.create_subprocess_exec", return_value=process),
-    ):
-        messages = [msg async for msg in runtime.execute_task("Do it")]
-
-    assert messages[-1].is_error
-    assert messages[-1].data["error_type"] == "GjcProtocolError"
-    assert process.terminated
+    assert {item.parameter for item in negotiated} == {"tools", "permission_mode"}
