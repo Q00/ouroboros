@@ -79,9 +79,18 @@ _SECRET_KEY_RE = __import__("re").compile(
     __import__("re").I,
 )
 _SECRET_VALUE_RE = __import__("re").compile(
-    r"(sk-[A-Za-z0-9][A-Za-z0-9._-]{7,}|(?:api[_-]?key|token|secret|password|credential)[=:][^\s,]+|(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[^\s,]+)",
+    r"(sk-[A-Za-z0-9][A-Za-z0-9._-]{7,}|(?:api[_-]?key|token|secret|password|credential)[=:][^\s,]+|(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[^\s,]+|[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization)[A-Za-z0-9_-]*\s*:\s*[^\s,]+)",
     __import__("re").I,
 )
+
+
+def _header_secret(value: str) -> str | None:
+    if ":" not in value:
+        return None
+    name, secret = value.split(":", 1)
+    if _SECRET_KEY_RE.search(name) and secret.strip():
+        return secret.strip()
+    return None
 
 
 def redact_secrets(value: Any) -> Any:
@@ -101,8 +110,13 @@ def redact_secrets(value: Any) -> Any:
                 redact_next = False
                 continue
             redacted.append(redact_secrets(item))
-            if isinstance(item, str) and _SECRET_KEY_RE.search(item.lstrip("-")):
-                redact_next = True
+            if isinstance(item, str):
+                redact_next = bool(_SECRET_KEY_RE.search(item.lstrip("-")))
+                if item.lstrip("-").lower() in {"header", "h"}:
+                    redact_next = True
+                header_secret = _header_secret(item)
+                if header_secret:
+                    redacted[-1] = item.replace(header_secret, "<redacted>")
         return redacted
     if isinstance(value, str):
         return _SECRET_VALUE_RE.sub("<redacted>", value)
@@ -114,6 +128,10 @@ def _sensitive_values(command: list[str], env: dict[str, str]) -> set[str]:
     for index, item in enumerate(command[:-1]):
         if _SECRET_KEY_RE.search(item.lstrip("-")):
             values.add(command[index + 1])
+        if item.lstrip("-").lower() in {"header", "h"}:
+            header_secret = _header_secret(command[index + 1])
+            if header_secret:
+                values.add(header_secret)
     return values
 
 

@@ -213,6 +213,27 @@ def test_redacts_structured_authorization_header_in_persisted_reports(tmp_path: 
     assert "<redacted>" in combined
 
 
+def test_redacts_opaque_sensitive_header_across_command_and_reports(tmp_path: Path) -> None:
+    harness = _load_harness()
+    secret = "x-api-secret-2289"
+    result = harness.run_command(
+        [sys.executable, "-c", f"print('{secret}')", "--header", f"X-API-Key: {secret}"],
+        cwd=tmp_path,
+        log_dir=tmp_path,
+        name="opaque_header_probe",
+        timeout=2,
+    )
+    check = harness.Check(
+        "config", "pass", "loaded", {"args": ["--header", f"X-API-Key: {secret}"]}
+    )
+    report = harness.write_markdown_report(tmp_path, [check])
+    persisted = "\n".join(
+        [str(result.command), Path(result.stdout_path).read_text(), report.read_text()]
+    )
+    assert secret not in persisted
+    assert "<redacted>" in persisted
+
+
 def test_effective_codex_entry_uses_codex_home_and_configured_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
