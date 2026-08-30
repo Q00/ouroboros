@@ -97,7 +97,8 @@ async def test_start_await_tail_and_stop_use_coordinator_contract(tmp_path: Path
     assert adapter.config.command == "/opt/gjc"
     assert adapter.config.args == ("mcp-serve", "coordinator")
     assert adapter.config.env["GJC_COORDINATOR_MCP_WORKDIR_ROOTS"] == str(tmp_path.resolve())
-    assert adapter.config.env["GJC_COORDINATOR_MCP_SESSION_COMMAND"] == "/opt/gjc"
+    assert adapter.config.env["GJC_COORDINATOR_MCP_SESSION_COMMAND"] == "gjc"
+    assert adapter.config.env["PATH"].split(":")[0] == "/opt"
     assert adapter.disconnected
 
 

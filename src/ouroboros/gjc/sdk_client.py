@@ -102,14 +102,21 @@ class GjcCoordinatorClient:
         repo_digest = hashlib.sha256(self._cwd.encode("utf-8")).hexdigest()[:16]
         state_root = Path(self._cwd) / ".gjc" / "state" / "ouroboros-coordinator" / repo_digest
         env = os.environ.copy()
+        cli_path = Path(self._cli_path).expanduser()
+        if cli_path.name == "gjc" and cli_path.parent != Path("."):
+            existing_path = env.get("PATH", "")
+            env["PATH"] = str(cli_path.parent) + (
+                os.pathsep + existing_path if existing_path else ""
+            )
         env.update(
             {
                 "GJC_COORDINATOR_MCP_WORKDIR_ROOTS": self._cwd,
                 "GJC_COORDINATOR_MCP_MUTATIONS": "sessions,questions",
-                # The Coordinator must launch the exact configured GJC binary;
-                # a bare `gjc` would bypass explicit-path setup and fail when it
-                # is intentionally absent from PATH.
-                "GJC_COORDINATOR_MCP_SESSION_COMMAND": self._cli_path,
+                # GJC's lifecycle target grammar intentionally accepts only the
+                # command name. Prepending the configured binary directory to
+                # PATH keeps that contract while making the exact configured
+                # executable authoritative for Broker-managed child sessions.
+                "GJC_COORDINATOR_MCP_SESSION_COMMAND": "gjc",
                 "GJC_COORDINATOR_MCP_FORCE_STOP": "true",
                 "GJC_COORDINATOR_MCP_PROFILE": "ouroboros",
                 "GJC_COORDINATOR_MCP_REPO": repo_digest,
