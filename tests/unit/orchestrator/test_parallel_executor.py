@@ -280,19 +280,18 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     claimed_file = tmp_path / "claimed.py"
     other_file = tmp_path / "other.py"
     claimed_file.write_text("original\n", encoding="utf-8")
-    command = shlex.join(
-        [
-            str(Path(sys.executable).resolve()),
-            "-I",
-            "-S",
-            "-c",
-            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
-            "touch",
-            "claimed.py",
-        ]
-    )
+    argv = [
+        str(Path(sys.executable).resolve()),
+        "-I",
+        "-S",
+        "-c",
+        "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+        "touch",
+        "claimed.py",
+    ]
+    command = shlex.join(argv)
 
-    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    completed = subprocess.run(argv, cwd=tmp_path, shell=False, check=False)
 
     assert completed.returncode == 0
     assert claimed_file.read_text(encoding="utf-8") == "original\n"
@@ -317,6 +316,7 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX /bin/bash")
 def test_files_touched_rejects_wrapped_reconstructed_pathlib_with_inert_touch_argv(
     tmp_path,
 ) -> None:

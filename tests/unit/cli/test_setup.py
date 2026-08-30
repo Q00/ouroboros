@@ -4744,7 +4744,7 @@ class TestClaudeSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch(
-                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                "ouroboros.package_profiles.has_unsupported_claude_sdk_mcp_mix",
                 return_value=True,
             ),
             patch(
@@ -10238,6 +10238,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=True),
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
             bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
@@ -10259,6 +10260,25 @@ class TestGjcSetup:
         assert "DEFAULT_COMMAND" in bridge
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge
         assert "_OUROBOROS_GJC_BRIDGE_DEPTH" in bridge
+
+    def test_setup_gjc_requires_mcp_v2_before_writing_config(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=False),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+        ):
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is False
+
+        assert config_path.read_text(encoding="utf-8") == original
+        assert not (agent_dir / "extensions").exists()
 
     def test_setup_gjc_cli_exits_nonzero_for_bridge_collision(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
