@@ -10238,7 +10238,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch("ouroboros.cli.commands.setup._gjc_mcp_v2_ready", return_value=True),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=True),
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
             bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
@@ -10272,7 +10272,7 @@ class TestGjcSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
-            patch("ouroboros.cli.commands.setup._gjc_mcp_v2_ready", return_value=False),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=False),
             patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
         ):
             assert setup_cmd._setup_gjc("/opt/bin/gjc") is False
