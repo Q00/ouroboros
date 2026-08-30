@@ -4744,7 +4744,7 @@ class TestClaudeSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch(
-                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                "ouroboros.package_profiles.has_unsupported_claude_sdk_mcp_mix",
                 return_value=True,
             ),
             patch(
