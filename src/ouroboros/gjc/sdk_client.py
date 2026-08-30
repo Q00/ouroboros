@@ -106,7 +106,10 @@ class GjcCoordinatorClient:
             {
                 "GJC_COORDINATOR_MCP_WORKDIR_ROOTS": self._cwd,
                 "GJC_COORDINATOR_MCP_MUTATIONS": "sessions,questions",
-                "GJC_COORDINATOR_MCP_SESSION_COMMAND": "gjc",
+                # The Coordinator must launch the exact configured GJC binary;
+                # a bare `gjc` would bypass explicit-path setup and fail when it
+                # is intentionally absent from PATH.
+                "GJC_COORDINATOR_MCP_SESSION_COMMAND": self._cli_path,
                 "GJC_COORDINATOR_MCP_FORCE_STOP": "true",
                 "GJC_COORDINATOR_MCP_PROFILE": "ouroboros",
                 "GJC_COORDINATOR_MCP_REPO": repo_digest,
@@ -215,7 +218,7 @@ class GjcCoordinatorClient:
         return payload
 
     @staticmethod
-    def _key(prefix: str) -> str:
+    def new_idempotency_key(prefix: str) -> str:
         return f"ouroboros-{prefix}-{uuid4().hex}"
 
     async def start_session(
@@ -224,11 +227,12 @@ class GjcCoordinatorClient:
         *,
         model: str | None = None,
         mpreset: str | None = None,
+        idempotency_key: str | None = None,
     ) -> GjcCoordinatorSession:
         arguments: dict[str, Any] = {
             "cwd": self._cwd,
             "prompt": prompt,
-            "idempotency_key": self._key("start"),
+            "idempotency_key": idempotency_key or self.new_idempotency_key("start"),
             "allow_mutation": True,
         }
         if model and model != "default":
@@ -247,14 +251,21 @@ class GjcCoordinatorClient:
             )
         return GjcCoordinatorSession(session_id=session_id, turn_id=turn_id)
 
-    async def send_prompt(self, session_id: str, prompt: str, *, queue: bool = False) -> str:
+    async def send_prompt(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        queue: bool = False,
+        idempotency_key: str | None = None,
+    ) -> str:
         payload = await self._call(
             "gjc_coordinator_send_prompt",
             {
                 "session_id": session_id,
                 "prompt": prompt,
                 "queue": queue,
-                "idempotency_key": self._key("prompt"),
+                "idempotency_key": idempotency_key or self.new_idempotency_key("prompt"),
                 "allow_mutation": True,
             },
         )
@@ -349,7 +360,13 @@ class GjcCoordinatorClient:
             multi=question.get("multi") is True,
         )
 
-    async def submit_question_answer(self, question: GjcCoordinatorQuestion, answer: str) -> None:
+    async def submit_question_answer(
+        self,
+        question: GjcCoordinatorQuestion,
+        answer: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
         await self._call(
             "gjc_coordinator_submit_question_answer",
             {
@@ -358,7 +375,7 @@ class GjcCoordinatorClient:
                 "question_id": question.question_id,
                 "answer_binding": question.answer_binding,
                 "answer": {"selected": [], "other": True, "custom": answer},
-                "idempotency_key": self._key("answer"),
+                "idempotency_key": idempotency_key or self.new_idempotency_key("answer"),
                 "allow_mutation": True,
             },
         )

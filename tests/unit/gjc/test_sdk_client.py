@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from ouroboros.core.types import Result
-from ouroboros.gjc.sdk_client import GjcCoordinatorClient, GjcCoordinatorError
+from ouroboros.gjc.sdk_client import (
+    GjcCoordinatorClient,
+    GjcCoordinatorError,
+    GjcCoordinatorQuestion,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPServerInfo, MCPToolResult
 
 
@@ -93,6 +97,7 @@ async def test_start_await_tail_and_stop_use_coordinator_contract(tmp_path: Path
     assert adapter.config.command == "/opt/gjc"
     assert adapter.config.args == ("mcp-serve", "coordinator")
     assert adapter.config.env["GJC_COORDINATOR_MCP_WORKDIR_ROOTS"] == str(tmp_path.resolve())
+    assert adapter.config.env["GJC_COORDINATOR_MCP_SESSION_COMMAND"] == "/opt/gjc"
     assert adapter.disconnected
 
 
@@ -157,6 +162,36 @@ async def test_public_coordinator_failure_maps_to_typed_error(tmp_path: Path) ->
 
     assert raised.value.code == "unknown_model"
     assert str(raised.value) == "No such model"
+
+
+@pytest.mark.asyncio
+async def test_mutation_methods_reuse_caller_owned_idempotency_keys(tmp_path: Path) -> None:
+    adapter = _FakeAdapter(
+        [
+            {"ok": True, "session": {"session_id": "session-1"}, "turn_id": "turn-1"},
+            {"ok": True, "turn_id": "turn-2"},
+            {"ok": True, "status": "accepted"},
+        ]
+    )
+    client = GjcCoordinatorClient(cli_path="gjc", cwd=tmp_path, adapter_factory=_factory(adapter))
+
+    async with client:
+        await client.start_session("work", idempotency_key="start-key")
+        await client.send_prompt("session-1", "next", idempotency_key="prompt-key")
+        question = GjcCoordinatorQuestion(
+            session_id="session-1",
+            turn_id="turn-1",
+            question_id="q-1",
+            answer_binding="binding-1",
+            prompt="Choose",
+            options=(),
+            multi=False,
+        )
+        await client.submit_question_answer(question, "answer", idempotency_key="answer-key")
+
+    assert adapter.calls[0][1]["idempotency_key"] == "start-key"
+    assert adapter.calls[1][1]["idempotency_key"] == "prompt-key"
+    assert adapter.calls[2][1]["idempotency_key"] == "answer-key"
 
 
 def test_current_gjc_exposes_coordinator_mcp_when_installed() -> None:

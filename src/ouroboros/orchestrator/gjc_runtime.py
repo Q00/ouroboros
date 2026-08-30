@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 import shutil
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -123,14 +124,25 @@ class GjcRuntime:
 
     def _build_runtime_handle(
         self,
-        session_id: str,
-        turn_id: str,
+        session_id: str | None,
+        turn_id: str | None,
         current_handle: RuntimeHandle | None,
         question: GjcCoordinatorQuestion | None = None,
+        *,
+        operation_phase: str,
+        idempotency_key: str | None = None,
     ) -> RuntimeHandle:
         metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata["turn_id"] = turn_id
+        if turn_id:
+            metadata["turn_id"] = turn_id
+        else:
+            metadata.pop("turn_id", None)
         metadata["transport"] = "gjc-coordinator-mcp"
+        metadata["gjc_operation_phase"] = operation_phase
+        if idempotency_key:
+            metadata["gjc_idempotency_key"] = idempotency_key
+        else:
+            metadata.pop("gjc_idempotency_key", None)
         if question is None:
             metadata.pop("pending_question", None)
         else:
@@ -199,6 +211,10 @@ class GjcRuntime:
         session_id: str | None = requested_session_id
         client: GjcCoordinatorClient | None = None
         handle = resume_handle
+        metadata = resume_handle.metadata if resume_handle else {}
+        phase = metadata.get("gjc_operation_phase")
+        prior_turn_id = metadata.get("turn_id")
+        prior_key = metadata.get("gjc_idempotency_key")
         try:
             client = self._coordinator_client_factory(
                 cli_path=self._cli_path,
@@ -206,11 +222,10 @@ class GjcRuntime:
                 timeout=self._timeout,
             )
             await client.connect()
-            pending = resume_handle.metadata.get("pending_question") if resume_handle else None
+            pending = metadata.get("pending_question")
             if requested_session_id and isinstance(pending, dict):
                 question_id = pending.get("question_id")
                 answer_binding = pending.get("answer_binding")
-                prior_turn_id = resume_handle.metadata.get("turn_id") if resume_handle else None
                 if not all(
                     isinstance(value, str) and value
                     for value in (question_id, answer_binding, prior_turn_id)
@@ -230,19 +245,90 @@ class GjcRuntime:
                     ),
                     multi=pending.get("multi") is True,
                 )
-                await client.submit_question_answer(question, prompt)
+                operation_key = (
+                    prior_key
+                    if phase == "answer_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-answer-{uuid4().hex}"
+                )
+                handle = self._build_runtime_handle(
+                    requested_session_id,
+                    prior_turn_id,
+                    resume_handle,
+                    question,
+                    operation_phase="answer_pending",
+                    idempotency_key=operation_key,
+                )
+                await client.submit_question_answer(
+                    question,
+                    prompt,
+                    idempotency_key=operation_key,
+                )
+                turn_id = prior_turn_id
+            elif (
+                requested_session_id
+                and phase == "awaiting"
+                and isinstance(prior_turn_id, str)
+                and prior_turn_id
+            ):
+                # The prior mutation already returned a durable turn identity.
+                # Resume observation instead of dispatching duplicate work.
                 turn_id = prior_turn_id
             elif requested_session_id:
-                turn_id = await client.send_prompt(requested_session_id, composed_prompt)
+                operation_key = (
+                    prior_key
+                    if phase == "prompt_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-prompt-{uuid4().hex}"
+                )
+                handle = self._build_runtime_handle(
+                    requested_session_id,
+                    None,
+                    resume_handle,
+                    operation_phase="prompt_pending",
+                    idempotency_key=operation_key,
+                )
+                turn_id = await client.send_prompt(
+                    requested_session_id,
+                    composed_prompt,
+                    idempotency_key=operation_key,
+                )
             else:
-                session = await client.start_session(composed_prompt, model=self._model)
+                operation_key = (
+                    prior_key
+                    if phase == "start_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-start-{uuid4().hex}"
+                )
+                handle = self._build_runtime_handle(
+                    None,
+                    None,
+                    resume_handle,
+                    operation_phase="start_pending",
+                    idempotency_key=operation_key,
+                )
+                session = await client.start_session(
+                    composed_prompt,
+                    model=self._model,
+                    idempotency_key=operation_key,
+                )
                 session_id = session.session_id
                 turn_id = session.turn_id
-            handle = self._build_runtime_handle(session_id, turn_id, resume_handle)
+            handle = self._build_runtime_handle(
+                session_id,
+                turn_id,
+                handle,
+                operation_phase="awaiting",
+            )
             turn = await client.await_turn(session_id, turn_id)
             if turn.status == "waiting_for_answer":
                 question = turn.question
-                handle = self._build_runtime_handle(session_id, turn_id, resume_handle, question)
+                answer_key = f"ouroboros-answer-{uuid4().hex}"
+                handle = self._build_runtime_handle(
+                    session_id,
+                    turn_id,
+                    handle,
+                    question,
+                    operation_phase="answer_pending",
+                    idempotency_key=answer_key,
+                )
                 yield AgentMessage(
                     type="result",
                     content=question.prompt if question else "GJC is waiting for user input.",
@@ -258,6 +344,13 @@ class GjcRuntime:
                     resume_handle=handle,
                 )
                 return
+            terminal_phase = "completed" if turn.succeeded else "failed"
+            handle = self._build_runtime_handle(
+                session_id,
+                turn_id,
+                handle,
+                operation_phase=terminal_phase,
+            )
             if not turn.succeeded:
                 yield AgentMessage(
                     type="result",

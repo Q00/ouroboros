@@ -9,7 +9,7 @@ from ouroboros.gjc.sdk_client import (
     GjcCoordinatorSession,
     GjcCoordinatorTurn,
 )
-from ouroboros.orchestrator.adapter import ParamSupport
+from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
 from ouroboros.orchestrator.gjc_runtime import GjcRuntime
 from ouroboros.orchestrator.runtime_param_negotiation import negotiate_execution_params
 
@@ -19,9 +19,9 @@ class FakeClient:
         self.turns = list(turns)
         self.connected = False
         self.closed = False
-        self.started: list[tuple[str, str | None]] = []
-        self.sent: list[tuple[str, str]] = []
-        self.answers: list[tuple[GjcCoordinatorQuestion, str]] = []
+        self.started: list[tuple[str, str | None, str | None]] = []
+        self.sent: list[tuple[str, str, str | None]] = []
+        self.answers: list[tuple[GjcCoordinatorQuestion, str, str | None]] = []
 
     async def connect(self) -> None:
         self.connected = True
@@ -30,19 +30,37 @@ class FakeClient:
         self.closed = True
 
     async def start_session(
-        self, prompt: str, *, model: str | None = None, mpreset: str | None = None
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        mpreset: str | None = None,
+        idempotency_key: str | None = None,
     ) -> GjcCoordinatorSession:
         del mpreset
-        self.started.append((prompt, model))
+        self.started.append((prompt, model, idempotency_key))
         return GjcCoordinatorSession("session-1", "turn-1")
 
-    async def send_prompt(self, session_id: str, prompt: str, *, queue: bool = False) -> str:
+    async def send_prompt(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        queue: bool = False,
+        idempotency_key: str | None = None,
+    ) -> str:
         del queue
-        self.sent.append((session_id, prompt))
+        self.sent.append((session_id, prompt, idempotency_key))
         return "turn-2"
 
-    async def submit_question_answer(self, question: GjcCoordinatorQuestion, answer: str) -> None:
-        self.answers.append((question, answer))
+    async def submit_question_answer(
+        self,
+        question: GjcCoordinatorQuestion,
+        answer: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.answers.append((question, answer, idempotency_key))
 
     async def await_turn(self, session_id: str, turn_id: str) -> GjcCoordinatorTurn:
         del session_id, turn_id
@@ -87,9 +105,12 @@ async def test_execute_task_maps_sdk_turn_to_runtime_result() -> None:
     assert messages[-1].data == {"subtype": "success", "transport": "gjc-coordinator-mcp"}
     assert messages[-1].resume_handle is not None
     assert messages[-1].resume_handle.native_session_id == "session-1"
-    assert client.started == [
-        ("## Tooling Guidance\nPrefer these tools:\n- read\n\nDo it", "openai-codex/gpt-5.6-sol")
-    ]
+    assert len(client.started) == 1
+    assert client.started[0][:2] == (
+        "## Tooling Guidance\nPrefer these tools:\n- read\n\nDo it",
+        "openai-codex/gpt-5.6-sol",
+    )
+    assert client.started[0][2] is not None
     assert client.connected and client.closed
 
 
@@ -124,9 +145,30 @@ async def test_question_round_trip_uses_resume_handle_binding() -> None:
             resume_handle=first.resume_handle,
         )
     ][-1]
-
     assert second.content == "Finished"
-    assert client.answers == [(question, "My custom answer")]
+
+    assert len(client.answers) == 1
+    assert client.answers[0][:2] == (question, "My custom answer")
+    assert client.answers[0][2] == first.resume_handle.metadata["gjc_idempotency_key"]
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_resume_handle_awaits_existing_turn_without_new_prompt() -> None:
+    client = FakeClient([_turn("Recovered")])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+    handle = RuntimeHandle(
+        backend="gjc",
+        native_session_id="session-1",
+        cwd="/tmp/project",
+        metadata={"turn_id": "turn-1", "gjc_operation_phase": "awaiting"},
+    )
+
+    message = [item async for item in runtime.execute_task("Do not resend", resume_handle=handle)][
+        -1
+    ]
+
+    assert message.content == "Recovered"
     assert client.sent == []
 
 

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.config import get_gjc_cli_path
 from ouroboros.core.errors import ProviderError
@@ -108,10 +109,23 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         session_id: str | None = None
         try:
             await client.connect()
-            session = await client.start_session(
-                prompt,
-                model=config.model if config.model_is_explicit else None,
-            )
+            start_key = f"ouroboros-completion-{uuid4().hex}"
+            session = None
+            for attempt in range(max(1, self._max_retries)):
+                try:
+                    session = await client.start_session(
+                        prompt,
+                        model=config.model if config.model_is_explicit else None,
+                        idempotency_key=start_key,
+                    )
+                    break
+                except GjcCoordinatorError as exc:
+                    if (
+                        exc.code not in {"connection_failed", "timeout", "tool_failed"}
+                        or attempt >= self._max_retries - 1
+                    ):
+                        raise
+            assert session is not None
             session_id = session.session_id
             turn = await client.await_turn(session.session_id, session.turn_id)
             if turn.status == "waiting_for_answer":

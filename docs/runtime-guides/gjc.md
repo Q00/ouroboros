@@ -40,12 +40,13 @@ the managed GJC-side `ooo` bridge extension is installed by setup.
 |-------------|-----|
 | `gjc` CLI | Provider runtime; keep `gjc` on `PATH`, or configure an explicit path |
 | GJC auth | Run the GJC provider login/configuration flow before first use |
-| Ouroboros base package | `pip install ouroboros-ai` |
+| Ouroboros MCP v2 profile | `pip install 'ouroboros-ai[mcp]'`; keep it separate from MCP 1.x `[claude]` / `[claude-sdk]` environments |
 
 ## Quick Start
 
 ```bash
-# 1. Install and authenticate GJC, then confirm gjc is on PATH
+# 1. Install the MCP v2 Ouroboros profile and GJC, then authenticate GJC
+pip install 'ouroboros-ai[mcp]'
 gjc
 
 # 2. Point Ouroboros at GJC and install the GJC-side ooo bridge
@@ -103,6 +104,11 @@ It then uses GJC's supported Coordinator MCP contract:
 Ouroboros never reads GJC endpoint records or credentials and never opens a
 private SDK WebSocket. GJC's Broker and `SessionRouter` remain the sole owners
 of endpoint discovery, authentication, generation fencing, and turn delivery.
+
+The GJC adapter is an MCP v2 integration. Setup validates that the running
+Ouroboros interpreter has the pinned `mcp==2.0.0` client before it writes
+`runtime_backend: gjc` or `llm.backend: gjc`. This profile must remain isolated
+from the Claude Agent SDK profiles, which retain their MCP 1.x dependency.
 
 ## What `ooo` Means With GJC
 

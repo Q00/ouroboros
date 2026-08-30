@@ -3770,6 +3770,14 @@ def _install_gjc_ooo_bridge() -> bool:
     return True
 
 
+def _gjc_mcp_v2_ready() -> bool:
+    """Return whether this interpreter has the pinned MCP v2 client profile."""
+    try:
+        return importlib_metadata.version("mcp") == "2.0.0"
+    except importlib_metadata.PackageNotFoundError:
+        return False
+
+
 def _setup_gjc(gjc_path: str) -> bool:
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -3784,6 +3792,13 @@ def _setup_gjc(gjc_path: str) -> bool:
         return False
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
+        return False
+    if not _gjc_mcp_v2_ready():
+        print_error(
+            "GJC requires the Ouroboros MCP v2 profile. Reinstall this environment with "
+            "'ouroboros-ai[mcp]' before running setup; keep it separate from the MCP 1.x "
+            "[claude] and [claude-sdk] profiles."
+        )
         return False
     if not _install_gjc_ooo_bridge():
         return False
