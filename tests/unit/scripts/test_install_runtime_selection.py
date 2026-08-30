@@ -345,6 +345,12 @@ def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> 
     assert not (tmp_path / "telemetry.log").exists()
 
 
+def test_readme_mcp_v2_default_selects_claude_cli_worker() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli" in readme
+    assert "ouroboros-ai[claude]" in readme
+
+
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
     config = tmp_path / "home" / ".ouroboros" / "config.yaml"
     config.parent.mkdir(parents=True)

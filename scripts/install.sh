@@ -1089,7 +1089,7 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
+    _choice 1 "Claude SDK" "MCP 1.x Agent SDK profile (${PACKAGE_NAME}[claude,tui]); choose Claude CLI for MCP 2"
     _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
@@ -1146,7 +1146,7 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
+    _choice 1 "Claude SDK" "MCP 1.x Agent SDK profile (${PACKAGE_NAME}[claude,tui]); choose Claude CLI for MCP 2"
     _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"

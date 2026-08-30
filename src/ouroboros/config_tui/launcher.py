@@ -58,6 +58,7 @@ def _relaunch_with_tui_profile() -> bool:
     env["OUROBOROS_CONFIG_TUI_BOOTSTRAPPED"] = "1"
     args = [
         uvx,
+        "--isolated",
         "--python",
         ">=3.12",
         *_bootstrap_profile_args(),

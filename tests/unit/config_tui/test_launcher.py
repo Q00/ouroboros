@@ -150,8 +150,8 @@ def test_bootstrap_uses_published_mcp_v2_and_tui_profile(monkeypatch) -> None:
     assert launcher._relaunch_with_tui_profile() is True
     args = captured["args"]
     assert isinstance(args, list)
-    assert args[:3] == ["/usr/bin/uvx", "--python", ">=3.12"]
-    assert args[3:5] == ["--from", "ouroboros-ai[mcp,tui]"]
+    assert args[:4] == ["/usr/bin/uvx", "--isolated", "--python", ">=3.12"]
+    assert args[4:6] == ["--from", "ouroboros-ai[mcp,tui]"]
     assert args[-3:] == ["ouroboros", "config", "--no-browser"]
     env = captured["env"]
     assert isinstance(env, dict)
