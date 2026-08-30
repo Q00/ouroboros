@@ -10,6 +10,7 @@ import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.harness_observation import observation_from_message
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _normalized_command_claim_aliases,
@@ -391,6 +392,13 @@ def _runtime_message_supports_file_reference(
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
+    observation = observation_from_message(message)
+    if observation is not None:
+        # The harness saw the workspace change during this leaf's window; that
+        # is support the leaf could not have narrated into existence. Basename
+        # probing never reaches here with a path that changed, so an unchanged
+        # claim stays unsupported.
+        return observation.supports_file_claim(reference)
     if message.tool_name == "Bash":
         return _bash_message_mutates_file_reference(
             message,

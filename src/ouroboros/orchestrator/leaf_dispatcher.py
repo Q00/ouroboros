@@ -46,6 +46,11 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_tool_call_ids,
     _shell_command_mutation_targets,
 )
+from ouroboros.orchestrator.evidence.harness_observation import (
+    diff_workspace_snapshots,
+    insert_observation_message,
+    snapshot_workspace,
+)
 from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
@@ -696,6 +701,12 @@ class LeafDispatcher:
         last_heartbeat = time.monotonic()
         exec_start = time.monotonic()
 
+        # Fingerprint the workspace before the leaf touches it. The matching
+        # snapshot after the stream ends lets the verifier accept files_touched
+        # claims for paths the harness itself saw change, whatever tool shape
+        # the runtime used to write them (see evidence/harness_observation.py).
+        workspace_before = snapshot_workspace(task_cwd)
+
         with (
             _BashFilesystemLeaseTracker(task_cwd=task_cwd) as identity_tracker,
             anyio.CancelScope(
@@ -890,3 +901,11 @@ class LeafDispatcher:
 
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
+
+        # Only a transcript that actually arrived gets the observation: an empty
+        # stream must keep reading as a collection fault (transcript missing),
+        # not as a transcript consisting of the harness's own note.
+        if any(not message.is_final for message in state.messages):
+            observation = diff_workspace_snapshots(workspace_before, snapshot_workspace(task_cwd))
+            if observation is not None:
+                insert_observation_message(state.messages, observation)
