@@ -12,7 +12,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_support_messages_for_field,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
-from ouroboros.orchestrator.evidence.harness_observation import is_harness_observation_message
+from ouroboros.orchestrator.evidence.harness_observation import (
+    is_harness_observation_message,
+    observation_from_message,
+)
 from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
@@ -21,6 +24,18 @@ from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.verifier import VerifierVerdict
+
+
+def _harness_observation_supports_command_claim(
+    value: str,
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when the harness itself ran the claimed command successfully."""
+    return any(
+        observation.supports_command_claim(value)
+        for observation in (observation_from_message(message) for message in messages)
+        if observation is not None
+    )
 
 
 def _verify_atomic_evidence_against_runtime_messages(
@@ -100,6 +115,8 @@ def _verify_atomic_evidence_against_runtime_messages(
         for value in values:
             if field_name == "commands_run":
                 if _runtime_messages_support_command_claim(value, field_messages):
+                    continue
+                if _harness_observation_supports_command_claim(value, support_messages):
                     continue
                 if _runtime_messages_have_masked_test_command_form(
                     value,

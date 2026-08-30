@@ -47,6 +47,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _shell_command_mutation_targets,
 )
 from ouroboros.orchestrator.evidence.harness_observation import (
+    WorkspaceObservation,
     diff_workspace_snapshots,
     insert_observation_message,
     snapshot_workspace,
@@ -55,9 +56,17 @@ from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
 )
+from ouroboros.orchestrator.evidence.test_reexecution import (
+    reexecute_test_commands,
+    select_test_reexecution_commands,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     project_runtime_message,
+)
+from ouroboros.orchestrator.verify_shell import (
+    sanitized_verify_environment,
+    verify_shell_path_from_identity,
 )
 
 if TYPE_CHECKING:
@@ -914,4 +923,49 @@ class LeafDispatcher:
         ):
             observation = diff_workspace_snapshots(workspace_before, snapshot_workspace(task_cwd))
             if observation is not None:
+                observation = await self._attach_test_reexecution(
+                    observation,
+                    state=state,
+                    task_cwd=task_cwd,
+                )
                 insert_observation_message(state.messages, observation)
+
+    async def _attach_test_reexecution(
+        self,
+        observation: WorkspaceObservation,
+        *,
+        state: LeafDispatchState,
+        task_cwd: str | None,
+    ) -> WorkspaceObservation:
+        """Re-run claimed test commands the transcript could not prove.
+
+        Bounded by the verify-command timeout and the same POSIX shell the
+        verify gate uses; skipped when the leaf did not finish successfully,
+        when there is no workspace, or when no claim would change verdict.
+        """
+        if not state.success or not state.final_message or task_cwd is None:
+            return observation
+        commands = select_test_reexecution_commands(
+            final_message=state.final_message,
+            messages=tuple(state.messages),
+            task_cwd=task_cwd,
+        )
+        if not commands:
+            return observation
+        executor = self._executor
+        shell_path = verify_shell_path_from_identity(
+            getattr(executor, "_verify_shell_identity", None)
+        )
+        if shell_path is None:
+            return observation
+        timeout_seconds = getattr(executor, "_verify_command_timeout_seconds", 600)
+        runs = await reexecute_test_commands(
+            commands,
+            cwd=task_cwd,
+            shell_path=shell_path,
+            env=sanitized_verify_environment(),
+            timeout_seconds=float(timeout_seconds),
+        )
+        if not runs:
+            return observation
+        return replace(observation, command_runs=runs)
