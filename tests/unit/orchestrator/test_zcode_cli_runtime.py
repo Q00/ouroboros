@@ -542,6 +542,27 @@ def test_rollout_invalid_tool_result_in_prior_turn_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_dangling_tool_call_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "dangling-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 @pytest.mark.parametrize("variant", ["trace", "turn"])
 def test_rollout_identifier_mismatch_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
