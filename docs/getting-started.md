@@ -186,19 +186,21 @@ is absent or too old, the skills use the uv-managed interpreter.
 ### Option 2: pip Install
 
 ```bash
-pip install ouroboros-ai              # Base package (core engine)
-pip install 'ouroboros-ai[claude]'      # + default Claude Agent SDK profile (MCP 1.x)
-pip install 'ouroboros-ai[claude-cli]'  # + dependency-free Claude CLI worker
-pip install 'ouroboros-ai[claude-sdk]'  # + explicit alias for the SDK profile
-pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
-pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
-pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes the MCP 2 server
+# Recommended standalone MCP v2 profile
+pip install 'ouroboros-ai[mcp,tui]'
+ouroboros setup --runtime claude-cli  # or another MCP v2-compatible runtime
 
-ouroboros --version                   # verify CLI
+# Alternative profiles
+pip install 'ouroboros-ai[claude]'      # Claude Agent SDK (MCP 1.x, isolated)
+pip install 'ouroboros-ai[claude-cli]'  # Claude CLI worker only
+pip install 'ouroboros-ai[claude-sdk]'  # explicit alias for the SDK profile
+pip install 'ouroboros-ai[litellm]'     # + LiteLLM; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'         # MCP v2 without the GUI
+pip install 'ouroboros-ai[tui]'         # settings GUI only
+pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes MCP 2
+ouroboros --version
 ```
-
-> **Which extra do I need?** Use `ouroboros-ai[claude]` for the default Agent SDK runtime on MCP 1.x. Use `ouroboros-ai[mcp]` for the modern protocol server in a separate environment; its Claude launcher selects the dependency-free `[claude-cli]` worker. `[claude-sdk]` is an explicit alias for `[claude]`. Never combine either SDK spelling or `[all]` with `[mcp]` in one interpreter. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
+> **Which profile do I need?** The recommended standalone profile is `ouroboros-ai[mcp,tui]`. Select an MCP v2-compatible runtime explicitly, for example `ouroboros setup --runtime claude-cli`; use `[claude]` or `[claude-sdk]` only in an isolated MCP 1.x environment for the Agent SDK. Never combine the SDK profiles with `[mcp]` in one interpreter.
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
