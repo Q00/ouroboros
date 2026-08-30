@@ -57,12 +57,23 @@ def test_ps1_shares_python_and_click_contract_with_install_sh() -> None:
         )
 
 
-def test_ps1_declares_no_telemetry() -> None:
-    """TELEMETRY.md promises the Windows installer sends nothing; keep it honest."""
+def test_ps1_emits_no_installer_events() -> None:
+    """TELEMETRY.md: install.ps1 emits neither installer event itself.
+
+    The `ouroboros setup` subprocesses it runs are ordinary CLI invocations and
+    keep their normal telemetry controls, so this only pins the installer's own
+    behavior: no PostHog client, no capture call, and no event name outside the
+    contract comment.
+    """
     text = INSTALL_PS1.read_text(encoding="utf-8")
-    assert "sends no telemetry" in text
+    assert "emits no installer events of its own" in text
     assert "posthog" not in text.lower()
-    assert "install_completed" not in text
+    assert "Invoke-RestMethod" not in text.replace(
+        "Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1'", ""
+    ), "install.ps1 must not make network calls beyond fetching the uv installer"
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "install_started" not in body
+    assert "install_completed" not in body
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not installed")

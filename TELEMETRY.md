@@ -82,7 +82,7 @@ use. Each row below is the exact property set accepted by the serializer.
 
 | Event | When | Properties (exact set) |
 |---|---|---|
-| `install_completed` | `install.sh` finishes successfully (the Windows `install.ps1` sends nothing) | os, runtime, version, ref |
+| `install_completed` | `install.sh` finishes successfully (the Windows `install.ps1` emits neither installer event) | os, runtime, version, ref |
 | `install_started` | `install.sh` begins — deliberately per-invocation, NOT daily-deduplicated: each row pairs with (or lacks) an `install_completed` to measure install drop-off and retry behavior, and volume is bounded by install attempts (~hundreds/month) | os, version, ref |
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
@@ -165,4 +165,7 @@ Collection is triggered only at these audited call sites:
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
 - [`scripts/install.sh`](scripts/install.sh) — successful install completion.
   [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
-  no events at all.
+  neither `install_started` nor `install_completed`. The `ouroboros setup`
+  calls it makes are ordinary CLI invocations and produce the `command_run`
+  (service=cli) rows above under the usual controls, as they do for
+  `install.sh`.

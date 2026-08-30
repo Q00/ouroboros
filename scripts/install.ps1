@@ -21,8 +21,10 @@
 #   4. `ouroboros setup --runtime <backend> --non-interactive`, `setup refresh`,
 #      and the Claude Code plugin when `claude` is on PATH.
 #
-# This installer sends no telemetry (see TELEMETRY.md). Native Windows support is
-# experimental; Codex CLI is only supported under WSL 2 (docs/platform-support.md).
+# This installer emits no installer events of its own (no install_started /
+# install_completed). The `ouroboros` CLI it invokes for setup follows the normal
+# telemetry controls in TELEMETRY.md, exactly as it does under install.sh.
+# Native Windows support is experimental; Codex CLI is only supported under WSL 2 (docs/platform-support.md).
 
 [CmdletBinding()]
 param(

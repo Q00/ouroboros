@@ -251,7 +251,8 @@ Options go through environment variables, same names as `install.sh`
 
 Open a new PowerShell window afterwards so the PATH change applies. Use
 Windows Terminal for `ouroboros config` (the TUI needs ANSI support; `cmd.exe`
-is not supported). The PowerShell installer sends no telemetry. Limits are
+is not supported). The PowerShell installer emits no installer telemetry
+events; the `ouroboros setup` it runs follows the normal [controls](../TELEMETRY.md). Limits are
 listed in [platform support](platform-support.md#windows-native-caveats); in
 short, Claude Code works and Codex CLI does not.
 
