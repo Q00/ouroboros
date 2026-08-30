@@ -72,7 +72,11 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator import create_agent_runtime, create_agent_runtime_async
+from ouroboros.orchestrator import (
+    create_agent_runtime,
+    create_agent_runtime_async,
+    preflight_agent_runtime,
+)
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_CWD_ARG,
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -1602,6 +1606,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             else {}
                         ),
                     )
+                    runtime_blocker = preflight_agent_runtime(agent_adapter)
+                    if runtime_blocker is not None:
+                        raise RuntimeError(
+                            f"Runtime '{self.agent_runtime_backend}' cannot execute: "
+                            f"{runtime_blocker}"
+                        )
                     # Host-driven execution: attach the composed bridge and the
                     # job identity its dispatch records correlate under. A
                     # retained-owner resume keeps the adapter this already
