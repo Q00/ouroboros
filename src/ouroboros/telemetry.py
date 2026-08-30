@@ -286,6 +286,71 @@ _SERVICE_ACTIVE_KEYS = frozenset(
         "ci",
     }
 )
+# Reinstated adoption events (removed by #2278 for volume, brought back as
+# ONE daily-deduplicated row per user/day/dimension via `$insert_id` plus the
+# process-local suppression cache): the funnel's top needs "MCP attached"
+# (`mcp_serve_started`) separately from "made a tool request" (`service_active`),
+# and fan-out adoption needs `subagent_dispatch`. Same lean property contract
+# as the other retained events — closed dimensions only.
+_MCP_SERVE_STARTED_KEYS = frozenset(
+    {
+        "transport",
+        "$insert_id",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_MCP_TRANSPORTS = frozenset({"stdio", "sse", "streamable-http"})
+_SUBAGENT_DISPATCH_KEYS = frozenset(
+    {
+        "phase",
+        "fanout_kind",
+        "$insert_id",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_SUBAGENT_DISPATCH_PHASES = frozenset({"emitted", "submitted"})
+
+# Events stamped with a deterministic per-day `$insert_id` (PostHog dedupes
+# identical ids server-side) and, for _DAILY_ONCE_EVENTS, also suppressed
+# process-locally after the first emission of the day.
+_DAILY_INSERT_ID_EVENTS = frozenset(
+    {"command_run", "service_active", "mcp_serve_started", "subagent_dispatch"}
+)
+_DAILY_ONCE_EVENTS = frozenset({"service_active", "mcp_serve_started", "subagent_dispatch"})
+
+# The AC verify-gate rejection-cause event. `cause` mirrors the orchestrator's
+# closed _VERIFY_GATE_CAUSES vocabulary (SSOT pairing with
+# orchestrator/verify_gate_outcome.py -- edit both together): which structural
+# reason the deterministic verify gate rejected an AC attempt for. Never a
+# command, path, artifact name, or output.
+_AC_VERIFY_FAILED_KEYS = frozenset(
+    {
+        "cause",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_AC_VERIFY_CAUSES = frozenset(
+    {
+        "invalid_contract",
+        "artifacts_missing",
+        "artifacts_missing_found_elsewhere",
+        "environment_unverifiable",
+        "timeout",
+        "exit_nonzero",
+        "output_assertion_unmatched",
+        "workspace_mutated",
+    }
+)
+_UNKNOWN_VERIFY_CAUSE = "unknown"
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -825,6 +890,12 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _WORKFLOW_OUTCOME_KEYS
     if event == "service_active":
         return _SERVICE_ACTIVE_KEYS
+    if event == "mcp_serve_started":
+        return _MCP_SERVE_STARTED_KEYS
+    if event == "subagent_dispatch":
+        return _SUBAGENT_DISPATCH_KEYS
+    if event == "ac_verify_failed":
+        return _AC_VERIFY_FAILED_KEYS
     return None
 
 
@@ -841,6 +912,9 @@ def _daily_insert_id(
         properties.get("status"),
         properties.get("error_type"),
         properties.get("runtime_backend"),
+        properties.get("transport"),
+        properties.get("phase"),
+        properties.get("fanout_kind"),
     )
     material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
     return hashlib.sha256(material.encode()).hexdigest()
@@ -872,7 +946,7 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
-        if event in {"command_run", "service_active"} and "$insert_id" not in props:
+        if event in _DAILY_INSERT_ID_EVENTS and "$insert_id" not in props:
             props["$insert_id"] = _daily_insert_id(event, resolved_id, props)
         props = _sanitize_properties(props, allowed_keys)
         event_payload = {
@@ -881,7 +955,7 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "properties": props,
         }
-        if event == "service_active":
+        if event in _DAILY_ONCE_EVENTS:
             insert_id = str(props["$insert_id"])
             with _lock:
                 if insert_id in _activity_cache:
@@ -934,14 +1008,72 @@ def capture_tool_call(
         pass
 
 
+def capture_ac_verify_failed(cause: str | None) -> None:
+    """Capture one deterministic verify-gate rejection with its closed cause.
+
+    ``cause`` is produced by the orchestrator's own gate branches, but this
+    boundary still folds anything outside the audited ``_AC_VERIFY_CAUSES``
+    vocabulary to a fixed ``unknown`` literal -- a future gate branch (or a
+    replayed/spoofed value) is counted, never forwarded verbatim.
+    """
+    try:
+        capture(
+            "ac_verify_failed",
+            {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
+        )
+    except Exception:
+        pass
+
+
 def capture_service_active() -> None:
     """Record at most one service-active row per user/day/backend."""
     capture("service_active", {"service": "mcp"})
 
 
+def capture_mcp_serve_started(transport: str | None) -> None:
+    """Record at most one "MCP attached" row per user/day/transport.
+
+    The top of the activation funnel: a host spawned ``ouroboros mcp serve``
+    for a session, whether or not any tool was ever requested. Kept separate
+    from ``service_active`` (first tool request of the day) so the
+    attached → used conversion stays measurable. Daily-deduplicated, so this
+    reinstates the metric #2278 removed without its per-session volume.
+    """
+    try:
+        capture(
+            "mcp_serve_started",
+            {"transport": transport if transport in _MCP_TRANSPORTS else "unknown"},
+        )
+    except Exception:
+        pass
+
+
 def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
-    """Compatibility no-op: subagent dispatch telemetry is no longer collected."""
-    del properties
+    """Record at most one fan-out adoption row per user/day/phase/fanout_kind.
+
+    The rich per-dispatch contract #2278 removed stays removed; what survives
+    is the adoption signal ("this user's sessions used subagent fan-out
+    today"), with both dimensions folded to closed vocabularies before
+    anything is queued.
+    """
+    try:
+        phase = properties.get("phase")
+        fanout_kind = properties.get("fanout_kind")
+        capture(
+            "subagent_dispatch",
+            {
+                "phase": phase if phase in _SUBAGENT_DISPATCH_PHASES else "unknown",
+                "fanout_kind": (
+                    fanout_kind
+                    if isinstance(fanout_kind, str)
+                    and fanout_kind.isidentifier()
+                    and len(fanout_kind) <= 64
+                    else "unknown"
+                ),
+            },
+        )
+    except Exception:
+        pass
 
 
 def capture_job_outcome(
@@ -1137,8 +1269,10 @@ def _reset_for_tests() -> None:
 
 __all__ = [
     "capture",
+    "capture_ac_verify_failed",
     "capture_cli_command",
     "capture_job_outcome",
+    "capture_mcp_serve_started",
     "capture_service_active",
     "capture_tool_call",
     "distinct_id",

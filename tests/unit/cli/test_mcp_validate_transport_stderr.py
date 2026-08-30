@@ -125,3 +125,27 @@ def test_stderr_console_print_does_not_leak_to_stdout(capfd) -> None:
     captured = capfd.readouterr()
     assert captured.out == "", f"stdout must be clean but got: {captured.out!r}"
     assert "Invalid transport" in captured.err
+
+
+def test_failed_startup_emits_no_mcp_serve_started(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """`mcp_serve_started` is the attached-funnel denominator: a startup that
+    dies on an invalid EventStore target must not count as an attachment."""
+    from unittest.mock import MagicMock, patch
+
+    from ouroboros import telemetry
+
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    capture = MagicMock()
+    monkeypatch.setattr(telemetry, "capture_mcp_serve_started", capture)
+
+    invalid_db_target = tmp_path / "not-a-file"
+    invalid_db_target.mkdir()  # a directory is an invalid EventStore target
+
+    with patch("ouroboros.cli.commands.mcp._ensure_shell_env", lambda **_: None):
+        with pytest.raises(typer.Exit) as excinfo:
+            asyncio.run(_run_mcp_server("localhost", 8080, "stdio", db_path=str(invalid_db_target)))
+
+    assert excinfo.value.exit_code == 1
+    capture.assert_not_called()

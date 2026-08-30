@@ -2021,6 +2021,76 @@ class TestAsyncJobHandlers:
         assert "ouroboros_ac_tree_hud" in handler.definition.description
         assert "ouroboros_job_wait" not in handler.definition.description
 
+
+class TestEntryToolRoutingContracts:
+    """Entry-tool descriptions carry Use when / Result / Do not use when routing.
+
+    The activation contract (HANDOFF: MCP-active users → product usage): a host
+    model reading only these descriptions must route an ambiguous request to
+    interview, a substantial end-to-end request to start_auto, and a
+    Seed-provided request to start_execute_seed — without the literal `ooo`.
+    """
+
+    @staticmethod
+    def _start_auto_description() -> str:
+        from ouroboros.mcp.tools.auto_handler import StartAutoHandler
+
+        return StartAutoHandler().definition.description
+
+    def test_interview_description_routes_ambiguous_requests(self) -> None:
+        description = InterviewHandler().definition.description
+        assert "Use when" in description
+        assert "Result" in description
+        assert "Do not use when" in description
+        # Ambiguous / no-AC requests route here, before implementation.
+        assert "ambiguous" in description
+        assert "acceptance criteria" in description
+        assert "before any" in description
+        # Not gated on the literal `ooo` syntax.
+        assert "'ooo'" in description
+        # Seed-provided requests are routed away, and trivial work is excluded.
+        assert "ouroboros_start_execute_seed" in description
+        assert "simple" in description
+
+    def test_start_auto_description_routes_end_to_end_requests(self) -> None:
+        description = self._start_auto_description()
+        assert "Use when" in description
+        assert "Result" in description
+        assert "Do not use when" in description
+        # Substantial end-to-end work routes here.
+        assert "end-to-end" in description
+        assert "migrations" in description
+        # The product contract stays visible: interview → Seed → execution.
+        assert "interview" in description
+        assert "Seed" in description
+        # Trivial work and Seed-provided requests are routed away.
+        assert "simple question" in description
+        assert "ouroboros_start_execute_seed" in description
+
+    def test_lateral_think_description_triggers_proactively_on_stagnation(self) -> None:
+        description = LateralThinkHandler().definition.description
+        assert "Use when" in description
+        assert "Result" in description
+        assert "Do not use when" in description
+        # Stagnation signals trigger the call proactively, not on the literal
+        # 'lateral'/'unstuck' keywords alone.
+        assert "stuck" in description
+        assert "proactively" in description
+        assert "do not wait for the user" in description
+        # But not when work is progressing normally.
+        assert "progressing normally" in description
+
+    def test_start_execute_seed_description_requires_existing_seed(self) -> None:
+        description = StartExecuteSeedHandler().definition.description
+        assert "Use when" in description
+        assert "Result" in description
+        assert "Do not use when" in description
+        # Only Seed-provided requests route here; raw requests go to the
+        # clarification entry points instead.
+        assert "already exists" in description
+        assert "ouroboros_interview" in description
+        assert "ouroboros_start_auto" in description
+
     async def test_start_execute_seed_background_generates_ids_without_session(
         self,
     ) -> None:
