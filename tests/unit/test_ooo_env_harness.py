@@ -374,6 +374,7 @@ http_headers = {{ X_Client_Secret = "{header_secret}" }}
     assert exit_code == 0
     assert "HTTP URL transport" in persisted
     assert "<configured>" in persisted
+    assert "https://ouroboros.example/mcp" not in persisted
     assert header_secret not in persisted
 
 
@@ -419,4 +420,4 @@ env = {{ GITHUB_PAT = "{pat}", PROVIDER_SETTING = "{ordinary_value}" }}
     assert ordinary_value not in persisted
     assert "GITHUB_PAT" in persisted
     assert "PROVIDER_SETTING" in persisted
-    assert "<redacted>" in persisted
+    assert "<configured>" in persisted

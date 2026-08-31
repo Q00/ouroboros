@@ -166,22 +166,34 @@ def _configured_sensitive_values(entry: dict[str, Any]) -> set[str]:
 
 
 def _safe_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Project an effective MCP entry without persisting configured values."""
+    """Project an MCP entry using only transport-safe diagnostic fields.
+
+    Keep the raw entry for validation and process launch, but make the durable
+    projection transport-aware.  HTTP entries never enter the stdio-shaped
+    command/args/env surface, and configured values are represented only by
+    presence markers or redacted keys.
+    """
+    transport = entry.get("transport", "unknown")
     safe: dict[str, Any] = {
         "path": entry.get("path"),
         "exists": entry.get("exists", False),
-        "transport": entry.get("transport", "unknown"),
-        "command": entry.get("command"),
-        "args": list(entry.get("args") or []),
-        "env": {
-            str(key): "<redacted>"
-            for key in (entry.get("env") or {})
-            if isinstance(entry.get("env"), dict)
-        },
+        "transport": transport,
         "url_present": bool(entry.get("url_present")),
         "error": entry.get("error"),
     }
-    if safe["transport"] == "url" or entry.get("url_present"):
+    if transport == "stdio":
+        safe.update(
+            {
+                "command": entry.get("command") if isinstance(entry.get("command"), str) else None,
+                "args": redact_secrets(list(entry.get("args") or [])),
+                "env": {
+                    str(key): "<configured>"
+                    for key in (entry.get("env") or {})
+                    if isinstance(entry.get("env"), dict)
+                },
+            }
+        )
+    elif transport == "url" or entry.get("url_present"):
         safe["url"] = "<configured>" if entry.get("url") else None
         for field in ("http_headers", "env_http_headers"):
             if isinstance(entry.get(field), dict):
@@ -648,21 +660,20 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    config_entries: list[dict[str, Any]] = []
-    for path in discovered_paths:
-        entry = read_mcp_entry(path)
+    valid_config_entries: list[dict[str, Any]] = []
+    for entry in raw_config_entries:
         status, message = classify_mcp_entry(entry, expected_script)
-        config_entries.append(entry)
-        checks.append(Check(f"mcp_config:{path}", status, message, entry))
+        if entry.get("exists") and not entry.get("error"):
+            valid_config_entries.append(entry)
+        checks.append(Check(f"mcp_config:{entry['path']}", status, message, _safe_mcp_entry(entry)))
 
     unique_signatures = {
         (
             entry.get("transport", "unknown"),
-            entry.get("command") if entry.get("transport") != "url" else None,
-            tuple(entry.get("args") or []) if entry.get("transport") != "url" else (),
+            entry.get("command"),
+            tuple(entry.get("args") or []),
         )
-        for entry in config_entries
-        if entry.get("exists") and not entry.get("error")
+        for entry in valid_config_entries
     }
     drift_status = "pass" if len(unique_signatures) <= 1 else "warn"
     checks.append(
@@ -672,7 +683,10 @@ def main(argv: list[str] | None = None) -> int:
             "all discovered MCP configs use one command signature"
             if drift_status == "pass"
             else "discovered MCP configs use multiple command signatures",
-            {"signatures": [list(signature) for signature in sorted(unique_signatures, key=str)]},
+            {
+                "signature_count": len(unique_signatures),
+                "transports": sorted({entry[0] for entry in unique_signatures}),
+            },
         )
     )
 
