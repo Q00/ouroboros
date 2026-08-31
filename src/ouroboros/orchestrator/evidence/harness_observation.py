@@ -125,7 +125,7 @@ def snapshot_workspace(
             truncated = True
             break
         for filename in filenames:
-            if len(fingerprints) >= max_entries:
+            if len(fingerprints) >= max_entries or time.monotonic() > deadline:
                 truncated = True
                 break
             full = os.path.join(dirpath, filename)
@@ -150,11 +150,17 @@ def diff_workspace_snapshots(
     """Return the paths that appeared or changed between two snapshots."""
     if before is None or after is None or before.root != after.root:
         return None
-    changed = {
-        path
-        for path, fingerprint in after.fingerprints.items()
-        if before.fingerprints.get(path) != fingerprint
-    }
+    changed: set[str] = set()
+    for path, fingerprint in after.fingerprints.items():
+        prior = before.fingerprints.get(path)
+        if prior == fingerprint:
+            continue
+        if prior is None and before.truncated:
+            # A truncated pre-snapshot may simply have run out of budget before
+            # reaching this path; its absence there is uncertainty, not proof
+            # that the leaf created it during this window.
+            continue
+        changed.add(path)
     return WorkspaceObservation(
         changed_paths=frozenset(changed),
         truncated=before.truncated or after.truncated,

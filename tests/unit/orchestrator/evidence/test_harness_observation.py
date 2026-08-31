@@ -19,6 +19,7 @@ from ouroboros.orchestrator.evidence.harness_observation import (
     HARNESS_OBSERVATION_DATA_KEY,
     HARNESS_OBSERVATION_MESSAGE_TYPE,
     WorkspaceObservation,
+    WorkspaceSnapshot,
     build_observation_message,
     diff_workspace_snapshots,
     insert_observation_message,
@@ -107,6 +108,46 @@ class TestSnapshotDiff:
         assert snapshot.truncated is True
         assert len(snapshot.fingerprints) == 3
 
+    def test_truncated_pre_snapshot_withholds_paths_it_never_saw(self, tmp_path: Path) -> None:
+        """Budget shift must not turn an unseen stale file into positive evidence.
+
+        With ``max_entries=1`` the pre-snapshot holds one of the two files.
+        Deleting one file lets the other enter the post-snapshot budget; its
+        absence from the truncated pre-snapshot is uncertainty, not proof that
+        this leaf created it.
+        """
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "a.py").write_text("a\n", encoding="utf-8")
+        (workspace / "b.py").write_text("b\n", encoding="utf-8")
+        before = snapshot_workspace(workspace, max_entries=1)
+        assert before is not None and before.truncated is True
+
+        (workspace / "a.py").unlink()
+        after = snapshot_workspace(workspace, max_entries=1)
+        observation = diff_workspace_snapshots(before, after)
+
+        assert observation is not None
+        assert not observation.supports_file_claim("a.py")
+        assert not observation.supports_file_claim("b.py")
+
+    def test_truncated_snapshots_still_observe_a_path_seen_in_both(self) -> None:
+        """A fingerprint change for a path present in both snapshots is genuine."""
+        before = WorkspaceSnapshot(root="/ws", fingerprints={"seen.py": (2, 100)}, truncated=True)
+        after = WorkspaceSnapshot(
+            root="/ws",
+            fingerprints={"seen.py": (9, 200), "unseen.py": (3, 300)},
+            truncated=True,
+        )
+
+        observation = diff_workspace_snapshots(before, after)
+
+        assert observation is not None
+        assert observation.truncated is True
+        assert observation.changed_paths == frozenset({"seen.py"})
+        assert observation.supports_file_claim("seen.py")
+        assert not observation.supports_file_claim("unseen.py")
+
     def test_missing_or_mismatched_roots_yield_no_observation(self, tmp_path: Path) -> None:
         assert snapshot_workspace(None) is None
         assert snapshot_workspace(tmp_path / "absent") is None
@@ -194,6 +235,23 @@ class TestFileClaimSupport:
             "stale.py", messages, task_cwd=str(tmp_path)
         )
 
+    def test_duplicate_basename_cannot_borrow_observation_support(self, tmp_path: Path) -> None:
+        """A changed ``foo.py`` must not vouch for an unchanged ``nested/foo.py``.
+
+        The basename fallback exists for transcript-shaped evidence whose tool
+        output reported ``generated.py`` instead of ``src/generated.py``; the
+        observation answers only for the exact workspace-relative path.
+        """
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / "foo.py").write_text("stale\n", encoding="utf-8")
+        observation = WorkspaceObservation(changed_paths=frozenset({"foo.py"}))
+        messages = (*_bash_pair("ls"), build_observation_message(observation))
+
+        assert not _runtime_messages_support_file_claim(
+            "nested/foo.py", messages, task_cwd=str(tmp_path)
+        )
+
     def test_out_of_workspace_claim_is_never_backed(self, tmp_path: Path) -> None:
         observation = WorkspaceObservation(changed_paths=frozenset({"hello.py"}))
         messages = (*_bash_pair("ls"), build_observation_message(observation))
@@ -204,6 +262,55 @@ class TestFileClaimSupport:
         assert not _runtime_messages_support_file_claim(
             "/etc/hello.py", messages, task_cwd=str(tmp_path)
         )
+
+
+class TestSessionSignalBoundary:
+    def test_follow_up_slice_and_restore_use_the_list_boundary(self) -> None:
+        """The synthetic observation must not leak into follow-up bookkeeping.
+
+        ``message_count`` counts only runtime messages, so after the observation
+        is appended the transcript list is one entry longer. Slicing a queued
+        signal's reply window (or restoring an aborted follow-up) from the
+        runtime counter would start inside the previous turn — a successful
+        first signal could make an error-only second signal look acknowledged.
+        """
+        from ouroboros.orchestrator.adapter import RuntimeHandle
+        from ouroboros.orchestrator.leaf_dispatcher import LeafDispatchState
+        from ouroboros.orchestrator.session_signal_followup import CompletedProviderTurn
+
+        runtime_messages = [
+            AgentMessage(type="assistant", content="working"),
+            AgentMessage(type="result", content="done", data={"subtype": "success"}),
+        ]
+        state = LeafDispatchState(
+            messages=list(runtime_messages),
+            runtime_handle=RuntimeHandle(backend="claude"),
+            message_count=len(runtime_messages),
+            final_message="done",
+            success=True,
+        )
+        insert_observation_message(
+            state.messages, WorkspaceObservation(changed_paths=frozenset({"a.py"}))
+        )
+
+        assert state.runtime_handle is not None
+        turn = CompletedProviderTurn.capture("dispatch-1", state.runtime_handle, state)
+        assert turn.message_count == 2
+        assert turn.message_list_length == 3
+
+        # A follow-up's reply window starts after the observation, so the
+        # previous turn's tail can never acknowledge the next signal.
+        follow_up = AgentMessage(type="assistant", content="signal reply")
+        state.messages.append(follow_up)
+        assert state.messages[turn.message_list_length :] == [follow_up]
+
+        # Restoring an aborted follow-up keeps the primary's observation.
+        turn.restore(state)
+        assert [message.type for message in state.messages] == [
+            "assistant",
+            "result",
+            HARNESS_OBSERVATION_MESSAGE_TYPE,
+        ]
 
 
 class TestVerifierIntegration:
