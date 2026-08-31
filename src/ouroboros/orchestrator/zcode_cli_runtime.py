@@ -875,7 +875,18 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         ]
         if not user_boundaries:
             return []
-        messages = messages[user_boundaries[-1] + 1 :]
+        boundary = user_boundaries[-1]
+        prior_tool_ids = {
+            identifier
+            for message in messages[: boundary + 1]
+            if isinstance(message, dict)
+            for identifier in [
+                *(call.get("id") for call in message.get("toolCalls", [])),
+                message.get("toolCallId") if message.get("role") == "tool" else None,
+            ]
+            if isinstance(identifier, str)
+        }
+        messages = messages[boundary + 1 :]
 
         receipts: list[AgentMessage] = []
         pending: dict[str, tuple[str, str]] = {}
@@ -900,6 +911,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                         and tool_name.strip()
                         and isinstance(tool_input, dict)
                     ):
+                        return []
+                    if call_id in prior_tool_ids:
                         return []
                     input_fingerprint = json.dumps(
                         tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -939,6 +952,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             call_id = message.get("toolCallId")
             tool_name = message.get("toolName")
             if not isinstance(call_id, str):
+                return []
+            if call_id in prior_tool_ids:
                 return []
             is_error = message.get("isError")
             if not isinstance(is_error, bool):

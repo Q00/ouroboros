@@ -453,6 +453,24 @@ def test_rollout_excludes_receipts_before_current_turn_user_boundary(
     assert [message.tool_name for message in messages[:-1]] == ["Read", "Read"]
 
 
+def test_rollout_rejects_exact_replayed_tool_ids_across_user_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    old_pair = record["request"]["messages"][1:]
+    record["request"]["messages"] = [
+        {"role": "user", "content": "old turn"},
+        *old_pair,
+        {"role": "assistant", "content": "old final"},
+        {"role": "user", "content": "current turn"},
+        *old_pair,
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_current_no_tool_turn_does_not_replay_prior_receipts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
