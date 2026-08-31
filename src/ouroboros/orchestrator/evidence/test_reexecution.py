@@ -27,6 +27,7 @@ from ouroboros.orchestrator.evidence.claims import _runtime_message_command_valu
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import CommandObservation
 from ouroboros.orchestrator.evidence.shell_parsing import (
+    _is_env_assignment,
     _looks_like_test_command,
     _shell_command_body,
 )
@@ -68,6 +69,33 @@ def safe_test_argv(command: str) -> tuple[str, ...] | None:
     ):
         return None
     return tuple(argv)
+
+
+def safe_test_invocation(command: str) -> tuple[dict[str, str], tuple[str, ...]] | None:
+    """Split a claimed test command into (environment delta, executable argv).
+
+    ``_looks_like_test_command`` accepts leading environment assignments
+    (``REEXEC_FLAG=yes python -m pytest``) via the same rule the evidence
+    matcher uses, so selection and execution must agree on that syntax: the
+    assignments become a controlled environment delta and the remainder is the
+    direct argv. Every token has already passed the metacharacter gate, so the
+    assignment values are literal bytes in both shell and direct execution —
+    the semantics the leaf claims are exactly the semantics that run. A bare
+    ``env`` prefix is peeled the same way ``_strip_env_prefix`` does.
+    """
+    argv = safe_test_argv(command)
+    if argv is None:
+        return None
+    index = 1 if argv[0] == "env" else 0
+    env_delta: dict[str, str] = {}
+    while index < len(argv) and _is_env_assignment(argv[index]):
+        name, _, value = argv[index].partition("=")
+        env_delta[name] = value
+        index += 1
+    executable = argv[index:]
+    if not executable:
+        return None
+    return env_delta, executable
 
 
 def select_test_reexecution_commands(
@@ -131,7 +159,7 @@ def select_test_reexecution_commands(
         if not key or key in seen:
             continue
         seen.add(key)
-        if safe_test_argv(candidate) is None:
+        if safe_test_invocation(candidate) is None:
             # Shell-dependent text is not a runnable claim; never a candidate.
             continue
         selected.append(candidate)
@@ -150,15 +178,16 @@ async def reexecute_test_commands(
     """Run each command as a direct argv (no shell) and record what happened."""
     observations: list[CommandObservation] = []
     for command in commands:
-        argv = safe_test_argv(command)
-        if argv is None:
+        invocation = safe_test_invocation(command)
+        if invocation is None:
             continue
+        env_delta, argv = invocation
         # ``run_with_shell`` executes exactly the argv it is given; no shell
         # is placed in front, so leaf-authored text cannot be interpreted.
         run = await run_with_shell(
             argv,
             cwd=cwd,
-            env=env,
+            env={**env, **env_delta} if env_delta else env,
             timeout_seconds=timeout_seconds,
         )
         if run.start_error is not None:
@@ -179,5 +208,6 @@ __all__ = [
     "MAX_REEXECUTED_COMMANDS",
     "reexecute_test_commands",
     "safe_test_argv",
+    "safe_test_invocation",
     "select_test_reexecution_commands",
 ]

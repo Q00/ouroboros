@@ -29,6 +29,7 @@ from ouroboros.orchestrator.evidence.test_reexecution import (
     MAX_REEXECUTED_COMMANDS,
     reexecute_test_commands,
     safe_test_argv,
+    safe_test_invocation,
     select_test_reexecution_commands,
 )
 from ouroboros.orchestrator.evidence.verification import (
@@ -160,6 +161,21 @@ class TestSafeArgv:
     def test_shell_dependent_text_is_rejected(self, command: str) -> None:
         assert safe_test_argv(command) is None
 
+    def test_env_prefix_becomes_a_delta_not_an_executable(self) -> None:
+        """Round-2 blocker: the recognizer accepts env prefixes, so must execution."""
+        assert safe_test_invocation("REEXEC_FLAG=yes python -m pytest -q test_env.py") == (
+            {"REEXEC_FLAG": "yes"},
+            ("python", "-m", "pytest", "-q", "test_env.py"),
+        )
+        assert safe_test_invocation("env A=1 B=2 pytest -q") == (
+            {"A": "1", "B": "2"},
+            ("pytest", "-q"),
+        )
+        assert safe_test_invocation("pytest -q") == ({}, ("pytest", "-q"))
+        # Assignments alone are not a runnable command.
+        assert safe_test_invocation("REEXEC_FLAG=yes") is None
+        assert safe_test_invocation('FLAG="$(id)" pytest -q') is None
+
 
 class TestReexecution:
     async def test_records_exit_status_and_output(self, tmp_path: Path) -> None:
@@ -180,6 +196,33 @@ class TestReexecution:
         assert runs[0].returncode == 0 and "1 passed" in runs[0].output_tail
         assert runs[1].returncode != 0
         assert runs[0].succeeded and not runs[1].succeeded
+
+    async def test_env_prefixed_command_runs_with_the_delta_applied(self, tmp_path: Path) -> None:
+        """The round-2 repro: an accepted env-prefixed claim must actually run."""
+        (tmp_path / "test_env.py").write_text(
+            "import os\n\ndef test_env():\n    assert os.environ['REEXEC_FLAG'] == 'yes'\n",
+            encoding="utf-8",
+        )
+        python = sys.executable
+        command = f"REEXEC_FLAG=yes {python} -m pytest -q -p no:cacheprovider test_env.py"
+
+        selected = select_test_reexecution_commands(
+            final_message=json.dumps({"tests_passed": [command]}),
+            messages=(_bash_call("ls"), _bash_result()),
+            task_cwd=str(tmp_path),
+        )
+        assert selected == (command,)
+
+        runs = await reexecute_test_commands(
+            selected,
+            cwd=str(tmp_path),
+            env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+            timeout_seconds=60,
+        )
+
+        assert len(runs) == 1
+        assert runs[0].returncode == 0 and "1 passed" in runs[0].output_tail
+        assert runs[0].succeeded
 
     async def test_timeout_is_recorded_not_raised(self, tmp_path: Path) -> None:
         runs = await reexecute_test_commands(
