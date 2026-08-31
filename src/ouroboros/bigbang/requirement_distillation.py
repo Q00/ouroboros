@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from ouroboros.bigbang.answer_provenance import classify_answer_provenance
 from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
@@ -31,6 +32,7 @@ from ouroboros.core.seed import (
 from ouroboros.interview_adapters import (
     ReferenceResolutionStatus,
     candidates_from_contrast_answer,
+    normalized_question_key,
 )
 
 _EXPLICIT_REQUIREMENT_RE = re.compile(
@@ -109,8 +111,12 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             )
         )
 
+    # Keyed by normalized question text: rounds can carry a host-rendered echo
+    # of the asked question (whitespace/case drift), and a missed lookup here
+    # used to resurrect the unresolved-contrast blocker for an already-RESOLVED
+    # reference. See normalized_question_key.
     reference_by_question = {
-        resolution.asked_question: cue
+        normalized_question_key(resolution.asked_question): cue
         for resolution in state.reference_resolutions
         for cue in state.reference_cues
         if (
@@ -119,6 +125,11 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             and resolution.answer
             and resolution.reference_id == cue.reference_id
         )
+    }
+    resolved_answers_by_id = {
+        resolution.reference_id: resolution.answer
+        for resolution in state.reference_resolutions
+        if resolution.status is ReferenceResolutionStatus.RESOLVED and resolution.answer
     }
     resolved_reference_ids: set[str] = set()
 
@@ -134,7 +145,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             # too (#1755). Note the evidence kind below is USER_STATEMENT: an
             # observation entering here would be labelled a user statement.
             continue
-        reference_cue = reference_by_question.get(round_data.question)
+        reference_cue = reference_by_question.get(normalized_question_key(round_data.question))
         if reference_cue is not None:
             if reference_cue.reference_id in resolved_reference_ids:
                 continue
@@ -203,6 +214,27 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
 
     for index, cue in enumerate(state.reference_cues):
         if cue.reference_id in resolved_reference_ids:
+            continue
+        resolved_answer = resolved_answers_by_id.get(cue.reference_id)
+        if resolved_answer and classify_answer_provenance(resolved_answer) != "observation":
+            # The resolution ledger is the authority on whether a contrast was
+            # answered — not a re-derivation from round question text. A
+            # RESOLVED reference whose round text drifted from asked_question
+            # used to fall through to the unresolved blocker below and pin
+            # Seed generation on reference_confirmation_required permanently;
+            # emit its contrast candidate from the stored answer instead. The
+            # #1755 withholding rule still applies on this walk too: an
+            # observation (adopted fact) resolving the ledger is not a user
+            # decision, so it falls through to the unresolved blocker exactly
+            # as the round walk would have refused it.
+            contrast_evidence, contrast_candidate = candidates_from_contrast_answer(
+                cue=cue,
+                answer=resolved_answer,
+                candidate_id_prefix=f"reference-{index}",
+            )
+            evidence.append(contrast_evidence)
+            candidates.append(contrast_candidate)
+            resolved_reference_ids.add(cue.reference_id)
             continue
         evidence_id = f"reference-{index}:cue"
         evidence.append(
