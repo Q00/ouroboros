@@ -108,6 +108,16 @@ attach the resolved envelope to persona payloads in
 interview path uses in `authoring_handlers.py:226`). Where the backend cannot
 enforce an envelope, payloads ship exactly as today (prose-only personas).
 
+**Implementation note (P2, 2026-09-01)**: the LATERAL role profile was NOT
+added. Lateral persona payloads are executed by *host* runtimes
+(plugin-passive, host-driven, or sequential-inline) — never by the
+engine-side execution path the role-profile/envelope machinery governs — so
+a LATERAL profile would be dead code on day one. The shipped D3 is the
+`research=true` prompt contract in `build_lateral_multi_subagent`: personas
+are instructed to use web tools *when their runtime exposes them* and to
+degrade to opinion-only otherwise, which is the same fail-safe tiering
+enforced at the only layer that actually executes these payloads.
+
 This yields the fail-safe tiering for free:
 
 | layer | condition | experience |
