@@ -228,11 +228,21 @@ Current blocker: `ouroboros_generate_seed` requires a completed interview
      host-context path all converge on the same composition step, so the
      verbatim guarantee is enforced at that one chokepoint — the same
      single-path principle that fixed the per-provider verification drift in
-     the codex run parity work. Note #1488's verified scope is round-to-round
-     ledger reuse; whether the ledger→seed-YAML conversion already preserves
-     committed answers verbatim is unverified — auditing `SeedGenerator`'s
-     consumption of committed material is the first task of P4, and any gap
-     found there is fixed for all three entry points at once.
+     the codex run parity work.
+     **P4 audit result (2026-09-01)**: the suspected gap was real — ordinary
+     (non-reference) interview→seed went through LLM re-wording in
+     `SeedGenerator._extract_requirements` with NO verbatim backstop; the
+     deterministic paths (reference-aware, ledger-synthesis fallbacks,
+     session_context) were all exceptional, and #1488's verbatim reuse never
+     reached seed construction. Shipped fix: `anchor_promoted_requirements`
+     (requirement_distillation.py), called at the SeedGenerator chokepoint —
+     any promoted USER-confirmed constraint/AC missing from the extracted
+     seed (normalized equality, no similarity scoring) is appended verbatim.
+     Add-only: extraction stays the composer, but a committed requirement
+     can no longer vanish or survive only as a paraphrase. The deliberate
+     trade-off — a paraphrase plus its verbatim original may coexist — is
+     bounded because only explicit-requirement answers become promoted
+     candidates.
   2. *Composition is non-deterministic.* The LLM only fills structure and
      wording around the anchors.
   3. *Acceptance is deterministic.* Schema validation, the preflight

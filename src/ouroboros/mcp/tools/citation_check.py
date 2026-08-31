@@ -66,9 +66,7 @@ def extract_cited_urls(text: str) -> tuple[str, ...]:
             candidates.extend(sources)
         claims = payload.get("claims")
         if isinstance(claims, list):
-            candidates.extend(
-                claim.get("source") for claim in claims if isinstance(claim, Mapping)
-            )
+            candidates.extend(claim.get("source") for claim in claims if isinstance(claim, Mapping))
         for candidate in candidates:
             if not isinstance(candidate, str):
                 continue

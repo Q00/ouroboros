@@ -335,6 +335,84 @@ def apply_requirement_distillation(
     )
 
 
+def _anchor_text_key(text: str) -> str:
+    """Whitespace-collapsed, casefolded comparison key for anchor membership."""
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _requirement_entry_text(entry: object) -> str:
+    """Extract the comparable text of one extracted requirement entry.
+
+    Extraction can yield bare strings or AC-spec-shaped mappings; the
+    user-visible wording lives in the string itself or the ``description``.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return str(entry.get("description") or "")
+    return str(entry)
+
+
+def anchor_promoted_requirements(
+    requirements: dict[str, Any],
+    promotion: PromotionResult,
+) -> tuple[dict[str, Any], int]:
+    """Append promoted user requirements the LLM extraction dropped or re-worded.
+
+    The verbatim-anchor backstop at the SeedGenerator chokepoint
+    (grounded-lateral RFC D6, owner decision 2026-09-01): a requirement the
+    user explicitly committed during the interview (promoted candidate,
+    CONFIRMED by USER authority) must reach the Seed in the user's own
+    wording. LLM extraction remains the composer for everything else — this
+    only *adds*, never rewrites or removes, so extraction quality is
+    untouched while no committed requirement can silently vanish or survive
+    only as a paraphrase.
+
+    Membership is judged by whitespace/case-normalized equality — no
+    similarity scoring, so a paraphrase does not count as present and the
+    verbatim original is appended alongside it. That duplication is the
+    deliberate price of the guarantee, and it is bounded: only answers that
+    matched the explicit-requirement pattern ever become promoted candidates.
+
+    Returns the (possibly updated) requirements dict and how many verbatim
+    entries were appended.
+    """
+    section_keys = {
+        RequirementSection.CONSTRAINT: "constraints",
+        RequirementSection.EXISTING_CONSTRAINT: "constraints",
+        RequirementSection.ACCEPTANCE_CRITERION: "acceptance_criteria",
+    }
+    appended = 0
+    updated = dict(requirements)
+    for candidate in promotion.promoted:
+        key = section_keys.get(candidate.section)
+        if key is None:
+            continue
+        if candidate.resolution is not CandidateResolution.CONFIRMED:
+            continue
+        if candidate.confirmation_authority is not ConfirmationAuthority.USER:
+            continue
+        text = candidate.text.strip()
+        if not text:
+            continue
+        raw_existing = updated.get(key)
+        if isinstance(raw_existing, (list, tuple)):
+            existing = list(raw_existing)
+        elif isinstance(raw_existing, str) and raw_existing.strip():
+            existing = [raw_existing]
+        else:
+            existing = []
+        anchor_key = _anchor_text_key(text)
+        if any(
+            _anchor_text_key(_requirement_entry_text(entry)) == anchor_key for entry in existing
+        ):
+            continue
+        existing.append(text)
+        updated[key] = existing
+        appended += 1
+    return updated, appended
+
+
 def _normalized_requirement_values(raw_value: object) -> tuple[str, ...]:
     """Normalize promoted requirement values without splitting literal pipes.
 

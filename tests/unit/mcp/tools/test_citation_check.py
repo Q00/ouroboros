@@ -78,7 +78,7 @@ def test_url_count_cap_marks_rest_unchecked() -> None:
     urls = [f"https://site{i}.example/page" for i in range(12)]
     text = "```json\n" + '{"external_sources": ' + str(urls).replace("'", '"') + "}\n```"
 
-    audit = audit_citations([text], fetch=lambda url, timeout: True, max_urls=3)
+    audit = audit_citations([text], fetch=lambda _url, _timeout: True, max_urls=3)
     assert audit is not None
     verdicts = list(audit["urls"].values())
     assert verdicts.count(VERIFIED) == 3

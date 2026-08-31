@@ -506,3 +506,44 @@ def test_whitespace_drifted_round_text_still_promotes_contrast_via_round_walk() 
     ]
     assert len(contrast) == 1
     assert contrast[0].candidate_id.startswith("round-2")
+
+
+def test_anchor_backstop_appends_dropped_promoted_requirement() -> None:
+    from ouroboros.bigbang.requirement_distillation import anchor_promoted_requirements
+
+    committed = "The exporter must emit RFC 3339 timestamps, required."
+    state = _reference_state(confirmation=committed)
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    # Simulate the LLM extraction dropping/paraphrasing the committed line.
+    # "must" without a constraint marker classifies it as an acceptance
+    # criterion (_CONSTRAINT_RE), so that is where the verbatim copy lands.
+    requirements = {"goal": "Build an issue tool", "acceptance_criteria": ["Fast triage"]}
+    updated, appended = anchor_promoted_requirements(requirements, applied.promotion)
+
+    assert appended == 1
+    assert updated["acceptance_criteria"] == ["Fast triage", committed]
+
+
+def test_anchor_backstop_is_a_noop_when_wording_survived() -> None:
+    from ouroboros.bigbang.requirement_distillation import anchor_promoted_requirements
+
+    committed = "The exporter must emit RFC 3339 timestamps, required."
+    state = _reference_state(confirmation=committed)
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    # Extraction kept the wording (whitespace/case drift tolerated) — the
+    # backstop must not duplicate it.
+    survived = "  The exporter must emit  RFC 3339 timestamps, REQUIRED. "
+    requirements = {
+        "goal": "Build an issue tool",
+        "acceptance_criteria": [survived],
+        "constraints": [],
+    }
+    updated, appended = anchor_promoted_requirements(requirements, applied.promotion)
+
+    assert appended == 0
+    assert updated["acceptance_criteria"] == [survived]
+    assert updated["constraints"] == []

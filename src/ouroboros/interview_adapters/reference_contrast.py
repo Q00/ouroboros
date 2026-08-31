@@ -19,7 +19,6 @@ from ouroboros.interview_adapters.models import (
     ReferenceResolutionStatus,
 )
 
-
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
 
