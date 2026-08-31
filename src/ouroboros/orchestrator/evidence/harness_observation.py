@@ -1,4 +1,4 @@
-"""Harness-observed workspace changes as unforgeable ``files_touched`` support.
+"""Harness observations as unforgeable evidence support.
 
 The transcript verifier proves ``files_touched`` claims from the runtime
 transcript: structured ``Edit``/``Write`` path values, or shell mutation targets
@@ -20,6 +20,12 @@ in :func:`observation_from_message` is the forgery boundary.
 Only positive support is granted: a path that did not change stays unsupported,
 so a stale file in the workspace still cannot prove that this run touched it,
 and a truncated snapshot (workspace over budget) can only withhold support.
+
+The same message also carries :class:`CommandObservation` records: test
+commands the harness re-executed itself in the workspace when the transcript
+could not prove a ``tests_passed`` claim (see ``evidence/test_reexecution.py``).
+The exit status and output there are the harness's own, so they can back a
+``tests_passed`` or ``commands_run`` claim the same way the transcript would.
 """
 
 from __future__ import annotations
@@ -74,16 +80,50 @@ class WorkspaceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandObservation:
+    """One command the harness ran itself in the workspace after the leaf."""
+
+    command: str
+    returncode: int
+    output_tail: str
+    timed_out: bool = False
+
+    @property
+    def succeeded(self) -> bool:
+        return self.returncode == 0 and not self.timed_out
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceObservation:
-    """Workspace-relative paths the harness saw change during one leaf run."""
+    """What the harness itself observed around one leaf run.
+
+    ``changed_paths`` are workspace-relative paths that appeared or changed
+    between the pre- and post-leaf snapshots. ``command_runs`` are commands the
+    harness re-executed in the workspace, with their real exit status.
+    """
 
     changed_paths: frozenset[str]
     truncated: bool = False
+    command_runs: tuple[CommandObservation, ...] = ()
 
     def supports_file_claim(self, claim: str) -> bool:
         """Return True when the claimed workspace-relative path changed."""
         normalized = _normalize_relative_path(claim)
         return normalized is not None and normalized in self.changed_paths
+
+    def supports_command_claim(self, claim: str) -> bool:
+        """Return True when the harness ran exactly this command and it exited 0."""
+        needle = _normalize_command_text(claim)
+        if not needle:
+            return False
+        return any(
+            run.succeeded and _normalize_command_text(run.command) == needle
+            for run in self.command_runs
+        )
+
+
+def _normalize_command_text(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _normalize_relative_path(value: str) -> str | None:
@@ -171,9 +211,11 @@ def build_observation_message(observation: WorkspaceObservation) -> AgentMessage
     """Wrap an observation as a transcript message the verifier can read."""
     count = len(observation.changed_paths)
     suffix = " (snapshot truncated)" if observation.truncated else ""
+    runs = len(observation.command_runs)
+    runs_note = f"; re-executed {runs} test command(s)" if runs else ""
     return AgentMessage(
         type=HARNESS_OBSERVATION_MESSAGE_TYPE,
-        content=f"Harness observed {count} changed workspace file(s){suffix}",
+        content=f"Harness observed {count} changed workspace file(s){suffix}{runs_note}",
         data={HARNESS_OBSERVATION_DATA_KEY: observation},
     )
 
@@ -215,6 +257,7 @@ def insert_observation_message(
 __all__ = [
     "HARNESS_OBSERVATION_DATA_KEY",
     "HARNESS_OBSERVATION_MESSAGE_TYPE",
+    "CommandObservation",
     "WorkspaceObservation",
     "WorkspaceSnapshot",
     "build_observation_message",

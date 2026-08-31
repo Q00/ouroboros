@@ -14,6 +14,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
+from ouroboros.orchestrator.evidence.harness_observation import observation_from_message
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _is_python_executable,
@@ -357,6 +358,8 @@ def _runtime_messages_support_test_claim(
     needle = value.strip().lower()
     if not needle:
         return False
+    if _harness_reexecution_supports_test_claim(value=value, messages=messages, task_cwd=task_cwd):
+        return True
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
@@ -417,6 +420,48 @@ def _runtime_messages_support_test_claim(
             for command in matching_commands
         ):
             return True
+    return False
+
+
+def _harness_reexecution_supports_test_claim(
+    *,
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a harness-re-executed test command proves the claim.
+
+    The command, its exit status, and its output all come from the harness's
+    own subprocess (``evidence/test_reexecution.py``), so they are held to the
+    same tests: a zero exit, runtime output that proves tests ran and passed,
+    and a command that targets the claimed test.
+    """
+    # A node-id or file claim (rather than the command itself) must name a
+    # test file this run actually produced or touched. Re-running a suite the
+    # harness found in the workspace proves those tests pass, not that the
+    # leaf wrote them, so a stale pre-existing test still cannot be claimed.
+    claimed_file = None if _looks_like_test_command(value) else _test_claim_file_part(value)
+    if claimed_file is not None and not _runtime_messages_support_file_claim(
+        claimed_file, messages, task_cwd=task_cwd
+    ):
+        return False
+    for message in messages:
+        observation = observation_from_message(message)
+        if observation is None:
+            continue
+        for run in observation.command_runs:
+            if not run.succeeded or not _looks_like_test_command(run.command):
+                continue
+            if not _text_proves_test_execution_success(run.output_tail):
+                continue
+            if _test_command_targets_claim(
+                command=run.command,
+                claim=value,
+                chunk_test_proof_text=run.output_tail,
+                messages=messages,
+                task_cwd=task_cwd,
+            ):
+                return True
     return False
 
 

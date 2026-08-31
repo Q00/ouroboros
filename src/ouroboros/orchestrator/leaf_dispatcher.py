@@ -18,7 +18,7 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import errno
 import os
@@ -47,6 +47,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _shell_command_mutation_targets,
 )
 from ouroboros.orchestrator.evidence.harness_observation import (
+    WorkspaceObservation,
     diff_workspace_snapshots,
     insert_observation_message,
     snapshot_workspace,
@@ -55,10 +56,15 @@ from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
 )
+from ouroboros.orchestrator.evidence.test_reexecution import (
+    reexecute_test_commands,
+    select_test_reexecution_commands,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     project_runtime_message,
 )
+from ouroboros.orchestrator.verify_shell import sanitized_verify_environment
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -914,4 +920,52 @@ class LeafDispatcher:
         ):
             observation = diff_workspace_snapshots(workspace_before, snapshot_workspace(task_cwd))
             if observation is not None:
+                observation = await self._attach_test_reexecution(
+                    observation,
+                    state=state,
+                    task_cwd=task_cwd,
+                    tools=tools,
+                )
                 insert_observation_message(state.messages, observation)
+
+    async def _attach_test_reexecution(
+        self,
+        observation: WorkspaceObservation,
+        *,
+        state: LeafDispatchState,
+        task_cwd: str | None,
+        tools: Sequence[str] | None = None,
+    ) -> WorkspaceObservation:
+        """Re-run claimed test commands the transcript could not prove.
+
+        Authority-gated: re-execution runs commands in the workspace, so it is
+        allowed only when the leaf itself held Bash authority (``tools``) and
+        the executor's deterministic verification is enabled — a run with
+        ``run_verify_commands`` off has opted out of harness-side execution.
+        Each command runs as a direct argv (never through a shell) under the
+        verify gate's sanitized environment and timeout.
+        """
+        if not state.success or not state.final_message or task_cwd is None:
+            return observation
+        if not tools or "Bash" not in tools:
+            return observation
+        executor = self._executor
+        if getattr(executor, "_run_verify_commands", False) is not True:
+            return observation
+        commands = select_test_reexecution_commands(
+            final_message=state.final_message,
+            messages=tuple(state.messages),
+            task_cwd=task_cwd,
+        )
+        if not commands:
+            return observation
+        timeout_seconds = getattr(executor, "_verify_command_timeout_seconds", 600)
+        runs = await reexecute_test_commands(
+            commands,
+            cwd=task_cwd,
+            env=sanitized_verify_environment(),
+            timeout_seconds=float(timeout_seconds),
+        )
+        if not runs:
+            return observation
+        return replace(observation, command_runs=runs)
