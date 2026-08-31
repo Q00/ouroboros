@@ -170,14 +170,23 @@ def test_verifier_settles_functional_claim_only_under_verify_gate_authority() ->
     assert any("tests_passed" in reason for reason in gated_off.reasons)
 
 
-def _observation_message(*, changed: tuple[str, ...] = (), truncated: bool = False) -> AgentMessage:
+def _observation_message(
+    *,
+    changed: tuple[str, ...] = (),
+    deleted: tuple[str, ...] = (),
+    truncated: bool = False,
+) -> AgentMessage:
     from ouroboros.orchestrator.evidence.harness_observation import (
         WorkspaceObservation,
         build_observation_message,
     )
 
     return build_observation_message(
-        WorkspaceObservation(changed_paths=frozenset(changed), truncated=truncated)
+        WorkspaceObservation(
+            changed_paths=frozenset(changed),
+            deleted_paths=frozenset(deleted),
+            truncated=truncated,
+        )
     )
 
 
@@ -187,38 +196,89 @@ VALIDATION_CLAIM = (
 )
 
 
-def test_zero_mutation_witness_admits_preexisting_artifact_execution() -> None:
+def test_zero_mutation_witness_admits_preexisting_artifact_execution(tmp_path) -> None:
+    (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
+    task_cwd = str(tmp_path)
     start, result = _codex_bash_pair(VALIDATION_CLAIM)
-    # No Edit evidence: the artifact pre-exists. The harness witnessed zero
-    # workspace mutation, so this is a pure-verification run.
+    # No Edit evidence: the artifact pre-exists as a real workspace file. The
+    # harness witnessed zero workspace mutation, so this is pure verification.
     messages = (start, result, _observation_message())
     assert (
         _functional_command_supports_test_claim(
-            value=VALIDATION_CLAIM, messages=messages, task_cwd=None
+            value=VALIDATION_CLAIM, messages=messages, task_cwd=task_cwd
         )
         is True
     )
-    # A mutated or truncated observation withdraws the waiver.
+    # A mutated, deleting, or truncated observation withdraws the waiver.
     for witness in (
         _observation_message(changed=("habits.json",)),
+        _observation_message(deleted=("removed.py",)),
         _observation_message(truncated=True),
     ):
         assert (
             _functional_command_supports_test_claim(
-                value=VALIDATION_CLAIM, messages=(start, result, witness), task_cwd=None
+                value=VALIDATION_CLAIM, messages=(start, result, witness), task_cwd=task_cwd
             )
             is False
         )
     # And with no observation at all, the stale-artifact guard still holds.
     assert (
         _functional_command_supports_test_claim(
-            value=VALIDATION_CLAIM, messages=(start, result), task_cwd=None
+            value=VALIDATION_CLAIM, messages=(start, result), task_cwd=task_cwd
         )
         is False
     )
 
 
-def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness() -> None:
+def test_zero_mutation_waiver_requires_the_cited_file_to_exist(tmp_path) -> None:
+    """A ghost path mentioned in the command must not settle through the waiver."""
+    ghost_claim = "python3 ghost.py check  # verifies ghost.py behavior"
+    start, result = _codex_bash_pair(ghost_claim)
+    messages = (start, result, _observation_message())
+    # ghost.py does not exist in the workspace, and with no workspace at all
+    # existence cannot be proven either.
+    for cwd in (str(tmp_path), None):
+        assert (
+            _functional_command_supports_test_claim(
+                value=ghost_claim, messages=messages, task_cwd=cwd
+            )
+            is False
+        )
+
+
+def test_functional_tier_requires_an_authoritative_zero_exit(tmp_path) -> None:
+    """Lifecycle-only completion (status=completed, no exit code) is not success."""
+    (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
+    import shlex as _shlex
+
+    wrapped = "/bin/zsh -lc " + _shlex.quote(VALIDATION_CLAIM)
+    start = AgentMessage(
+        type="assistant",
+        content=f"Calling tool: Bash: {wrapped}",
+        tool_name="Bash",
+        data={"tool_input": {"command": wrapped}, "tool_call_id": "item_9"},
+    )
+    lifecycle_only = AgentMessage(
+        type="tool_result",
+        content="Traceback: command failed",
+        data={
+            "tool_call_id": "item_9",
+            "status": "completed",
+            "tool_result": {"text_content": "Traceback: command failed"},
+        },
+    )
+    assert (
+        _functional_command_supports_test_claim(
+            value=VALIDATION_CLAIM,
+            messages=(start, lifecycle_only, _observation_message()),
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness(tmp_path) -> None:
+    (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
     start, result = _codex_bash_pair(VALIDATION_CLAIM)
 
     def verdict(extra: tuple[AgentMessage, ...]):
@@ -233,8 +293,8 @@ def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness() 
             ),
             ac_content="An unknown subcommand prints a usage error and exits with status 2",
             execution_profile=load_profile("code"),
-            task_cwd=None,
-            adapter_working_directory=None,
+            task_cwd=str(tmp_path),
+            adapter_working_directory=str(tmp_path),
             has_success_contract=True,
             verify_gate_active=True,
         )

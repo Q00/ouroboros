@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 from ouroboros.orchestrator.adapter import AgentMessage
@@ -13,6 +14,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_supports_command_claim,
     _runtime_message_tool_call_id,
     _runtime_messages_support_file_claim,
+    _workspace_relative_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.harness_observation import (
@@ -493,12 +495,19 @@ def _functional_command_supports_test_claim(
     if not any(
         _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
         for invoked in invoked_files
-    ) and not observations_confirm_unmutated_workspace(messages):
+    ):
         # The invoked artifact must be this run's own work — unless the
-        # harness witnessed a pure-verification run (zero mutation), where the
-        # artifact necessarily pre-exists and the verify gate stays the
-        # behavioral authority.
-        return False
+        # harness witnessed a pure-verification run (zero mutation, zero
+        # deletion, complete snapshots), where the cited artifact must still
+        # be a real workspace file: existence now proves existence throughout
+        # the leaf's window, so a ghost path in a comment stays rejected.
+        if not observations_confirm_unmutated_workspace(messages):
+            return False
+        if not any(
+            _invoked_file_is_existing_workspace_file(invoked, task_cwd=task_cwd)
+            for invoked in invoked_files
+        ):
+            return False
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
@@ -508,8 +517,69 @@ def _functional_command_supports_test_claim(
             continue
         if not _runtime_message_supports_command_claim(value, message):
             continue
-        if _runtime_message_has_success_evidence(message, messages=messages, index=index):
+        if _runtime_message_has_success_evidence(
+            message, messages=messages, index=index
+        ) and _functional_command_has_authoritative_zero_exit(messages, index=index):
             return True
+    return False
+
+
+def _invoked_file_is_existing_workspace_file(invoked: str, *, task_cwd: str | None) -> bool:
+    """Return True when a cited path is an existing regular file in the workspace."""
+    if task_cwd is None:
+        return False
+    relative = _workspace_relative_file_claim(invoked, task_cwd=task_cwd)
+    if relative is None:
+        return False
+    try:
+        return (Path(task_cwd).resolve() / relative).is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _message_carries_zero_exit(message: AgentMessage) -> bool:
+    """Return True when a message carries an authoritative integer zero exit."""
+    containers: list[dict[str, object]] = [message.data]
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        containers.append(tool_result)
+    for container in containers:
+        exit_code = container.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0:
+            return True
+    return False
+
+
+def _functional_command_has_authoritative_zero_exit(
+    messages: tuple[AgentMessage, ...],
+    *,
+    index: int,
+) -> bool:
+    """Require a real exit verdict for the functional-verification tier.
+
+    ``_runtime_message_has_success_evidence`` accepts lifecycle-only success
+    (``status="completed"``, ``*.completed`` events), but Codex marks
+    command_execution items completed even on non-zero exits. A checking
+    command that vouches for behavior needs the authoritative zero exit
+    itself — on the call, its correlated completion, or (for id-less legacy
+    streams) the immediately following completion.
+    """
+    call = messages[index]
+    if _message_carries_zero_exit(call):
+        return True
+    call_id = _runtime_message_tool_call_id(call)
+    if call_id is not None:
+        return any(
+            _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+            and _message_carries_zero_exit(candidate)
+            for candidate in messages
+        )
+    for candidate in messages[index + 1 :]:
+        if candidate.tool_name is not None and not _runtime_message_is_tool_completion(candidate):
+            break
+        if _runtime_message_is_tool_completion(candidate):
+            return _message_carries_zero_exit(candidate)
     return False
 
 
