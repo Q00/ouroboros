@@ -103,6 +103,44 @@ async def test_start_await_tail_and_stop_use_coordinator_contract(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_server_env_applies_child_recursion_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "gjc")
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "gjc")
+    monkeypatch.setenv("_OUROBOROS_DEPTH", "1")
+    adapter = _FakeAdapter([])
+    client = GjcCoordinatorClient(
+        cli_path="/opt/gjc",
+        cwd=tmp_path,
+        adapter_factory=_factory(adapter),
+    )
+
+    await client.connect()
+
+    assert "OUROBOROS_AGENT_RUNTIME" not in adapter.config.env
+    assert "OUROBOROS_LLM_BACKEND" not in adapter.config.env
+    assert adapter.config.env["_OUROBOROS_DEPTH"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_server_env_depth_ceiling_raises_coordinator_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("_OUROBOROS_DEPTH", "5")
+    adapter = _FakeAdapter([])
+    client = GjcCoordinatorClient(
+        cli_path="/opt/gjc",
+        cwd=tmp_path,
+        adapter_factory=_factory(adapter),
+    )
+
+    with pytest.raises(GjcCoordinatorError) as excinfo:
+        await client.connect()
+    assert excinfo.value.code == "recursion_depth_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_waiting_turn_projects_question_and_accepts_custom_answer(tmp_path: Path) -> None:
     adapter = _FakeAdapter(
         [

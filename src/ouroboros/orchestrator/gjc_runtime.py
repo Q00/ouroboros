@@ -153,7 +153,7 @@ class GjcRuntime:
                 "options": list(question.options),
                 "multi": question.multi,
             }
-        return RuntimeHandle(
+        handle = RuntimeHandle(
             backend=self._runtime_handle_backend,
             kind="agent_runtime",
             native_session_id=session_id,
@@ -161,6 +161,38 @@ class GjcRuntime:
             approval_mode=self._permission_mode,
             metadata=metadata,
         )
+        if session_id:
+            # Broker-owned GJC sessions outlive the coordinator connection, so
+            # every session-bearing handle must expose a real terminate path or
+            # the run-level reclamation sweeps silently skip gjc workers.
+            handle = handle.bind_controls(terminate_callback=self._terminate_session)
+        return handle
+
+    async def _terminate_session(self, handle: RuntimeHandle) -> bool:
+        session_id = handle.native_session_id
+        if not session_id:
+            return False
+        client = self._coordinator_client_factory(
+            cli_path=self._cli_path,
+            cwd=self._cwd,
+            timeout=self._timeout,
+        )
+        try:
+            await client.connect()
+            await client.stop_session(session_id)
+            return True
+        except GjcCoordinatorError as exc:
+            log.warning(
+                f"{self._log_namespace}.terminate_failed",
+                session_id=session_id,
+                code=exc.code,
+            )
+            return False
+        finally:
+            try:
+                await client.close()
+            except GjcCoordinatorError:
+                pass
 
     @staticmethod
     def _compose_prompt(prompt: str, tools: list[str] | None, system_prompt: str | None) -> str:
@@ -210,6 +242,7 @@ class GjcRuntime:
         )
         session_id: str | None = requested_session_id
         client: GjcCoordinatorClient | None = None
+        stop_target: str | None = None
         handle = resume_handle
         metadata = resume_handle.metadata if resume_handle else {}
         phase = metadata.get("gjc_operation_phase")
@@ -345,6 +378,10 @@ class GjcRuntime:
                 )
                 return
             terminal_phase = "completed" if turn.succeeded else "failed"
+            # The turn is terminal and non-resumable: reclaim the broker-owned
+            # worker session so it cannot outlive the run. Question turns and
+            # coordinator errors keep the session alive for resume.
+            stop_target = session_id
             handle = self._build_runtime_handle(
                 session_id,
                 turn_id,
@@ -383,6 +420,11 @@ class GjcRuntime:
             )
         finally:
             if client is not None:
+                if stop_target is not None:
+                    try:
+                        await client.stop_session(stop_target)
+                    except GjcCoordinatorError:
+                        pass
                 try:
                     await client.close()
                 except GjcCoordinatorError:

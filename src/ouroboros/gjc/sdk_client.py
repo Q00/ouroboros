@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.types import MCPServerConfig, MCPToolResult, TransportType
+from ouroboros.runtime.child_env import build_child_env
 
 _SERVER_NAME = "gjc-coordinator"
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "superseded"})
@@ -101,7 +102,15 @@ class GjcCoordinatorClient:
     def _server_config(self) -> MCPServerConfig:
         repo_digest = hashlib.sha256(self._cwd.encode("utf-8")).hexdigest()[:16]
         state_root = Path(self._cwd) / ".gjc" / "state" / "ouroboros-coordinator" / repo_digest
-        env = os.environ.copy()
+        # The coordinator forwards this environment to Broker-managed worker
+        # sessions, so it needs the same recursion guard every other backend
+        # applies: strip the Ouroboros runtime markers and bound the depth.
+        env = build_child_env(
+            depth_error_factory=lambda depth, max_depth: GjcCoordinatorError(
+                f"GJC session nesting depth {depth} exceeds the maximum of {max_depth}.",
+                code="recursion_depth_exceeded",
+            ),
+        )
         cli_path = Path(self._cli_path).expanduser()
         if cli_path.name == "gjc" and cli_path.parent != Path("."):
             existing_path = env.get("PATH", "")
