@@ -15,7 +15,10 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
-from ouroboros.orchestrator.evidence.harness_observation import observation_from_message
+from ouroboros.orchestrator.evidence.harness_observation import (
+    observation_from_message,
+    observations_confirm_unmutated_workspace,
+)
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _is_python_executable,
@@ -483,7 +486,11 @@ def _functional_command_supports_test_claim(
     if not any(
         _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
         for invoked in invoked_files
-    ):
+    ) and not observations_confirm_unmutated_workspace(messages):
+        # The invoked artifact must be this run's own work — unless the
+        # harness witnessed a pure-verification run (zero mutation), where the
+        # artifact necessarily pre-exists and the verify gate stays the
+        # behavioral authority.
         return False
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":

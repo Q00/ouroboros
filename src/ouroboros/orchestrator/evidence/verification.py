@@ -15,6 +15,7 @@ from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import (
     is_harness_observation_message,
     observation_from_message,
+    observations_confirm_unmutated_workspace,
 )
 from ouroboros.orchestrator.evidence.test_detection import (
     _functional_command_supports_test_claim,
@@ -110,6 +111,18 @@ def _verify_atomic_evidence_against_runtime_messages(
         values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
         if not values:
             if field_name in required_fields:
+                # A pure-verification run may honestly have nothing to touch:
+                # when the AC's hidden verify gate stays the behavioral
+                # authority and the harness's own snapshot diff witnessed zero
+                # workspace mutation, an empty files_touched is corroborated
+                # truth, not withheld evidence.
+                if (
+                    field_name == "files_touched"
+                    and has_success_contract
+                    and verify_gate_active
+                    and observations_confirm_unmutated_workspace(support_messages)
+                ):
+                    continue
                 unsupported.append(f"{field_name}: no concrete claim values")
             continue
         field_messages = _runtime_support_messages_for_field(field_name, support_messages)

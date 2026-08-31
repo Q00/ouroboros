@@ -235,6 +235,27 @@ def observation_from_message(message: AgentMessage) -> WorkspaceObservation | No
     return None
 
 
+def observations_confirm_unmutated_workspace(
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when harness observations prove the leaf mutated nothing.
+
+    Requires at least one observation and every observation to report a
+    complete (non-truncated) snapshot diff with zero changed paths. This is the
+    harness's own unforgeable witness that a run was pure verification — the
+    basis for accepting an honestly-empty ``files_touched`` and for letting a
+    verification command execute a pre-existing artifact.
+    """
+    observations = [
+        observation
+        for observation in (observation_from_message(message) for message in messages)
+        if observation is not None
+    ]
+    return bool(observations) and all(
+        not observation.changed_paths and not observation.truncated for observation in observations
+    )
+
+
 def is_harness_observation_message(message: AgentMessage) -> bool:
     """Return True for a genuine harness observation message."""
     return observation_from_message(message) is not None

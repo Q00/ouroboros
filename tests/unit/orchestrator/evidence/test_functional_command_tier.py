@@ -152,3 +152,78 @@ def test_verifier_settles_functional_claim_only_under_verify_gate_authority() ->
     gated_off = _verdict(verify_gate_active=False)
     assert gated_off.passed is False
     assert any("tests_passed" in reason for reason in gated_off.reasons)
+
+
+def _observation_message(*, changed: tuple[str, ...] = (), truncated: bool = False) -> AgentMessage:
+    from ouroboros.orchestrator.evidence.harness_observation import (
+        WorkspaceObservation,
+        build_observation_message,
+    )
+
+    return build_observation_message(
+        WorkspaceObservation(changed_paths=frozenset(changed), truncated=truncated)
+    )
+
+
+VALIDATION_CLAIM = (
+    't=$(mktemp -d) && cp habit_tracker.py "$t"/ && cd "$t" && '
+    "python3 habit_tracker.py unknown-command; test $? -eq 2 && echo EXIT_TWO_OK"
+)
+
+
+def test_zero_mutation_witness_admits_preexisting_artifact_execution() -> None:
+    start, result = _codex_bash_pair(VALIDATION_CLAIM)
+    # No Edit evidence: the artifact pre-exists. The harness witnessed zero
+    # workspace mutation, so this is a pure-verification run.
+    messages = (start, result, _observation_message())
+    assert (
+        _functional_command_supports_test_claim(
+            value=VALIDATION_CLAIM, messages=messages, task_cwd=None
+        )
+        is True
+    )
+    # A mutated or truncated observation withdraws the waiver.
+    for witness in (
+        _observation_message(changed=("habits.json",)),
+        _observation_message(truncated=True),
+    ):
+        assert (
+            _functional_command_supports_test_claim(
+                value=VALIDATION_CLAIM, messages=(start, result, witness), task_cwd=None
+            )
+            is False
+        )
+    # And with no observation at all, the stale-artifact guard still holds.
+    assert (
+        _functional_command_supports_test_claim(
+            value=VALIDATION_CLAIM, messages=(start, result), task_cwd=None
+        )
+        is False
+    )
+
+
+def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness() -> None:
+    start, result = _codex_bash_pair(VALIDATION_CLAIM)
+
+    def verdict(extra: tuple[AgentMessage, ...]):
+        return _verify_atomic_evidence_against_runtime_messages(
+            messages=(start, result, *extra, AgentMessage(type="result", content="done")),
+            typed_evidence=EvidenceRecord(
+                data={
+                    "files_touched": [],
+                    "commands_run": [VALIDATION_CLAIM],
+                    "tests_passed": [VALIDATION_CLAIM],
+                }
+            ),
+            ac_content="An unknown subcommand prints a usage error and exits with status 2",
+            execution_profile=load_profile("code"),
+            task_cwd=None,
+            adapter_working_directory=None,
+            has_success_contract=True,
+            verify_gate_active=True,
+        )
+
+    assert verdict((_observation_message(),)).passed is True
+    without_witness = verdict(())
+    assert without_witness.passed is False
+    assert any("files_touched" in reason for reason in without_witness.reasons)
