@@ -1334,7 +1334,7 @@ if [ "$HAS_UV" = true ]; then
     "[claude,tui]" | "[claude-sdk,tui]")
       UV_ARGS+=(
         --with "claude-agent-sdk==0.2.144"
-        --with "anthropic==0.122.0"
+        --with "anthropic==1.0.0"
         --with "mcp==1.28.1"
       )
       ;;
@@ -1344,7 +1344,7 @@ if [ "$HAS_UV" = true ]; then
     "[all]")
       UV_ARGS+=(
         --with "claude-agent-sdk==0.2.144"
-        --with "anthropic==0.122.0"
+        --with "anthropic==1.0.0"
         --with "mcp==1.28.1"
         --with "litellm==1.91.0"
       )
