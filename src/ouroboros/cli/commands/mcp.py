@@ -79,9 +79,55 @@ _JOB_DRAIN_GRACE_SECONDS = 5.0
 _IDLE_CHECKPOINT_POLL_SECONDS = 300.0
 _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 
+# Idle lifetime bound for network transports: unlike stdio, an sse or
+# streamable-http server has no stdin EOF and — once its spawner dies and it
+# is reparented to launchd/systemd — no parent tether either (the orphan
+# watchdog stands down at ppid 1). Without a bound such a server runs
+# forever, pinning the shared database.
+_IDLE_SHUTDOWN_POLL_SECONDS = 60.0
+_NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS = 7200.0
+
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
 log = structlog.get_logger(__name__)
+
+
+def _effective_idle_timeout(transport: str, idle_timeout_seconds: float | None) -> float:
+    """Resolve the idle-shutdown bound; ``None`` picks the transport default."""
+    if idle_timeout_seconds is not None:
+        return idle_timeout_seconds
+    return 0.0 if transport == "stdio" else _NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS
+
+
+async def _idle_shutdown_loop(
+    stop: asyncio.Event,
+    server: Any,
+    idle_timeout_seconds: float,
+    *,
+    poll_seconds: float = _IDLE_SHUTDOWN_POLL_SECONDS,
+) -> None:
+    """Set ``stop`` once no tool call has arrived for ``idle_timeout_seconds``.
+
+    Network transports only: stdio keeps its EOF/watchdog lifecycle, but an
+    sse/streamable-http server reparented to launchd/systemd has no other
+    tether (the orphan watchdog stands down at ppid 1) and would otherwise
+    run forever, pinning the shared database.
+    """
+    while not stop.is_set():
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+        if stop.is_set():
+            return
+        idle_for = getattr(server, "seconds_since_last_tool_call", None)
+        if not isinstance(idle_for, int | float):
+            return
+        if idle_for < idle_timeout_seconds:
+            continue
+        _stderr_console.print(
+            f"[yellow]No tool call for {int(idle_for)}s (--idle-timeout) — shutting down[/yellow]"
+        )
+        stop.set()
+        return
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -602,6 +648,7 @@ async def _run_mcp_server(
     allowed_hosts: tuple[str, ...] = (),
     allowed_origins: tuple[str, ...] = (),
     workspace_roots: tuple[str, ...] = (),
+    idle_timeout_seconds: float | None = None,
 ) -> None:
     """Run the MCP server.
 
@@ -618,6 +665,9 @@ async def _run_mcp_server(
         allowed_origins: ``Origin`` header allowlist for network transports.
         workspace_roots: Directories seed execution is confined to. Empty
             leaves execution unrestricted, the historical local behaviour.
+        idle_timeout_seconds: Shut down after this many seconds without a
+            tool call. ``None`` picks the transport default (network
+            transports get a bound, stdio stays unbounded); ``0`` disables.
     """
     from ouroboros.mcp.server.adapter import validate_transport
 
@@ -675,6 +725,7 @@ async def _run_mcp_server(
     stop_task: asyncio.Task[bool] | None = None
     watchdog_task: asyncio.Task[None] | None = None
     idle_checkpoint_task: asyncio.Task[None] | None = None
+    idle_shutdown_task: asyncio.Task[None] | None = None
     serve_exc: BaseException | None = None
 
     # The protective try spans store init -> composition -> serve: a failure
@@ -889,6 +940,8 @@ async def _run_mcp_server(
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=5.0)
 
+        effective_idle_timeout = _effective_idle_timeout(transport, idle_timeout_seconds)
+
         async def _idle_wal_checkpoint() -> None:
             # Long-lived idle servers pin the shared WAL: passive autocheckpoints
             # cannot truncate while any reader is active, so N concurrent idle
@@ -923,6 +976,11 @@ async def _run_mcp_server(
         idle_checkpoint_task = asyncio.create_task(
             _idle_wal_checkpoint(), name="ouroboros-mcp-idle-checkpoint"
         )
+        if effective_idle_timeout > 0:
+            idle_shutdown_task = asyncio.create_task(
+                _idle_shutdown_loop(stop, server, effective_idle_timeout),
+                name="ouroboros-mcp-idle-shutdown",
+            )
 
         # One daily-deduplicated "MCP attached" row per user — the denominator
         # of the attached → used activation funnel. The row must reflect a
@@ -953,7 +1011,9 @@ async def _run_mcp_server(
         # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
         # EventStore.close() always gets to collapse the WAL.
         helper_tasks = [
-            t for t in (watchdog_task, stop_task, idle_checkpoint_task) if t is not None
+            t
+            for t in (watchdog_task, stop_task, idle_checkpoint_task, idle_shutdown_task)
+            if t is not None
         ]
         for _task in helper_tasks:
             if not _task.done():
@@ -1221,6 +1281,17 @@ def serve(
             ),
         ),
     ] = "",
+    idle_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--idle-timeout",
+            help=(
+                "Shut the server down after this many seconds without a tool "
+                "call. Defaults to 7200 for network transports (sse, "
+                "streamable-http) and disabled for stdio. Pass 0 to disable."
+            ),
+        ),
+    ] = None,
     runtime: Annotated[
         AgentRuntimeBackend | None,
         typer.Option(
@@ -1357,6 +1428,7 @@ def serve(
                 allowed_hosts=allowed_hosts,
                 allowed_origins=allowed_origins,
                 workspace_roots=workspace_roots,
+                idle_timeout_seconds=idle_timeout,
             )
         )
     except KeyboardInterrupt:

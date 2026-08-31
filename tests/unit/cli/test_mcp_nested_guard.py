@@ -186,6 +186,7 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
         allowed_hosts=(),
         allowed_origins=(),
         workspace_roots=(),
+        idle_timeout_seconds=None,
     )
 
 
@@ -213,6 +214,7 @@ def test_public_claude_cli_runtime_selects_cli_worker(monkeypatch):
         allowed_hosts=(),
         allowed_origins=(),
         workspace_roots=(),
+        idle_timeout_seconds=None,
     )
 
 
@@ -240,6 +242,7 @@ def test_public_host_runtime_selects_host_dispatch(monkeypatch) -> None:
         allowed_hosts=(),
         allowed_origins=(),
         workspace_roots=(),
+        idle_timeout_seconds=None,
     )
 
 
@@ -267,6 +270,7 @@ def test_public_codex_runtime_remains_executable(monkeypatch):
         allowed_hosts=(),
         allowed_origins=(),
         workspace_roots=(),
+        idle_timeout_seconds=None,
     )
 
 
@@ -444,6 +448,7 @@ def test_bare_serve_allows_configured_cli_worker(monkeypatch, tmp_path) -> None:
         allowed_hosts=(),
         allowed_origins=(),
         workspace_roots=(),
+        idle_timeout_seconds=None,
     )
 
 
