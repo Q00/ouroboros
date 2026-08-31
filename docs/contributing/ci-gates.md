@@ -200,6 +200,31 @@ Version numbers come from git tags via `hatch-vcs`; `__init__.py` is never
 hand-edited. Pushes to `main` between tags publish dev builds through
 `dev-publish.yml`.
 
+### Homebrew formula
+
+After the PyPI publish, the `Bump Homebrew Formula` job updates
+`Q00/homebrew-tap` so `brew install q00/tap/ouroboros-ai` tracks the release.
+The formula vendors its whole dependency graph, so the job regenerates every
+`resource` block via `scripts/bump-homebrew-formula.sh` rather than swapping the
+url and sha256 alone.
+
+The regenerated graph tracks `ouroboros-ai[mcp,tui]` — the same profile
+`install.sh` selects by default — so `brew` and `install.sh` do not diverge in
+which features are present. Change the extras in one place only: `FORMULA_EXTRAS`
+in that script.
+
+Two things this job needs, and how it fails without them:
+
+- `HOMEBREW_TAP_TOKEN`, a PAT with `contents: write` on `Q00/homebrew-tap`.
+  Missing, the job **fails the release run** on purpose. Skipping quietly is how
+  the formula drifted from 0.51.1 to 17 releases behind before the job existed.
+- A green `brew audit`, `brew install --build-from-source` and `brew test`,
+  which run **before** the push. A formula that cannot build is worse than one
+  that is a release behind, and the tap has no CI of its own.
+
+Pre-release tags are skipped: the tap tracks stable only, and `v*.*.*` also
+matches `v0.52.0b1`.
+
 The GitHub Release is created by CI with auto-generated notes. To add a
 curated narrative, **prepend** it and keep the generated list:
 
