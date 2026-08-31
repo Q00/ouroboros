@@ -8,6 +8,8 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
+import anyio
+
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.gjc.sdk_client import (
@@ -242,7 +244,8 @@ class GjcRuntime:
         )
         session_id: str | None = requested_session_id
         client: GjcCoordinatorClient | None = None
-        stop_target: str | None = None
+        keep_session_for_resume = False
+        session_stopped = False
         handle = resume_handle
         metadata = resume_handle.metadata if resume_handle else {}
         phase = metadata.get("gjc_operation_phase")
@@ -352,6 +355,7 @@ class GjcRuntime:
             )
             turn = await client.await_turn(session_id, turn_id)
             if turn.status == "waiting_for_answer":
+                keep_session_for_resume = True
                 question = turn.question
                 answer_key = f"ouroboros-answer-{uuid4().hex}"
                 handle = self._build_runtime_handle(
@@ -378,16 +382,27 @@ class GjcRuntime:
                 )
                 return
             terminal_phase = "completed" if turn.succeeded else "failed"
-            # The turn is terminal and non-resumable: reclaim the broker-owned
-            # worker session so it cannot outlive the run. Question turns and
-            # coordinator errors keep the session alive for resume.
-            stop_target = session_id
             handle = self._build_runtime_handle(
                 session_id,
                 turn_id,
                 handle,
                 operation_phase=terminal_phase,
             )
+            content = (
+                (turn.text or await client.read_last_assistant(session_id))
+                if turn.succeeded
+                else None
+            )
+            # The turn is terminal and non-resumable: reclaim the broker-owned
+            # worker session BEFORE publishing the result, so a consumer that
+            # stops iterating at the terminal message (or never closes the
+            # generator) cannot leave the session running. Question turns and
+            # coordinator errors keep the session alive for resume.
+            session_stopped = True
+            try:
+                await client.stop_session(session_id)
+            except GjcCoordinatorError:
+                pass
             if not turn.succeeded:
                 yield AgentMessage(
                     type="result",
@@ -400,7 +415,6 @@ class GjcRuntime:
                     resume_handle=handle,
                 )
                 return
-            content = turn.text or await client.read_last_assistant(session_id)
             yield AgentMessage(
                 type="result",
                 content=content or "GJC task completed.",
@@ -408,6 +422,7 @@ class GjcRuntime:
                 resume_handle=handle,
             )
         except GjcCoordinatorError as exc:
+            keep_session_for_resume = True
             yield AgentMessage(
                 type="result",
                 content=str(exc),
@@ -419,16 +434,27 @@ class GjcRuntime:
                 resume_handle=handle,
             )
         finally:
+            # Runs under caller cancellation and generator finalization too, so
+            # the cleanup awaits are shielded: a session bound after
+            # ``start_session`` must be reclaimed even when the consumer never
+            # drains the stream or cancels while ``await_turn`` blocks. Only
+            # explicitly resumable states (question turns, coordinator errors)
+            # keep the broker-owned session alive.
             if client is not None:
-                if stop_target is not None:
+                with anyio.CancelScope(shield=True):
+                    if (
+                        session_id is not None
+                        and not keep_session_for_resume
+                        and (not session_stopped)
+                    ):
+                        try:
+                            await client.stop_session(session_id)
+                        except GjcCoordinatorError:
+                            pass
                     try:
-                        await client.stop_session(stop_target)
+                        await client.close()
                     except GjcCoordinatorError:
                         pass
-                try:
-                    await client.close()
-                except GjcCoordinatorError:
-                    pass
 
     async def execute_task_to_result(
         self,

@@ -108,6 +108,7 @@ async def test_server_env_applies_child_recursion_guard(
 ) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "gjc")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "gjc")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "gjc")
     monkeypatch.setenv("_OUROBOROS_DEPTH", "1")
     adapter = _FakeAdapter([])
     client = GjcCoordinatorClient(
@@ -120,6 +121,9 @@ async def test_server_env_applies_child_recursion_guard(
 
     assert "OUROBOROS_AGENT_RUNTIME" not in adapter.config.env
     assert "OUROBOROS_LLM_BACKEND" not in adapter.config.env
+    # The public legacy selector routes BOTH runtime and LLM choice; leaving it
+    # set would send a discovered nested Ouroboros straight back into GJC.
+    assert "OUROBOROS_RUNTIME" not in adapter.config.env
     assert adapter.config.env["_OUROBOROS_DEPTH"] == "2"
 
 

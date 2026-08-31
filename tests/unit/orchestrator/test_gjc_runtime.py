@@ -210,6 +210,53 @@ async def test_terminal_failed_turn_stops_broker_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_stop_precedes_the_final_yield() -> None:
+    """A consumer that stops at the terminal message must not leak the session."""
+    client = FakeClient([_turn("Done")])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+
+    stream = runtime.execute_task("Do it")
+    message = await anext(stream)
+
+    # The session was reclaimed BEFORE the result was published; no aclose()
+    # or further iteration was needed.
+    assert message.data["subtype"] == "success"
+    assert client.stopped == ["session-1"]
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_while_awaiting_turn_stops_the_bound_session() -> None:
+    """Cancelling mid-turn must reclaim the session bound by start_session."""
+    import asyncio
+
+    entered = asyncio.Event()
+
+    class BlockingClient(FakeClient):
+        async def await_turn(self, session_id: str, turn_id: str) -> GjcCoordinatorTurn:
+            del session_id, turn_id
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    client = BlockingClient([])
+    runtime = GjcRuntime(cwd="/tmp/project", coordinator_client_factory=_factory(client))
+
+    async def consume() -> None:
+        async for _message in runtime.execute_task("Do it"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.stopped == ["session-1"]
+    assert client.closed
+
+
+@pytest.mark.asyncio
 async def test_question_turn_keeps_broker_session_alive() -> None:
     question = GjcCoordinatorQuestion(
         session_id="session-1",
