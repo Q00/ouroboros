@@ -17,6 +17,7 @@ from ouroboros.orchestrator.evidence.harness_observation import (
     observation_from_message,
 )
 from ouroboros.orchestrator.evidence.test_detection import (
+    _functional_command_supports_test_claim,
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
 )
@@ -142,6 +143,21 @@ def _verify_atomic_evidence_against_runtime_messages(
                     backed_commands=backed_commands,
                     messages=support_messages,
                     task_cwd=workspace_cwd,
+                ):
+                    continue
+                # Functional-verification tier: only when a hidden verify gate
+                # stays the behavioral authority for this AC, a non-test claim
+                # that IS a transcript-backed successful execution of an
+                # artifact this run produced is honest evidence, not
+                # fabrication.
+                if (
+                    has_success_contract
+                    and verify_gate_active
+                    and _functional_command_supports_test_claim(
+                        value=value,
+                        messages=support_messages,
+                        task_cwd=workspace_cwd,
+                    )
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(

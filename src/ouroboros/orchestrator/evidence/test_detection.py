@@ -9,6 +9,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_has_conflicting_tool_call_ids,
     _runtime_message_has_success_evidence,
+    _runtime_message_is_tool_completion,
     _runtime_message_supports_command_claim,
     _runtime_message_tool_call_id,
     _runtime_messages_support_file_claim,
@@ -419,6 +420,81 @@ def _runtime_messages_support_test_claim(
             )
             for command in matching_commands
         ):
+            return True
+    return False
+
+
+_FUNCTIONAL_INTERPRETER_NAMES = frozenset(
+    {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "php", "deno", "bun"}
+)
+
+
+def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
+    """Return workspace file tokens a command directly executes.
+
+    Only direct invocations count: an interpreter followed by a file argument
+    (``python3 tool.py``) or a ``./script`` execution. Files that are merely
+    mentioned (copied, grepped, cat-ed) are not "invoked" and cannot anchor the
+    functional-verification tier.
+    """
+    tokens = [token.strip("'\"") for token in command.split()]
+    invoked: list[str] = []
+    for index, token in enumerate(tokens):
+        base = token.rsplit("/", 1)[-1]
+        if base in _FUNCTIONAL_INTERPRETER_NAMES:
+            for candidate in tokens[index + 1 :]:
+                if candidate.startswith("-"):
+                    continue
+                if "." in candidate.rsplit("/", 1)[-1]:
+                    invoked.append(candidate)
+                break
+        elif token.startswith("./") and len(token) > 2:
+            invoked.append(token[2:])
+    return tuple(dict.fromkeys(invoked))
+
+
+def _functional_command_supports_test_claim(
+    *,
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a ``tests_passed`` claim is itself a transcript-backed
+    functional verification command.
+
+    Some leafs (Codex in particular) verify behavior by executing the built
+    artifact directly — ``python3 tool.py add x && python3 tool.py list`` —
+    and cite that exact command under ``tests_passed`` instead of a test-runner
+    invocation. That is honest, transcript-provable work, not fabrication, so
+    it must not be rejected as FABRICATION_SUSPECTED. This tier never trusts
+    leaf narration: the claim must match a recorded Bash invocation, the
+    correlated completion must carry a machine-readable success signal, and the
+    command must directly execute a workspace file whose mutation this run
+    already proved (a stale artifact cannot be claimed). Test-runner-shaped
+    claims never enter this tier — they keep the stricter test-output proof.
+    The caller additionally restricts this tier to ACs where a hidden verify
+    gate remains the behavioral authority.
+    """
+    if _looks_like_test_command(value):
+        return False
+    invoked_files = _functional_command_invoked_files(value)
+    if not invoked_files:
+        return False
+    if not any(
+        _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
+        for invoked in invoked_files
+    ):
+        return False
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        if _runtime_message_is_tool_completion(message):
+            continue
+        if _runtime_message_has_conflicting_tool_call_ids(message):
+            continue
+        if not _runtime_message_supports_command_claim(value, message):
+            continue
+        if _runtime_message_has_success_evidence(message, messages=messages, index=index):
             return True
     return False
 
