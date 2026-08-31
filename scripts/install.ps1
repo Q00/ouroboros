@@ -312,13 +312,13 @@ $extrasLabel = '[tui]'
 $setupRuntime = $selected
 $pythonSpec = $DefaultPythonSpec
 switch ($selected) {
-    'claude' { $extrasLabel = '[claude,tui]'; $extraPins = @('claude-agent-sdk==0.2.139', 'anthropic==0.122.0') }
-    'claude-sdk' { $extrasLabel = '[claude-sdk,tui]'; $extraPins = @('claude-agent-sdk==0.2.139', 'anthropic==0.122.0') }
+    'claude' { $extrasLabel = '[claude,tui]'; $extraPins = @('claude-agent-sdk==0.2.144', 'anthropic==0.122.0', 'mcp==1.28.1') }
+    'claude-sdk' { $extrasLabel = '[claude-sdk,tui]'; $extraPins = @('claude-agent-sdk==0.2.144', 'anthropic==0.122.0', 'mcp==1.28.1') }
     'claude-cli' { $extrasLabel = '[claude-cli,tui]' }
     'hermes' { $extrasLabel = '[mcp,tui]'; $extraPins = @('mcp==2.0.0') }
     'all' {
         $extrasLabel = '[all]'
-        $extraPins = @('claude-agent-sdk==0.2.139', 'anthropic==0.122.0', 'litellm==1.91.0')
+        $extraPins = @('claude-agent-sdk==0.2.144', 'anthropic==0.122.0', 'mcp==1.28.1', 'litellm==1.91.0')
         $pythonSpec = $LiteLLMPythonSpec
         $setupRuntime = ''
     }
