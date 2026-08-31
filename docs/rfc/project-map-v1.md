@@ -304,11 +304,10 @@ for one Seed resolve to unknown. `override_rate` is
 `forced_seed_count / (forced_seed_count + gated_seed_count)`; unknown Seeds are
 excluded and a zero denominator produces `null` (`n/a` in text output).
 
-The session-start event accepts this provenance only from a server-owned Gen-1
-generation receipt. Seed YAML is caller/model controlled, so a hand-authored,
-edited, legacy, or Gen-2 Seed cannot make `metadata.gate_forced` authoritative.
-If the in-process receipt is unavailable, the project classification is
-unknown rather than inferred from YAML or the current ambiguity threshold.
+The classification comes from `metadata.gate_forced`, stamped at Gen-1
+generation. Seeds without the field (pre-existing, hand-authored without it,
+or Gen-2) are classified as unknown; the current ambiguity threshold is never
+inferred retrospectively.
 
 ## V1 query surfaces
 

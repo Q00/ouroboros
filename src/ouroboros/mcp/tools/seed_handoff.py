@@ -10,36 +10,9 @@ from uuid import uuid4
 
 import yaml
 
-from ouroboros.core.seed_provenance import SeedGenerationReceipt
 from ouroboros.orchestrator.contract_redaction import redact_hidden_contract_values
 
 _HIDDEN_WORKER_KEYS = frozenset({"verify_command", "output_assertion"})
-
-
-@dataclass
-class SeedGenerationReceiptRegistry:
-    """Bounded process-local authority for Seed generation provenance."""
-
-    max_entries: int = 256
-    _entries: OrderedDict[str, SeedGenerationReceipt] = field(
-        default_factory=OrderedDict,
-        init=False,
-        repr=False,
-    )
-
-    def register(self, *, seed_id: str, gate_forced: bool | None) -> SeedGenerationReceipt:
-        receipt = SeedGenerationReceipt(seed_id=seed_id, gate_forced=gate_forced)
-        self._entries[seed_id] = receipt
-        self._entries.move_to_end(seed_id)
-        while len(self._entries) > max(1, self.max_entries):
-            self._entries.popitem(last=False)
-        return receipt
-
-    def resolve(self, seed_id: str) -> SeedGenerationReceipt | None:
-        receipt = self._entries.get(seed_id)
-        if receipt is not None:
-            self._entries.move_to_end(seed_id)
-        return receipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,10 +169,6 @@ class SeedHandoffRegistry:
     """Bounded process-local vault keyed by opaque plugin handoff IDs."""
 
     max_entries: int = 256
-    generation_receipts: SeedGenerationReceiptRegistry = field(
-        default_factory=SeedGenerationReceiptRegistry,
-        repr=False,
-    )
     _entries: OrderedDict[str, tuple[str, str]] = field(
         default_factory=OrderedDict,
         init=False,

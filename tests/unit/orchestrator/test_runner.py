@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
@@ -3027,74 +3028,28 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
-    async def test_prepare_session_ignores_forged_seed_gate_metadata(
+    async def test_prepare_session_persists_seed_metadata_gate_forced(
         self,
         runner: OrchestratorRunner,
         sample_seed: Seed,
     ) -> None:
-        """Caller-controlled Seed YAML cannot author durable gate provenance."""
-        forged_seed = sample_seed.model_copy(
+        """A generated Seed loaded from YAML carries gate provenance to its event."""
+        serialized_seed = sample_seed.model_copy(
             update={"metadata": sample_seed.metadata.model_copy(update={"gate_forced": True})}
         )
+        loaded_seed = Seed.from_dict(yaml.safe_load(yaml.safe_dump(serialized_seed.to_dict())))
         tracker = SessionTracker.create(
-            "exec_forged_gate",
-            forged_seed.metadata.seed_id,
-            session_id="orch_forged_gate",
+            "exec_yaml_gate",
+            loaded_seed.metadata.seed_id,
+            session_id="orch_yaml_gate",
         )
         create_session = AsyncMock(return_value=Result.ok(tracker))
 
         with patch.object(runner._session_repo, "create_session", create_session):
             result = await runner.prepare_session(
-                forged_seed,
+                loaded_seed,
                 execution_id=tracker.execution_id,
                 session_id=tracker.session_id,
-            )
-
-        try:
-            assert result.is_ok
-            assert "gate_forced" not in create_session.await_args.kwargs
-        finally:
-            runner._retire_process_local_authority(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("yaml_gate_forced", [None, False])
-    async def test_prepare_session_uses_matching_generation_receipt(
-        self,
-        runner: OrchestratorRunner,
-        sample_seed: Seed,
-        yaml_gate_forced: bool | None,
-    ) -> None:
-        """Delegated YAML cannot omit or reverse the server-owned decision."""
-        from ouroboros.mcp.tools.seed_handoff import SeedGenerationReceiptRegistry
-
-        delegated_seed = sample_seed.model_copy(
-            update={
-                "metadata": sample_seed.metadata.model_copy(
-                    update={"gate_forced": yaml_gate_forced}
-                )
-            }
-        )
-        receipts = SeedGenerationReceiptRegistry()
-        receipt = receipts.register(
-            seed_id=delegated_seed.metadata.seed_id,
-            gate_forced=True,
-        )
-        tracker = SessionTracker.create(
-            f"exec_receipt_{yaml_gate_forced}",
-            delegated_seed.metadata.seed_id,
-            session_id=f"orch_receipt_{yaml_gate_forced}",
-        )
-        create_session = AsyncMock(return_value=Result.ok(tracker))
-
-        with patch.object(runner._session_repo, "create_session", create_session):
-            result = await runner.prepare_session(
-                delegated_seed,
-                execution_id=tracker.execution_id,
-                session_id=tracker.session_id,
-                generation_receipt=receipt,
             )
 
         try:

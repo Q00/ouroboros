@@ -6,13 +6,12 @@ Contains handlers for interview and seed generation tools:
 """
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
 import time
 from typing import Any
-from uuid import uuid4
 
 from pydantic import ValidationError as PydanticValidationError
 import structlog
@@ -73,7 +72,6 @@ from ouroboros.mcp.tools.interview_advisory import (
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
 )
-from ouroboros.mcp.tools.seed_handoff import SeedGenerationReceiptRegistry
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -1103,12 +1101,6 @@ class GenerateSeedHandler:
     data_dir: Path | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
-    generation_receipts: SeedGenerationReceiptRegistry | None = field(default=None, repr=False)
-
-    def _record_generation_receipt(self, seed_id: str, gate_forced: bool) -> None:
-        """Bind a server-owned gate decision to the generated Seed identity."""
-        if self.generation_receipts is not None:
-            self.generation_receipts.register(seed_id=seed_id, gate_forced=gate_forced)
 
     def _build_ambiguity_score_from_value(self, ambiguity_score_value: float) -> AmbiguityScore:
         """Build an ambiguity score object from an explicit numeric override."""
@@ -1352,7 +1344,6 @@ class GenerateSeedHandler:
                     allow_unicode=True,
                     sort_keys=False,
                 )
-                self._record_generation_receipt(reference_seed.metadata.seed_id, force)
                 result_text = (
                     _client_gate_warning_text(client_gate_status) + "Seed Generated Successfully\n"
                     "=========================\n"
@@ -1379,7 +1370,6 @@ class GenerateSeedHandler:
                     )
                 )
 
-            delegated_seed_id = f"seed_{uuid4().hex[:12]}"
             payload = build_generate_seed_subagent(
                 session_id=session_id,
                 ambiguity_score=effective_score,
@@ -1388,17 +1378,6 @@ class GenerateSeedHandler:
                 force=force,
                 requirement_distillation=(distillation if interview_state.reference_cues else None),
             )
-            payload = replace(
-                payload,
-                prompt=(
-                    f"{payload.prompt}\n\n## Server-Assigned Seed Identity\n"
-                    "Use this exact value for `metadata.seed_id`: "
-                    f"`{delegated_seed_id}`. The server owns ambiguity-gate "
-                    "provenance; do not infer it from or alter it in YAML.\n"
-                ),
-                context={**payload.context, "seed_id": delegated_seed_id},
-            )
-            self._record_generation_receipt(delegated_seed_id, force)
             return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=session_id,
@@ -1408,11 +1387,7 @@ class GenerateSeedHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "force": force,
-                    # The process-local receipt is authoritative. This field
-                    # only exposes the decision to the bridge/user; execution
-                    # never trusts model-produced Seed metadata.
                     "gate_forced": force,
-                    "seed_id": delegated_seed_id,
                     **client_gate_status,
                 },
             )
@@ -1530,8 +1505,6 @@ class GenerateSeedHandler:
                 )
 
             seed = seed_result.value
-            self._record_generation_receipt(seed.metadata.seed_id, force)
-
             # Convert seed to YAML
             seed_dict = seed.to_dict()
             seed_yaml = yaml.dump(

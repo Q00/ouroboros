@@ -2300,7 +2300,6 @@ def _authoring_seed_handler(
         llm_backend=llm_backend if llm_backend is not None else handler.llm_backend,
         event_store=handler.event_store,
         data_dir=handler.data_dir,
-        generation_receipts=handler.generation_receipts,
         agent_runtime_backend=agent_runtime_backend,
         opencode_mode=opencode_mode,
     )
@@ -2352,7 +2351,6 @@ def _execution_start_handler(
         session_signal_hub=getattr(original_execute, "session_signal_hub", None),
         host_dispatch_bridge=getattr(original_execute, "host_dispatch_bridge", None),
         seed_handoff_registry=getattr(original_execute, "seed_handoff_registry", None),
-        generation_receipts=getattr(original_execute, "generation_receipts", None),
     )
     # Without the successor stack the run cannot enqueue the evaluation it
     # delegates to and finishes with ``evaluation_status="enqueue_failed"``.
