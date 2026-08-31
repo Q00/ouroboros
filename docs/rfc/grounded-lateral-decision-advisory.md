@@ -2,7 +2,15 @@
 
 ## Status
 
-Draft — for owner review. Not scheduled; no code changes yet.
+Implemented on `feat/grounded-lateral-decision-advisory` (2026-09-01) —
+P1–P4 all shipped; see the phasing table and per-section implementation
+notes for what each phase became in code. One slice deliberately remains
+host-mediated rather than automatic: the interview does not yet read
+decision records from the EventStore on its own — accepted decisions reach
+seeds via `session_context.decisions` (verbatim) and reach future
+interviews via the host relaying them, per the synthesis contract's
+follow_up. Promoting that to an automatic EventStore read path is future
+work with its own review.
 
 ## Problem
 
@@ -265,7 +273,7 @@ calls per week, deep-tier share, and (later) interview sessions that consumed
 |---|---|---|
 | P1 | D1 trigger copy + D2 `mode=decision` output contract (quick tier only) | none — prompt/copy/schema-enum only |
 | P2 | D3 envelope wiring + D4 citation gate (deep tier) | LATERAL role profile, URL checker (~1 small module) |
-| P3 | D5 decision records + interview consumption | conductor-decision reuse + one interview read path |
+| P3 | D5 decision records (shipped: ADVISORY actor mode, read-only ADR path free of mutating governance gates, ready-to-fill `record_decision` template in the synthesis contract keyed by fanout_id; interview consumption stays host-mediated for now) | ConductorActorMode.ADVISORY + contract template |
 | P4 | D6 interview-less seed (context input path + gap-question gate) | generate_seed input variant; reuses ambiguity scorer, preflight, inverted-interview prior art |
 
 P1 alone is shippable and measurable: trigger expansion reaches every

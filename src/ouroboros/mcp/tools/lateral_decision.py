@@ -65,10 +65,34 @@ DECISION_SYNTHESIS_CONTRACT: dict[str, Any] = {
     ),
     "follow_up": (
         "After the user accepts a recommendation, offer to persist it via "
-        "`ouroboros_record_conductor_decision`, and when the session has "
-        "settled goal + constraints + success criteria, offer "
-        "`ouroboros_generate_seed` directly — no interview needed."
+        "`ouroboros_record_conductor_decision` (see record_decision below), "
+        "and when the session has settled goal + constraints + success "
+        "criteria, offer `ouroboros_generate_seed` with session_context — "
+        "pass accepted decisions in its `decisions` key so they become "
+        "constraints verbatim. No interview needed."
     ),
+    # Ready-to-fill arguments for persisting the accepted recommendation as a
+    # durable ADR (grounded-lateral RFC P3). The fanout_id from this dispatch
+    # is the trigger identifier: pass it as decision_id, attention_event_id,
+    # and evidence_event_ids so the record stays traceable to the fan-out
+    # that produced it. Advisory records are read-only — the mutating
+    # governance budgets and ownership gates do not apply.
+    "record_decision": {
+        "tool": "ouroboros_record_conductor_decision",
+        "arguments_template": {
+            "decision_id": "<fanout_id of this dispatch>",
+            "phase": "selected",
+            "attention_event_id": "<fanout_id of this dispatch>",
+            "evidence_event_ids": ["<fanout_id of this dispatch>"],
+            "selected_action": "<the recommended option, one line, verbatim>",
+            "verification_summary": (
+                "<grounds (verified citations only) + strongest dissent + flip conditions>"
+            ),
+            "selected_effect": "read_only",
+            "actor_mode": "advisory",
+            "engine_ownership_state": "active",
+        },
+    },
 }
 
 DECISION_INLINE_CONTRACT_TEXT = (
