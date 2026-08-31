@@ -980,8 +980,13 @@ class TestCodexCliLLMAdapter:
         assert result.is_ok
         assert result.value.content == "Profiled answer"
 
-    def test_build_command_uses_full_auto_for_accept_edits(self) -> None:
-        """acceptEdits maps to Codex full-auto mode."""
+    def test_build_command_uses_workspace_write_sandbox_for_accept_edits(self) -> None:
+        """acceptEdits selects the workspace-write sandbox explicitly.
+
+        codex-cli 0.149 removed the ``--full-auto`` alias from ``codex exec``;
+        the explicit ``--sandbox workspace-write`` pair is accepted by both
+        current and older CLIs.
+        """
         adapter = CodexCliLLMAdapter(cli_path="codex", permission_mode="acceptEdits")
 
         command = adapter._build_command(
@@ -990,8 +995,9 @@ class TestCodexCliLLMAdapter:
             model=None,
         )
 
-        assert "--full-auto" in command
-        assert "--sandbox" not in command
+        assert "--full-auto" not in command
+        sandbox_index = command.index("--sandbox")
+        assert command[sandbox_index + 1] == "workspace-write"
 
     def test_build_command_uses_dangerous_bypass_when_requested(self) -> None:
         """bypassPermissions maps to the Codex dangerous bypass flag."""

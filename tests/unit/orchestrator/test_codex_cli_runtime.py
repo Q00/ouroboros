@@ -1743,7 +1743,8 @@ class TestCodexCliRuntime:
 
         assert command[:2] == [_test_cli_path(), "exec"]
         assert "--json" in command
-        assert "--full-auto" in command
+        assert "--full-auto" not in command
+        assert "workspace-write" in command
         assert "--model" in command
         assert "o3" in command
         assert "-C" in command
