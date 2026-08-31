@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,14 +28,15 @@ from ouroboros.orchestrator.evidence.test_detection import (
 from ouroboros.orchestrator.evidence.test_reexecution import (
     MAX_REEXECUTED_COMMANDS,
     reexecute_test_commands,
+    safe_test_argv,
     select_test_reexecution_commands,
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.leaf_dispatcher import LeafDispatcher, LeafDispatchState
 from ouroboros.orchestrator.profile_loader import load_profile
-from ouroboros.orchestrator.verify_shell import resolve_verify_shell
 
 TEST_COMMAND = "python3 -m pytest -q test_hello.py"
 
@@ -129,36 +131,60 @@ class TestSelection:
         assert len(selected) == MAX_REEXECUTED_COMMANDS
 
 
-@pytest.mark.skipif(resolve_verify_shell() is None, reason="no POSIX shell for verify commands")
+class TestSafeArgv:
+    def test_plain_test_commands_tokenize(self) -> None:
+        assert safe_test_argv("python3 -m pytest -q test_hello.py") == (
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            "test_hello.py",
+        )
+        assert safe_test_argv("pytest tests/test_a.py::test_b") is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'pytest -q "$(touch harness_escape_marker)"',
+            "pytest; rm -rf .",
+            "pytest && curl evil",
+            "pytest `id`",
+            "pytest | tee out",
+            "pytest > out.txt",
+            "t=$(mktemp -d) && pytest",
+            "pytest\nrm -rf .",
+            'pytest "unclosed',
+            "",
+        ],
+    )
+    def test_shell_dependent_text_is_rejected(self, command: str) -> None:
+        assert safe_test_argv(command) is None
+
+
 class TestReexecution:
     async def test_records_exit_status_and_output(self, tmp_path: Path) -> None:
-        route = resolve_verify_shell()
-        assert route is not None
+        (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
         python = sys.executable
 
         runs = await reexecute_test_commands(
             (
-                f'"{python}" -c "print(\'2 passed in 0.01s\')"',
-                f'"{python}" -c "import sys; print(\'1 failed\'); sys.exit(1)"',
+                f"{python} -m pytest -q -p no:cacheprovider test_ok.py",
+                f"{python} -m pytest -q -p no:cacheprovider test_absent.py",
             ),
             cwd=str(tmp_path),
-            shell_path=route.shell_path,
-            env={"PATH": "/usr/bin:/bin"},
-            timeout_seconds=30,
+            env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+            timeout_seconds=60,
         )
 
-        assert [run.returncode for run in runs] == [0, 1]
-        assert "2 passed" in runs[0].output_tail
+        assert len(runs) == 2
+        assert runs[0].returncode == 0 and "1 passed" in runs[0].output_tail
+        assert runs[1].returncode != 0
         assert runs[0].succeeded and not runs[1].succeeded
 
     async def test_timeout_is_recorded_not_raised(self, tmp_path: Path) -> None:
-        route = resolve_verify_shell()
-        assert route is not None
-
         runs = await reexecute_test_commands(
             ("sleep 5",),
             cwd=str(tmp_path),
-            shell_path=route.shell_path,
             env={"PATH": "/usr/bin:/bin"},
             timeout_seconds=0.2,
         )
@@ -166,6 +192,59 @@ class TestReexecution:
         assert len(runs) == 1
         assert runs[0].timed_out is True
         assert runs[0].succeeded is False
+
+    async def test_injection_text_is_never_executed(self, tmp_path: Path) -> None:
+        """The blocker regression: substitution text must not run at all."""
+        marker = tmp_path / "harness_escape_marker"
+        selected = select_test_reexecution_commands(
+            final_message=json.dumps(
+                {"tests_passed": ['pytest -q "$(touch harness_escape_marker)"']}
+            ),
+            messages=(_bash_call("ls"), _bash_result()),
+            task_cwd=str(tmp_path),
+        )
+        assert selected == ()
+
+        runs = await reexecute_test_commands(
+            ('pytest -q "$(touch harness_escape_marker)"',),
+            cwd=str(tmp_path),
+            env={"PATH": "/usr/bin:/bin"},
+            timeout_seconds=30,
+        )
+        assert runs == ()
+        assert not marker.exists()
+
+
+class TestAuthorityGates:
+    def _state(self) -> LeafDispatchState:
+        final = _final({"tests_passed": [TEST_COMMAND]})
+        return LeafDispatchState(
+            messages=[*_codex_unprovable_transcript(), final],
+            runtime_handle=None,
+            final_message=final.content,
+            success=True,
+        )
+
+    async def _attach(self, executor: object, tools: list[str]) -> WorkspaceObservation:
+        dispatcher = LeafDispatcher(executor)  # type: ignore[arg-type]
+        return await dispatcher._attach_test_reexecution(
+            WorkspaceObservation(changed_paths=frozenset()),
+            state=self._state(),
+            task_cwd="/tmp",
+            tools=tools,
+        )
+
+    async def test_no_bash_authority_skips_reexecution(self) -> None:
+        executor = SimpleNamespace(_run_verify_commands=True, _verify_command_timeout_seconds=1)
+        observation = await self._attach(executor, tools=["Read", "Edit"])
+        assert observation.command_runs == ()
+        observation = await self._attach(executor, tools=[])
+        assert observation.command_runs == ()
+
+    async def test_disabled_verification_skips_reexecution(self) -> None:
+        executor = SimpleNamespace(_run_verify_commands=False, _verify_command_timeout_seconds=1)
+        observation = await self._attach(executor, tools=["Bash"])
+        assert observation.command_runs == ()
 
 
 class TestClaimSupport:

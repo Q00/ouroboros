@@ -10576,8 +10576,11 @@ class TestParallelACExecutor:
             ac_index=0,
             ac_content='Create hello.py with hello() returning "hello".',
             session_id="orch_123",
-            tools=["Read"],
-            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            tools=["Read", "Bash"],
+            tool_catalog=(
+                MCPToolDefinition(name="Read", description="Read a file."),
+                MCPToolDefinition(name="Bash", description="Run a shell command."),
+            ),
             system_prompt="system",
             seed_goal="Ship the feature",
             depth=0,

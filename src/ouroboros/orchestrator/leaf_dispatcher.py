@@ -18,7 +18,7 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import errno
 import os
@@ -64,10 +64,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     project_runtime_message,
 )
-from ouroboros.orchestrator.verify_shell import (
-    sanitized_verify_environment,
-    verify_shell_path_from_identity,
-)
+from ouroboros.orchestrator.verify_shell import sanitized_verify_environment
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -927,6 +924,7 @@ class LeafDispatcher:
                     observation,
                     state=state,
                     task_cwd=task_cwd,
+                    tools=tools,
                 )
                 insert_observation_message(state.messages, observation)
 
@@ -936,14 +934,23 @@ class LeafDispatcher:
         *,
         state: LeafDispatchState,
         task_cwd: str | None,
+        tools: Sequence[str] | None = None,
     ) -> WorkspaceObservation:
         """Re-run claimed test commands the transcript could not prove.
 
-        Bounded by the verify-command timeout and the same POSIX shell the
-        verify gate uses; skipped when the leaf did not finish successfully,
-        when there is no workspace, or when no claim would change verdict.
+        Authority-gated: re-execution runs commands in the workspace, so it is
+        allowed only when the leaf itself held Bash authority (``tools``) and
+        the executor's deterministic verification is enabled — a run with
+        ``run_verify_commands`` off has opted out of harness-side execution.
+        Each command runs as a direct argv (never through a shell) under the
+        verify gate's sanitized environment and timeout.
         """
         if not state.success or not state.final_message or task_cwd is None:
+            return observation
+        if not tools or "Bash" not in tools:
+            return observation
+        executor = self._executor
+        if getattr(executor, "_run_verify_commands", False) is not True:
             return observation
         commands = select_test_reexecution_commands(
             final_message=state.final_message,
@@ -952,17 +959,10 @@ class LeafDispatcher:
         )
         if not commands:
             return observation
-        executor = self._executor
-        shell_path = verify_shell_path_from_identity(
-            getattr(executor, "_verify_shell_identity", None)
-        )
-        if shell_path is None:
-            return observation
         timeout_seconds = getattr(executor, "_verify_command_timeout_seconds", 600)
         runs = await reexecute_test_commands(
             commands,
             cwd=task_cwd,
-            shell_path=shell_path,
             env=sanitized_verify_environment(),
             timeout_seconds=float(timeout_seconds),
         )

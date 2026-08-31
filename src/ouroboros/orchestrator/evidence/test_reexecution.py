@@ -20,6 +20,7 @@ at least one ``tests_passed`` claim is currently unsupported.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import shlex
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import _runtime_message_command_values
@@ -37,6 +38,36 @@ from ouroboros.orchestrator.verify_command_runner import run_with_shell
 
 MAX_REEXECUTED_COMMANDS = 3
 OUTPUT_TAIL_CHARS = 4_000
+
+# Characters that would let leaf-authored text smuggle shell behaviour into a
+# re-executed command. Candidates are executed as a direct argv (never through
+# a shell), so these can only appear as literal argument bytes — but a command
+# whose meaning depends on shell interpretation is not the command the leaf
+# claims to have run, so it is rejected outright instead of run differently.
+_SHELL_METACHARACTERS = frozenset("`$;&|<>(){}\n\r")
+
+
+def safe_test_argv(command: str) -> tuple[str, ...] | None:
+    """Return the direct argv for a claimed test command, or None.
+
+    The blocker this closes: self-reported ``tests_passed``/``commands_run``
+    text was handed to ``bash -c``, so ``pytest -q "$(touch marker)"`` ran the
+    substitution. Executable text must never be shell-interpreted: only a
+    command that tokenizes cleanly and carries no shell metacharacters is
+    eligible, and it runs as an argv with no shell in front of it.
+    """
+    stripped = command.strip()
+    if not stripped or any(char in _SHELL_METACHARACTERS for char in stripped):
+        return None
+    try:
+        argv = shlex.split(stripped)
+    except ValueError:
+        return None
+    if not argv or any(
+        not token or any(c in _SHELL_METACHARACTERS for c in token) for token in argv
+    ):
+        return None
+    return tuple(argv)
 
 
 def select_test_reexecution_commands(
@@ -100,6 +131,9 @@ def select_test_reexecution_commands(
         if not key or key in seen:
             continue
         seen.add(key)
+        if safe_test_argv(candidate) is None:
+            # Shell-dependent text is not a runnable claim; never a candidate.
+            continue
         selected.append(candidate)
         if len(selected) >= MAX_REEXECUTED_COMMANDS:
             break
@@ -110,15 +144,19 @@ async def reexecute_test_commands(
     commands: Sequence[str],
     *,
     cwd: str,
-    shell_path: str,
     env: Mapping[str, str],
     timeout_seconds: float,
 ) -> tuple[CommandObservation, ...]:
-    """Run each command through the verify shell and record what happened."""
+    """Run each command as a direct argv (no shell) and record what happened."""
     observations: list[CommandObservation] = []
     for command in commands:
+        argv = safe_test_argv(command)
+        if argv is None:
+            continue
+        # ``run_with_shell`` executes exactly the argv it is given; no shell
+        # is placed in front, so leaf-authored text cannot be interpreted.
         run = await run_with_shell(
-            (shell_path, "-c", command),
+            argv,
             cwd=cwd,
             env=env,
             timeout_seconds=timeout_seconds,
@@ -140,5 +178,6 @@ async def reexecute_test_commands(
 __all__ = [
     "MAX_REEXECUTED_COMMANDS",
     "reexecute_test_commands",
+    "safe_test_argv",
     "select_test_reexecution_commands",
 ]
