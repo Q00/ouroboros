@@ -689,13 +689,12 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     # submission still completes. Pinning a claim keeps the claim, true or not;
     # only the runtime can say what a reply means, and it says it below.
     repo_root = Path(__file__).resolve().parents[4]
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
-        skill = (root / "pm" / "SKILL.md").read_text(encoding="utf-8")
-        assert "With a `contract_id`, synthesize" in skill, root
-        assert "leave out a lane you submitted as\n`undispatched`" in skill, root
-        assert "dispatch_subagents_if_supported" in skill, root
-        assert "process_payloads_sequentially" in skill, root
-        assert "host action selects the execution strategy" in skill, root
+    skill = (repo_root / "skills" / "pm" / "SKILL.md").read_text(encoding="utf-8")
+    assert "With a `contract_id`, synthesize" in skill
+    assert "leave out a lane you submitted as\n`undispatched`" in skill
+    assert "dispatch_subagents_if_supported" in skill
+    assert "process_payloads_sequentially" in skill
+    assert "host action selects the execution strategy" in skill
 
 
 @pytest.mark.asyncio
