@@ -145,6 +145,52 @@ def _redact_command(command: list[str], sensitive_values: set[str]) -> list[str]
     return [_redact_text(item, sensitive_values) for item in command]
 
 
+def _configured_sensitive_values(entry: dict[str, Any]) -> set[str]:
+    """Return configured values that must never reach durable diagnostics."""
+    values: set[str] = set()
+    for value in entry.get("env", {}).values() if isinstance(entry.get("env"), dict) else ():
+        if isinstance(value, str) and value:
+            values.add(value)
+    for field_name in ("http_headers", "env_http_headers"):
+        mapping = entry.get(field_name)
+        if isinstance(mapping, dict):
+            values.update(value for value in mapping.values() if isinstance(value, str) and value)
+    url = entry.get("url")
+    if isinstance(url, str) and url:
+        values.add(url)
+    command = entry.get("command")
+    args = entry.get("args")
+    if isinstance(command, str):
+        values.update(_sensitive_values([command, *(str(arg) for arg in args or [])], {}))
+    return values
+
+
+def _safe_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Project an effective MCP entry without persisting configured values."""
+    safe: dict[str, Any] = {
+        "path": entry.get("path"),
+        "exists": entry.get("exists", False),
+        "transport": entry.get("transport", "unknown"),
+        "command": entry.get("command"),
+        "args": list(entry.get("args") or []),
+        "env": {
+            str(key): "<redacted>"
+            for key in (entry.get("env") or {})
+            if isinstance(entry.get("env"), dict)
+        },
+        "url_present": bool(entry.get("url_present")),
+        "error": entry.get("error"),
+    }
+    if safe["transport"] == "url" or entry.get("url_present"):
+        safe["url"] = "<configured>" if entry.get("url") else None
+        for field in ("http_headers", "env_http_headers"):
+            if isinstance(entry.get(field), dict):
+                safe[field] = {str(key): "<redacted>" for key in entry[field]}
+        if entry.get("bearer_token_env_var"):
+            safe["bearer_token_env_var"] = str(entry["bearer_token_env_var"])
+    return redact_secrets(safe)
+
+
 def run_command(
     command: list[str],
     *,
@@ -161,6 +207,8 @@ def run_command(
     if env:
         merged_env.update(env)
     sensitive_values = _sensitive_values(command, merged_env)
+    if env:
+        sensitive_values.update(value for value in env.values() if value)
     sensitive_values.update(redact_values or set())
     persisted_command = _redact_command(command, sensitive_values)
     try:
@@ -198,9 +246,12 @@ def read_mcp_entry(path: Path, *, sanitize: bool = True) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "path": str(path),
         "exists": path.exists(),
+        "transport": "unknown",
         "command": None,
         "args": [],
         "env": {},
+        "url": None,
+        "url_present": False,
         "error": None,
     }
     if not path.exists():
@@ -213,10 +264,44 @@ def read_mcp_entry(path: Path, *, sanitize: bool = True) -> dict[str, Any]:
         if not isinstance(server, dict):
             entry["error"] = "missing mcpServers.ouroboros object"
             return entry
-        entry["command"] = server.get("command")
-        entry["args"] = server.get("args") if isinstance(server.get("args"), list) else []
-        entry["env"] = server.get("env") if isinstance(server.get("env"), dict) else {}
-        return redact_secrets(entry) if sanitize else entry
+        command = server.get("command")
+        url = server.get("url")
+        has_command = "command" in server
+        has_url = "url" in server
+        if has_command and has_url:
+            entry["error"] = "MCP entry mixes stdio command with HTTP URL"
+        elif has_url:
+            entry["transport"] = "url"
+            if not isinstance(url, str) or not url.strip():
+                entry["error"] = "MCP URL must be a non-empty string"
+        elif has_command:
+            entry["transport"] = "stdio"
+            if not isinstance(command, str) or not command.strip():
+                entry["error"] = "MCP command must be a non-empty string"
+        else:
+            entry["error"] = "MCP entry is missing command or URL transport"
+        entry["command"] = command
+        args = server.get("args", [])
+        env = server.get("env", {})
+        entry["args"] = args if isinstance(args, list) else []
+        entry["env"] = env if isinstance(env, dict) else {}
+        if entry["transport"] == "stdio" and (
+            not isinstance(args, list) or any(not isinstance(arg, str) for arg in args)
+        ):
+            entry["error"] = "MCP stdio args must be an array of strings"
+        if entry["transport"] == "stdio" and (
+            not isinstance(env, dict)
+            or any(
+                not isinstance(key, str) or not isinstance(value, str) for key, value in env.items()
+            )
+        ):
+            entry["error"] = "MCP stdio env must be a table of string values"
+        entry["url"] = url
+        entry["url_present"] = "url" in server
+        for field in ("http_headers", "env_http_headers", "bearer_token_env_var"):
+            if field in server:
+                entry[field] = server[field]
+        return _safe_mcp_entry(entry) if sanitize else entry
     except Exception as exc:  # pragma: no cover - defensive diagnostics
         entry["error"] = str(exc)
         return entry
@@ -227,6 +312,8 @@ def classify_mcp_entry(entry: dict[str, Any], expected_script: Path) -> tuple[st
         return "warn", "config file is absent"
     if entry.get("error"):
         return "fail", str(entry["error"])
+    if entry.get("transport") == "url" or entry.get("url_present"):
+        return "warn", "uses HTTP URL transport; stdio smoke is not applicable"
     command = entry.get("command")
     args = entry.get("args") or []
     expected = str(expected_script)
@@ -298,8 +385,14 @@ def mcp_stdio_smoke(
     # machinery; a stale checkout-local venv is itself separate diagnostic data.
     python = Path(sys.executable)
     configured = entry or {"command": str(repo / "scripts/mcp-serve.sh"), "args": [], "env": {}}
+    if configured.get("transport") == "url" or configured.get("url_present"):
+        details = _safe_mcp_entry(configured)
+        result = CommandResult([], None, "", "")
+        return Check(
+            "mcp_stdio_smoke", "warn", "skipped; effective MCP uses HTTP URL transport", details
+        ), result
     if configured.get("error") or not isinstance(configured.get("command"), str):
-        details = redact_secrets(configured)
+        details = _safe_mcp_entry(configured)
         result = CommandResult([], None, "", "")
         return Check(
             "mcp_stdio_smoke", "fail", "effective Codex MCP launcher is invalid", details
@@ -329,10 +422,7 @@ asyncio.run(main())
         name="mcp_stdio_smoke",
         timeout=timeout,
         env={str(k): str(v) for k, v in (configured.get("env") or {}).items()},
-        redact_values=_sensitive_values(
-            launcher,
-            {str(k): str(v) for k, v in (configured.get("env") or {}).items()},
-        ),
+        redact_values=_configured_sensitive_values(configured),
     )
     details: dict[str, Any] = redact_secrets(
         {"launcher": launcher, "command_result": _jsonable(result.__dict__)}
@@ -498,6 +588,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
+    codex_home = resolve_codex_home()
+    effective_entry = effective_codex_entry()
+    discovered_paths = discover_mcp_config_paths(repo, codex_home)
+    raw_config_entries = [read_mcp_entry(path, sanitize=False) for path in discovered_paths]
+    configured_sensitive = set().union(
+        *(_configured_sensitive_values(entry) for entry in [effective_entry, *raw_config_entries])
+    )
+
     process_result = run_command(
         [
             "ps",
@@ -508,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
         log_dir=log_dir,
         name="processes",
         timeout=args.timeout,
+        redact_values=configured_sensitive,
     )
     checks.append(
         Check(
@@ -532,7 +631,14 @@ def main(argv: list[str] | None = None) -> int:
         "global_ooo_version": ["ooo", "--version"],
         "local_mcp_doctor": [str(repo / ".venv/bin/ouroboros"), "mcp", "doctor", "--json"],
     }.items():
-        result = run_command(command, cwd=repo, log_dir=log_dir, name=label, timeout=args.timeout)
+        result = run_command(
+            command,
+            cwd=repo,
+            log_dir=log_dir,
+            name=label,
+            timeout=args.timeout,
+            redact_values=configured_sensitive,
+        )
         checks.append(
             Check(
                 label,
@@ -542,17 +648,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    codex_home = resolve_codex_home()
-    effective_entry = effective_codex_entry()
     config_entries: list[dict[str, Any]] = []
-    for path in discover_mcp_config_paths(repo, codex_home):
+    for path in discovered_paths:
         entry = read_mcp_entry(path)
         status, message = classify_mcp_entry(entry, expected_script)
         config_entries.append(entry)
-        checks.append(Check(f"mcp_config:{path}", status, message, redact_secrets(entry)))
+        checks.append(Check(f"mcp_config:{path}", status, message, entry))
 
     unique_signatures = {
-        (entry.get("command"), tuple(entry.get("args") or []))
+        (
+            entry.get("transport", "unknown"),
+            entry.get("command") if entry.get("transport") != "url" else None,
+            tuple(entry.get("args") or []) if entry.get("transport") != "url" else (),
+        )
         for entry in config_entries
         if entry.get("exists") and not entry.get("error")
     }
@@ -564,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
             "all discovered MCP configs use one command signature"
             if drift_status == "pass"
             else "discovered MCP configs use multiple command signatures",
-            {"signatures": [list(signature) for signature in sorted(unique_signatures)]},
+            {"signatures": [list(signature) for signature in sorted(unique_signatures, key=str)]},
         )
     )
 
