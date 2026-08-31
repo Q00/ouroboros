@@ -839,10 +839,9 @@ class CodexCliRuntime:
     def _git_main_repository_root(self, cwd: str) -> str | None:
         """Resolve the main repository root for a linked-worktree cwd.
 
-        Pure file inspection (no subprocess): a linked worktree carries a
-        ``.git`` FILE containing ``gitdir: <main>/.git/worktrees/<name>``.
-        Returns None when cwd is not a linked worktree or the layout is
-        unrecognized — exemption then falls back to the cwd key alone.
+        Pure file inspection (no subprocess): only an existing linked-worktree
+        ``.git`` FILE (``gitdir: <main>/.git/worktrees/<name>``) may mint the
+        extra exempt key; None otherwise — exemption then covers cwd alone.
         """
         try:
             current = Path(cwd).expanduser().resolve(strict=False)
@@ -852,7 +851,7 @@ class CodexCliRuntime:
             gitfile = candidate / ".git"
             try:
                 if gitfile.is_dir():
-                    return str(candidate) if candidate != current else None
+                    return None
                 if not gitfile.is_file():
                     continue
                 content = gitfile.read_text(encoding="utf-8", errors="replace")
@@ -864,13 +863,15 @@ class CodexCliRuntime:
                 gitdir = Path(line[len("gitdir:") :].strip()).expanduser()
                 if not gitdir.is_absolute():
                     gitdir = candidate / gitdir
-                # <main>/.git/worktrees/<name> -> <main>
-                if gitdir.parent.parent.name == ".git":
-                    try:
-                        return str(gitdir.parent.parent.parent.resolve(strict=False))
-                    except (OSError, RuntimeError, ValueError):
+                main_git_dir = gitdir.parent.parent
+                if gitdir.parent.name != "worktrees" or main_git_dir.name != ".git":
+                    return None
+                try:
+                    if not gitdir.is_dir() or not main_git_dir.is_dir():
                         return None
-                return None
+                    return str(main_git_dir.parent.resolve(strict=False))
+                except (OSError, RuntimeError, ValueError):
+                    return None
             return None
         return None
 
@@ -937,7 +938,12 @@ class CodexCliRuntime:
             try:
                 stat_result = path.lstat()
             except FileNotFoundError:
-                digest.update(b"missing\0")
+                # Missing config ≡ only the exempt first-use trust entry.
+                digest.update(
+                    self._stable_global_codex_config_bytes(b"") + b"\0"
+                    if name == "config.toml"
+                    else b"missing\0"
+                )
                 continue
             except OSError as exc:
                 raise RuntimeError("Cannot inspect Codex profile configuration") from exc
