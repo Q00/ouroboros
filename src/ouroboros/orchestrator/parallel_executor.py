@@ -8936,7 +8936,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
                         )
                     dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
-                    message_count_before_signal = primary_turn.message_count
+                    message_count_before_signal = primary_turn.message_list_length
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
 
                     async def _claim_follow_up_delivery() -> None:

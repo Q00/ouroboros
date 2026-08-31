@@ -12,6 +12,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_support_messages_for_field,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.harness_observation import is_harness_observation_message
 from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
@@ -47,8 +48,17 @@ def _verify_atomic_evidence_against_runtime_messages(
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
     )
-    support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
-    if not support_messages:
+    # Exclude the leaf's terminal self-report by identity, not by position: a
+    # harness observation may legitimately sit after the final result message.
+    final_indices = [index for index, message in enumerate(messages) if message.is_final]
+    terminal_index = final_indices[-1] if final_indices else None
+    support_messages = tuple(
+        message for index, message in enumerate(messages) if index != terminal_index
+    )
+    # A harness observation is support for claims, not proof that the runtime
+    # transcript arrived: an otherwise empty stream is still an infrastructure
+    # signal.
+    if not any(not is_harness_observation_message(message) for message in support_messages):
         if not effective_schema.required:
             return VerifierVerdict(passed=True)
         # A completely empty transcript is an infrastructure signal, not a
