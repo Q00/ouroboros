@@ -2232,6 +2232,67 @@ async def test_final_settlement_replays_stale_command_against_final_workspace(
 
 
 @pytest.mark.asyncio
+async def test_settlement_replay_mutation_invalidates_every_provisional_success(
+    tmp_path: Any,
+) -> None:
+    """A replay that mutates the workspace poisons the whole success set.
+
+    The first run of the command leaves the workspace untouched and passes;
+    the replay (triggered by a sibling edit) writes a side-effect file. That
+    mutation must fold into the settlement-wide state and reject every
+    provisional success — including a contract-less sibling — not just add an
+    individual failure for the replayed AC.
+    """
+    counter = tmp_path.parent / f"settle-mutating-replay-{tmp_path.name}.txt"
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        "n and Path('replay-side-effect.txt').write_text('mutated'); "
+        'raise SystemExit(0)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="contract ac", verify_command=command),
+        AcceptanceCriterionSpec(description="plain sibling"),
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.passed is True
+    # A later worker changes the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="contract ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="plain sibling",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            ),
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert [result.success for result in settled] == [False, False]
+    assert [result.outcome for result in settled] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+    ]
+    assert all("mutated the workspace" in (result.error or "") for result in settled)
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp_path: Any) -> None:
     from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
