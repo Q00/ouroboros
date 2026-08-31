@@ -1080,41 +1080,36 @@ def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> N
 
 
 def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
-    """Both copies, because only one of them ships to each host.
+    """`skills/` is the single shipped contract: the wheel's payload and what a
+    marketplace install reads (plugin.json points at it; the old
+    `.claude-plugin/skills/` copy was never loaded and is gone).
 
-    `skills/` is the canonical source and the wheel's payload;
-    `.claude-plugin/skills/` is what a marketplace install reads. An instruction
-    present in one and absent from the other is absent for half the hosts.
-
-    What each must carry changed with the lane. There is no confirmation
-    surface to describe any more, and correspondingly less standing between a
-    measurement and the Seed: the host putting the number beside the question
-    rather than into the answer is now the whole of it, so that is the sentence
-    that has to be in both.
+    What the contract must carry changed with the lane. There is no
+    confirmation surface to describe any more, and correspondingly less
+    standing between a measurement and the Seed: the host putting the number
+    beside the question rather than into the answer is now the whole of it, so
+    that is the sentence that has to be present.
     """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[4]
-    for skill in (
-        root / "skills" / "interview" / "SKILL.md",
-        root / ".claude-plugin" / "skills" / "interview" / "SKILL.md",
-    ):
-        content = skill.read_text(encoding="utf-8")
-        assert "there is no `[from-data]` answer to" in content, skill
-        assert "material for the user's" in content, skill
-        # The drop-after-answer duty is what a measurement crossing issuances is
-        # weighed against (see the cross-issuance test above): the server cannot
-        # tell when a payload was produced, so this rule — not a token the child
-        # echoes — is what keeps a late number from re-opening a settled
-        # decision. It is a host duty, so the duty being *stated* is the whole of
-        # what this side can pin, and losing the sentence would silently retire
-        # the guard the accepted risk rests on.
-        assert "already answered the question by the time the measurement" in content, skill
-        assert "drop it" in content, skill
-        assert "evidence informs a\n     decision, it does not revisit one" in content, skill
-        # The retired gate: leaving it would have hosts waiting to confirm a
-        # read that already ran.
-        assert "Run a read only after the user confirms" not in content, skill
+    skill = root / "skills" / "interview" / "SKILL.md"
+    content = skill.read_text(encoding="utf-8")
+    assert "there is no `[from-data]` answer to" in content, skill
+    assert "material for the user's" in content, skill
+    # The drop-after-answer duty is what a measurement crossing issuances is
+    # weighed against (see the cross-issuance test above): the server cannot
+    # tell when a payload was produced, so this rule — not a token the child
+    # echoes — is what keeps a late number from re-opening a settled
+    # decision. It is a host duty, so the duty being *stated* is the whole of
+    # what this side can pin, and losing the sentence would silently retire
+    # the guard the accepted risk rests on.
+    assert "already answered the question by the time the measurement" in content, skill
+    assert "drop it" in content, skill
+    assert "evidence informs a\n     decision, it does not revisit one" in content, skill
+    # The retired gate: leaving it would have hosts waiting to confirm a
+    # read that already ran.
+    assert "Run a read only after the user confirms" not in content, skill
 
 
 # --------------------------------------------------------------------------- #
@@ -1924,11 +1919,8 @@ def test_the_host_is_no_longer_told_to_caption_a_measurement_with_its_time() -> 
     """
     from pathlib import Path
 
-    for skill in (
-        Path("skills/interview/SKILL.md"),
-        Path(".claude-plugin/skills/interview/SKILL.md"),
-    ):
-        content = skill.read_text(encoding="utf-8")
-        assert "observed_at" not in content, skill
-        assert "Say when each was measured" not in content, skill
-        assert "already answered the question by the time the measurement" in content, skill
+    skill = Path("skills/interview/SKILL.md")
+    content = skill.read_text(encoding="utf-8")
+    assert "observed_at" not in content, skill
+    assert "Say when each was measured" not in content, skill
+    assert "already answered the question by the time the measurement" in content, skill
