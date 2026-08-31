@@ -47,7 +47,13 @@
 </p>
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+```powershell
+# Windows (PowerShell) — no Python needed; installs Git and uv for you
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
 <p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
@@ -140,8 +146,19 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 **Install** — one command, everything auto-detected:
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
+
+```powershell
+# Windows (PowerShell 5.1+ or pwsh 7+) — nothing to install first
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+The Windows installer installs Git and uv through winget when they are missing,
+lets uv download its own Python, then installs `ouroboros-ai` and wires the
+host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
+[platform support](./docs/platform-support.md).
 
 **First command** — open your AI coding agent and run these in order:
 

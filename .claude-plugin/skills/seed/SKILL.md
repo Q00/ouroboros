@@ -114,11 +114,11 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool 
 3. The tool extracts requirements from persisted interview state, calculates ambiguity score, and generates the Seed YAML.
 
    **Seed generation response shapes**: Branch only after an actual Seed YAML artifact is available.
-   - If the response has `status: "delegated_to_subagent"` and `dispatch_mode: "plugin"`, keep the returned `session_id`, wait for the plugin-managed subagent result, then extract the Seed YAML from that result. Do not enter the QA loop using the delegation envelope as the artifact.
+   - If the response has `status: "delegated_to_subagent"` and `dispatch_mode: "plugin"`, keep the returned `session_id`, wait for the plugin-managed subagent result, then extract the Seed YAML from that result. Do not run the advisory QA check using the delegation envelope as the artifact.
    - If the response directly contains Seed YAML, extract that YAML directly.
-   - If neither shape yields Seed YAML, stop and ask the user to resume generation or provide the missing artifact; do not fabricate a seed just to satisfy the QA loop.
+   - If neither shape yields Seed YAML, stop and ask the user to resume generation or provide the missing artifact; do not fabricate a seed just to satisfy the advisory QA check.
 
-4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
+4. Run the single-pass Advisory QA Check below, then present the seed as final and proceed to "After Seed Generation". Do not enter any refinement iteration unless the user explicitly opts in.
 
 **Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
 
@@ -134,21 +134,17 @@ If the MCP tool is NOT available, fall back to agent-based generation:
    - If no `session_id` was provided, use current-thread interview Q&A only when it is complete enough to identify one coherent interview; otherwise ask which interview or requirements summary should be seeded.
    - If no matching artifact is found, or if local artifacts plus matching conversation history still do not provide enough requirements, ask the user for the missing interview transcript / concise requirement summary, or ask them to run or resume `ooo interview`. Do not generate a seed from an absent or mismatched transcript.
 3. Generate a Seed YAML specification from the recovered requirements.
-4. Continue immediately into the required QA Refinement Loop. Do not present the seed as final, ask for acceptance, or proceed to "After Seed Generation" until QA exits with PASS or the user explicitly accepts a below-threshold best attempt at the loop boundary.
+4. Run the single-pass Advisory QA Check below, then present the seed as final and proceed to "After Seed Generation". Do not enter any refinement iteration unless the user explicitly opts in.
 
-### QA Refinement Loop (Required after generation)
+### Advisory QA Check (single pass, non-blocking)
 
-After Path A or Path B produces a seed, **do not present it as final yet**. Run a QA loop until the seed passes a high quality bar.
+After Path A or Path B produces a seed, run QA **exactly once** and surface the verdict as advisory information. **The verdict never blocks.** The seed is presented as final regardless of score; the user decides whether any refinement is worth their time. Do not run QA-until-PASS iterations — that loop is retired because it front-loads heavy interaction the user did not ask for.
 
-The first generation (Path A `ouroboros_generate_seed` or Path B agent role) runs **exactly once** and establishes the seed's ontology. From there on, **all revisions are direct YAML edits by you (main session)** — do not call `ouroboros_generate_seed` again. It does not accept revision hints, and re-running it would discard the established ontology.
+The generation (Path A `ouroboros_generate_seed` or Path B agent role) runs **exactly once** and establishes the seed's ontology. Any later revision is a direct YAML edit by you (main session) — do not call `ouroboros_generate_seed` again. It does not accept revision hints, and re-running it would discard the established ontology.
 
-**Threshold for seed**: `pass_threshold: 0.90` (stricter than default 0.80 — seeds are structural specs and must be precise).
+**Advisory bar**: `pass_threshold: 0.90` (stricter than default 0.80 — seeds are structural specs). The bar labels the verdict; it does not gate anything.
 
-**Max iterations**: 5. Track the highest-scoring seed across all iterations (the "best attempt"). If still not PASS after 5, present that best attempt with its QA verdict and ask the user: accept it as-is, make one final manual edit and accept it below threshold, or escalate to `ooo interview` / `ooo unstuck`. If the user chooses one final manual edit, apply exactly that user-specified edit, present the complete edited Seed YAML in a fenced `yaml` block, and ask for explicit below-threshold acceptance; do not start a sixth QA iteration, rerun QA, or claim the result passed unless the user explicitly asks to rerun QA despite the max-iteration cap. If the user accepts any below-threshold attempt, present the complete accepted Seed YAML in a fenced `yaml` block before proceeding to "After Seed Generation".
-
-The seed sits inside the **Define** diamond of Double Diamond — where expansion (Wonder) and convergence (Reflect/Refine/Restate) both happen in service of a single sharp specification. Expansion is not the enemy; **unchecked expansion that bypasses the user gate is.** The four-phase cycle plus User Adoption Gate is the workflow's primary safeguard.
-
-**Loop**:
+**Check**:
 
 1. Establish the QA evaluator for this run:
    - **MCP QA mode**: Load the QA tool via the active runtime's `call_mcp` capability using runtime tool discovery query `"+ouroboros qa"` if not already loaded.
@@ -161,38 +157,35 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
    Tool: ouroboros_qa
    Arguments:
      artifact: <the seed YAML>
-     quality_bar: "Seed must be internally consistent, acceptance_criteria must be measurable and testable, constraints must be concrete (no vague terms), ontology_schema must cover all entities referenced in goal/criteria, and there must be no contradictions between fields."
+     quality_bar: "Seed must be internally consistent, acceptance_criteria must be measurable and testable, constraints must be concrete (no vague terms), ontology_schema must cover all entities referenced in goal/criteria, and there must be no contradictions between fields. acceptance_criteria must also be parsimonious in the ontological sense: a criterion names a state of the finished work a user can see is true, while an implementation step names a means of reaching it, and only the first belongs in the list. Read each criterion beside its siblings — one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves, and flagging that is as important as flagging a missing piece, since it commits the seed to an unverified path. How many criteria a goal has follows from that judgment, so weigh each criterion against its siblings."
      artifact_type: "document"
      pass_threshold: 0.90
      seed_content: <the seed YAML>
-     qa_session_id: <reuse across iterations>
-     iteration_history: <accumulated>
+     qa_session_id: <reuse across passes>
+     iteration_history: <accumulated across passes>
    ```
 
-   **Fallback QA mode** — skip the tool call and evaluate the current seed text under the QA Judge role from step 1, using the same quality bar and threshold. Treat the locally produced verdict exactly like the MCP verdict for the PASS/REVISE/FAIL branch below.
+   **Fallback QA mode** — skip the tool call and evaluate the current seed text under the QA Judge role from step 1, using the same quality bar and threshold. Treat the locally produced verdict exactly like the MCP verdict for the advisory presentation below.
 
    **QA response shapes**: Branch only after a usable verdict is available.
    - In MCP QA mode, if the response has `status: "delegated_to_subagent"` and no verdict payload, keep the returned `qa_session_id`, wait for the plugin-managed subagent result, then parse that result as the QA verdict. Do not treat the delegation envelope itself as PASS/REVISE/FAIL.
    - In MCP QA mode, if the response already includes a scored verdict, parse that inline verdict directly.
-   - In fallback QA mode, parse the exact QA Judge JSON. Normalize `verdict` to uppercase only for the branch labels below (`pass`→PASS, `revise`→REVISE, `fail`→FAIL). Treat `differences` as blocking/revision issues and `suggestions` as proposed fixes; do not add non-schema fields such as `loop_action`.
-   - In all modes, append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before the next QA pass.
+   - In fallback QA mode, parse the exact QA Judge JSON. Normalize `verdict` to uppercase only for the labels below (`pass`→PASS, `revise`→REVISE, `fail`→FAIL). Treat `differences` and `suggestions` as advisory findings; do not add non-schema fields such as `loop_action`.
+   - If the user later opts into a refinement pass, append the parsed verdict plus applied/rejected revision decisions to `iteration_history` before that next QA pass.
 
-3. Branch on verdict:
-   - **PASS (>= 0.90)**: Exit loop. Present the final validated Seed YAML to the user, then proceed to "After Seed Generation" below.
-   - **REVISE (0.40–0.89)**: Run the **Wonder → Reflect → Refine → Restate** cycle below, then loop back to step 2.
-   - **FAIL (< 0.40)**: Stop the loop. The seed has fundamental issues that regeneration likely won't fix. Show the full verdict and recommend `ooo interview` to revisit requirements, or `ooo unstuck` to challenge assumptions. Do not proceed to celebration.
+3. Present the advisory verdict and the final seed — always in this order, never gated on score:
+   1. One advisory line: `QA advisory: <PASS|REVISE|FAIL> — score X.XX (bar 0.90).`
+   2. If the verdict is below the bar, list the top 2–3 QA suggestions as short advisory bullets — findings, not tasks. Do not apply any of them automatically.
+   3. Present the complete final Seed YAML in a fenced `yaml` block.
+   4. If the verdict was REVISE or FAIL, offer exactly one opt-in line — e.g. `Want a refinement pass on these findings? Otherwise the seed stands as-is.` For FAIL (< 0.40) additionally mention that `ooo interview` (revisit requirements) or `ooo unstuck` (challenge assumptions) may serve better than YAML edits. Then proceed to "After Seed Generation" regardless of the answer being pending — the seed is final unless the user opts in.
 
-4. On iteration N >= 3, briefly tell the user "Refining seed (iteration N/5)..." so they know progress is being made — but do not dump full verdicts each round; only deltas.
+4. Only if the user explicitly opts in, run one **Wonder → Reflect → Refine → Restate** pass (below), re-run the QA check once on the revised seed for an updated advisory line, and present the revised YAML. Each additional pass requires a fresh explicit opt-in; never chain passes autonomously.
 
-5. After PASS, show a one-line summary of the journey: `Seed passed QA at iteration N/5 with score X.XX.`
+#### Wonder → Reflect → Refine → Restate (opt-in refinement pass)
 
-6. Immediately after that PASS summary, present the complete final validated Seed YAML in a fenced `yaml` block. This must happen before any "After Seed Generation" celebration, star prompt, setup prompt, or next-step text.
+This refinement pass mirrors the Double Diamond Define cycle: **diverge via multiple perspectives first, then converge through debate, user decision, and structural application.** Revisions must NEVER be auto-applied by the main session alone — *"No candidate is accepted by default."* (Symposium User Adoption Gate)
 
-#### Wonder → Reflect → Refine → Restate (REVISE branch)
-
-This revision loop mirrors the Double Diamond Define cycle: **diverge via multiple perspectives first, then converge through debate, user decision, and structural application.** Revisions must NEVER be auto-applied by the main session alone — *"No candidate is accepted by default."* (Symposium User Adoption Gate)
-
-Four explicit phases per iteration:
+Four explicit phases per pass:
 - **Wonder** — diverge: collect raw proposals from independent sources
 - **Reflect** — debate: surface where sources agree and where they conflict
 - **Refine** — user gate: human picks which proposals enter the next seed
@@ -226,7 +219,7 @@ Attempt to load the MCP tool with the active runtime's `call_mcp` capability usi
 Tool: ouroboros_lateral_think
 Arguments:
   problem_context: |
-    Seed is in REVISE state (QA score X.XX, threshold 0.90).
+    User opted into a refinement pass (QA advisory score X.XX, bar 0.90).
     Current seed YAML:
     <YAML>
     QA suggestions:
@@ -255,7 +248,7 @@ The 5 personas return distinct revision angles:
 - **Inline fallback with dispatch block**: If the response returns markdown `content` plus the hidden sentinel `<!-- ouroboros-lateral-inline-dispatch-v1 base64 ... -->`, keep the visible markdown as the lateral scaffold. If the active runtime can dispatch isolated subagents, decode the sentinel JSON (`dispatch_mode`, `persona_count`, `payloads`) and send each `payload.prompt` + `payload.context` through that isolated subagent surface, then extract candidates from the returned persona texts. If the runtime cannot dispatch subagents, synthesize candidates directly from the visible inline persona sections.
 - **Inline fallback without dispatch block**: Treat the returned markdown as the complete lateral output and synthesize candidates directly from the visible persona sections. Do not split solely on `---` if doing so would corrupt user-provided content; prefer section headers and visible persona boundaries.
 
-If runtime tool discovery cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The QA refinement loop remains required, and the User Adoption Gate still applies to any proposed revision.
+If runtime tool discovery cannot load `ouroboros_lateral_think`, do not emulate lateral personas or read persona files directly. Record `no lateral proposals: MCP lateral tool unavailable` as Source 3 output and proceed with QA plus Socrates/available sources. The User Adoption Gate still applies to any proposed revision.
 
 **Phase 2 — Reflect (debate): structure proposals by agreement and conflict**
 
@@ -277,12 +270,12 @@ Ask sequential single-choice questions in this order:
 1. For each conflict group, ask one question with exactly one option per mutually exclusive resolution plus "Leave unchanged"; handle the runtime's free-form "Other" response if available. Record the chosen option as accepted and mark the other options in that group rejected.
 2. For non-conflicting convergent signals, ask one single-choice batch question: "Apply all strong non-conflicting revisions, review one by one, or skip them?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
 3. For singleton signals, ask one single-choice batch question: "Review singleton revisions one by one, skip all singleton revisions, or other?" If the user chooses review, ask each revision as a Yes/No/Other single-choice question.
-4. Always include a skip option at the batch level: "None of the above / keep current seed for now". If selected during a REVISE iteration, skip applying this candidate batch and return to QA or the max-iteration boundary; do not treat it as below-threshold acceptance unless the user separately chooses an explicit "accept current seed below threshold" option at the loop boundary.
+4. Always include a skip option at the batch level: "None of the above / keep current seed for now". If selected, skip applying this candidate batch; the current seed simply stands as-is.
 
 Convergent signals still appear first in summaries, conflicts second, singletons last. Conflict questions must be asked before any non-conflicting batch is applied so contradictory revisions cannot both enter the next seed.
 
 ```
-Iteration N/5 — QA score X.XX (REVISE)
+Refinement pass — QA advisory score X.XX
 
 Which revisions should enter the next seed?
 (Nothing accepted by default. Questions are single-choice and may be sequential.)
@@ -302,7 +295,7 @@ E. [Architect] Group 3 user-management criteria under one parent
 F. [Hacker] Replace "user authentication" with "device-local key file"
 
 Other:
-G. None of the above (exit loop with current seed)
+G. None of the above (keep current seed)
 H. Other — describe a different change
 ```
 
@@ -329,9 +322,9 @@ Track all rejected candidates across iterations and pass them as `failed_attempt
 
 **Phase 4 — Restate (apply accepted only)**
 
-Edit the previous seed YAML in place. Apply ONLY user-accepted items. Do not start from scratch. Do not lose fields that were already correct. Do not call `ouroboros_generate_seed` again — that tool runs only at iter-0.
+Edit the previous seed YAML in place. Apply ONLY user-accepted items. Do not start from scratch. Do not lose fields that were already correct. Do not call `ouroboros_generate_seed` again — that tool runs only at initial generation.
 
-If the user skips all proposed revisions for a REVISE iteration, keep the current seed unchanged for that iteration and continue the loop or max-iteration boundary. Exit below threshold only after an explicit loop-boundary acceptance choice such as "accept current seed below threshold"; before proceeding to "After Seed Generation", present the complete accepted Seed YAML in a fenced `yaml` block so the accepted artifact is explicit.
+If the user skips all proposed revisions, the current seed stands unchanged. After applying accepted items (or after a full skip), re-run the QA check once for an updated advisory line and present the complete Seed YAML in a fenced `yaml` block so the standing artifact is explicit. Do not start another pass without a fresh explicit opt-in.
 
 Common edit shapes (both expansion and convergence are legitimate when the user accepted them):
 - Sharpen: replace vague phrase with measurable predicate (`"fast"` → `"p95 latency < 200ms"`)
@@ -401,6 +394,20 @@ ontology_schema:
     - name: title
       type: string
       description: Task title
+evaluation_principles:
+  - name: completeness
+    description: All requirements are implemented
+    weight: 1.0
+  - name: usability
+    description: CLI commands are clear and easy to use
+    weight: 0.7
+exit_conditions:
+  - name: all_criteria_met
+    description: All acceptance criteria pass
+    criteria: 100% of acceptance criteria are satisfied
+  - name: tests_green
+    description: The project test suite passes
+    criteria: Required automated tests exit successfully
 metadata:
   ambiguity_score: 0.15
 ```
@@ -464,5 +471,15 @@ If `star_asked` is already `true`, skip the question and just announce:
 
 ```
 Your seed has been crystallized!
-📍 Next: `ooo run` to execute this seed (requires `ooo setup` first)
+◆ Current state → next: `ooo run` to execute this seed (requires `ooo setup` first)
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

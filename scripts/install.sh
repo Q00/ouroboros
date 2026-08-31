@@ -9,6 +9,10 @@
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
 #   4. Auto-detect single CLI on PATH; default to claude in pipe mode.
+#
+# When no usable installer is present, uv is fetched from astral.sh because it
+# carries its own Python. Set OUROBOROS_INSTALL_BOOTSTRAP_UV=0 to decline that
+# and get installation instructions instead.
 set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
@@ -19,6 +23,7 @@ LITELLM_PYTHON_SPEC=">=3.12,<3.14"
 IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
 EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
+BOOTSTRAP_UV="${OUROBOROS_INSTALL_BOOTSTRAP_UV:-1}"
 
 if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; } && { [ "${TERM:-}" != "dumb" ] || [ -n "${FORCE_COLOR:-}" ]; }; then
   BOLD="$(printf '\033[1m')"
@@ -893,7 +898,7 @@ HAS_UV=false
 HAS_PIPX=false
 PYTHON=""
 
-_step "1/4  Checking Python tooling" "Prefer uv, then pipx, then pip."
+_step "1/4  Checking Python tooling" "Prefer uv, then pipx, then pip. uv is installed when none of them can run."
 
 if command -v uv &>/dev/null; then
   HAS_UV=true
@@ -927,6 +932,52 @@ _python_requirement_message() {
   else
     printf 'Python %s' "$DEFAULT_PYTHON_SPEC"
   fi
+}
+
+_bootstrap_uv() {
+  # uv carries its own Python, so installing uv is the single move that unblocks
+  # a machine with no usable interpreter — the case that previously just exited.
+  # install.ps1 does the same on Windows (winget, then this script as fallback);
+  # here the script is the only path needing no package manager and no
+  # privileges. Everything that already works — an existing uv, or pipx with a
+  # supported Python — reaches its installer before this is ever called.
+  if [ "$BOOTSTRAP_UV" = "0" ]; then
+    # Fetching and running an installer from the network is the one thing here
+    # a caller may reasonably refuse; declining returns to the instructions.
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    _err "curl is required to install uv automatically."
+    return 1
+  fi
+
+  _blank
+  _say "${BOLD}Installing uv${RESET} — it provides its own Python, so none needs to be installed separately."
+  _info "Source: https://astral.sh/uv/install.sh"
+  if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    _err "uv installation failed."
+    return 1
+  fi
+
+  # The installer does not touch the running shell's PATH, so look where it
+  # actually writes before deciding it failed.
+  local candidate
+  for candidate in "${XDG_BIN_HOME:-}" "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.local/bin"; do
+    if [ -n "$candidate" ] && [ -x "$candidate/uv" ]; then
+      PATH="$candidate:$PATH"
+      export PATH
+      break
+    fi
+  done
+
+  if ! command -v uv >/dev/null 2>&1; then
+    _err "uv was installed but is not on PATH yet."
+    _info "Open a new shell and run this installer again."
+    return 1
+  fi
+
+  _ok "uv installed: $(uv --version)"
+  return 0
 }
 
 _print_python_install_remediation() {
@@ -1211,12 +1262,21 @@ if [ "$HAS_UV" = false ]; then
     done
     if [ -z "$PYTHON" ]; then
       _blank
-      _err "pipx requires $(_python_requirement_message), but none was found."
-      _blank
-      _print_python_install_remediation
-      exit 1
+      _warn "pipx requires $(_python_requirement_message), but none was found."
+      if _bootstrap_uv; then
+        HAS_UV=true
+        HAS_PIPX=false
+      else
+        _blank
+        _err "pipx requires $(_python_requirement_message), but none was found."
+        _blank
+        _print_python_install_remediation
+        exit 1
+      fi
     fi
-    _ok "Python found: $($PYTHON --version)"
+    if [ "$HAS_UV" = false ]; then
+      _ok "Python found: $($PYTHON --version)"
+    fi
   else
     # pip fallback: prefer explicit compatible versions for constrained profiles.
     if [ "$INSTALL_PYTHON_SPEC" = "$LITELLM_PYTHON_SPEC" ]; then
@@ -1232,12 +1292,20 @@ if [ "$HAS_UV" = false ]; then
     done
     if [ -z "$PYTHON" ]; then
       _blank
-      _err "No installer found: uv, pipx, or $(_python_requirement_message)."
-      _blank
-      _print_python_install_remediation
-      exit 1
+      _warn "No installer found: uv, pipx, or $(_python_requirement_message)."
+      if _bootstrap_uv; then
+        HAS_UV=true
+      else
+        _blank
+        _err "No installer found: uv, pipx, or $(_python_requirement_message)."
+        _blank
+        _print_python_install_remediation
+        exit 1
+      fi
     fi
-    _ok "Python found: $($PYTHON --version)"
+    if [ "$HAS_UV" = false ]; then
+      _ok "Python found: $($PYTHON --version)"
+    fi
   fi
 fi
 
