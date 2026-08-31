@@ -195,17 +195,15 @@ def is_harness_observation_message(message: AgentMessage) -> bool:
 def insert_observation_message(
     messages: list[AgentMessage], observation: WorkspaceObservation
 ) -> None:
-    """Place the observation before the final result so the verifier keeps it.
+    """Append the observation to the transcript.
 
-    The verifier drops the trailing final message on purpose (a leaf's
-    self-report must not support its own claims); an observation appended after
-    it would be dropped with it.
+    Always an append: repositioning existing entries would shift the indices
+    that mid-stream bookkeeping (e.g. session-signal delivery slices) captured
+    earlier. The verifier excludes the leaf's terminal self-report by identity
+    (the last final message), not by position, so an observation appended after
+    the final result is still counted as support.
     """
-    message = build_observation_message(observation)
-    if messages and messages[-1].is_final:
-        messages.insert(len(messages) - 1, message)
-    else:
-        messages.append(message)
+    messages.append(build_observation_message(observation))
 
 
 __all__ = [

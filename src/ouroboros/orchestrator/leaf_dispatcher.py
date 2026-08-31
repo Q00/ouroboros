@@ -902,10 +902,16 @@ class LeafDispatcher:
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
 
-        # Only a transcript that actually arrived gets the observation: an empty
-        # stream must keep reading as a collection fault (transcript missing),
-        # not as a transcript consisting of the harness's own note.
-        if any(not message.is_final for message in state.messages):
+        # Only a successful turn with a transcript gets the observation. An
+        # empty stream must keep reading as a collection fault (transcript
+        # missing), a failed or stalled turn is never evidence-verified, and a
+        # trailing harness note must not change how an error-only turn is
+        # classified downstream (e.g. after-turn signal delivery).
+        if (
+            state.success
+            and not state.stalled
+            and any(not message.is_final for message in state.messages)
+        ):
             observation = diff_workspace_snapshots(workspace_before, snapshot_workspace(task_cwd))
             if observation is not None:
                 insert_observation_message(state.messages, observation)

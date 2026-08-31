@@ -143,7 +143,8 @@ class TestObservationMessage:
         assert observation_from_message(forged_dict) is None
         assert observation_from_message(forged_type) is None
 
-    def test_insert_keeps_observation_ahead_of_the_final_message(self) -> None:
+    def test_insert_appends_without_moving_existing_messages(self) -> None:
+        """Appending only: repositioning would shift mid-stream index bookkeeping."""
         final = AgentMessage(type="result", content="done", data={"subtype": "success"})
         messages = [AgentMessage(type="assistant", content="working"), final]
 
@@ -151,10 +152,10 @@ class TestObservationMessage:
 
         assert [message.type for message in messages] == [
             "assistant",
-            HARNESS_OBSERVATION_MESSAGE_TYPE,
             "result",
+            HARNESS_OBSERVATION_MESSAGE_TYPE,
         ]
-        assert messages[-1] is final
+        assert messages[1] is final
 
         open_stream = [AgentMessage(type="assistant", content="working")]
         insert_observation_message(open_stream, WorkspaceObservation(changed_paths=frozenset()))
