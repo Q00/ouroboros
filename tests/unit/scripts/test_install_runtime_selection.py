@@ -171,6 +171,10 @@ exit 0
             TOOL_BIN_VAR: str(tool_bin_dir),
             OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
             CAPTURES_LOG_VAR: str(tmp_path / "telemetry.log"),
+            # The installer fetches uv from astral.sh when nothing else can
+            # install. Off by default here so no test reaches the network by
+            # accident; the bootstrap tests below opt back in with a fake curl.
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
         }
     )
     if env:
@@ -2745,3 +2749,98 @@ def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "install skipped" in result.stdout
     assert "Manual install: dsh plugin --profile web add" in result.stdout
+
+
+def _uv_bootstrap_curl(installed_uv: str) -> str:
+    """Fake curl that plays astral.sh's installer: emit a script that drops a
+    working `uv` into ~/.local/bin, which is where the real one writes when
+    XDG_BIN_HOME and CARGO_HOME are unset."""
+    return (
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *astral.sh/uv/install.sh*)\n"
+        '    printf \'%s\\n\' "mkdir -p \\"$HOME/.local/bin\\"" \\\n'
+        '      "cat > \\"$HOME/.local/bin/uv\\" <<\'UVEOF\'" \\\n'
+        f"      {shlex.quote(installed_uv)} \\\n"
+        '      "UVEOF" "chmod 755 \\"$HOME/.local/bin/uv\\""\n'
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
+def test_installer_bootstraps_uv_when_no_installer_is_usable(tmp_path: Path) -> None:
+    """With no uv, no pipx and no supported Python, the installer fetches uv
+    rather than exiting — uv carries its own Python, so this is recoverable."""
+    tool_bin_dir = tmp_path / "uv-tool-bin"
+    installed_uv = f"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "uv 0.0.0-bootstrapped"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then
+  echo "{tool_bin_dir}"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  ln -sf "${OUROBOROS_STUB_VAR}" "{tool_bin_dir}/ouroboros"
+fi
+printf 'uv %s\\n' "$*" >> "${CALLS_LOG_VAR}"
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": _uv_bootstrap_curl(installed_uv)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "uv installed: uv 0.0.0-bootstrapped" in result.stdout
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install" in calls
+
+
+def test_installer_declines_to_bootstrap_uv_when_opted_out(tmp_path: Path) -> None:
+    """OUROBOROS_INSTALL_BOOTSTRAP_UV=0 keeps the pre-existing behaviour: print
+    instructions and exit rather than fetch an installer from the network."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 1
+    assert "No installer found" in result.stdout
+    assert "https://astral.sh/uv/install.sh" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "uv tool install" not in calls_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_installer_reports_failure_when_uv_bootstrap_does_not_land(tmp_path: Path) -> None:
+    """A curl that reports success but installs nothing must not be treated as a
+    working uv — the installer falls back to the instructions and exits."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 1
+    assert "not on PATH yet" in result.stdout
+    assert "No installer found" in result.stdout
