@@ -5414,19 +5414,28 @@ class ParallelACExecutor:
 
                 if cached_digest != final_digest:
                     # A later worker changed the workspace after this command
-                    # passed.  Do not replay an unrestricted shell contract:
-                    # effects outside the workspace (DB/API/deployment writes)
-                    # cannot be detected by the digest.  The stale evidence is
-                    # therefore rejected at the final boundary.
-                    individual_failures[result.ac_index] = (
-                        "Final acceptance rejected because the workspace changed "
-                        "after verify_command completed; replaying verify_command "
-                        "is not permitted.",
-                        outcome,
-                        "workspace_mutated",
+                    # passed. verify_command is an observation contract (a mutating
+                    # one is rejected by the gate), so judge the final workspace once.
+                    replayed = await _invoke_execution_authority_entry(
+                        self, _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE, spec=spec, cwd=cwd
                     )
-                    settled.append(result)
-                    continue
+                    if replayed.workspace_mutated:
+                        # The replay itself changed the workspace (or made its
+                        # digest unreadable): every provisional success is now
+                        # stale. Fold it into the settlement-wide mutation
+                        # state so no further command runs and the complete
+                        # success set is invalidated below.
+                        verify_mutated_workspace = True
+                        settled.append(result)
+                        continue
+                    if not replayed.passed:
+                        individual_failures[result.ac_index] = (
+                            "Final acceptance rejected because verify_command failed on "
+                            f"the final workspace: {replayed.reason}",
+                            replayed,
+                            replayed.cause or "workspace_mutated",
+                        )
+                    result = replace(result, verify_gate_outcome=replayed)
 
             settled.append(result)
 
