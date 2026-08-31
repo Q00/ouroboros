@@ -215,9 +215,14 @@ in that script.
 
 Two things this job needs, and how it fails without them:
 
-- `HOMEBREW_TAP_TOKEN`, a PAT with `contents: write` on `Q00/homebrew-tap`.
+- `HOMEBREW_TAP_DEPLOY_KEY`, the private half of a write-enabled deploy key on
+  `Q00/homebrew-tap`. A deploy key rather than a PAT: write access is scoped to
+  that one repository, carries no account identity, and has no expiry to renew.
   Missing, the job **fails the release run** on purpose. Skipping quietly is how
   the formula drifted from 0.51.1 to 17 releases behind before the job existed.
+  To rotate it: `ssh-keygen -t ed25519 -N "" -f k`, add `k.pub` under the tap's
+  Deploy keys with write access, then `gh secret set HOMEBREW_TAP_DEPLOY_KEY
+  --repo Q00/ouroboros < k`, and delete the old key.
 - A green `brew audit`, `brew install --build-from-source` and `brew test`,
   which run **before** the push. A formula that cannot build is worse than one
   that is a release behind, and the tap has no CI of its own.

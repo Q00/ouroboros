@@ -262,12 +262,12 @@ jobs:
       - name: Require tap credentials
         if: steps.gate.outputs.stable == 'true'
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           # Fail closed: a silently skipped bump is how the formula drifted 17
           # releases behind before this job existed.
-          if [ -z "$TAP_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not set; cannot push to Q00/homebrew-tap" >&2
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "HOMEBREW_TAP_DEPLOY_KEY is not set; cannot push to Q00/homebrew-tap" >&2
             exit 1
           fi
 
@@ -293,16 +293,24 @@ jobs:
         if: steps.gate.outputs.stable == 'true'
         env:
           VERSION: ${{ steps.gate.outputs.version }}
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           if git -C "$TAP_DIR" diff --quiet; then
             echo "formula already at $VERSION"
             exit 0
           fi
+
+          # A deploy key, not a PAT: write access is scoped to this one
+          # repository and carries no account identity or expiry to renew.
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          export GIT_SSH_COMMAND="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
           git -C "$TAP_DIR" config user.name "github-actions[bot]"
           git -C "$TAP_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$TAP_DIR" remote set-url origin \
-            "https://x-access-token:${TAP_TOKEN}@github.com/Q00/homebrew-tap.git"
+          git -C "$TAP_DIR" remote set-url origin git@github.com:Q00/homebrew-tap.git
           git -C "$TAP_DIR" add Formula/ouroboros-ai.rb
           git -C "$TAP_DIR" commit -m "ouroboros-ai $VERSION"
           git -C "$TAP_DIR" push origin HEAD:main
