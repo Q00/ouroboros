@@ -98,13 +98,15 @@ class WorkspaceObservation:
     """What the harness itself observed around one leaf run.
 
     ``changed_paths`` are workspace-relative paths that appeared or changed
-    between the pre- and post-leaf snapshots. ``command_runs`` are commands the
-    harness re-executed in the workspace, with their real exit status.
+    between the pre- and post-leaf snapshots; ``deleted_paths`` are paths the
+    complete post-snapshot no longer contains. ``command_runs`` are commands
+    the harness re-executed in the workspace, with their real exit status.
     """
 
     changed_paths: frozenset[str]
     truncated: bool = False
     command_runs: tuple[CommandObservation, ...] = ()
+    deleted_paths: frozenset[str] = frozenset()
 
     def supports_file_claim(self, claim: str) -> bool:
         """Return True when the claimed workspace-relative path changed."""
@@ -201,9 +203,17 @@ def diff_workspace_snapshots(
             # that the leaf created it during this window.
             continue
         changed.add(path)
+    deleted: set[str] = set()
+    if not after.truncated:
+        # A path the complete post-snapshot no longer contains was removed
+        # during the window. Under a truncated post-snapshot its absence is
+        # only budget uncertainty, and ``truncated`` already withholds the
+        # zero-mutation waiver.
+        deleted = {path for path in before.fingerprints if path not in after.fingerprints}
     return WorkspaceObservation(
         changed_paths=frozenset(changed),
         truncated=before.truncated or after.truncated,
+        deleted_paths=frozenset(deleted),
     )
 
 
@@ -233,6 +243,31 @@ def observation_from_message(message: AgentMessage) -> WorkspaceObservation | No
     if isinstance(candidate, WorkspaceObservation):
         return candidate
     return None
+
+
+def observations_confirm_unmutated_workspace(
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when harness observations prove the leaf mutated nothing.
+
+    Requires at least one observation and every observation to report a
+    complete (non-truncated) snapshot diff with zero changed and zero deleted
+    paths. This is the
+    harness's own unforgeable witness that a run was pure verification — the
+    basis for accepting an honestly-empty ``files_touched`` and for letting a
+    verification command execute a pre-existing artifact.
+    """
+    observations = [
+        observation
+        for observation in (observation_from_message(message) for message in messages)
+        if observation is not None
+    ]
+    return bool(observations) and all(
+        not observation.changed_paths
+        and not observation.deleted_paths
+        and not observation.truncated
+        for observation in observations
+    )
 
 
 def is_harness_observation_message(message: AgentMessage) -> bool:

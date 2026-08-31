@@ -25,6 +25,7 @@ from ouroboros.orchestrator.evidence.harness_observation import (
     insert_observation_message,
     is_harness_observation_message,
     observation_from_message,
+    observations_confirm_unmutated_workspace,
     snapshot_workspace,
 )
 from ouroboros.orchestrator.evidence.verification import (
@@ -147,6 +148,38 @@ class TestSnapshotDiff:
         assert observation.changed_paths == frozenset({"seen.py"})
         assert observation.supports_file_claim("seen.py")
         assert not observation.supports_file_claim("unseen.py")
+
+    def test_deletion_is_observed_and_withdraws_the_zero_mutation_waiver(
+        self, tmp_path: Path
+    ) -> None:
+        """Removing a file is a mutation: the diff must see it symmetrically."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "kept.py").write_text("x\n", encoding="utf-8")
+        doomed = workspace / "doomed.py"
+        doomed.write_text("y\n", encoding="utf-8")
+        before = snapshot_workspace(workspace)
+
+        doomed.unlink()
+        observation = diff_workspace_snapshots(before, snapshot_workspace(workspace))
+
+        assert observation is not None
+        assert observation.changed_paths == frozenset()
+        assert observation.deleted_paths == frozenset({"doomed.py"})
+        assert not observations_confirm_unmutated_workspace(
+            (build_observation_message(observation),)
+        )
+
+    def test_truncated_post_snapshot_claims_no_deletions(self) -> None:
+        """Absence from a truncated post-snapshot is budget uncertainty."""
+        before = WorkspaceSnapshot(root="/ws", fingerprints={"a.py": (1, 1), "b.py": (2, 2)})
+        after = WorkspaceSnapshot(root="/ws", fingerprints={"a.py": (1, 1)}, truncated=True)
+
+        observation = diff_workspace_snapshots(before, after)
+
+        assert observation is not None
+        assert observation.deleted_paths == frozenset()
+        assert observation.truncated is True
 
     def test_missing_or_mismatched_roots_yield_no_observation(self, tmp_path: Path) -> None:
         assert snapshot_workspace(None) is None
