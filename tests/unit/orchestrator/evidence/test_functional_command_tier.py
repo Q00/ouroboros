@@ -76,13 +76,29 @@ def _edit_pair(path: str) -> tuple[AgentMessage, AgentMessage]:
     return start, result
 
 
-def test_invoked_files_only_cover_direct_executions() -> None:
-    assert _functional_command_invoked_files(CLAIM) == ("habit_tracker.py",)
-    # Mentioned-but-not-invoked files and test runners do not anchor the tier.
+def test_invoked_files_require_an_interpreter_and_a_file_token() -> None:
+    assert "habit_tracker.py" in _functional_command_invoked_files(CLAIM)
+    # Commands with no interpreter or no file token never enter the tier.
     assert _functional_command_invoked_files("cp habit_tracker.py /tmp/") == ()
     assert _functional_command_invoked_files("echo ok") == ()
-    assert _functional_command_invoked_files("python3 -m pytest test_app.py") == ()
     assert _functional_command_invoked_files("./run.sh") == ("run.sh",)
+    # Heredoc drivers reference the artifact inside their body.
+    heredoc = (
+        "python3 - <<'PY'\nimport subprocess, sys\n"
+        "subprocess.run([sys.executable, 'habit_tracker.py', 'add', 'x'], check=True)\nPY"
+    )
+    assert "habit_tracker.py" in _functional_command_invoked_files(heredoc)
+
+
+def test_test_runner_claims_stay_outside_the_functional_tier() -> None:
+    start, result = _codex_bash_pair("python3 -m pytest test_app.py")
+    messages = (*_edit_pair("test_app.py"), start, result)
+    assert (
+        _functional_command_supports_test_claim(
+            value="python3 -m pytest test_app.py", messages=messages, task_cwd=None
+        )
+        is False
+    )
 
 
 def test_codex_wrapped_functional_command_supports_claim() -> None:

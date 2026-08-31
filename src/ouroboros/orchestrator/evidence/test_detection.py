@@ -432,27 +432,34 @@ _FUNCTIONAL_INTERPRETER_NAMES = frozenset(
 )
 
 
-def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
-    """Return workspace file tokens a command directly executes.
+_FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
-    Only direct invocations count: an interpreter followed by a file argument
-    (``python3 tool.py``) or a ``./script`` execution. Files that are merely
-    mentioned (copied, grepped, cat-ed) are not "invoked" and cannot anchor the
-    functional-verification tier.
+
+def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
+    """Return workspace file tokens a verification command exercises.
+
+    The anchor is not the token itself but the backing requirement layered on
+    top: at least one referenced file must be proven authored by this run (or
+    the harness must have witnessed a pure-verification run). An interpreter
+    invocation (``python3 tool.py``), a ``./script`` execution, and a heredoc
+    driver that names the artifact inside its body (``python3 - <<'PY' ...
+    subprocess.run([..., 'tool.py', ...])``) all reference the artifact the
+    same way; a command that names no file at all (``echo ok``) stays outside
+    the tier entirely.
     """
     tokens = [token.strip("'\"") for token in command.split()]
-    invoked: list[str] = []
-    for index, token in enumerate(tokens):
-        base = token.rsplit("/", 1)[-1]
-        if base in _FUNCTIONAL_INTERPRETER_NAMES:
-            for candidate in tokens[index + 1 :]:
-                if candidate.startswith("-"):
-                    continue
-                if "." in candidate.rsplit("/", 1)[-1]:
-                    invoked.append(candidate)
-                break
-        elif token.startswith("./") and len(token) > 2:
-            invoked.append(token[2:])
+    has_interpreter = any(
+        token.rsplit("/", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES or token.startswith("./")
+        for token in tokens
+    )
+    if not has_interpreter:
+        return ()
+    invoked = [
+        match.group(0)
+        for match in _FILE_TOKEN_RE.finditer(command)
+        # Skip pure version-ish tokens such as ``2.0`` (no letter anywhere).
+        if any(ch.isalpha() for ch in match.group(0))
+    ]
     return tuple(dict.fromkeys(invoked))
 
 
