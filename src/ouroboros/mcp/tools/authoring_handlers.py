@@ -1158,16 +1158,12 @@ class GenerateSeedHandler:
             description=(
                 "Generate an immutable Seed from a completed interview session, "
                 "OR crystallize one directly from already-settled session context "
-                "with NO interview (pass session_context instead of session_id). "
-                "The seed contains structured requirements (goal, constraints, acceptance criteria). "
-                "Interview path: requires ambiguity_score <= 0.2 "
-                "unless force=true is passed to deliberately bypass the gate. "
-                "Session-context path: deterministic — the supplied material enters "
-                "the Seed verbatim (no LLM), and an incomplete submission returns "
-                "the specific gap questions instead of a blocked error. Offer this "
-                "path proactively when the conversation has already settled goal, "
-                "constraints, and success criteria; a Seed is useful even without "
-                "running it (spec artifact, review checklist, ooo publish)."
+                "with NO interview (pass session_context instead of session_id; "
+                "deterministic — material enters the Seed verbatim, and an "
+                "incomplete submission returns gap questions, not a block). Offer "
+                "that proactively once goal, constraints, and success criteria are "
+                "settled; a Seed is useful even without running it. Interview "
+                "path requires ambiguity_score <= 0.2 unless force=true."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1184,14 +1180,10 @@ class GenerateSeedHandler:
                     type=ToolInputType.OBJECT,
                     description=(
                         "Interview-less path: settled material from THIS session. "
-                        "Keys: goal (string, required), acceptance_criteria (list "
-                        "of verifiable checks, required), constraints (list), "
-                        "decisions (list of settled decisions, e.g. from a "
-                        "decision-mode lateral run — they become constraints), "
-                        "project_type ('greenfield'|'brownfield'). Everything is "
-                        "anchored verbatim — supply the user's own settled "
-                        "wording, never your paraphrase. Missing goal or criteria "
-                        "returns gap questions to relay to the user."
+                        "Keys: goal (required), acceptance_criteria (required, "
+                        "verifiable checks), constraints, decisions (become "
+                        "constraints), project_type. Anchored verbatim — supply "
+                        "the user's own settled wording, never your paraphrase."
                     ),
                     required=False,
                 ),
@@ -1230,94 +1222,11 @@ class GenerateSeedHandler:
             ),
         )
 
-    def _handle_session_context_seed(
-        self,
-        session_context: Any,
-    ) -> Result[MCPToolResult, MCPServerError]:
-        """Crystallize a Seed from host-settled context — no interview, no LLM.
+    def _handle_session_context_seed(self, ctx: Any) -> Result[MCPToolResult, MCPServerError]:
+        """Interview-less crystallization (RFC D6) — see session_seed_handler."""
+        from ouroboros.mcp.tools.session_seed_handler import handle_session_context_seed
 
-        Grounded-lateral RFC D6. Fully deterministic: the supplied material is
-        anchored verbatim, the gate is structural completeness, and an
-        incomplete submission returns the specific gap questions (status
-        ``gap_questions_required``) for the host to relay — never the
-        blocked/force binary of the interview path.
-        """
-        from ouroboros.bigbang.session_seed import build_session_context_seed
-
-        if not isinstance(session_context, dict):
-            return Result.err(
-                MCPToolError(
-                    "session_context must be an object with goal and acceptance_criteria",
-                    tool_name="ouroboros_generate_seed",
-                )
-            )
-
-        outcome = build_session_context_seed(session_context)
-        if outcome.gap_questions:
-            log.info(
-                "mcp.tool.generate_seed.session_context.gaps",
-                gap_count=len(outcome.gap_questions),
-            )
-            questions_text = "\n".join(f"- {q}" for q in outcome.gap_questions)
-            return Result.ok(
-                MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text=(
-                                "Seed not generated yet — the session context "
-                                "is missing pieces. Ask the user exactly these "
-                                "questions, then call ouroboros_generate_seed "
-                                "again with the answers merged into "
-                                "session_context:\n" + questions_text
-                            ),
-                        ),
-                    ),
-                    is_error=False,
-                    meta={
-                        "status": "gap_questions_required",
-                        "gap_questions": list(outcome.gap_questions),
-                        "source": "session_context",
-                    },
-                )
-            )
-
-        seed = outcome.seed
-        assert seed is not None  # gap-free outcome always carries a seed
-        seed_yaml = yaml.dump(
-            seed.to_dict(),
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-        )
-        log.info(
-            "mcp.tool.generate_seed.session_context",
-            seed_id=seed.metadata.seed_id,
-            criteria_count=len(seed.acceptance_criteria),
-        )
-        result_text = (
-            "Seed Generated Successfully (interview-less)\n"
-            "============================================\n"
-            f"Seed ID: {seed.metadata.seed_id}\n"
-            f"Ambiguity Score: {seed.metadata.ambiguity_score:.2f} "
-            "(conservative ceiling — gate was structural, not scored)\n"
-            f"Goal: {seed.goal}\n\n"
-            "--- Seed YAML ---\n"
-            f"{seed_yaml}"
-        )
-        return Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
-                is_error=False,
-                meta={
-                    "seed_id": seed.metadata.seed_id,
-                    "interview_id": seed.metadata.interview_id,
-                    "ambiguity_score": seed.metadata.ambiguity_score,
-                    "source": "session_context",
-                    "status": "seed_generated",
-                },
-            )
-        )
+        return handle_session_context_seed(ctx)
 
     async def handle(
         self,
