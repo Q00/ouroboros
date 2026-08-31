@@ -76,6 +76,41 @@ def test_codex_config_fingerprint_ignores_automatic_project_trust(
     assert runtime._fingerprint_codex_config_files() == original
 
 
+def test_codex_config_fingerprint_ignores_main_root_trust_for_worktree_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex records first-use trust against the git MAIN repo root.
+
+    A task running in a linked worktree must not have that benign entry
+    treated as authority-bearing drift (observed live: every AC after the
+    first failed instantly with "configuration changed").
+    """
+    main_repo = tmp_path / "main-repo"
+    (main_repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(
+        f"gitdir: {main_repo / '.git' / 'worktrees' / 'wt'}\n", encoding="utf-8"
+    )
+    main_key = str(main_repo.resolve(strict=False))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd=str(worktree.resolve(strict=False)))
+    original = runtime._codex_config_fingerprint
+
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(main_key)}]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() == original
+    runtime._assert_codex_config_files_unchanged()
+
+
 def test_codex_config_fingerprint_tracks_other_project_trust(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

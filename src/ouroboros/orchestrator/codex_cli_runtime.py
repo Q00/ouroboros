@@ -361,6 +361,7 @@ class CodexCliRuntime:
             self._profile_resolution_fingerprint = self._fingerprint_profile_resolution_config()
             self._codex_profile_v2_names = self._codex_profile_v2_names_from_ouroboros_config()
             self._codex_project_trust_baseline = self._read_codex_project_trust_levels()
+            self._codex_trust_exempt_keys_cache: frozenset[str] | None = None
             self._codex_config_fingerprint = self._fingerprint_codex_config_files()
             self._skill_dispatch_registry_fingerprint = self._fingerprint_skill_dispatch_registry()
             self._builtin_mcp_handler_registry_fingerprint = (
@@ -379,6 +380,7 @@ class CodexCliRuntime:
             self._codex_config_fingerprint = None
             self._codex_profile_v2_names = set()
             self._codex_project_trust_baseline = None
+            self._codex_trust_exempt_keys_cache = None
             self._skill_dispatch_registry_fingerprint = None
             self._builtin_mcp_handler_registry_fingerprint = None
             self._runtime_handle_profile_fingerprints = {}
@@ -810,6 +812,68 @@ class CodexCliRuntime:
             if isinstance(settings, dict) and "trust_level" in settings
         }
 
+    def _codex_trust_exempt_project_keys(self) -> frozenset[str]:
+        """Project keys whose automatic first-use trust entry is not drift.
+
+        Codex records first-use trust against the git MAIN repository root, so
+        a task running inside a linked worktree (the orchestrator's normal
+        layout) writes ``projects.<main-root>.trust_level`` — not an entry for
+        the worktree path this runtime was initialized with. Both keys describe
+        the same benign mutation for the same execution and neither can
+        retarget a model/profile; every other project's trust remains
+        authority-bearing drift.
+        """
+        cached = self._codex_trust_exempt_keys_cache
+        if cached is not None:
+            return cached
+        keys: set[str] = set()
+        if self._cwd is not None:
+            keys.add(self._cwd)
+            main_root = self._git_main_repository_root(self._cwd)
+            if main_root is not None:
+                keys.add(main_root)
+        resolved = frozenset(keys)
+        self._codex_trust_exempt_keys_cache = resolved
+        return resolved
+
+    def _git_main_repository_root(self, cwd: str) -> str | None:
+        """Resolve the main repository root for a linked-worktree cwd.
+
+        Pure file inspection (no subprocess): a linked worktree carries a
+        ``.git`` FILE containing ``gitdir: <main>/.git/worktrees/<name>``.
+        Returns None when cwd is not a linked worktree or the layout is
+        unrecognized — exemption then falls back to the cwd key alone.
+        """
+        try:
+            current = Path(cwd).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        for candidate in (current, *current.parents):
+            gitfile = candidate / ".git"
+            try:
+                if gitfile.is_dir():
+                    return str(candidate) if candidate != current else None
+                if not gitfile.is_file():
+                    continue
+                content = gitfile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+            for line in content.splitlines():
+                if not line.startswith("gitdir:"):
+                    continue
+                gitdir = Path(line[len("gitdir:") :].strip()).expanduser()
+                if not gitdir.is_absolute():
+                    gitdir = candidate / gitdir
+                # <main>/.git/worktrees/<name> -> <main>
+                if gitdir.parent.parent.name == ".git":
+                    try:
+                        return str(gitdir.parent.parent.parent.resolve(strict=False))
+                    except (OSError, RuntimeError, ValueError):
+                        return None
+                return None
+            return None
+        return None
+
     @staticmethod
     def _canonical_codex_project_path(project_path: str) -> str:
         """Match Codex project keys to the canonical cwd without weakening drift."""
@@ -952,8 +1016,7 @@ class CodexCliRuntime:
                 canonical_project_key = self._canonical_codex_project_path(project_key)
                 automatic_current_cwd_trust = (
                     self._codex_project_trust_baseline is not None
-                    and self._cwd is not None
-                    and canonical_project_key == self._cwd
+                    and canonical_project_key in self._codex_trust_exempt_project_keys()
                     and canonical_project_key not in self._codex_project_trust_baseline
                     and raw_settings.get("trust_level") == "trusted"
                 )
