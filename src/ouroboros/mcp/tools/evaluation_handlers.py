@@ -1511,6 +1511,33 @@ class ChecklistVerifyHandler:
         return Result.ok(augmented)
 
 
+# Decision-mode synthesis contract (grounded-lateral RFC D2), attached to the
+# dispatch metadata so every host synthesizes fan-out results the same way. A
+# decision advisory that ends as a pile of perspectives leaves an unsure user
+# MORE unsure — the debate must converge. Citation honesty mirrors the deep-tier
+# evidence contract in build_lateral_multi_subagent: only sources a persona
+# actually fetched may be cited, and unverifiable citations are dropped or
+# marked unverified, never presented as authority.
+_DECISION_SYNTHESIS_CONTRACT: dict[str, Any] = {
+    "converge_to": [
+        "recommendation: exactly ONE recommended option, stated first",
+        "grounds: why, citing persona evidence (verified sources only)",
+        "dissent: the strongest surviving argument against the recommendation",
+        "flip_conditions: concrete conditions under which the recommendation flips",
+    ],
+    "citation_rule": (
+        "Cite only sources personas actually fetched; drop or mark 'unverified' "
+        "anything you cannot trace to a fetched URL. Never invent citations."
+    ),
+    "follow_up": (
+        "After the user accepts a recommendation, offer to persist it via "
+        "`ouroboros_record_conductor_decision`, and when the session has "
+        "settled goal + constraints + success criteria, offer "
+        "`ouroboros_generate_seed` directly — no interview needed."
+    ),
+}
+
+
 @dataclass
 class LateralThinkHandler(BridgeAwareMixin):
     """Handler for the lateral_think tool.
@@ -1557,13 +1584,19 @@ class LateralThinkHandler(BridgeAwareMixin):
             description=(
                 "Generate alternative thinking approaches using lateral thinking personas. "
                 "Use when: stuck on a problem, going in circles, the same fix has "
-                "failed twice, or progress has stalled — call proactively on these "
+                "failed twice, progress has stalled, OR the user faces a "
+                "consequential choice with no clear winner (architecture, library, "
+                "trade-off) — call proactively on these "
                 "signals; do not wait for the user to ask for 'lateral' or 'unstuck'. "
                 "Result: fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "
                 "architect (restructures approach), or contrarian (challenges assumptions). "
-                "Do not use when: work is progressing normally with no stagnation signal. "
+                "For decisions, pass mode='decision': personas advise on the choice "
+                "and the synthesis must converge on ONE recommendation with flip "
+                "conditions. "
+                "Do not use when: work is progressing normally with no stagnation "
+                "signal and no open decision. "
                 "Set persona='all' (or pass personas=['hacker','architect',...]) to "
                 "fan out to MULTIPLE personas in parallel — each runs in its own "
                 "Task pane with an independent LLM context (no cross-contamination)."
@@ -1631,6 +1664,32 @@ class LateralThinkHandler(BridgeAwareMixin):
                     description="Previous failed approaches to avoid repeating",
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="mode",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "'unstuck' (default): break through stagnation. "
+                        "'decision': personas advise on a consequential choice; "
+                        "problem_context describes the options, current_approach "
+                        "the currently favored one (or 'undecided'). The fan-out "
+                        "synthesis contract then requires ONE recommendation, its "
+                        "grounds, the strongest dissent, and flip conditions."
+                    ),
+                    required=False,
+                    enum=("unstuck", "decision"),
+                ),
+                MCPToolParameter(
+                    name="research",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Deep tier opt-in: personas ground claims with web "
+                        "evidence when their runtime exposes web tools, and emit "
+                        "a machine-readable evidence block. Slower; never the "
+                        "default. Runtimes without web tools degrade to "
+                        "opinion-only instead of failing."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -1677,6 +1736,16 @@ class LateralThinkHandler(BridgeAwareMixin):
         failed_attempts_raw = arguments.get("failed_attempts") or []
         failed_attempts = tuple(str(a) for a in failed_attempts_raw if a)
 
+        mode = str(arguments.get("mode") or "unstuck").strip().lower()
+        if mode not in ("unstuck", "decision"):
+            return Result.err(
+                MCPToolError(
+                    f"Invalid mode: {mode}. Must be 'unstuck' or 'decision'.",
+                    tool_name="ouroboros_lateral_think",
+                )
+            )
+        research = bool(arguments.get("research"))
+
         # --- Parallel multi-persona dispatch path ---
         explicit_list = arguments.get("personas")
         raw_persona_arg = arguments.get("persona")
@@ -1692,6 +1761,12 @@ class LateralThinkHandler(BridgeAwareMixin):
                     )
                 )
         dispatch_all = persona_arg == "all"
+        if mode == "decision" and not explicit_list and not persona_arg:
+            # A decision advisory is a debate by construction: without an
+            # explicit persona selection, converging on one recommendation
+            # needs the full multi-perspective fan-out, not one default
+            # persona's opinion.
+            dispatch_all = True
 
         if explicit_list or dispatch_all:
             from ouroboros.mcp.tools.subagent import (
@@ -1729,6 +1804,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                     problem_context=str(problem_context),
                     current_approach=str(current_approach),
                     failed_attempts=failed_attempts,
+                    mode=mode,
+                    research=research,
                 )
             except ValueError as e:
                 return Result.err(
@@ -1751,6 +1828,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                 persona_count=len(payloads),
                 context_length=len(str(problem_context)),
                 failed_count=len(failed_attempts),
+                mode=mode,
+                research=research,
             )
 
             # Resolve the 3-way dispatch mode (the production source of truth).
@@ -1776,13 +1855,17 @@ class LateralThinkHandler(BridgeAwareMixin):
                     worker_backend=self.agent_runtime_backend,
                     fanout_reentry_available=False,
                 )
+                plugin_shape: dict[str, Any] = {
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "persona_count": len(payloads),
+                    "mode": mode,
+                }
+                if mode == "decision":
+                    plugin_shape["synthesis_contract"] = _DECISION_SYNTHESIS_CONTRACT
                 return build_multi_subagent_result(
                     payloads,
-                    response_shape={
-                        "status": "delegated_to_subagent",
-                        "dispatch_mode": "plugin",
-                        "persona_count": len(payloads),
-                    },
+                    response_shape=plugin_shape,
                 )
 
             # --- Inline/sequential fallback: concatenate persona prompts ---
@@ -1847,7 +1930,10 @@ class LateralThinkHandler(BridgeAwareMixin):
                 "persona_count": len(sections),
                 "payloads": payload_dicts,
                 "subagent_orchestration_instruction": contract.runtime_instruction_handling,
+                "mode": mode,
             }
+            if mode == "decision":
+                dispatch_record["synthesis_contract"] = _DECISION_SYNTHESIS_CONTRACT
             # Stamp the PR-C-standardized 3-mode contract (dispatch_mode /
             # host_action / result_correlation_key) via the shared helper. Only
             # HOST_DRIVEN and SEQUENTIAL reach here (PLUGIN_PASSIVE returned the
@@ -1971,6 +2057,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                     problem_context=str(problem_context),
                     current_approach=str(current_approach),
                     failed_attempts=failed_attempts,
+                    mode=mode,
+                    research=research,
                 )
             except (ValueError, Exception) as e:  # noqa: BLE001
                 log.error("mcp.tool.lateral_think.single_dispatch.error", error=str(e))
@@ -1982,13 +2070,17 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
             # Single payload → single _subagent envelope (not _subagents array)
+            single_shape: dict[str, Any] = {
+                "status": "delegated_to_subagent",
+                "dispatch_mode": "plugin",
+                "persona": persona.value,
+                "mode": mode,
+            }
+            if mode == "decision":
+                single_shape["synthesis_contract"] = _DECISION_SYNTHESIS_CONTRACT
             return build_subagent_result(
                 payloads[0],
-                response_shape={
-                    "status": "delegated_to_subagent",
-                    "dispatch_mode": "plugin",
-                    "persona": persona.value,
-                },
+                response_shape=single_shape,
             )
 
         # Inline fallback for subprocess / non-OpenCode runtimes.
@@ -2019,16 +2111,28 @@ class LateralThinkHandler(BridgeAwareMixin):
             )
             for question in lateral_result.questions:
                 response_text += f"- {question}\n"
+            if mode == "decision":
+                response_text += (
+                    "\n## Decision output contract\n"
+                    "Converge — do not stop at perspectives. State exactly one "
+                    "recommendation first, then its grounds, the strongest "
+                    "dissent, and the concrete flip conditions under which the "
+                    "recommendation changes.\n"
+                )
 
+            single_meta: dict[str, Any] = {
+                "persona": lateral_result.persona.value,
+                "approach_summary": lateral_result.approach_summary,
+                "questions_count": len(lateral_result.questions),
+                "mode": mode,
+            }
+            if mode == "decision":
+                single_meta["synthesis_contract"] = _DECISION_SYNTHESIS_CONTRACT
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),
                     is_error=False,
-                    meta={
-                        "persona": lateral_result.persona.value,
-                        "approach_summary": lateral_result.approach_summary,
-                        "questions_count": len(lateral_result.questions),
-                    },
+                    meta=single_meta,
                 )
             )
         except Exception as e:

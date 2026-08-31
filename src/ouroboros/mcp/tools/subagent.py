@@ -1850,6 +1850,8 @@ def build_lateral_multi_subagent(
     problem_context: str,
     current_approach: str,
     failed_attempts: tuple[str, ...] = (),
+    mode: str = "unstuck",
+    research: bool = False,
 ) -> list[SubagentPayload]:
     """Build N subagent payloads — one per lateral-thinking persona.
 
@@ -1863,6 +1865,15 @@ def build_lateral_multi_subagent(
         problem_context: Description of the stuck situation.
         current_approach: What has been tried and isn't working.
         failed_attempts: Previous failed approaches shared across all panes.
+        mode: ``"unstuck"`` (default) keeps the historical break-the-stagnation
+              task block. ``"decision"`` reframes each persona as an advocate in
+              a decision advisory: position, strongest argument, strongest
+              counter-argument to its own position (grounded-lateral RFC D2).
+        research: Deep tier opt-in (RFC D3/D4): each persona is asked to ground
+              claims with web evidence *when its runtime exposes web tools*, and
+              to emit the machine-readable evidence block the citation gate
+              parses. Purely additive prompt contract — a runtime without web
+              tools ignores it and degrades to opinion-only, never errors.
 
     Returns:
         List of SubagentPayload, one per unique persona.
@@ -1929,25 +1940,60 @@ def build_lateral_multi_subagent(
         lateral = result.unwrap()
         # Wrap the persona prompt with an explicit instruction for the
         # subagent to produce a concrete alternative plan, not just restate.
-        prompt = (
-            f"{lateral.prompt}\n\n"
-            "---\n\n"
-            "## Task for you (subagent)\n"
-            f"You are thinking as the **{persona.value}** persona. Apply the "
-            "instructions above to this specific problem. Produce:\n"
-            "1. A concrete alternative plan (3-5 bullet steps).\n"
-            "2. The single biggest assumption you challenge.\n"
-            "3. A one-line verdict: would this plan work? why/why not?\n\n"
-            "Keep it tight. Your output will be compared with 4 other personas "
-            "thinking in parallel. Be distinctive — lean hard into your persona."
-        )
+        if mode == "decision":
+            task_block = (
+                "## Task for you (subagent)\n"
+                f"You are thinking as the **{persona.value}** persona, advising "
+                "on a decision the user must make. The problem context above "
+                "describes the choice; the current approach is the option "
+                "currently favored (if any). Produce:\n"
+                "1. Your position: which option this persona picks, in one line.\n"
+                "2. Your strongest argument for it (2-4 bullets).\n"
+                "3. The strongest argument AGAINST your own position — steelman "
+                "the other side, do not strawman it.\n"
+                "4. Flip condition: the concrete condition under which you would "
+                "switch to another option.\n\n"
+                "Keep it tight. Your output will be weighed against other "
+                "personas advising in parallel. Be distinctive — lean hard into "
+                "your persona."
+            )
+        else:
+            task_block = (
+                "## Task for you (subagent)\n"
+                f"You are thinking as the **{persona.value}** persona. Apply the "
+                "instructions above to this specific problem. Produce:\n"
+                "1. A concrete alternative plan (3-5 bullet steps).\n"
+                "2. The single biggest assumption you challenge.\n"
+                "3. A one-line verdict: would this plan work? why/why not?\n\n"
+                "Keep it tight. Your output will be compared with 4 other personas "
+                "thinking in parallel. Be distinctive — lean hard into your persona."
+            )
+        research_block = ""
+        if research:
+            research_block = (
+                "\n\n## Evidence (deep tier)\n"
+                "If your runtime exposes web tools (WebSearch/WebFetch or "
+                "equivalent), ground every load-bearing claim in a source you "
+                "actually fetched, and end your reply with exactly one fenced "
+                "json block of the shape "
+                '{"external_sources": ["<url>", ...], "claims": '
+                '[{"claim": "<one sentence>", "source": "<url>"}, ...]}. '
+                "List only URLs you fetched in this task — never invent or "
+                "recall a URL from memory. If you have no web tools, skip this "
+                "section entirely and reason from the given context; do not "
+                "fabricate sources."
+            )
+        prompt = f"{lateral.prompt}\n\n---\n\n{task_block}{research_block}"
 
         context = {
             "persona": persona.value,
             "problem_context": problem_context,
             "current_approach": current_approach,
             "failed_attempts": list(failed_attempts),
+            "mode": mode,
         }
+        if research:
+            context["research"] = True
 
         payloads.append(
             build_subagent_payload(
