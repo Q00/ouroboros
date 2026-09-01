@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 import inspect
 import json
 import logging
@@ -19,6 +18,13 @@ import structlog
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.job_snapshot import (
+    JobEventFold,
+    JobLinks,
+    JobSnapshot,
+    JobStatus,
+    fold_job_events,
+)
 from ouroboros.mcp.telemetry_boundary import JobTelemetryBoundary
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
@@ -46,55 +52,6 @@ from ouroboros.persistence.event_store import (
     EventStore,
     validate_acceptance_finalization_payload,
 )
-
-
-class JobStatus(StrEnum):
-    """Lifecycle states for async MCP jobs."""
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    CANCEL_REQUESTED = "cancel_requested"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    INTERRUPTED = "interrupted"
-
-
-@dataclass(frozen=True, slots=True)
-class JobLinks:
-    """Cross-reference IDs attached to a job."""
-
-    session_id: str | None = None
-    execution_id: str | None = None
-    lineage_id: str | None = None
-    preserve_runner_result: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class JobSnapshot:
-    """Materialized view of a background job."""
-
-    job_id: str
-    job_type: str
-    status: JobStatus
-    message: str
-    created_at: datetime
-    updated_at: datetime
-    cursor: int = 0
-    links: JobLinks = field(default_factory=JobLinks)
-    result_text: str | None = None
-    result_meta: dict[str, Any] = field(default_factory=dict)
-    result_payload: dict[str, Any] | None = None
-    error: str | None = None
-
-    @property
-    def is_terminal(self) -> bool:
-        return self.status in {
-            JobStatus.COMPLETED,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
-            JobStatus.INTERRUPTED,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +415,7 @@ class JobManager:
         self._cleanup_running = False
         self._last_cleanup_monotonic = time.monotonic()
         self._live_snapshots: dict[str, JobSnapshot] = {}
+        self._fold_cache: dict[str, JobEventFold] = {}
         self._telemetry = JobTelemetryBoundary()
 
     def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
@@ -887,7 +845,7 @@ class JobManager:
         _HEARTBEAT_INTERVAL = 60.0
         while True:
             await asyncio.sleep(interval)
-            snapshot = await self.get_snapshot(job_id)
+            snapshot = await self._get_snapshot_tail(job_id)
             if snapshot.is_terminal:
                 return
 
@@ -1970,72 +1928,44 @@ class JobManager:
         events, cursor = await self._event_store.get_events_after("job", job_id, last_row_id=0)
         if not events:
             raise ValueError(f"Job not found: {job_id}")
+        fold = fold_job_events(None, events, cursor=cursor)
+        # A full replay is authoritative: refresh the tail cache so polling
+        # loops resume from here and self-heal any divergence.
+        self._fold_cache[job_id] = fold
+        return await self._finalize_fold_snapshot(job_id, fold)
 
-        created = events[0]
-        self._telemetry.remember(job_id, created.data)
-        created_links = created.data.get("links", {})
-        status = JobStatus(created.data.get("status", JobStatus.QUEUED.value))
-        message = created.data.get("message", "")
-        links = JobLinks(
-            session_id=created_links.get("session_id"),
-            execution_id=created_links.get("execution_id"),
-            lineage_id=created_links.get("lineage_id"),
-            preserve_runner_result=created_links.get("preserve_runner_result") is True,
+    async def _get_snapshot_tail(self, job_id: str) -> JobSnapshot:
+        """``get_snapshot`` variant for polling loops: fold only new events.
+
+        Resumes the cached fold at its rowid cursor instead of replaying the
+        job's whole stream every tick. Falls back to a full replay when no
+        fold is cached yet. The derived reconcilers still run on every call —
+        only the per-tick replay cost drops to O(new events).
+        """
+        await self._ensure_initialized()
+        await self._maybe_cleanup_expired()
+        fold = self._fold_cache.get(job_id)
+        if fold is None:
+            return await self.get_snapshot(job_id)
+        events, cursor = await self._event_store.get_events_after(
+            "job", job_id, last_row_id=fold.cursor
         )
-        result_text: str | None = None
-        result_meta: dict[str, Any] = {}
-        result_payload: dict[str, Any] | None = None
-        error: str | None = None
+        if events:
+            fold = fold_job_events(fold, events, cursor=cursor)
+        return await self._finalize_fold_snapshot(job_id, fold)
 
-        for event in events[1:]:
-            data = event.data
-            link_data = data.get("links") or {}
-            links = JobLinks(
-                session_id=link_data.get("session_id") or links.session_id,
-                execution_id=link_data.get("execution_id") or links.execution_id,
-                lineage_id=link_data.get("lineage_id") or links.lineage_id,
-                preserve_runner_result=(
-                    link_data.get("preserve_runner_result")
-                    if isinstance(link_data.get("preserve_runner_result"), bool)
-                    else links.preserve_runner_result
-                ),
-            )
-
-            if "status" in data:
-                status = JobStatus(data["status"])
-            if "message" in data:
-                message = data["message"]
-            if "result_text" in data:
-                result_text = data["result_text"]
-            if "result_meta" in data and isinstance(data["result_meta"], dict):
-                result_meta = data["result_meta"]
-            if "result_payload" in data and isinstance(data["result_payload"], dict):
-                result_payload = data["result_payload"]
-            if "error" in data:
-                error = data["error"]
-
-        snapshot = JobSnapshot(
-            job_id=job_id,
-            job_type=created.data.get("job_type", "unknown"),
-            status=status,
-            message=message,
-            created_at=created.timestamp,
-            updated_at=events[-1].timestamp,
-            cursor=cursor,
-            links=links,
-            result_text=result_text,
-            result_meta=result_meta,
-            result_payload=result_payload,
-            error=error,
-        )
-        owner_is_dead = self._job_owner_is_dead(created.data)
+    async def _finalize_fold_snapshot(self, job_id: str, fold: JobEventFold) -> JobSnapshot:
+        """Turn a fold into the reconciled snapshot ``get_snapshot`` promises."""
+        self._telemetry.remember(job_id, fold.created_data)
+        snapshot = fold.to_snapshot(job_id)
+        owner_is_dead = self._job_owner_is_dead(fold.created_data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
             owner_is_dead=owner_is_dead,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
-            owner_data=created.data,
+            owner_data=fold.created_data,
         )
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
@@ -2348,7 +2278,7 @@ class JobManager:
                 snapshot = await self.get_snapshot(job_id)
                 return replace(snapshot, cursor=new_cursor), True
 
-            snapshot = await self.get_snapshot(job_id)
+            snapshot = await self._get_snapshot_tail(job_id)
             if snapshot.is_terminal or asyncio.get_running_loop().time() >= deadline:
                 return snapshot, False
 
@@ -2904,6 +2834,7 @@ class JobManager:
         for job_id in expired:
             self._known_job_ids.discard(job_id)
             self._live_snapshots.pop(job_id, None)
+            self._fold_cache.pop(job_id, None)
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
             self._monitors.pop(job_id, None)

@@ -36,6 +36,7 @@ from rich.table import Table
 import typer
 import yaml
 
+from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
@@ -89,11 +90,6 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
-from ouroboros.package_profiles import (
-    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
-    UVX_PYTHON_FLOOR,
-    has_unsupported_claude_sdk_mcp_mix,
-)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -113,7 +109,7 @@ def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     return [
         "--isolated",
         "--python",
-        UVX_PYTHON_FLOOR,
+        package_profiles.UVX_PYTHON_FLOOR,
         "--from",
         package_spec,
         "ouroboros",
@@ -455,7 +451,7 @@ _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
     (
         "--python",
-        UVX_PYTHON_FLOOR,
+        package_profiles.UVX_PYTHON_FLOOR,
         "--from",
         "ouroboros-ai[mcp]",
         "ouroboros",
@@ -3741,9 +3737,9 @@ def _install_gjc_ooo_bridge() -> bool:
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
     dest = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    content = _gjc_bridge_source_text()
+    content = None if package_profiles.gjc_mcp_v2_profile_error() else _gjc_bridge_source_text()
     if content is None:
-        print_warning("Could not locate packaged GJC ooo bridge source.")
+        print_warning("Could not activate the GJC MCP v2 profile or locate its bridge source.")
         return False
 
     expected = content.encode("utf-8")
@@ -4829,11 +4825,9 @@ def setup(
     """
     if ctx.invoked_subcommand is not None:
         return
-    if has_unsupported_claude_sdk_mcp_mix():
-        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
+    if package_profiles.has_unsupported_claude_sdk_mcp_mix():
+        print_error(escape(package_profiles.UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
-
-    console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
     # Show current backend if already configured
     current_backend = _get_current_backend()

@@ -59,7 +59,7 @@ REPLACEMENTS: list[tuple[str, str]] = [
 
 
 def main() -> int:
-    trees = [REPO / "skills", REPO / ".claude-plugin" / "skills"]
+    trees = [REPO / "skills"]
     total_changed = 0
     leftovers: list[str] = []
     for tree in trees:
