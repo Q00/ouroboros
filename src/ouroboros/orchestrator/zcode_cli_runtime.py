@@ -109,11 +109,12 @@ _ZCODE_SESSION_ID_RE = re.compile(
 )
 _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
 _MAX_ZCODE_TOOL_INPUT_DEPTH = 100
+_MAX_ZCODE_MESSAGE_IDENTITY_DEPTH = 1_000
 
 
-def _zcode_canonical_json_identity(value: Any) -> str | None:
+def _zcode_canonical_json_identity(value: Any, *, max_depth: int) -> str | None:
     def encode(item: Any, depth: int) -> object | None:
-        if depth > _MAX_ZCODE_TOOL_INPUT_DEPTH:
+        if depth > max_depth:
             return None
         if item is None:
             return ["null", None]
@@ -149,10 +150,10 @@ def _zcode_canonical_json_identity(value: Any) -> str | None:
             return ["dict", normalized_dict]
         return None
 
-    normalized = encode(value, 0)
-    if normalized is None:
-        return None
     try:
+        normalized = encode(value, 0)
+        if normalized is None:
+            return None
         return json.dumps(
             normalized,
             sort_keys=True,
@@ -167,7 +168,7 @@ def _zcode_canonical_json_identity(value: Any) -> str | None:
 def _zcode_tool_input_fingerprint(tool_input: dict[str, Any]) -> str | None:
     if not isinstance(tool_input, dict):
         return None
-    return _zcode_canonical_json_identity(tool_input)
+    return _zcode_canonical_json_identity(tool_input, max_depth=_MAX_ZCODE_TOOL_INPUT_DEPTH)
 
 
 def _zcode_message_identity(messages: list[Any]) -> str | None:
@@ -179,7 +180,7 @@ def _zcode_message_identity(messages: list[Any]) -> str | None:
             )
         else:
             normalized.append(message)
-    return _zcode_canonical_json_identity(normalized)
+    return _zcode_canonical_json_identity(normalized, max_depth=_MAX_ZCODE_MESSAGE_IDENTITY_DEPTH)
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
