@@ -29,6 +29,7 @@ Model selection:
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -110,28 +111,75 @@ _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
 _MAX_ZCODE_TOOL_INPUT_DEPTH = 100
 
 
-def _zcode_tool_input_fingerprint(tool_input: dict[str, Any]) -> str | None:
-    stack: list[tuple[Any, int]] = [(tool_input, 0)]
-    while stack:
-        value, depth = stack.pop()
+def _zcode_canonical_json_identity(value: Any) -> str | None:
+    def encode(item: Any, depth: int) -> object | None:
         if depth > _MAX_ZCODE_TOOL_INPUT_DEPTH:
             return None
-        if isinstance(value, dict):
-            for key, item in value.items():
+        if item is None:
+            return ["null", None]
+        if isinstance(item, bool):
+            return ["bool", item]
+        if isinstance(item, str):
+            return ["str", item]
+        if isinstance(item, int):
+            return ["int", item]
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                return None
+            return ["float", item]
+        if isinstance(item, list):
+            normalized_list = []
+            for value_item in item:
+                normalized_item = encode(value_item, depth + 1)
+                if normalized_item is None:
+                    return None
+                normalized_list.append(normalized_item)
+            return ["list", normalized_list]
+        if isinstance(item, dict):
+            normalized_dict = []
+            if not all(isinstance(key, str) for key in item):
+                return None
+            for key, value_item in sorted(item.items()):
                 if not isinstance(key, str):
                     return None
-                stack.append((item, depth + 1))
-            continue
-        if isinstance(value, list):
-            stack.extend((item, depth + 1) for item in value)
-            continue
-        if value is None or isinstance(value, str | int | float | bool):
-            continue
+                normalized_item = encode(value_item, depth + 1)
+                if normalized_item is None:
+                    return None
+                normalized_dict.append([key, normalized_item])
+            return ["dict", normalized_dict]
+        return None
+
+    normalized = encode(value, 0)
+    if normalized is None:
         return None
     try:
-        return json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError, RecursionError):
         return None
+
+
+def _zcode_tool_input_fingerprint(tool_input: dict[str, Any]) -> str | None:
+    if not isinstance(tool_input, dict):
+        return None
+    return _zcode_canonical_json_identity(tool_input)
+
+
+def _zcode_message_identity(messages: list[Any]) -> str | None:
+    normalized: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("cacheControl") == {"type": "ephemeral"}:
+            normalized.append(
+                {key: value for key, value in message.items() if key != "cacheControl"}
+            )
+        else:
+            normalized.append(message)
+    return _zcode_canonical_json_identity(normalized)
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
@@ -772,20 +820,6 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # same identity makes the entire history ambiguous and fail-closed.
         previous_messages: list[Any] | None = None
 
-        def comparable_messages(messages: list[Any]) -> list[Any]:
-            """Ignore only ZCode's non-semantic ephemeral cache marker."""
-            normalized: list[Any] = []
-            for message in messages:
-                if isinstance(message, dict) and message.get("cacheControl") == {
-                    "type": "ephemeral"
-                }:
-                    normalized.append(
-                        {key: value for key, value in message.items() if key != "cacheControl"}
-                    )
-                else:
-                    normalized.append(message)
-            return normalized
-
         for index in matching_indexes:
             candidate_request = records[index].get("request")
             candidate_messages = (
@@ -793,10 +827,17 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             )
             if not isinstance(candidate_messages, list):
                 return []
-            if previous_messages is not None and comparable_messages(
-                candidate_messages[: len(previous_messages)]
-            ) != comparable_messages(previous_messages):
-                return []
+            if previous_messages is not None:
+                current_prefix_identity = _zcode_message_identity(
+                    candidate_messages[: len(previous_messages)]
+                )
+                previous_identity = _zcode_message_identity(previous_messages)
+                if (
+                    current_prefix_identity is None
+                    or previous_identity is None
+                    or current_prefix_identity != previous_identity
+                ):
+                    return []
             previous_messages = candidate_messages
 
         matching = records[last_matching_index]
