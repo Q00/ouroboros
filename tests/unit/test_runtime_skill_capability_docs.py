@@ -7,10 +7,14 @@ code identifiers) so that rewording the surrounding prose never breaks them.
 from pathlib import Path
 import re
 
+import pytest
+
 from ouroboros.backends.capabilities import (
     get_backend_capability,
     runtime_backend_choices,
 )
+from ouroboros.config.loader import get_agent_runtime_backend
+from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
 
 
 def test_runtime_skill_capability_guide_docs_cover_all_runtime_backends() -> None:
@@ -71,6 +75,34 @@ def test_architecture_runtime_inventory_matches_backend_registry() -> None:
         capability = get_backend_capability(backend)
         assert capability is not None
         assert aliases == set(capability.aliases)
+
+
+def test_architecture_runtime_factory_precedence_matches_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = Path("docs/architecture.md").read_text(encoding="utf-8")
+    section = docs.split("### Runtime factory", 1)[1].split("The public CLI additionally", 1)[0]
+    expected_order = (
+        "1. Explicit `backend=` parameter",
+        "2. `OUROBOROS_AGENT_RUNTIME` environment variable",
+        "3. Legacy `OUROBOROS_RUNTIME` environment variable",
+        "4. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`",
+        "5. Default `claude` runtime",
+    )
+
+    cursor = 0
+    for item in expected_order:
+        position = section.find(item, cursor)
+        assert position >= 0, f"missing or out-of-order runtime precedence item: {item}"
+        cursor = position + len(item)
+
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "goose")
+    assert resolve_agent_runtime_backend("grok") == "grok"
+    assert get_agent_runtime_backend() == "codex"
+
+    monkeypatch.delenv("OUROBOROS_AGENT_RUNTIME")
+    assert get_agent_runtime_backend() == "goose"
 
 
 def test_readme_runtime_summary_defers_to_canonical_registry() -> None:

@@ -573,11 +573,13 @@ worker transports; the remaining entries are user-selectable runtimes.
 `create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py`
 resolves canonical names and aliases from
 `src/ouroboros/backends/capabilities.py`, then dispatches through
-`src/ouroboros/backends/factory_registry.py`. The backend can be set via:
+`src/ouroboros/backends/factory_registry.py`. Runtime selection uses this order:
 
-1. `OUROBOROS_AGENT_RUNTIME` environment variable
-2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
-3. Explicit `backend=` parameter
+1. Explicit `backend=` parameter
+2. `OUROBOROS_AGENT_RUNTIME` environment variable
+3. Legacy `OUROBOROS_RUNTIME` environment variable
+4. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
+5. Default `claude` runtime
 
 The public CLI additionally maps `claude-sdk` and `claude_sdk` to `claude`, and
 `claude-cli` to the internal `claude_mcp` transport. Those package-profile
