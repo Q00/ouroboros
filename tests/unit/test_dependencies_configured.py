@@ -163,8 +163,11 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     sdk_pins = [
-        "claude-agent-sdk==0.2.139",
+        "claude-agent-sdk==0.2.144",
         "anthropic==0.122.0",
+        # SDK 0.2.144 dropped its own MCP 1.x ceiling; the profile contract
+        # keeps the 1.x graph through this explicit pin.
+        "mcp==1.28.1",
     ]
     assert optional_deps["claude"] == sdk_pins
     assert optional_deps["claude-cli"] == []
@@ -331,10 +334,6 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
         "skills/update/SKILL.md",
         "skills/welcome/SKILL.md",
         "skills/pm/SKILL.md",
-        ".claude-plugin/skills/setup/SKILL.md",
-        ".claude-plugin/skills/update/SKILL.md",
-        ".claude-plugin/skills/welcome/SKILL.md",
-        ".claude-plugin/skills/pm/SKILL.md",
     ],
 )
 def test_claude_skills_never_combine_sdk_and_mcp_profiles(skill_path: str) -> None:
@@ -343,18 +342,6 @@ def test_claude_skills_never_combine_sdk_and_mcp_profiles(skill_path: str) -> No
 
     assert "ouroboros-ai[mcp,claude-sdk]" not in content
     assert "ouroboros-ai[claude-sdk,mcp]" not in content
-
-
-@pytest.mark.parametrize("skill_name", ["update", "pm", "unstuck"])
-def test_claude_plugin_skill_mirrors_canonical_skill(skill_name: str) -> None:
-    """Host-agnostic marketplace skills must mirror their canonical source."""
-    root = Path(__file__).parent.parent.parent
-    canonical = (root / "skills" / skill_name / "SKILL.md").read_text(encoding="utf-8")
-    plugin = (root / ".claude-plugin" / "skills" / skill_name / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert plugin == canonical
 
 
 @pytest.mark.parametrize(
@@ -371,12 +358,12 @@ def test_claude_skills_do_not_use_mcp_json_as_setup_health(skill_path: str) -> N
 
 @pytest.mark.parametrize(
     "skill_path",
-    ["skills/setup/SKILL.md", ".claude-plugin/skills/setup/SKILL.md"],
+    ["skills/setup/SKILL.md"],
 )
 def test_claude_setup_surfaces_keep_default_sdk_distinct_from_cli_worker(
     skill_path: str,
 ) -> None:
-    """Both shipped setup summaries must reflect the selected package contract."""
+    """The shipped setup summary must reflect the selected package contract."""
     content = Path(skill_path).read_text(encoding="utf-8")
 
     assert "default Claude Agent SDK runtime\non MCP 1.x" in content
@@ -398,7 +385,6 @@ def test_mcp_serve_documentation_names_runtime_and_public_claude_aliases() -> No
     shipped_markdown = [
         *Path("docs").rglob("*.md"),
         *Path("skills").rglob("*.md"),
-        *Path(".claude-plugin/skills").rglob("*.md"),
     ]
     for doc_path in dict.fromkeys(shipped_markdown):
         in_fenced_code = False

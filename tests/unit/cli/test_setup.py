@@ -20,7 +20,6 @@ import typer
 from typer.testing import CliRunner
 import yaml
 
-from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _codex_uses_profile_v2,  # real fn bound at import; bypasses the autouse probe guard
@@ -4745,7 +4744,7 @@ class TestClaudeSetup:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch(
-                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                "ouroboros.package_profiles.has_unsupported_claude_sdk_mcp_mix",
                 return_value=True,
             ),
             patch(
@@ -9782,6 +9781,339 @@ class TestRuntimeOnlyBackendSetup:
         assert data["orchestrator"]["runtime_backend"] == runtime
 
 
+class TestHostRuntimeSetup:
+    """``host`` has no CLI to detect at all: unlike the runtime-only backends
+    above, ``--runtime host`` must configure
+    ``orchestrator.runtime_backend: host`` with no ``*_cli_path`` and without
+    a `_detect_runtimes()` entry — this is what dsh's ``cordis.patch.yml``
+    now defaults to (see ``integrations/dsh-plugin``)."""
+
+    def test_setup_host_writes_runtime_only_config(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_host()
+
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+        assert "host_cli_path" not in data["orchestrator"]
+        # Runtime-only: the completion-only llm.backend is never set to it.
+        assert data.get("llm", {}).get("backend") != "host"
+        # The persisted config must round-trip through schema validation.
+        from ouroboros.config.models import OuroborosConfig
+
+        OuroborosConfig.model_validate(data)
+
+    def test_setup_runtime_host_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+        """`setup --runtime host --non-interactive` configures the backend
+        rather than failing with 'Unsupported runtime' (the prior contract gap
+        docs/cli-reference.md advertised but the dispatcher never implemented)."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
+
+        assert "Unsupported runtime" not in result.output
+        assert result.exit_code == 0, result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+        assert "In your MCP host chat, type: ooo run" in result.output
+        assert "ouroboros run workflow seed.yaml" not in result.output
+
+    def test_setup_host_migrates_setup_managed_codex_launcher(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: codex\n", encoding="utf-8"
+        )
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        codex_config.write_text(
+            setup_cmd._CODEX_MCP_SECTION_TEMPLATE.format(
+                command_lines=(
+                    'command = "ouroboros"\n'
+                    'args = ["mcp", "serve", "--runtime", "codex", '
+                    '"--llm-backend", "codex"]'
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_host() is True
+
+        entry = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"]["ouroboros"]
+        assert entry["args"] == [
+            "mcp",
+            "serve",
+            "--runtime",
+            "host",
+            "--llm-backend",
+            "codex",
+        ]
+        assert entry["env"] == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "codex",
+        }
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+    @pytest.mark.parametrize(
+        "opencode_command",
+        [
+            ["uvx", "ouroboros-ai[mcp]", "mcp", "serve"],
+            ["uvx", *setup_cmd._CODEX_UVX_MCP_ARGS],
+            [
+                "pipx",
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ],
+        ],
+        ids=["legacy-uvx", "isolated-uvx", "isolated-pipx"],
+    )
+    def test_setup_host_migrates_all_setup_managed_launchers(
+        self, tmp_path: Path, opencode_command: list[str]
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        kiro_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "uvx",
+                            "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_RUNTIME": "kiro",
+                                "OUROBOROS_LLM_BACKEND": "kiro",
+                                "KEEP": "kiro",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        copilot_path = tmp_path / ".copilot" / "mcp-config.json"
+        copilot_path.parent.mkdir(parents=True)
+        copilot_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "pipx",
+                            "args": ["run", "ouroboros-ai[mcp]", "mcp", "serve"],
+                            "env": {
+                                "OUROBOROS_AGENT_RUNTIME": "copilot",
+                                "OUROBOROS_LLM_BACKEND": "copilot",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        opencode_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "ouroboros": {
+                            "type": "local",
+                            "command": opencode_command,
+                            "environment": {
+                                "OUROBOROS_AGENT_RUNTIME": "opencode",
+                                "OUROBOROS_LLM_BACKEND": "opencode",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is True
+
+        kiro_env = json.loads(kiro_path.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"][
+            "env"
+        ]
+        assert kiro_env == {
+            "OUROBOROS_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "kiro",
+            "KEEP": "kiro",
+            "OUROBOROS_AGENT_RUNTIME": "host",
+        }
+        copilot_env = json.loads(copilot_path.read_text(encoding="utf-8"))["mcpServers"][
+            "ouroboros"
+        ]["env"]
+        assert copilot_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "copilot",
+        }
+        opencode_env = json.loads(opencode_path.read_text(encoding="utf-8"))["mcp"]["ouroboros"][
+            "environment"
+        ]
+        assert opencode_env == {
+            "OUROBOROS_AGENT_RUNTIME": "host",
+            "OUROBOROS_LLM_BACKEND": "opencode",
+        }
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "host"
+
+    def test_setup_host_rolls_back_launchers_when_later_selector_is_user_managed(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: kiro\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        kiro_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        kiro_path.parent.mkdir(parents=True)
+        original_kiro = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": "uvx",
+                        "args": ["ouroboros-ai[mcp]", "mcp", "serve"],
+                        "env": {"OUROBOROS_RUNTIME": "kiro"},
+                    }
+                }
+            }
+        )
+        kiro_path.write_text(original_kiro, encoding="utf-8")
+        opencode_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        opencode_path.parent.mkdir(parents=True)
+        original_opencode = json.dumps(
+            {
+                "mcp": {
+                    "ouroboros": {
+                        "type": "local",
+                        "command": ["docker", "run", "ouroboros"],
+                        "environment": {"OUROBOROS_AGENT_RUNTIME": "opencode"},
+                    }
+                }
+            }
+        )
+        opencode_path.write_text(original_opencode, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._find_opencode_config", return_value=opencode_path),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert kiro_path.read_text(encoding="utf-8") == original_kiro
+        assert opencode_path.read_text(encoding="utf-8") == original_opencode
+
+    def test_setup_host_rejects_user_managed_runtime_override(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        codex_config = codex_dir / "config.toml"
+        original_codex = (
+            '[mcp_servers.ouroboros]\ncommand = "/custom/mcp-wrapper"\n'
+            'args = ["serve", "--runtime", "codex"]\n'
+        )
+        codex_config.write_text(original_codex, encoding="utf-8")
+
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._detect_runtimes", return_value={}),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "host", "--non-interactive"])
+
+        assert result.exit_code == 1
+        assert "user-managed" in result.output
+        assert "Setup complete" not in result.output
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == original_codex
+
+    @pytest.mark.parametrize(
+        ("command", "args"),
+        [
+            ("python", ["/opt/custom/server.py", "--runtime", "codex"]),
+            ("uv", ["run", "/opt/custom/server.py", "--runtime", "codex"]),
+            ("uvx", ["custom-package", "serve", "--runtime", "codex"]),
+        ],
+    )
+    def test_setup_host_preserves_custom_common_launcher(
+        self,
+        tmp_path: Path,
+        command: str,
+        args: list[str],
+    ) -> None:
+        """Common executable names do not prove setup ownership."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "orchestrator:\n  runtime_backend: kiro\n", encoding="utf-8"
+        )
+        mcp_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        mcp_path.parent.mkdir(parents=True)
+        original = json.dumps(
+            {
+                "mcpServers": {
+                    "ouroboros": {
+                        "command": command,
+                        "args": args,
+                        "env": {"OUROBOROS_LLM_BACKEND": "codex"},
+                    }
+                }
+            },
+            indent=2,
+        )
+        mcp_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_host() is False
+
+        assert mcp_path.read_text(encoding="utf-8") == original
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 
@@ -9894,45 +10226,107 @@ class TestGjcSetup:
 
         assert detected["gjc"] == "/opt/bin/gjc"
 
-    def test_setup_gjc_writes_config_artifact_and_bridge(
+    def test_setup_gjc_installs_exact_bridge_and_is_idempotent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
+        config_path = config_dir / "config.yaml"
         config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
         agent_dir = tmp_path / "gjc-agent"
         monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=True),
         ):
-            setup_cmd._setup_gjc("/opt/bin/gjc")
-            setup_cmd._setup_gjc("/opt/bin/gjc")
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
+            bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+            first = bridge_path.read_bytes()
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is True
 
-        config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert bridge_path.read_bytes() == first
+        assert not (agent_dir / "rules" / "ouroboros-skill-capability-guide.md").exists()
+        assert first == setup_cmd._gjc_bridge_source_text().encode("utf-8")
+        assert (config_dir / "credentials.yaml").exists()
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "gjc"
         assert config["orchestrator"]["gjc_cli_path"] == "/opt/bin/gjc"
         assert config["llm"]["backend"] == "gjc"
-
-        guide_path = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
-        assert guide_path.read_text(encoding="utf-8") == render_backend_skill_capability_guide(
-            "gjc"
-        )
-
-        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
-        bridge = bridge_path.read_text(encoding="utf-8")
-        assert not (
-            agent_dir / "extensions" / "ouroboros-ooo-bridge" / "ouroboros-ooo-bridge.ts"
-        ).exists()
+        bridge = first.decode("utf-8")
         assert '"dispatch", "--runtime", "gjc"' in bridge
         assert '"--cwd", cwd' in bridge
         assert "process.env.OUROBOROS_CLI" in bridge
         assert "DEFAULT_COMMAND" in bridge
-        assert '"-m", "ouroboros"' in bridge
-        assert "{ cwd, env, timeout: TIMEOUT_MS }" in bridge
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge
         assert "_OUROBOROS_GJC_BRIDGE_DEPTH" in bridge
+
+    def test_setup_gjc_requires_mcp_v2_before_writing_config(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.package_profiles.has_pinned_mcp_v2_profile", return_value=False),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+        ):
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is False
+
+        assert config_path.read_text(encoding="utf-8") == original
+        assert not (agent_dir / "extensions").exists()
+
+    def test_setup_gjc_cli_exits_nonzero_for_bridge_collision(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        agent_dir = tmp_path / "gjc-agent"
+        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge_path.parent.mkdir(parents=True)
+        custom = "// operator bridge\n"
+        bridge_path.write_text(custom, encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"gjc": "/opt/bin/gjc"},
+            ),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(agent_dir)}),
+        ):
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "gjc", "--non-interactive"])
+
+        assert result.exit_code == 1
+        assert bridge_path.read_text(encoding="utf-8") == custom
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_gjc_does_not_commit_when_bridge_write_fails(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\n"
+        config_path.write_text(original, encoding="utf-8")
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text", side_effect=OSError("read-only")
+            ),
+            patch.dict(os.environ, {"GJC_CODING_AGENT_DIR": str(tmp_path / "gjc-agent")}),
+        ):
+            assert setup_cmd._setup_gjc("/opt/bin/gjc") is False
+
+        assert (
+            yaml.safe_load(config_path.read_text(encoding="utf-8"))["orchestrator"][
+                "runtime_backend"
+            ]
+            == "claude"
+        )
 
     def test_register_kiro_mcp_server_creates_fresh_entry(self, tmp_path: Path) -> None:
         """Fresh setup writes a valid entry with the Kiro env vars baked in."""

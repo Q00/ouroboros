@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 from ouroboros.orchestrator.adapter import AgentMessage
@@ -9,11 +10,17 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_has_conflicting_tool_call_ids,
     _runtime_message_has_success_evidence,
+    _runtime_message_is_tool_completion,
     _runtime_message_supports_command_claim,
     _runtime_message_tool_call_id,
     _runtime_messages_support_file_claim,
+    _workspace_relative_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
+from ouroboros.orchestrator.evidence.harness_observation import (
+    observation_from_message,
+    observations_confirm_unmutated_workspace,
+)
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _is_python_executable,
@@ -357,6 +364,8 @@ def _runtime_messages_support_test_claim(
     needle = value.strip().lower()
     if not needle:
         return False
+    if _harness_reexecution_supports_test_claim(value=value, messages=messages, task_cwd=task_cwd):
+        return True
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
@@ -417,6 +426,202 @@ def _runtime_messages_support_test_claim(
             for command in matching_commands
         ):
             return True
+    return False
+
+
+_FUNCTIONAL_INTERPRETER_NAMES = frozenset(
+    {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "php", "deno", "bun"}
+)
+
+
+_FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
+
+
+def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
+    """Return workspace file tokens a verification command exercises.
+
+    The anchor is not the token itself but the backing requirement layered on
+    top: at least one referenced file must be proven authored by this run (or
+    the harness must have witnessed a pure-verification run). An interpreter
+    invocation (``python3 tool.py``), a ``./script`` execution, and a heredoc
+    driver that names the artifact inside its body (``python3 - <<'PY' ...
+    subprocess.run([..., 'tool.py', ...])``) all reference the artifact the
+    same way; a command that names no file at all (``echo ok``) stays outside
+    the tier entirely.
+    """
+    tokens = [token.strip("'\"") for token in command.split()]
+    has_interpreter = any(
+        token.rsplit("/", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES or token.startswith("./")
+        for token in tokens
+    )
+    if not has_interpreter:
+        return ()
+    invoked = [
+        match.group(0)
+        for match in _FILE_TOKEN_RE.finditer(command)
+        # Skip pure version-ish tokens such as ``2.0`` (no letter anywhere).
+        if any(ch.isalpha() for ch in match.group(0))
+    ]
+    return tuple(dict.fromkeys(invoked))
+
+
+def _functional_command_supports_test_claim(
+    *,
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a ``tests_passed`` claim is itself a transcript-backed
+    functional verification command.
+
+    Some leafs (Codex in particular) verify behavior by executing the built
+    artifact directly — ``python3 tool.py add x && python3 tool.py list`` —
+    and cite that exact command under ``tests_passed`` instead of a test-runner
+    invocation. That is honest, transcript-provable work, not fabrication, so
+    it must not be rejected as FABRICATION_SUSPECTED. This tier never trusts
+    leaf narration: the claim must match a recorded Bash invocation, the
+    correlated completion must carry a machine-readable success signal, and the
+    command must directly execute a workspace file whose mutation this run
+    already proved (a stale artifact cannot be claimed). Test-runner-shaped
+    claims never enter this tier — they keep the stricter test-output proof.
+    The caller additionally restricts this tier to ACs where a hidden verify
+    gate remains the behavioral authority.
+    """
+    if _looks_like_test_command(value):
+        return False
+    invoked_files = _functional_command_invoked_files(value)
+    if not invoked_files:
+        return False
+    if not any(
+        _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
+        for invoked in invoked_files
+    ):
+        # The invoked artifact must be this run's own work — unless the
+        # harness witnessed a pure-verification run (zero mutation, zero
+        # deletion, complete snapshots), where the cited artifact must still
+        # be a real workspace file: existence now proves existence throughout
+        # the leaf's window, so a ghost path in a comment stays rejected.
+        if not observations_confirm_unmutated_workspace(messages):
+            return False
+        if not any(
+            _invoked_file_is_existing_workspace_file(invoked, task_cwd=task_cwd)
+            for invoked in invoked_files
+        ):
+            return False
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        if _runtime_message_is_tool_completion(message):
+            continue
+        if _runtime_message_has_conflicting_tool_call_ids(message):
+            continue
+        if not _runtime_message_supports_command_claim(value, message):
+            continue
+        if _runtime_message_has_success_evidence(
+            message, messages=messages, index=index
+        ) and _functional_command_has_authoritative_zero_exit(messages, index=index):
+            return True
+    return False
+
+
+def _invoked_file_is_existing_workspace_file(invoked: str, *, task_cwd: str | None) -> bool:
+    """Return True when a cited path is an existing regular file in the workspace."""
+    if task_cwd is None:
+        return False
+    relative = _workspace_relative_file_claim(invoked, task_cwd=task_cwd)
+    if relative is None:
+        return False
+    try:
+        return (Path(task_cwd).resolve() / relative).is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _message_carries_zero_exit(message: AgentMessage) -> bool:
+    """Return True when a message carries an authoritative integer zero exit."""
+    containers: list[dict[str, object]] = [message.data]
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        containers.append(tool_result)
+    for container in containers:
+        exit_code = container.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0:
+            return True
+    return False
+
+
+def _functional_command_has_authoritative_zero_exit(
+    messages: tuple[AgentMessage, ...],
+    *,
+    index: int,
+) -> bool:
+    """Require a real exit verdict for the functional-verification tier.
+
+    ``_runtime_message_has_success_evidence`` accepts lifecycle-only success
+    (``status="completed"``, ``*.completed`` events), but Codex marks
+    command_execution items completed even on non-zero exits. A checking
+    command that vouches for behavior needs the authoritative zero exit
+    itself — on the call, its correlated completion, or (for id-less legacy
+    streams) the immediately following completion.
+    """
+    call = messages[index]
+    if _message_carries_zero_exit(call):
+        return True
+    call_id = _runtime_message_tool_call_id(call)
+    if call_id is not None:
+        return any(
+            _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+            and _message_carries_zero_exit(candidate)
+            for candidate in messages
+        )
+    for candidate in messages[index + 1 :]:
+        if candidate.tool_name is not None and not _runtime_message_is_tool_completion(candidate):
+            break
+        if _runtime_message_is_tool_completion(candidate):
+            return _message_carries_zero_exit(candidate)
+    return False
+
+
+def _harness_reexecution_supports_test_claim(
+    *,
+    value: str,
+    messages: tuple[AgentMessage, ...],
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a harness-re-executed test command proves the claim.
+
+    The command, its exit status, and its output all come from the harness's
+    own subprocess (``evidence/test_reexecution.py``), so they are held to the
+    same tests: a zero exit, runtime output that proves tests ran and passed,
+    and a command that targets the claimed test.
+    """
+    # A node-id or file claim (rather than the command itself) must name a
+    # test file this run actually produced or touched. Re-running a suite the
+    # harness found in the workspace proves those tests pass, not that the
+    # leaf wrote them, so a stale pre-existing test still cannot be claimed.
+    claimed_file = None if _looks_like_test_command(value) else _test_claim_file_part(value)
+    if claimed_file is not None and not _runtime_messages_support_file_claim(
+        claimed_file, messages, task_cwd=task_cwd
+    ):
+        return False
+    for message in messages:
+        observation = observation_from_message(message)
+        if observation is None:
+            continue
+        for run in observation.command_runs:
+            if not run.succeeded or not _looks_like_test_command(run.command):
+                continue
+            if not _text_proves_test_execution_success(run.output_tail):
+                continue
+            if _test_command_targets_claim(
+                command=run.command,
+                claim=value,
+                chunk_test_proof_text=run.output_tail,
+                messages=messages,
+                task_cwd=task_cwd,
+            ):
+                return True
     return False
 
 

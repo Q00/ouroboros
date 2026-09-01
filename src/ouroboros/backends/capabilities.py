@@ -500,6 +500,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_name="claude",
         cli_config_key="cli_path",
     ),
+    # Host-driven execution runtime: no process is spawned — ``execute_task``
+    # publishes a dispatch record and the calling MCP host model spawns its own
+    # subagent, then submits the result through
+    # ``ouroboros_submit_fanout_results`` (see orchestrator.host_dispatch).
+    # Host-agnostic: any host honoring the ``host_action=spawn_subagents``
+    # contract qualifies (Claude Code, dsh, Codex Desktop). ``cli_name`` is
+    # None on purpose — there is nothing to spawn — and the backend must stay
+    # OUT of ``_OPENCODE_BACKENDS``/``_CODEX_BACKENDS`` (orchestrator.adapter).
+    BackendCapability(
+        name="host",
+        aliases=("host_dispatch",),
+        supports_runtime=True,
+        # Advisory fan-out and execution dispatch ride the same host primitive,
+        # so one env var (OUROBOROS_AGENT_RUNTIME=host) turns on both. No
+        # concrete mechanism is named: the backend is host-agnostic by design.
+        supports_host_driven_subagents=True,
+    ),
     BackendCapability(
         name="copilot",
         aliases=("copilot_cli",),
@@ -728,6 +745,16 @@ def render_mcp_server_instructions() -> str:
         "Ouroboros drives interview/seed/run/evaluate/evolve workflows through "
         "MCP tools named `...ouroboros_*`.\n"
         "\n"
+        "WHEN TO USE OUROBOROS: use BEFORE implementation when a request is "
+        "ambiguous, lacks acceptance criteria, is multi-step, or is a "
+        "migration. Unclear request → "
+        "`ouroboros_interview`; substantial end-to-end task → "
+        "`ouroboros_start_auto`; existing Seed → "
+        "`ouroboros_start_execute_seed`; stuck or repeated failures → "
+        "`ouroboros_lateral_think`. Do not wait for the literal word "
+        '"ooo". '
+        "Do not route simple questions or small unambiguous edits.\n"
+        "\n"
         "TOOL DISCOVERY: these tools may be DEFERRED — the tool exists but its "
         "schema is not loaded, so it is not in your immediate tool list. Do NOT "
         "conclude a tool is unavailable from its absence. Load it through your "
@@ -738,15 +765,19 @@ def render_mcp_server_instructions() -> str:
         "exposed, call it directly — discovery is a no-op then, and an empty "
         "discovery result is expected, not a failure. Never surface this "
         "tool-discovery plumbing to the user.\n"
+        "\n"
         "SUBAGENT FAN-OUT: when a tool result carries a payload array, obey its "
         "dispatch contract. `host_action=spawn_subagents` means the host declared "
-        "parallel support: spawn ONE child per payload, await all, correlate by "
+        "parallel support: spawn ONE child per payload using your runtime's native "
+        "primitive, give each the payload `prompt`, await all, correlate by "
         "`result_correlation_key`, then synthesize. "
         "`host_action=dispatch_subagents_if_supported` means host capability was "
         "not declared: use the host's native parallel primitive when available, "
         "otherwise process the same payloads sequentially. A passive plugin bridge "
         "consumes `_subagents` itself. Preserve user-facing content while assistive "
-        "work runs."
+        "work runs. During background execution, keep pumping `ouroboros_job_wait` "
+        "with bounded timeouts: spawn each `pending_host_dispatches` entry the same "
+        "way and submit each result via `ouroboros_submit_fanout_results`."
     )
 
 

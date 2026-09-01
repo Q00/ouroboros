@@ -47,7 +47,13 @@
 </p>
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero bash
+```
+
+```powershell
+# Windows (PowerShell) — no Python needed; installs Git and uv for you
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
 <p align="center"><sub>One command installs it. Then run <code>ooo setup</code> once inside your coding agent — details in <a href="#quick-start">Quick Start</a>.</sub></p>
@@ -140,8 +146,19 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 **Install** — one command, everything auto-detected:
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme bash
 ```
+
+```powershell
+# Windows (PowerShell 5.1+ or pwsh 7+) — nothing to install first
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+The Windows installer installs Git and uv through winget when they are missing,
+lets uv download its own Python, then installs `ouroboros-ai` and wires the
+host it finds. Native Windows is experimental and Codex CLI needs WSL 2; see
+[platform support](./docs/platform-support.md).
 
 **First command** — open your AI coding agent and run these in order:
 
@@ -249,26 +266,26 @@ Then run `ooo setup` inside a Claude Code session.
 
 **pip / uv / pipx**:
 ```bash
-pip install ouroboros-ai                # base
-pip install 'ouroboros-ai[claude]'        # + default Claude Agent SDK profile (MCP 1.x)
-pip install 'ouroboros-ai[claude-cli]'    # + dependency-free Claude CLI worker profile
-pip install 'ouroboros-ai[claude-sdk]'    # + explicit alias for the Claude SDK profile
-pip install 'ouroboros-ai[litellm]'       # + LiteLLM multi-provider; Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'           # + MCP server/client support
-pip install 'ouroboros-ai[tui]'           # + Textual terminal UI
-pip install 'ouroboros-ai[all]'           # MCP 1.x app bundle; excludes the MCP 2 server
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli  # recommended MCP v2 default
+pip install 'ouroboros-ai[claude]'      # Claude Agent SDK profile (MCP 1.x, isolated)
+pip install 'ouroboros-ai[claude-cli]'  # dependency-free Claude CLI worker
+pip install 'ouroboros-ai[claude-sdk]'  # explicit alias for the Claude SDK profile
+pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'         # MCP v2 server/client without the GUI
+pip install 'ouroboros-ai[tui]'         # settings GUI only
+pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes MCP 2 by design
 ouroboros setup                         # configure runtime
 ```
 
 Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--extra all`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
-`[claude]` preserves the in-process Agent SDK and its MCP 1.x dependency graph;
-`[claude-sdk]` is its explicit alias. The MCP 2 server runs from a separate
-`[mcp]` environment and selects the `[claude-cli]` subprocess worker when
-Claude is the host. Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or
-`[all,mcp]` in one interpreter. See the [package compatibility and migration matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles).
+The recommended standalone installation is `ouroboros-ai[mcp,tui]` followed by
+an explicit MCP v2-compatible runtime selection. The example uses
+`--runtime claude-cli`; substitute another compatible runtime such as `codex`,
+`opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, or `gjc`.
+Use `[claude]` and `[claude-sdk]` only in isolated MCP 1.x environments.
 
-`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx --isolated --python '>=3.12'` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
+`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx --isolated --python '>=3.12'` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 

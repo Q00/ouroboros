@@ -280,19 +280,18 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     claimed_file = tmp_path / "claimed.py"
     other_file = tmp_path / "other.py"
     claimed_file.write_text("original\n", encoding="utf-8")
-    command = shlex.join(
-        [
-            str(Path(sys.executable).resolve()),
-            "-I",
-            "-S",
-            "-c",
-            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
-            "touch",
-            "claimed.py",
-        ]
-    )
+    argv = [
+        str(Path(sys.executable).resolve()),
+        "-I",
+        "-S",
+        "-c",
+        "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+        "touch",
+        "claimed.py",
+    ]
+    command = shlex.join(argv)
 
-    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    completed = subprocess.run(argv, cwd=tmp_path, shell=False, check=False)
 
     assert completed.returncode == 0
     assert claimed_file.read_text(encoding="utf-8") == "original\n"
@@ -317,6 +316,7 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX /bin/bash")
 def test_files_touched_rejects_wrapped_reconstructed_pathlib_with_inert_touch_argv(
     tmp_path,
 ) -> None:
@@ -10505,15 +10505,24 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
-    async def test_fat_harness_verifier_rejects_exit_code_only_test_success(self, tmp_path) -> None:
-        """A zero exit without execution output cannot prove that tests ran."""
+    @pytest.mark.parametrize("tests_pass", [True, False])
+    async def test_fat_harness_exit_code_only_test_output_is_settled_by_harness_reexecution(
+        self, tmp_path, tests_pass: bool
+    ) -> None:
+        """A zero exit without execution output cannot prove that tests ran.
+
+        The transcript alone is still insufficient; the harness re-runs the
+        claimed test command in the workspace and the verdict follows what
+        that run actually produced.
+        """
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")
+        expected = "'hello'" if tests_pass else "'goodbye'"
         test_file.write_text(
             "from hello import hello\n\n"
             "def test_hello_returns_hello():\n"
-            "    assert hello() == 'hello'\n",
+            f"    assert hello() == {expected}\n",
             encoding="utf-8",
         )
 
@@ -10567,23 +10576,26 @@ class TestParallelACExecutor:
             ac_index=0,
             ac_content='Create hello.py with hello() returning "hello".',
             session_id="orch_123",
-            tools=["Read"],
-            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            tools=["Read", "Bash"],
+            tool_catalog=(
+                MCPToolDefinition(name="Read", description="Read a file."),
+                MCPToolDefinition(name="Bash", description="Run a shell command."),
+            ),
             system_prompt="system",
             seed_goal="Ship the feature",
             depth=0,
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is False
+        assert result.success is tests_pass
         assert result.atomic_verifier_verdict is not None
-        assert result.atomic_verifier_verdict.passed is False
+        assert result.atomic_verifier_verdict.passed is tests_pass
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["verifier_passed"] is False
+        assert evidence_event.data["verifier_passed"] is tests_pass
 
     @pytest.mark.parametrize(
         "command",
@@ -16857,6 +16869,7 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
             targeted_resume=True,
             structured_output=True,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
 
         def __init__(self) -> None:
@@ -16962,6 +16975,7 @@ class TestParamDegradationNotice:
             targeted_resume=True,
             structured_output=True,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
         executor = _make_param_executor(caps)
 

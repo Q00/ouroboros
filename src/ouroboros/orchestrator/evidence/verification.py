@@ -12,7 +12,13 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_support_messages_for_field,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.harness_observation import (
+    is_harness_observation_message,
+    observation_from_message,
+    observations_confirm_unmutated_workspace,
+)
 from ouroboros.orchestrator.evidence.test_detection import (
+    _functional_command_supports_test_claim,
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
 )
@@ -20,6 +26,18 @@ from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.verifier import VerifierVerdict
+
+
+def _harness_observation_supports_command_claim(
+    value: str,
+    messages: tuple[AgentMessage, ...],
+) -> bool:
+    """Return True when the harness itself ran the claimed command successfully."""
+    return any(
+        observation.supports_command_claim(value)
+        for observation in (observation_from_message(message) for message in messages)
+        if observation is not None
+    )
 
 
 def _verify_atomic_evidence_against_runtime_messages(
@@ -47,8 +65,17 @@ def _verify_atomic_evidence_against_runtime_messages(
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
     )
-    support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
-    if not support_messages:
+    # Exclude the leaf's terminal self-report by identity, not by position: a
+    # harness observation may legitimately sit after the final result message.
+    final_indices = [index for index, message in enumerate(messages) if message.is_final]
+    terminal_index = final_indices[-1] if final_indices else None
+    support_messages = tuple(
+        message for index, message in enumerate(messages) if index != terminal_index
+    )
+    # A harness observation is support for claims, not proof that the runtime
+    # transcript arrived: an otherwise empty stream is still an infrastructure
+    # signal.
+    if not any(not is_harness_observation_message(message) for message in support_messages):
         if not effective_schema.required:
             return VerifierVerdict(passed=True)
         # A completely empty transcript is an infrastructure signal, not a
@@ -84,12 +111,26 @@ def _verify_atomic_evidence_against_runtime_messages(
         values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
         if not values:
             if field_name in required_fields:
+                # A pure-verification run may honestly have nothing to touch:
+                # when the AC's hidden verify gate stays the behavioral
+                # authority and the harness's own snapshot diff witnessed zero
+                # workspace mutation, an empty files_touched is corroborated
+                # truth, not withheld evidence.
+                if (
+                    field_name == "files_touched"
+                    and has_success_contract
+                    and verify_gate_active
+                    and observations_confirm_unmutated_workspace(support_messages)
+                ):
+                    continue
                 unsupported.append(f"{field_name}: no concrete claim values")
             continue
         field_messages = _runtime_support_messages_for_field(field_name, support_messages)
         for value in values:
             if field_name == "commands_run":
                 if _runtime_messages_support_command_claim(value, field_messages):
+                    continue
+                if _harness_observation_supports_command_claim(value, support_messages):
                     continue
                 if _runtime_messages_have_masked_test_command_form(
                     value,
@@ -115,6 +156,21 @@ def _verify_atomic_evidence_against_runtime_messages(
                     backed_commands=backed_commands,
                     messages=support_messages,
                     task_cwd=workspace_cwd,
+                ):
+                    continue
+                # Functional-verification tier: only when a hidden verify gate
+                # stays the behavioral authority for this AC, a non-test claim
+                # that IS a transcript-backed successful execution of an
+                # artifact this run produced is honest evidence, not
+                # fabrication.
+                if (
+                    has_success_contract
+                    and verify_gate_active
+                    and _functional_command_supports_test_claim(
+                        value=value,
+                        messages=support_messages,
+                        task_cwd=workspace_cwd,
+                    )
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(

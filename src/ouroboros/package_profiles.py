@@ -25,6 +25,12 @@ UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE = (
     "[mcp]; run the MCP 2 server in a separate environment/process."
 )
 
+GJC_MCP_V2_INSTALL_MESSAGE = (
+    "GJC requires the Ouroboros MCP v2 profile. Reinstall this environment with "
+    "'ouroboros-ai[mcp]' before running setup; keep it separate from the MCP 1.x "
+    "[claude] and [claude-sdk] profiles."
+)
+
 
 SDK_RUNTIME_IN_MCP_SERVER_MESSAGE = (
     "The MCP server cannot host the 'claude' SDK runtime in this process. "
@@ -58,6 +64,7 @@ class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
     ZCODE = "zcode"
+    HOST = "host"
 
 
 def _installed_major(distribution: str) -> int | None:
@@ -75,6 +82,19 @@ def _installed_major(distribution: str) -> int | None:
 def has_unsupported_claude_sdk_mcp_mix() -> bool:
     """Detect an environment forced past the MCP 2 / Claude SDK resolver guard."""
     return _installed_major("mcp") == 2 and _installed_major("claude-agent-sdk") is not None
+
+
+def has_pinned_mcp_v2_profile() -> bool:
+    """Return whether this interpreter has Ouroboros's exact MCP v2 client pin."""
+    try:
+        return importlib_metadata.version("mcp") == "2.0.0"
+    except importlib_metadata.PackageNotFoundError:
+        return False
+
+
+def gjc_mcp_v2_profile_error() -> str | None:
+    """Return the actionable GJC profile error, or ``None`` when ready."""
+    return None if has_pinned_mcp_v2_profile() else GJC_MCP_V2_INSTALL_MESSAGE
 
 
 def public_runtime_backend(runtime: str | None) -> str | None:
@@ -103,7 +123,10 @@ __all__ = [
     "MCP_PROFILE",
     "SDK_RUNTIME_IN_MCP_SERVER_MESSAGE",
     "PublicAgentRuntimeBackend",
+    "GJC_MCP_V2_INSTALL_MESSAGE",
     "UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE",
     "has_unsupported_claude_sdk_mcp_mix",
+    "gjc_mcp_v2_profile_error",
+    "has_pinned_mcp_v2_profile",
     "public_runtime_backend",
 ]

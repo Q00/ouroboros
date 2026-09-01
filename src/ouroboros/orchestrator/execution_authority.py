@@ -2058,6 +2058,7 @@ _RUNTIME_EFFECT_CAPABILITY_KEYS = frozenset(
         "structured_output",
         "system_prompt_support",
         "tool_restriction_support",
+        "empty_tool_restriction_support",
         "permission_mode_support",
         "reasoning_effort_support",
         "enforceable_reasoning_efforts",
@@ -2090,12 +2091,9 @@ _SESSION_SIGNAL_CAPABILITY_KEYS = frozenset(
 
 def valid_runtime_effect_capabilities_contract(value: object) -> bool:
     """Validate every declared runtime capability that can change a live effect."""
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS
-        or value.get("version") != 1
-        or type(value.get("version")) is not int
-    ):
+    if not isinstance(value, Mapping) or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS:
+        return False
+    if value.get("version") != 2 or type(value.get("version")) is not int:
         return False
     if any(
         type(value.get(key)) is not bool
@@ -2107,6 +2105,7 @@ def valid_runtime_effect_capabilities_contract(value: object) -> bool:
         for key in (
             "system_prompt_support",
             "tool_restriction_support",
+            "empty_tool_restriction_support",
             "permission_mode_support",
             "reasoning_effort_support",
             "model_override_support",
@@ -2145,12 +2144,13 @@ def runtime_effect_capabilities_contract(adapter: object) -> dict[str, object]:
     ):
         raise ValueError("runtime reasoning-effort vocabulary must be a closed immutable set")
     contract: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "skill_dispatch": capabilities.skill_dispatch,
         "targeted_resume": capabilities.targeted_resume,
         "structured_output": capabilities.structured_output,
         "system_prompt_support": capabilities.system_prompt_support.value,
         "tool_restriction_support": capabilities.tool_restriction_support.value,
+        "empty_tool_restriction_support": capabilities.empty_tool_restriction_support.value,
         "permission_mode_support": capabilities.permission_mode_support.value,
         "reasoning_effort_support": capabilities.reasoning_effort_support.value,
         "enforceable_reasoning_efforts": sorted(raw_levels) if raw_levels is not None else None,
