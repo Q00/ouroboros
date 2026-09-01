@@ -436,27 +436,29 @@ asyncio.run(main())
         env={str(k): str(v) for k, v in (configured.get("env") or {}).items()},
         redact_values=_configured_sensitive_values(configured),
     )
-    details: dict[str, Any] = redact_secrets(
+    smoke_details: dict[str, Any] = redact_secrets(
         {"launcher": launcher, "command_result": _jsonable(result.__dict__)}
     )
     if result.timed_out:
-        return Check("mcp_stdio_smoke", "fail", "MCP stdio probe timed out", details), result
+        return Check("mcp_stdio_smoke", "fail", "MCP stdio probe timed out", smoke_details), result
     if result.returncode != 0:
-        return Check("mcp_stdio_smoke", "fail", "MCP stdio probe failed", details), result
+        return Check("mcp_stdio_smoke", "fail", "MCP stdio probe failed", smoke_details), result
     try:
         payload = json.loads(Path(result.stdout_path).read_text(encoding="utf-8").splitlines()[-1])
     except Exception as exc:
-        details["parse_error"] = str(exc)
+        smoke_details["parse_error"] = str(exc)
         return Check(
-            "mcp_stdio_smoke", "fail", "MCP stdio probe returned unparsable output", details
+            "mcp_stdio_smoke", "fail", "MCP stdio probe returned unparsable output", smoke_details
         ), result
     tools = set(payload.get("tools", []))
     missing = sorted(REQUIRED_MCP_TOOLS - tools)
-    details["tool_count"] = payload.get("tool_count")
-    details["missing_required_tools"] = missing
+    smoke_details["tool_count"] = payload.get("tool_count")
+    smoke_details["missing_required_tools"] = missing
     if missing:
-        return Check("mcp_stdio_smoke", "fail", "MCP missing required tools", details), result
-    return Check("mcp_stdio_smoke", "pass", "MCP initialize/tools-list succeeded", details), result
+        return Check("mcp_stdio_smoke", "fail", "MCP missing required tools", smoke_details), result
+    return Check(
+        "mcp_stdio_smoke", "pass", "MCP initialize/tools-list succeeded", smoke_details
+    ), result
 
 
 def write_smoke_seed(project: Path, *, verify_command: str) -> Path:
