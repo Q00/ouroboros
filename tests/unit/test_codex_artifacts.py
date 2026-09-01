@@ -514,6 +514,61 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
 
         assert not target_path.exists()
 
+    def test_refresh_failed_directory_publication_restores_previous_generation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_skills_dir = tmp_path / "packaged-skills"
+        skill_dir = source_skills_dir / "run"
+        skill_dir.mkdir(parents=True)
+        skill_dir.joinpath("SKILL.md").write_text("fresh skill", encoding="utf-8")
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_stat = os.stat
+        stat_failures_remaining = 1
+
+        def _fail_first_target_stat(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            *args: object,
+            **kwargs: object,
+        ) -> os.stat_result:
+            nonlocal stat_failures_remaining
+            if (
+                Path(os.fsdecode(path)) == target_path
+                and kwargs.get("follow_symlinks") is False
+                and stat_failures_remaining
+            ):
+                stat_failures_remaining -= 1
+                raise OSError(errno.ESTALE, os.strerror(errno.ESTALE))
+            return real_stat(path, *args, **kwargs)
+
+        real_rename = os.rename
+
+        def _refuse_staged_directory_publication(
+            source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        ) -> None:
+            if (
+                Path(os.fsdecode(source)).name.endswith(".tmp")
+                and Path(os.fsdecode(destination)) == target_path
+            ):
+                raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+            real_rename(source, destination)
+
+        monkeypatch.setattr(codex_artifacts.os, "stat", _fail_first_target_stat)
+        monkeypatch.setattr(codex_artifacts.os, "rename", _refuse_staged_directory_publication)
+
+        with pytest.raises(OSError, match=os.strerror(errno.EXDEV)):
+            install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "installed skill"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+
     def test_failed_staging_cleanup_does_not_report_a_failed_commit(
         self,
         tmp_path: Path,

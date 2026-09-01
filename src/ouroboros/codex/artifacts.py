@@ -857,6 +857,14 @@ def _restore_displaced_concurrent_generation(target_path: Path, displaced_path: 
         raise OSError(msg) from restore_conflict
 
 
+def _remove_empty_directory(path: Path) -> bool:
+    try:
+        os.rmdir(path)
+    except OSError:
+        return False
+    return True
+
+
 def _acquire_rollback_generation(
     target_path: Path,
     *,
@@ -902,6 +910,7 @@ def _commit_staged_artifact(
     backup_path: Path | None = None
     prepared_generation = False
     staged_generation_active = False
+    staged_path_was_directory = staging_path.is_dir() and not staging_path.is_symlink()
     try:
         if _installed_artifact_exists(target_path):
             backup_path = _acquire_rollback_generation(
@@ -960,8 +969,12 @@ def _commit_staged_artifact(
                 except BaseException:
                     pass
             elif _installed_artifact_exists(target_path):
-                msg = f"Managed Codex artifact changed during rollback: {target_path}"
-                raise OSError(msg) from commit_error
+                if staged_path_was_directory and _remove_empty_directory(target_path):
+                    _rename_noreplace(backup_path, target_path)
+                    _record_current_generation(target_path, on_generation)
+                else:
+                    msg = f"Managed Codex artifact changed during rollback: {target_path}"
+                    raise OSError(msg) from commit_error
             else:
                 _rename_noreplace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
