@@ -321,7 +321,12 @@ def _strip_env_prefix(parts: list[str]) -> list[str]:
             if token.startswith("--unset=") or (token.startswith("-u") and len(token) > 2):
                 index += 1
                 continue
-            if token in {"--default-signal", "--block-signal", "--ignore-signal", "--list-signal-handling"}:
+            if token in {
+                "--default-signal",
+                "--block-signal",
+                "--ignore-signal",
+                "--list-signal-handling",
+            }:
                 index += 1
                 continue
             if token.startswith(("--default-signal=", "--block-signal=", "--ignore-signal=")):

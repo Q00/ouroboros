@@ -1,45 +1,47 @@
 # Telemetry
 
-Ouroboros collects **anonymous usage data** to understand how the tool is used
-(install funnel, interview → seed → run → evolve conversion, success rates per
-runtime backend) and to decide what to improve next.
+Ouroboros collects a deliberately small anonymous dataset for install adoption,
+daily activity, runtime adoption, and actionable failures.
 
 **We never collect:** code, prompts, seed content, file contents, file paths,
-tool arguments, environment variables, or anything that could identify you or
-your project.
+tool arguments, environment variables, account data, or project identifiers.
 
 ## How the data is used
 
-Both uses are declared here up front — there are no undisclosed uses:
+1. **Product improvement** — failed or blocked lifecycle commands and terminal
+   workflow failures decide what gets fixed next.
+2. **Aggregate adoption** — installs, active users, versions, operating systems,
+   countries, and runtime backends may be reported only as aggregates. Cells
+   covering fewer than 10 users are withheld.
 
-1. **Product improvement** — funnel drop-offs and per-backend failure rates
-   decide what gets fixed next.
-2. **Public aggregate stats** — adoption numbers (e.g. weekly active users)
-   may be published and used to promote the project. Only aggregates are ever
-   published, never per-user data, and any aggregate cell covering fewer than
-   10 users is withheld.
+**Counting rules:**
 
-**Counting rule (fixed):** one "active user" = one distinct anonymous ID with
-at least one `workflow_outcome` where `command=evaluate`, `verified=true`, and
-`ci!=true` that week. Submission receipts, installs, reinstalls, retries, and
-CI runs are not users. Published numbers follow this rule, verbatim. An
-`ouroboros_evaluate` completion that OpenCode's plugin mode delegates out
-(`delegated_to_plugin`) finishes outside the Ouroboros process and cannot be
-observed by it, so it is never counted toward a verified outcome or the
-active-user rule — that's an undercount, never an overcount.
+- install count = `install_completed` event count;
+- command DAU = distinct anonymous IDs with `command_run` and `ci!=true` that day;
+- service DAU = distinct anonymous IDs with `service_active` and `ci!=true` that day;
+- verified weekly active = distinct anonymous IDs with `workflow_outcome`,
+  `command=evaluate`, `verified=true`, and `ci!=true` that week. Evaluations
+  delegated to an external plugin bridge are excluded because no terminal evidence is available.
 
-**Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID
-— pseudonymous, stable across sessions so retention can be measured, derived
-from nothing about you or your machine. Delete the file to reset it; opt out
-to stop it being used at all.
+`command_run` and `service_active` carry deterministic daily `$insert_id` values.
+PostHog therefore stores at most one row per anonymous user/day/dimension tuple
+for activity metrics, even when a host repeats a command or starts multiple MCP processes.
 
-**Change policy:** this document is append-only — collection scope or use
-changes are recorded in the changelog below, ship in a new minor/major version
-with a fresh first-run notice, and any *new* data category defaults to off.
+**Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID,
+stable across sessions for lifecycle analysis and derived from nothing about the
+machine or user. Delete the file to reset it; opt out to stop collection.
+
+**Change policy:** scope expansions are recorded below, ship in a new
+minor/major version with a fresh notice, and default off. Scope reductions do
+not require users to acknowledge a new notice.
 
 ### Changelog
 
-- v1 (2026-08): initial contract — events listed below, uses (1) and (2).
+- v1 (2026-08): initial contract.
+- v2 (2026-08): removed install starts, polling/helper successes, request
+  durations, tool names, provider details, Python version, frontdoor/onboarding
+  attribution, recovery actions, and subagent dispatch data; added daily
+  deduplication for retained command and service activity.
 
 ## How to opt out
 
@@ -76,111 +78,66 @@ before its first notice or event.
 ## What is sent
 
 Identity is a random UUID (`~/.ouroboros/telemetry.json`) generated on first
-use — it is not derived from your machine, account, or network.
-
-Each row below is the *exact* property set that event can carry — not "these
-plus whatever base/context happens to be set". `src/ouroboros/telemetry.py`
-enforces this per event (and, for `command_run`, per `source`) at
-serialization time; a property not listed for a row is dropped before the
-event is queued, even if some other event's row does carry it. The table and
-the code's allowlist constants are one contract in two places — edited
-together, always.
+use. Each row below is the exact property set accepted by the serializer.
 
 | Event | When | Properties (exact set) |
 |---|---|---|
-| `install_started` | `install.sh` begins | source, os, arch, version, is_local, pre, ref |
-| `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version, ref |
-| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, first_command_surface, app_version, os, python_version, ci |
-| `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
-| `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, failure_reason_code (failed/cancelled/interrupted outcomes only), recovery_action (failed/cancelled/interrupted outcomes only), `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
-| `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, first_command_surface, app_version, os, ci — no python_version, no backend/provider context |
-| `subagent_dispatch` | A structured fan-out contract is emitted (`phase=emitted`) or correlated child results return through `ouroboros_submit_fanout_results` (`phase=submitted`) | phase, fanout_kind, payload_count, invocation_surface, dispatch_authority, host_family, host_identity_status, host_capability, capability_source, delivery_mode, execution_preference, fallback_strategy, configured_worker_backend, host_worker_mismatch, decision_reason, contract_version, fanout_reentry_available, submission_status, expected_count, received_count, undispatched_count, frontdoor, first_command_surface, app_version, os, python_version, ci |
+| `install_completed` | `install.sh` finishes successfully (the Windows `install.ps1` emits neither installer event) | os, runtime, version, ref |
+| `install_started` | `install.sh` begins — deliberately per-invocation, NOT daily-deduplicated: each row pairs with (or lacks) an `install_completed` to measure install drop-off and retry behavior, and volume is bounded by install attempts (~hundreds/month) | os, version, ref |
+| `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
+| `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
+| `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
+| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
 Notes:
 
-- `ref` on the install events is a short opaque channel token (`hellogithub`,
-  `readme`, `guide-zh`, …) that a docs page or listing prepends to the install
-  command as `OUROBOROS_INSTALL_REF=<channel>`. It says which of OUR surfaces
-  the command was copied from; it is chosen by us, never derived from the
-  machine, defaults to `direct`, and is discarded unless it matches
-  `[A-Za-z0-9._-]{1,32}`.
-- `first_command_surface` is a fixed enum (`readme_quickstart`,
-  `getting_started`, `setup_complete`, or `unknown`) carried only on MCP
-  session/command events. README and Getting Started installers persist the
-  enum locally before setup; the hint remains preferred after setup so the
-  first-command cohort still represents the page that brought the user in.
-  A missing hint with an existing `~/.ouroboros/config.yaml` is attributed to
-  `setup_complete`. It contains no URL, prompt, path, or user identifier.
+- `install_started` is excluded from the daily-deduplication contract on
+  purpose: retries are the signal (a started-but-never-completed sequence is
+  install drop-off), and installer volume is self-bounding.
+- `mcp_serve_started` and `subagent_dispatch` are daily-deduplicated adoption
+  signals (deterministic `$insert_id`, one row per user/day/dimension) — the
+  per-session volume and rich per-dispatch properties removed by #2278 stay
+  removed. `mcp_serve_started` is the top of the activation funnel ("MCP
+  attached"), distinct from `service_active` ("made a tool request").
 
-- `source` separates the two entry surfaces cleanly: `cli` means the user typed
-  the command in a terminal; `mcp` means it arrived from inside an AI agent
-  session (`ooo …` keyword in Claude Code / Codex / any MCP host). Internal
-  machinery (in-process servers, detached job workers, `ouroboros mcp serve`
-  boots, `job`/`dispatch` plumbing) is either not captured or captured as its
-  own event, so the cli-vs-agent ratio is not inflated by automation.
-- High-frequency polling tools (`ouroboros_job_status`, `ouroboros_session_status`,
-  HUD/projection queries, …) are sampled at 1/50 via an independent random
-  draw on every call — not a per-process counter — so the probability stays
-  1/50 regardless of how long a given process lives; sampled events carry a
-  `sample_rate` property so counts can be re-weighted. Everything else is
-  captured 1:1.
-- `tool`/`command` on an MCP `command_run` event only ever carry a name from
-  the audited, static list of built-in Ouroboros tools: an unrecognized
-  lookup appears as `ouroboros_unknown_tool`, and a registered third-party
-  or custom tool (extensions can register arbitrary names) appears as
-  `ouroboros_extension_tool` — the identifying name itself is never sent.
-  `command` on a job-derived `workflow_outcome` is the same contract for
-  background-job types: only the five funnel stages and Ouroboros' own
-  internal diagnostic job types are ever forwarded; anything else (a
-  third-party job type registered against the same job manager) appears as
-  the fixed `extension_job` value. `command` on a `command_run` (source=cli)
-  event is the same contract again for direct `ooo <subcommand>` runs:
-  built-in subcommands are forwarded verbatim, and a dynamically installed
-  plugin command (`ooo <plugin-name> ...`) appears as the fixed
-  `extension_command` value.
-- `error_type` is only the Python exception class name (e.g. `TimeoutError`),
-  never a message or traceback.
-- `failure_reason_code` and `recovery_action` are fixed enums emitted only for
-  non-success terminal outcomes. The classifier reads terminal status and
-  structured machine metadata only; it never reads exception messages, result
-  text, prompts, paths, or identifiers. Current reason codes are `config`,
-  `auth`, `timeout`, `model`, `tool`, `validation`, `cancelled`, and `unknown`.
-  Current recovery actions are `retry`, `setup`, `login`, `update`,
-  `inspect_logs`, and `none`. An unclassified failure is always `unknown` with
-  `inspect_logs`, so the failure denominator remains measurable.
-- `subagent_dispatch` uses closed enums only. Raw MCP `clientInfo.name`, client
-  versions, custom backend names, `fanout_id`, session ids, correlation values,
-  prompts, problem context, child outputs, repository paths, and file paths are
-  never sent. Recognized client identities are folded to `claude_code`, `codex`,
-  or `opencode`; every other non-empty identity becomes `other_known`, and an
-  absent identity becomes `unknown`. Custom worker backends become `other`.
-  Counts are bounded to 0–64. The submitted event reports only aggregate lane
-  counts and never infers whether execution was parallel from elapsed time.
-- Start-tool `command_run` events are submission receipts. They intentionally
-  have `accepted`, not `ok`; queue acceptance is never a completed or verified
-  run. `workflow_outcome` is the durable/direct terminal boundary described
-  below. Only a completed formal evaluation with explicit `final_approved=true`
-  sets `verified=true`.
-- `workflow_outcome` has two producers, and exactly one fires per evaluation:
-  the durable job-terminal boundary (`JobTelemetryBoundary`, stamping
-  `$insert_id` so a retried/redelivered terminal event dedupes) covers
-  `ouroboros_start_evaluate`'s background job; the direct-evaluation boundary
-  (`record_direct_evaluation_outcome`, no `$insert_id` — each invocation is
-  its own outcome, there is no durable job row to replay against) covers
-  `ouroboros_evaluate` and `ouroboros_checklist_verify`, both of which never
-  create a job. When a direct evaluation runs *inside* a background job (the
-  `ouroboros_start_evaluate` path reuses the same handler internally), the
-  direct boundary is explicitly suppressed for that call so the job-derived
-  event is the only one emitted — one evaluation, one `workflow_outcome`.
-- Events are sent to PostHog via a fire-and-forget background thread using a
-  **public, write-only** project API key. Telemetry never blocks a command,
-  never raises, and silently drops events when offline. The worker is a
-  daemon thread, so process exit never waits on it either — events queued or
-  in flight when a process terminates are dropped, not delivered, with one
-  exception: the detached background-job worker explicitly flushes (bounded,
-  5s) before it exits, so the durable-job `workflow_outcome` that the
-  counting rule above depends on survives even though that worker is a
-  short-lived process with no interactive command left to keep responsive.
+- `cause` on `ac_verify_failed` names which structural branch of the
+  deterministic verify gate rejected the attempt — e.g.
+  `artifacts_missing_found_elsewhere` means the expected artifact exists in
+  the workspace but not at the contract path (the worker-`cd` signature), and
+  `workspace_mutated` means files changed while verification ran. It never
+  carries the AC text, command, path, artifact name, or any output; those
+  stay in the local event store (`execution.verify.failed`), which also
+  records `verify_cause` and the local-only `verify_cwd` for per-session
+  debugging.
+- `ref` is one of `direct`, `readme`, `readme-hero`, `readme-ko`,
+  `readme-hero-ko`, `readme-zh`, `readme-hero-zh`, or `docs-getting-started`.
+  Every other value folds to `direct` before serialization.
+- Successful polling and internal helper tools are not collected. Failures are
+  retained so broken status, artifact, fan-out, and control paths remain visible.
+- `service_active` is emitted from the tool-request boundary, not process startup.
+  A bind, SDK startup, or PID-file failure therefore cannot count as service DAU.
+- User lifecycle is derived by PostHog's lifecycle query over the stable random
+  identity and daily `service_active` rows; no extra lifecycle-state property is sent.
+- A logical tool result with `is_error=true` is recorded as `status=blocked`.
+  This makes seed blocks and other validation stops distinct from exceptions.
+- Registered non-product MCP tools are folded to `extension_tool` regardless of
+  their textual prefix. Their successful requests contribute only to service
+  activity; failures and logical blocks retain the fixed command token.
+- `error_type` is only an audited exception class name, never a message or
+  traceback. `failure_reason_code` is one of `config`, `auth`, `timeout`,
+  `model`, `tool`, `validation`, `cancelled`, or `unknown`.
+- `command` values come only from static built-in command/tool/job registries.
+- `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
+  anonymous ID, UTC day, event, and retained dimensions. Job-derived
+  `workflow_outcome` uses a one-way job digest; direct evaluations are not deduplicated.
+- PostHog may derive coarse country from the request IP for the country
+  aggregate. Ouroboros does not include the IP address in event properties.
+- Events use a public write-only project key and a fire-and-forget worker.
+  Telemetry never blocks a command and silently drops events when offline.
+  Detached job workers flush their terminal `workflow_outcome` before exit.
 
 ## Where the code lives
 
@@ -206,4 +163,9 @@ Collection is triggered only at these audited call sites:
   `EvaluateHandler.handle()` (direct `ouroboros_evaluate`) and
   `ChecklistVerifyHandler`'s nested multi-AC delegation; suppresses it when
   the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
-- [`scripts/install.sh`](scripts/install.sh) — disclosed install start/completion.
+- [`scripts/install.sh`](scripts/install.sh) — successful install completion.
+  [`scripts/install.ps1`](scripts/install.ps1), the Windows installer, emits
+  neither `install_started` nor `install_completed`. The `ouroboros setup`
+  calls it makes are ordinary CLI invocations and produce the `command_run`
+  (service=cli) rows above under the usual controls, as they do for
+  `install.sh`.

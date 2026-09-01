@@ -17,11 +17,11 @@ row that mounts dsh's existing `@deepseek-ai/dsh-mcp-client` against
   runs Ouroboros in an isolated environment on first launch, no `pip install`
   step.
 - Python >= 3.12 (whatever `uv` resolves).
-- An Ouroboros-supported agent runtime available (Claude Code, Codex CLI,
-  OpenCode, ...) for `ooo auto`'s execution step. Run `ouroboros setup` once
-  yourself, or set `OUROBOROS_AGENT_RUNTIME` (see below) — an MCP subprocess
-  can't host the in-process `claude` SDK runtime, so this needs an executable
-  one (`claude-cli`, `codex`, `opencode`, ...).
+- Nothing else for execution: this bundle defaults `OUROBOROS_AGENT_RUNTIME`
+  to `host`, so dsh's own model does `ooo run`/`ooo auto`'s execution step —
+  no CLI to install. Set `OUROBOROS_AGENT_RUNTIME` (see below) to an
+  executable runtime (`claude-cli`, `codex`, `opencode`, ...) if you'd rather
+  have that CLI do the work instead.
 
 ## Install
 
@@ -46,7 +46,7 @@ the dsh host environment and passed through to the spawned
 
 | Variable | Purpose |
 |---|---|
-| `OUROBOROS_AGENT_RUNTIME` | Agent runtime for `ooo auto`'s execution step (`claude-cli`, `codex`, `opencode`, ...). Leave unset if you've already run `ouroboros setup` and picked a default. |
+| `OUROBOROS_AGENT_RUNTIME` | Agent runtime for `ooo run`/`ooo auto`'s execution step. Defaults to `host` (dsh's own model does the work — see below); set to `claude-cli`, `codex`, `opencode`, ... to use that CLI instead. |
 | `OUROBOROS_LLM_BACKEND` | LLM backend for interview/Seed/QA. Leave unset to keep your `ouroboros setup` default. `dsh` routes those calls through DeepSeek Harness — read the next section first, it needs two more variables. |
 | `OUROBOROS_DSH_CONFIG_PATH` | Absolute path to the trusted Cordis composition the `dsh` LLM backend loads. Required whenever `OUROBOROS_LLM_BACKEND=dsh`. |
 | `OUROBOROS_DSH_CLI_PATH` | Path to the `dsh-acp-demo` bin, when it isn't on `PATH`. |

@@ -1,22 +1,22 @@
-"""GJC CLI RPC runtime for Ouroboros orchestrator execution."""
+"""GJC agent runtime backed by the supported Coordinator MCP / SDK lifecycle."""
 
 from __future__ import annotations
 
-import asyncio
-import codecs
-from collections import deque
-from collections.abc import AsyncIterator
-import contextlib
-import json
-import os
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 import shutil
-import time
 from typing import Any
 from uuid import uuid4
 
+import anyio
+
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.gjc.sdk_client import (
+    GjcCoordinatorClient,
+    GjcCoordinatorError,
+    GjcCoordinatorQuestion,
+)
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -30,51 +30,22 @@ from ouroboros.orchestrator.adapter import (
     worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
-from ouroboros.providers.codex_cli_stream import (
-    malformed_event_message,
-    parse_json_event,
-)
-from ouroboros.providers.gjc_rpc_protocol import (
-    SUPPORTED_EVENT_TYPES,
-    GjcCommandError,
-    GjcProtocolError,
-    UnsupportedGjcRpcFrame,
-    is_passive_lifecycle_event,
-    unsupported_enveloped_frame_error,
-    unsupported_frame_error,
-    unwrap_event_envelope,
-    validate_response_ack,
-)
 
 log = get_logger(__name__)
-
-_MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024
-
-
-class MalformedGjcEvent(ProviderError):
-    """Raised when GJC emits malformed JSONL."""
-
-
-class GjcExitError(ProviderError):
-    """Raised when GJC exits non-zero."""
+CoordinatorClientFactory = Callable[..., GjcCoordinatorClient]
 
 
 class GjcRuntime:
-    """Agent runtime that drives ``gjc --mode rpc`` over persistent stdio."""
+    """Agent runtime that maps Ouroboros turns onto GJC SDK sessions."""
 
     _runtime_handle_backend = "gjc"
     _runtime_backend = "gjc"
     _requires_memory_gate = False
     _provider_name = "gjc"
-    _runtime_error_type = "GjcError"
     _log_namespace = "gjc_runtime"
     _display_name = "GJC"
     _default_cli_name = "gjc"
     _default_llm_backend = "gjc"
-    _process_shutdown_timeout_seconds = 5.0
-    _startup_output_timeout_seconds = 120.0
-    _stdout_idle_timeout_seconds = 600.0
-    _max_stderr_lines = 512
 
     def __init__(
         self,
@@ -87,6 +58,7 @@ class GjcRuntime:
         llm_backend: str | None = None,
         startup_output_timeout_seconds: float | None = None,
         stdout_idle_timeout_seconds: float | None = None,
+        coordinator_client_factory: CoordinatorClientFactory = GjcCoordinatorClient,
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
@@ -96,6 +68,8 @@ class GjcRuntime:
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
+        self._timeout = stdout_idle_timeout_seconds or startup_output_timeout_seconds or 600.0
+        self._coordinator_client_factory = coordinator_client_factory
         self._interceptor = SkillInterceptor(
             cwd=self._cwd,
             runtime_backend=self._runtime_backend,
@@ -104,21 +78,14 @@ class GjcRuntime:
             llm_backend=self._llm_backend,
             log_namespace=self._log_namespace,
             skills_dir=self._skills_dir,
-            skill_dispatcher=self._skill_dispatcher,
+            skill_dispatcher=skill_dispatcher,
         )
-        if startup_output_timeout_seconds is not None:
-            self._startup_output_timeout_seconds = (
-                None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
-            )
-        if stdout_idle_timeout_seconds is not None:
-            self._stdout_idle_timeout_seconds = (
-                None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
-            )
         log.info(
             f"{self._log_namespace}.initialized",
             cli_path=self._cli_path,
             cwd=self._cwd,
             model=model,
+            transport="coordinator_mcp",
         )
 
     @property
@@ -141,11 +108,11 @@ class GjcRuntime:
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
             skill_dispatch=True,
-            targeted_resume=False,
+            targeted_resume=True,
             structured_output=True,
-            # GJC RPC mode is already headless, but exposes no per-invocation
-            # approval/permission flag. Keep the requested mode in runtime
-            # metadata without claiming that the subprocess enforces it.
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             permission_mode_support=ParamSupport.IGNORED,
         )
 
@@ -157,232 +124,90 @@ class GjcRuntime:
         path = Path(candidate).expanduser()
         return str(path) if path.exists() else candidate
 
-    def _build_command(self, *, prompt: str) -> list[str]:
-        # --no-session: one task per process, never resumed (targeted_resume is
-        # False), so persisting gjc session files would only accumulate noise.
-        return [self._cli_path, "--mode", "rpc", "--no-session"]
-
-    def _build_child_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        return env
-
-    async def _iter_stream_lines(
+    def _build_runtime_handle(
         self,
-        stream: asyncio.StreamReader | None,
+        session_id: str | None,
+        turn_id: str | None,
+        current_handle: RuntimeHandle | None,
+        question: GjcCoordinatorQuestion | None = None,
         *,
-        first_chunk_timeout_seconds: float | None = None,
-        chunk_timeout_seconds: float | None = None,
-    ) -> AsyncIterator[str]:
-        if stream is None:
-            return
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        buffer = ""
-        buffer_byte_estimate = 0
-        saw_chunk = False
-        while True:
-            timeout_seconds = (
-                first_chunk_timeout_seconds if not saw_chunk else chunk_timeout_seconds
-            )
-            try:
-                chunk = (
-                    await stream.read(16384)
-                    if timeout_seconds is None
-                    else await asyncio.wait_for(stream.read(16384), timeout=timeout_seconds)
-                )
-            except TimeoutError as exc:
-                phase = "startup" if not saw_chunk else "idle"
-                raise TimeoutError(
-                    f"{self._display_name} produced no stdout during {phase} window ({timeout_seconds:.0f}s)"
-                ) from exc
-            if not chunk:
-                break
-            saw_chunk = True
-            decoded = decoder.decode(chunk)
-            buffer += decoded
-            buffer_byte_estimate += len(decoded) * 4
-            if buffer_byte_estimate > _MAX_LINE_BUFFER_BYTES:
-                raise ProviderError(f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes")
-            while True:
-                newline_index = buffer.find("\n")
-                if newline_index < 0:
-                    break
-                line = buffer[:newline_index]
-                buffer = buffer[newline_index + 1 :]
-                buffer_byte_estimate = len(buffer) * 4
-                yield line.rstrip("\r")
-        buffer += decoder.decode(b"", final=True)
-        if buffer:
-            yield buffer.rstrip("\r")
+        operation_phase: str,
+        idempotency_key: str | None = None,
+    ) -> RuntimeHandle:
+        metadata = dict(current_handle.metadata) if current_handle is not None else {}
+        if turn_id:
+            metadata["turn_id"] = turn_id
+        else:
+            metadata.pop("turn_id", None)
+        metadata["transport"] = "gjc-coordinator-mcp"
+        metadata["gjc_operation_phase"] = operation_phase
+        if idempotency_key:
+            metadata["gjc_idempotency_key"] = idempotency_key
+        else:
+            metadata.pop("gjc_idempotency_key", None)
+        if question is None:
+            metadata.pop("pending_question", None)
+        else:
+            metadata["pending_question"] = {
+                "question_id": question.question_id,
+                "answer_binding": question.answer_binding,
+                "prompt": question.prompt,
+                "options": list(question.options),
+                "multi": question.multi,
+            }
+        handle = RuntimeHandle(
+            backend=self._runtime_handle_backend,
+            kind="agent_runtime",
+            native_session_id=session_id,
+            cwd=self._cwd,
+            approval_mode=self._permission_mode,
+            metadata=metadata,
+        )
+        if session_id:
+            # Broker-owned GJC sessions outlive the coordinator connection, so
+            # every session-bearing handle must expose a real terminate path or
+            # the run-level reclamation sweeps silently skip gjc workers.
+            handle = handle.bind_controls(terminate_callback=self._terminate_session)
+        return handle
 
-    async def _collect_stream_lines(
-        self, stream: asyncio.StreamReader | None, *, max_lines: int | None = None
-    ) -> list[str]:
-        if stream is None:
-            return []
-        lines: deque[str] = deque(maxlen=max_lines if max_lines and max_lines > 0 else None)
-        async for line in self._iter_stream_lines(stream):
-            if line:
-                lines.append(line)
-        return list(lines)
-
-    def _parse_event(self, line: str) -> dict[str, Any]:
-        parsed = parse_json_event(line)
-        if parsed is None:
-            raise MalformedGjcEvent(
-                message=self._malformed_event_message(line), provider=self._provider_name
-            )
-        return parsed
-
-    def _malformed_event_message(self, line: str) -> str:
-        return malformed_event_message(line, display_name=self._display_name)
-
-    def _extract_content_delta(self, event: dict[str, Any]) -> str | None:
-        if event.get("type") != "message_update":
-            return None
-        assistant_event = event.get("assistantMessageEvent")
-        if isinstance(assistant_event, dict):
-            if assistant_event.get("type") not in {None, "text_delta"}:
-                return None
-            delta = assistant_event.get("delta")
-            if isinstance(delta, str):
-                return delta
-            text = assistant_event.get("text") or assistant_event.get("content")
-            return text if isinstance(text, str) else None
-        return None
-
-    def _extract_text_from_message(self, message: dict[str, Any]) -> str | None:
-        content = message.get("content") or message.get("text") or ""
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            texts: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    texts.append(item)
-                elif isinstance(item, dict):
-                    text = item.get("text") or item.get("content")
-                    if isinstance(text, str) and item.get("type") in {None, "text"}:
-                        texts.append(text)
-            joined = "".join(texts).strip()
-            if joined:
-                return joined
-        return None
-
-    def _extract_final_content(self, event: dict[str, Any]) -> str | None:
-        event_type = event.get("type")
-        if event_type in {"message_end", "turn_end"}:
-            message = event.get("message")
-            if isinstance(message, dict) and message.get("role") == "assistant":
-                return self._extract_text_from_message(message)
-            return None
-        if event_type != "agent_end":
-            return None
-        for msg in reversed(event.get("messages") or []):
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                text = self._extract_text_from_message(msg)
-                if text:
-                    return text
-        return None
-
-    def _extract_error_content(self, event: dict[str, Any]) -> str | None:
-        def from_message(message: Any) -> str | None:
-            if (
-                not isinstance(message, dict)
-                or message.get("role") != "assistant"
-                or message.get("stopReason") != "error"
-            ):
-                return None
-            error = message.get("errorMessage") or message.get("error")
-            if isinstance(error, str) and error.strip():
-                return error.strip()
-            return self._extract_text_from_message(message)
-
-        if event.get("type") in {"message_start", "message_end", "turn_end"}:
-            return from_message(event.get("message"))
-        if event.get("type") == "agent_end":
-            for msg in reversed(event.get("messages") or []):
-                error = from_message(msg)
-                if error:
-                    return error
-        return None
-
-    def _provider_error(self, exc: Exception) -> ProviderError:
-        if isinstance(exc, ProviderError):
-            return exc
-        return ProviderError(message=str(exc), provider=self._provider_name)
-
-    def _check_unsupported_or_unknown(self, event: dict[str, Any]) -> None:
-        error = unsupported_frame_error(event, provider=self._provider_name)
-        if error is not None:
+    async def _terminate_session(self, handle: RuntimeHandle) -> bool:
+        session_id = handle.native_session_id
+        if not session_id:
+            return False
+        client = self._coordinator_client_factory(
+            cli_path=self._cli_path,
+            cwd=self._cwd,
+            timeout=self._timeout,
+        )
+        try:
+            await client.connect()
+            await client.stop_session(session_id)
+            return True
+        except GjcCoordinatorError as exc:
             log.warning(
-                f"{self._log_namespace}.unsupported_frame",
-                frame_type=error.details.get("frame_type"),
-                id=error.details.get("id"),
+                f"{self._log_namespace}.terminate_failed",
+                session_id=session_id,
+                code=exc.code,
             )
-            raise error
+            return False
+        finally:
+            try:
+                await client.close()
+            except GjcCoordinatorError:
+                pass
 
-    def _model_override(self) -> tuple[str, str] | None:
-        if not self._model or "/" not in self._model:
-            return None
-        provider, model_id = self._model.split("/", 1)
-        provider = provider.strip()
-        model_id = model_id.strip()
-        if not provider or not model_id:
-            return None
-        return provider, model_id
-
-    async def _send_command(self, process: Any, payload: dict[str, Any]) -> None:
-        stdin = getattr(process, "stdin", None)
-        if stdin is None:
-            raise GjcProtocolError(
-                message="GJC stdin pipe is unavailable", provider=self._provider_name
+    @staticmethod
+    def _compose_prompt(prompt: str, tools: list[str] | None, system_prompt: str | None) -> str:
+        parts: list[str] = []
+        if system_prompt:
+            parts.append(f"## System Instructions\n{system_prompt}")
+        if tools:
+            parts.append(
+                "## Tooling Guidance\nPrefer these tools:\n"
+                + "\n".join(f"- {tool}" for tool in tools)
             )
-        stdin.write((json.dumps(payload) + "\n").encode())
-        drain = getattr(stdin, "drain", None)
-        if callable(drain):
-            await drain()
-
-    async def _terminate_process(self, process: Any) -> None:
-        if getattr(process, "returncode", None) is not None:
-            return
-        terminate = getattr(process, "terminate", None)
-        kill = getattr(process, "kill", None)
-        try:
-            if callable(terminate):
-                terminate()
-            elif callable(kill):
-                kill()
-            else:
-                return
-        except ProcessLookupError:
-            return
-        except Exception as exc:
-            log.warning(f"{self._log_namespace}.process_terminate_failed", error=str(exc))
-            return
-        try:
-            await asyncio.wait_for(process.wait(), timeout=self._process_shutdown_timeout_seconds)
-            return
-        except (TimeoutError, ProcessLookupError):
-            pass
-        if callable(kill):
-            with contextlib.suppress(ProcessLookupError, Exception):
-                kill()
-            with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
-                await asyncio.wait_for(
-                    process.wait(), timeout=self._process_shutdown_timeout_seconds
-                )
-
-    def _close_stdin(self, process: Any) -> None:
-        stdin = getattr(process, "stdin", None)
-        if stdin is not None:
-            with contextlib.suppress(Exception):
-                stdin.close()
-
-    def _error_message(self, exc: Exception, stderr_lines: list[str] | None = None) -> str:
-        stderr_text = "\n".join(stderr_lines or []).strip()
-        return stderr_text or str(exc)
+        parts.append(prompt)
+        return "\n\n".join(part for part in parts if part.strip())
 
     async def execute_task(
         self,
@@ -401,10 +226,7 @@ class GjcRuntime:
             yield cwd_failure
             return
 
-        current_handle = None
-        if resume_handle is not None or resume_session_id is not None:
-            log.info(f"{self._log_namespace}.resume_ignored_non_resumable")
-        intercepted_messages = await self._interceptor.maybe_dispatch(prompt, None)
+        intercepted_messages = await self._interceptor.maybe_dispatch(prompt, resume_handle)
         if intercepted_messages is not None:
             for message in intercepted_messages:
                 yield AgentMessage(
@@ -412,246 +234,227 @@ class GjcRuntime:
                     content=message.content,
                     data=message.data,
                     tool_name=message.tool_name,
+                    resume_handle=message.resume_handle,
                 )
             return
-        parts = []
-        if system_prompt:
-            parts.append(f"## System Instructions\n{system_prompt}")
-        if tools:
-            parts.append(
-                "## Tooling Guidance\nPrefer these tools:\n"
-                + "\n".join(f"- {tool}" for tool in tools)
-            )
-        parts.append(prompt)
-        composed_prompt = "\n\n".join(part for part in parts if part.strip())
-        command = self._build_command(prompt=composed_prompt)
-        log.info(f"{self._log_namespace}.task_started", command=command, cwd=self._cwd)
-        process: Any | None = None
-        stderr_task: asyncio.Task[list[str]] | None = None
-        process_finished = False
-        process_terminated = False
-        spawn_started = time.monotonic()
-        task_started = spawn_started
-        last_content = ""
-        pending_final_content: str | None = None
-        pending_error_content: str | None = None
+
+        composed_prompt = self._compose_prompt(prompt, tools, system_prompt)
+        requested_session_id = (
+            resume_handle.native_session_id if resume_handle else resume_session_id
+        )
+        session_id: str | None = requested_session_id
+        client: GjcCoordinatorClient | None = None
+        keep_session_for_resume = False
+        session_stopped = False
+        handle = resume_handle
+        metadata = resume_handle.metadata if resume_handle else {}
+        phase = metadata.get("gjc_operation_phase")
+        prior_turn_id = metadata.get("turn_id")
+        prior_key = metadata.get("gjc_idempotency_key")
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
+            client = self._coordinator_client_factory(
+                cli_path=self._cli_path,
                 cwd=self._cwd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._build_child_env(),
+                timeout=self._timeout,
             )
-            stderr_task = asyncio.create_task(
-                self._collect_stream_lines(process.stderr, max_lines=self._max_stderr_lines)
-            )
-            line_iter = self._iter_stream_lines(
-                process.stdout,
-                first_chunk_timeout_seconds=self._startup_output_timeout_seconds,
-                chunk_timeout_seconds=self._stdout_idle_timeout_seconds,
-            )
-            try:
-                ready_event = self._parse_event(await anext(line_iter))
-                self._check_unsupported_or_unknown(ready_event)
-            except StopAsyncIteration as exc:
-                raise TimeoutError("GJC produced no ready event") from exc
-            if ready_event.get("type") != "ready":
-                raise GjcProtocolError(
-                    message=f"Expected GJC ready frame before any other frame, got {ready_event.get('type')!r}",
-                    provider=self._provider_name,
+            await client.connect()
+            pending = metadata.get("pending_question")
+            if requested_session_id and isinstance(pending, dict):
+                question_id = pending.get("question_id")
+                answer_binding = pending.get("answer_binding")
+                if not all(
+                    isinstance(value, str) and value
+                    for value in (question_id, answer_binding, prior_turn_id)
+                ):
+                    raise GjcCoordinatorError(
+                        "GJC resume handle contains an invalid pending question.",
+                        code="invalid_resume_handle",
+                    )
+                question = GjcCoordinatorQuestion(
+                    session_id=requested_session_id,
+                    turn_id=prior_turn_id,
+                    question_id=question_id,
+                    answer_binding=answer_binding,
+                    prompt=str(pending.get("prompt") or ""),
+                    options=tuple(
+                        value for value in pending.get("options", []) if isinstance(value, str)
+                    ),
+                    multi=pending.get("multi") is True,
                 )
-            spawn_to_ready_ms = int((time.monotonic() - spawn_started) * 1000)
-            log.info(f"{self._log_namespace}.ready_received", spawn_to_ready_ms=spawn_to_ready_ms)
-            override = self._model_override()
-            if override is not None:
-                model_command_id = f"set_model-{uuid4().hex}"
-                await self._send_command(
-                    process,
-                    {
-                        "id": model_command_id,
-                        "type": "set_model",
-                        "provider": override[0],
-                        "modelId": override[1],
-                    },
+                operation_key = (
+                    prior_key
+                    if phase == "answer_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-answer-{uuid4().hex}"
                 )
-                while True:
-                    event = self._parse_event(await anext(line_iter))
-                    if unwrap_event_envelope(event, provider=self._provider_name) is not None:
-                        continue
-                    self._check_unsupported_or_unknown(event)
-                    validate_response_ack(
-                        event,
-                        command_id=model_command_id,
-                        command="set_model",
-                        provider=self._provider_name,
-                    )
-                    break
-                log.info(f"{self._log_namespace}.model_acknowledged")
-            prompt_command_id = f"prompt-{uuid4().hex}"
-            await self._send_command(
-                process, {"id": prompt_command_id, "type": "prompt", "message": composed_prompt}
-            )
-            acked = False
-            async for line in line_iter:
-                if not line:
-                    continue
-                event = self._parse_event(line)
-                inner = unwrap_event_envelope(event, provider=self._provider_name)
-                if inner is not None:
-                    event = inner
-                    if event.get("type") not in SUPPORTED_EVENT_TYPES:
-                        error = unsupported_enveloped_frame_error(
-                            event, provider=self._provider_name
-                        )
-                        if error is not None:
-                            raise error
-                        log.debug(
-                            f"{self._log_namespace}.unknown_enveloped_event",
-                            event_type=event.get("type"),
-                        )
-                        continue
-                else:
-                    self._check_unsupported_or_unknown(event)
-                event_type = event.get("type")
-                if event_type == "response" and event.get("id") == prompt_command_id:
-                    validate_response_ack(
-                        event,
-                        command_id=prompt_command_id,
-                        command="prompt",
-                        provider=self._provider_name,
-                    )
-                    if not acked:
-                        acked = True
-                        prompt_ack_ms = int((time.monotonic() - task_started) * 1000)
-                        log.info(
-                            f"{self._log_namespace}.prompt_acknowledged",
-                            prompt_ack_ms=prompt_ack_ms,
-                        )
-                    continue
-                if not acked:
-                    raise GjcProtocolError(
-                        message=f"Expected GJC prompt response before streaming, got {event_type!r}",
-                        provider=self._provider_name,
-                    )
-                if is_passive_lifecycle_event(event):
-                    log.debug(
-                        f"{self._log_namespace}.passive_lifecycle_event", event_type=event_type
-                    )
-                    continue
-                error_content = self._extract_error_content(event)
-                if error_content:
-                    pending_error_content = error_content
-                delta = self._extract_content_delta(event)
-                if delta:
-                    last_content += delta
-                    yield AgentMessage(
-                        type="assistant", content=delta, data={"event_type": "message_update"}
-                    )
-                    continue
-                final_content = self._extract_final_content(event)
-                if final_content:
-                    pending_final_content = final_content
-                if event_type == "agent_end":
-                    break
+                handle = self._build_runtime_handle(
+                    requested_session_id,
+                    prior_turn_id,
+                    resume_handle,
+                    question,
+                    operation_phase="answer_pending",
+                    idempotency_key=operation_key,
+                )
+                await client.submit_question_answer(
+                    question,
+                    prompt,
+                    idempotency_key=operation_key,
+                )
+                turn_id = prior_turn_id
+            elif (
+                requested_session_id
+                and phase == "awaiting"
+                and isinstance(prior_turn_id, str)
+                and prior_turn_id
+            ):
+                # The prior mutation already returned a durable turn identity.
+                # Resume observation instead of dispatching duplicate work.
+                turn_id = prior_turn_id
+            elif requested_session_id:
+                operation_key = (
+                    prior_key
+                    if phase == "prompt_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-prompt-{uuid4().hex}"
+                )
+                handle = self._build_runtime_handle(
+                    requested_session_id,
+                    None,
+                    resume_handle,
+                    operation_phase="prompt_pending",
+                    idempotency_key=operation_key,
+                )
+                turn_id = await client.send_prompt(
+                    requested_session_id,
+                    composed_prompt,
+                    idempotency_key=operation_key,
+                )
             else:
-                raise GjcProtocolError(
-                    message="GJC stream ended before agent_end", provider=self._provider_name
+                operation_key = (
+                    prior_key
+                    if phase == "start_pending" and isinstance(prior_key, str) and prior_key
+                    else f"ouroboros-start-{uuid4().hex}"
                 )
-            self._close_stdin(process)
-            returncode = await process.wait()
-            process_finished = True
-            stderr_lines = await stderr_task if stderr_task else []
-            task_wall_ms = int((time.monotonic() - task_started) * 1000)
-            if returncode != 0:
-                raise GjcExitError(
-                    message="\n".join(stderr_lines).strip()
-                    or f"GJC exited with code {returncode}.",
-                    provider=self._provider_name,
-                    details={"returncode": returncode},
+                handle = self._build_runtime_handle(
+                    None,
+                    None,
+                    resume_handle,
+                    operation_phase="start_pending",
+                    idempotency_key=operation_key,
                 )
-            if pending_error_content:
-                raise ProviderError(message=pending_error_content, provider=self._provider_name)
-            final_message = pending_final_content or last_content or "GJC task completed."
-            log.info(
-                f"{self._log_namespace}.task_completed",
-                task_wall_ms=task_wall_ms,
-                returncode=returncode,
+                session = await client.start_session(
+                    composed_prompt,
+                    model=self._model,
+                    idempotency_key=operation_key,
+                )
+                session_id = session.session_id
+                turn_id = session.turn_id
+            handle = self._build_runtime_handle(
+                session_id,
+                turn_id,
+                handle,
+                operation_phase="awaiting",
             )
+            turn = await client.await_turn(session_id, turn_id)
+            if turn.status == "waiting_for_answer":
+                keep_session_for_resume = True
+                question = turn.question
+                answer_key = f"ouroboros-answer-{uuid4().hex}"
+                handle = self._build_runtime_handle(
+                    session_id,
+                    turn_id,
+                    handle,
+                    question,
+                    operation_phase="answer_pending",
+                    idempotency_key=answer_key,
+                )
+                yield AgentMessage(
+                    type="result",
+                    content=question.prompt if question else "GJC is waiting for user input.",
+                    data={
+                        "subtype": "error",
+                        "error_type": "GjcQuestionRequired",
+                        "recoverable": True,
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "question_id": question.question_id if question else None,
+                        "options": list(question.options) if question else [],
+                    },
+                    resume_handle=handle,
+                )
+                return
+            terminal_phase = "completed" if turn.succeeded else "failed"
+            handle = self._build_runtime_handle(
+                session_id,
+                turn_id,
+                handle,
+                operation_phase=terminal_phase,
+            )
+            content = (
+                (turn.text or await client.read_last_assistant(session_id))
+                if turn.succeeded
+                else None
+            )
+            # The turn is terminal and non-resumable: reclaim the broker-owned
+            # worker session BEFORE publishing the result, so a consumer that
+            # stops iterating at the terminal message (or never closes the
+            # generator) cannot leave the session running. Question turns and
+            # coordinator errors keep the session alive for resume.
+            session_stopped = True
+            try:
+                await client.stop_session(session_id)
+            except GjcCoordinatorError:
+                pass
+            if not turn.succeeded:
+                yield AgentMessage(
+                    type="result",
+                    content=turn.error or f"GJC turn ended with status {turn.status}",
+                    data={
+                        "subtype": "error",
+                        "error_type": "GjcTurnError",
+                        "status": turn.status,
+                    },
+                    resume_handle=handle,
+                )
+                return
             yield AgentMessage(
                 type="result",
-                content=final_message,
-                data={"subtype": "success", "returncode": returncode},
+                content=content or "GJC task completed.",
+                data={"subtype": "success", "transport": "gjc-coordinator-mcp"},
+                resume_handle=handle,
             )
-        except (
-            TimeoutError,
-            MalformedGjcEvent,
-            GjcProtocolError,
-            GjcCommandError,
-            UnsupportedGjcRpcFrame,
-            GjcExitError,
-            ProviderError,
-        ) as exc:
-            if process is not None and not isinstance(exc, GjcExitError):
-                await self._terminate_process(process)
-                process_terminated = True
-            stderr_lines = await stderr_task if stderr_task else []
-            provider_exc = self._provider_error(exc)
-            log.info(
-                f"{self._log_namespace}.task_failed", error_type=type(exc).__name__, error=str(exc)
-            )
+        except GjcCoordinatorError as exc:
+            keep_session_for_resume = True
             yield AgentMessage(
                 type="result",
-                content=(
-                    self._error_message(provider_exc, stderr_lines)
-                    if isinstance(exc, TimeoutError)
-                    else provider_exc.message
-                ),
+                content=str(exc),
                 data={
                     "subtype": "error",
                     "error_type": type(exc).__name__,
-                    **(
-                        {"returncode": provider_exc.details.get("returncode")}
-                        if isinstance(provider_exc.details, dict)
-                        and "returncode" in provider_exc.details
-                        else {}
-                    ),
+                    "code": exc.code,
                 },
-                resume_handle=current_handle,
-            )
-        except asyncio.CancelledError:
-            if process is not None:
-                await self._terminate_process(process)
-            raise
-        except FileNotFoundError as exc:
-            yield AgentMessage(
-                type="result",
-                content=f"{self._display_name} not found: {exc}",
-                data={"subtype": "error", "error_type": type(exc).__name__},
-            )
-        except Exception as exc:
-            if process is not None:
-                await self._terminate_process(process)
-                process_terminated = True
-            yield AgentMessage(
-                type="result",
-                content=f"Failed to run {self._display_name}: {exc}",
-                data={"subtype": "error", "error_type": type(exc).__name__},
+                resume_handle=handle,
             )
         finally:
-            if process is not None:
-                self._close_stdin(process)
-                if (
-                    not process_finished
-                    and not process_terminated
-                    and getattr(process, "returncode", None) is None
-                ):
-                    await self._terminate_process(process)
-            if stderr_task is not None and not stderr_task.done():
-                stderr_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stderr_task
+            # Runs under caller cancellation and generator finalization too, so
+            # the cleanup awaits are shielded: a session bound after
+            # ``start_session`` must be reclaimed even when the consumer never
+            # drains the stream or cancels while ``await_turn`` blocks. Only
+            # explicitly resumable states (question turns, coordinator errors)
+            # keep the broker-owned session alive.
+            if client is not None:
+                with anyio.CancelScope(shield=True):
+                    if (
+                        session_id is not None
+                        and not keep_session_for_resume
+                        and (not session_stopped)
+                    ):
+                        try:
+                            await client.stop_session(session_id)
+                        except GjcCoordinatorError:
+                            pass
+                    try:
+                        await client.close()
+                    except GjcCoordinatorError:
+                        pass
 
     async def execute_task_to_result(
         self,
@@ -664,6 +467,7 @@ class GjcRuntime:
         messages: list[AgentMessage] = []
         final_message = ""
         success = True
+        final_handle = resume_handle
         async for message in self.execute_task(
             prompt=prompt,
             tools=tools,
@@ -672,6 +476,8 @@ class GjcRuntime:
             resume_session_id=resume_session_id,
         ):
             messages.append(message)
+            if message.resume_handle is not None:
+                final_handle = message.resume_handle
             if message.is_final:
                 final_message = message.content
                 success = not message.is_error
@@ -685,20 +491,13 @@ class GjcRuntime:
             )
         return Result.ok(
             TaskResult(
-                success=success,
+                success=True,
                 final_message=final_message,
                 messages=tuple(messages),
-                session_id=None,
-                resume_handle=None,
+                session_id=final_handle.native_session_id if final_handle else None,
+                resume_handle=final_handle,
             )
         )
 
 
-__all__ = [
-    "GjcRuntime",
-    "GjcCommandError",
-    "GjcExitError",
-    "GjcProtocolError",
-    "MalformedGjcEvent",
-    "UnsupportedGjcRpcFrame",
-]
+__all__ = ["GjcRuntime"]

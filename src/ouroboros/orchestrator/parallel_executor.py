@@ -50,6 +50,7 @@ from weakref import ref
 import anyio
 from rich.console import Console
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -424,6 +425,7 @@ from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
     _mapping_has_exact_keys,
+    _missing_artifacts_cause,
     _missing_expected_artifacts,
     _revalidate_cached_verify_gate_outcome,
     _serialize_verify_gate_outcome,
@@ -1784,7 +1786,6 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
-
 
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
@@ -5169,9 +5170,11 @@ class ParallelACExecutor:
                             "reason": reason,
                             "failure_class": "evidence_missing",
                             "final_workspace_revalidation": True,
+                            "verify_cause": "workspace_mutated",
                         },
                     )
                 )
+                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
                 revalidated.append(
                     replace(
                         result,
@@ -5207,9 +5210,11 @@ class ParallelACExecutor:
                             "failure_class": "evidence_missing",
                             "final_workspace_revalidation": True,
                             "verify_replay_blocked": True,
+                            "verify_cause": "workspace_mutated",
                         },
                     )
                 )
+                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
                 revalidated.append(
                     replace(
                         result,
@@ -5224,6 +5229,30 @@ class ParallelACExecutor:
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
             if missing_artifacts:
                 reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+                # This branch owns the rejection (settlement skips
+                # already-failed results), so it must record the same durable
+                # diagnostics and closed-cause analytics as every other
+                # deterministic gate rejection.
+                verify_cause = _missing_artifacts_cause(missing_artifacts, cwd)
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "missing_artifacts": list(missing_artifacts),
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                            "verify_cause": verify_cause,
+                        },
+                    )
+                )
+                usage_telemetry.capture_ac_verify_failed(cause=verify_cause)
                 revalidated.append(
                     replace(
                         result,
@@ -5262,16 +5291,8 @@ class ParallelACExecutor:
         coordinator_revalidated: bool = False,
     ) -> list[ACExecutionResult]:
         """Bind terminal acceptance to the settled shared workspace.
-
-        Verify gates run as each AC completes, while later ACs can still touch
-        the same workspace. Before terminal acceptance, re-check every
-        successful contract's artifact leg and cached workspace identity. A
-        stale command result is replayed only when its Seed contract explicitly
-        declares that repeated execution is side-effect-safe or idempotent. The
-        replayed gate result (pass or fail) becomes the acceptance evidence.
-        Commands without that authority fail closed rather than duplicating an
-        external effect. Invalidate the complete success set when any verify
-        command — cached or replayed — was observed mutating the workspace.
+        Replay stale command evidence only for verify_replay_safe contracts;
+        any mutating verifier invalidates all provisional successes.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -5297,8 +5318,7 @@ class ParallelACExecutor:
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         settled: list[ACExecutionResult] = []
-        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
-        replay_mutated_workspace = False
+        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None, str | None]] = {}
 
         for result in results:
             if not result.success:
@@ -5307,16 +5327,10 @@ class ParallelACExecutor:
 
             spec = successful_contracts.get(result.ac_index)
             if spec is None:
-                # A mutating final verifier invalidates all successes, including
-                # description-only ACs.  Defer the replacement until every
-                # final verifier has been inspected.
                 settled.append(result)
                 continue
 
             if verify_mutated_workspace:
-                # Once one final verifier has changed (or made unreadable) the
-                # workspace, do not execute any additional arbitrary commands.
-                # The complete success set will be invalidated below.
                 settled.append(result)
                 continue
 
@@ -5324,6 +5338,7 @@ class ParallelACExecutor:
             if not isinstance(outcome, _VerifyGateOutcome):
                 individual_failures[result.ac_index] = (
                     "Final verify gate evidence is unavailable for acceptance.",
+                    None,
                     None,
                 )
                 settled.append(result)
@@ -5333,19 +5348,20 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     f"Final workspace verify gate failed: {outcome.reason}",
                     outcome,
+                    outcome.cause,
                 )
                 settled.append(result)
                 continue
 
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
             final_digest = self._workspace_content_digest(
-                cwd,
-                expected_artifacts=spec.expected_artifacts,
+                cwd, expected_artifacts=spec.expected_artifacts
             )
             if final_digest is None:
                 individual_failures[result.ac_index] = (
                     "Final workspace digest unavailable for acceptance evidence.",
                     outcome,
+                    None,
                 )
                 settled.append(result)
                 continue
@@ -5353,19 +5369,18 @@ class ParallelACExecutor:
                 individual_failures[result.ac_index] = (
                     "Final expected_artifacts missing: " + ", ".join(missing_artifacts),
                     outcome,
+                    _missing_artifacts_cause(missing_artifacts, cwd),
                 )
                 settled.append(result)
                 continue
 
             if spec.verify_command and not outcome.environment_unverifiable:
                 if coordinator_revalidated:
-                    # Coordinator revalidation deliberately refuses to replay
-                    # arbitrary shell contracts.  A command-bearing success
-                    # that survived that boundary is therefore not admissible.
                     individual_failures[result.ac_index] = (
                         "Final acceptance rejected because coordinator revalidation "
                         "did not replay verify_command.",
                         outcome,
+                        "workspace_mutated",
                     )
                     settled.append(result)
                     continue
@@ -5375,6 +5390,7 @@ class ParallelACExecutor:
                     individual_failures[result.ac_index] = (
                         "Final verify gate workspace digest unavailable for acceptance.",
                         outcome,
+                        None,
                     )
                     settled.append(result)
                     continue
@@ -5385,13 +5401,10 @@ class ParallelACExecutor:
                             "Final acceptance rejected because verify_command evidence "
                             "is stale and the contract does not declare verify_replay_safe.",
                             outcome,
+                            "workspace_mutated",
                         )
                         settled.append(result)
                         continue
-                    # A replay-safe command may be re-run once against the
-                    # settled workspace. Its pass or fail becomes authoritative
-                    # final evidence; workspace mutation still invalidates the
-                    # complete success set below.
                     replay_outcome = await _invoke_execution_authority_entry(
                         self,
                         _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
@@ -5418,7 +5431,9 @@ class ParallelACExecutor:
                         )
                     )
                     if replay_outcome.workspace_mutated:
-                        replay_mutated_workspace = True
+                        verify_mutated_workspace = True
+                        settled.append(result)
+                        continue
                     if not replay_outcome.passed:
                         replay_failure = (
                             "Final workspace verify gate was unverifiable on settlement replay"
@@ -5428,25 +5443,27 @@ class ParallelACExecutor:
                         individual_failures[result.ac_index] = (
                             f"{replay_failure}: {replay_outcome.reason}",
                             replay_outcome,
+                            replay_outcome.cause or "workspace_mutated",
                         )
                         settled.append(result)
                         continue
-                    settled.append(replace(result, verify_gate_outcome=replay_outcome))
-                    continue
+                    result = replace(result, verify_gate_outcome=replay_outcome)
 
             settled.append(result)
 
-        if verify_mutated_workspace or replay_mutated_workspace:
-            # A verifier is an observation boundary, not another writer.  If
-            # any final verifier changed the shared workspace (or its digest
-            # became unreadable), every success observed before or after that
-            # command is stale.  Fail closed for the complete finalization set.
+        if verify_mutated_workspace:
             mutation_reason = (
                 "Final acceptance rejected because a verify_command mutated the "
                 "workspace or its digest could not be revalidated."
             )
             individual_failures = {
-                result.ac_index: (mutation_reason, result.verify_gate_outcome)
+                result.ac_index: (
+                    mutation_reason,
+                    result.verify_gate_outcome
+                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                    else None,
+                    "workspace_mutated",
+                )
                 for result in settled
                 if result.success
             }
@@ -5457,7 +5474,7 @@ class ParallelACExecutor:
             if failure is None:
                 finalized.append(result)
                 continue
-            reason, outcome = failure
+            reason, outcome, verify_cause = failure
             spec = successful_contracts.get(result.ac_index)
             missing_artifacts = (
                 list(outcome.missing_artifacts) if isinstance(outcome, _VerifyGateOutcome) else []
@@ -5480,9 +5497,11 @@ class ParallelACExecutor:
                         "reason": reason,
                         "failure_class": FailureClass.EVIDENCE_MISSING.value,
                         "final_workspace_revalidation": True,
+                        "verify_cause": verify_cause,
                     },
                 )
             )
+            usage_telemetry.capture_ac_verify_failed(cause=verify_cause)
             finalized.append(
                 replace(
                     result,
@@ -7110,10 +7129,14 @@ class ParallelACExecutor:
         from ouroboros.orchestrator.cross_harness_redispatch import (
             create_alt_harness_redispatch_event,
         )
-        from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+        from ouroboros.orchestrator.runtime_factory import (
+            create_agent_runtime,
+            create_agent_runtime_async,
+        )
 
         cwd = self._task_cwd or self._adapter.working_directory
-        alt_adapter = create_agent_runtime(
+        alt_adapter = await create_agent_runtime_async(
+            create_agent_runtime,
             backend=backend,
             cwd=cwd,
             permission_mode="bypassPermissions",
@@ -8934,7 +8957,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
                         )
                     dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
-                    message_count_before_signal = primary_turn.message_count
+                    message_count_before_signal = primary_turn.message_list_length
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
 
                     async def _claim_follow_up_delivery() -> None:
@@ -9739,6 +9762,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="output_assertion requires verify_command",
                 output_tail="",
                 workspace_digest=workspace_digest(),
+                cause="invalid_contract",
             )
 
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
@@ -9749,6 +9773,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 missing_artifacts=missing_artifacts,
                 workspace_digest=workspace_digest(),
+                cause=_missing_artifacts_cause(missing_artifacts, cwd),
             )
 
         command = spec.verify_command
@@ -9777,6 +9802,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     output_tail=output_tail,
                     workspace_mutated=True,
                     workspace_digest=workspace_after,
+                    cause="workspace_mutated",
                 )
             return None
 
@@ -9794,10 +9820,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_before,
                 environment_unverifiable=True,
+                cause="environment_unverifiable",
             )
-        # Where the command runs is a per-AC contract (explicit verify_cwd, or
-        # the workspace's sole node manifest directory for package-runner
-        # commands); artifact checks and digests above stay rooted at ``cwd``.
         command_cwd = bind_verify_command_cwd(cwd, spec)
         if command_cwd.error is not None:
             return _VerifyGateOutcome(
@@ -9824,6 +9848,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_before,
                 environment_unverifiable=True,
+                cause="environment_unverifiable",
             )
         if run.timed_out:
             mutated = workspace_mutation_outcome("")
@@ -9835,6 +9860,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail="",
                 workspace_digest=workspace_digest(),
                 environment_unverifiable=True,
+                cause="timeout",
             )
 
         combined = run.output
@@ -9849,6 +9875,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
+                cause="exit_nonzero",
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -9856,6 +9883,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="output_assertion not satisfied by verify_command output",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
+                cause="output_assertion_unmatched",
             )
         return _VerifyGateOutcome(
             passed=True,
@@ -9914,6 +9942,11 @@ Respond with either ATOMIC or the structured JSON object only.
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
 
         if outcome.environment_unverifiable:
+            # Quarantine preserves the worker result instead of failing it,
+            # but the rejection-cause analytics must still see this branch:
+            # `timeout` and `environment_unverifiable` are documented causes
+            # and would otherwise never reach telemetry.
+            usage_telemetry.capture_ac_verify_failed(cause=outcome.cause)
             return await quarantine_unverifiable_result(
                 result=result,
                 spec=spec,
@@ -9951,9 +9984,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     "reason": outcome.reason,
                     "failure_class": FailureClass.EVIDENCE_MISSING.value,
                     "output_tail": outcome.output_tail,
+                    # Machine-readable rejection cause plus the exact cwd the
+                    # gate ran from. Both stay in the LOCAL event store; only
+                    # the closed-vocabulary cause reaches telemetry below.
+                    "verify_cause": outcome.cause,
+                    "verify_cwd": cwd,
                 },
             )
         )
+        usage_telemetry.capture_ac_verify_failed(cause=outcome.cause)
         log.warning(
             "parallel_executor.ac.verify_gate_failed",
             session_id=session_id,

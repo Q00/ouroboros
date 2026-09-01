@@ -419,6 +419,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Zcode-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             # Reasoning effort is advised, not enforced: no per-invocation effort
             # flag has been verified. Declared IGNORED (also the default) until a
             # real per-call mechanism is confirmed — revisit if the CLI exposes one.
