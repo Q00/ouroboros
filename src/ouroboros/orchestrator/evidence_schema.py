@@ -340,6 +340,10 @@ _INLINE_EVIDENCE_LABEL_RE = re.compile(
     r"(?:(?:actual|validation)\s+)?evidence(?:\s+follows)?\s*:\s*$",
     re.IGNORECASE,
 )
+_INLINE_EVIDENCE_LABEL_PREFIX_RE = re.compile(
+    r"(?:(?:actual|validation)\s+)?evidence(?:\s+follows)?\s*:\s*",
+    re.IGNORECASE,
+)
 
 
 def _is_evidence_container_opener(text: str, opener_pos: int) -> bool:
@@ -347,6 +351,11 @@ def _is_evidence_container_opener(text: str, opener_pos: int) -> bool:
     line_start = text.rfind("\n", 0, opener_pos) + 1
     prefix = text[line_start:opener_pos]
     return not prefix.strip() or _INLINE_EVIDENCE_LABEL_RE.search(prefix) is not None
+
+
+def _inline_evidence_value_start(line: str) -> int | None:
+    match = _INLINE_EVIDENCE_LABEL_PREFIX_RE.match(line)
+    return match.end() if match is not None else None
 
 
 def _looks_like_json_container(text: str, opener_pos: int) -> bool:
@@ -358,6 +367,9 @@ def _looks_like_json_container(text: str, opener_pos: int) -> bool:
     """
     if not _is_evidence_container_opener(text, opener_pos):
         return False
+    line_start = text.rfind("\n", 0, opener_pos) + 1
+    if _INLINE_EVIDENCE_LABEL_RE.search(text[line_start:opener_pos]) is not None:
+        return True
 
     boundary_end = _malformed_boundary_end(text, opener_pos)
     if text[opener_pos] == "{" and boundary_end == len(text):
@@ -417,6 +429,12 @@ def _collect_top_level_values(text: str) -> list[tuple[int, int, Any]]:
         leading = len(content) - len(content.lstrip(" \t"))
         start = offset + leading
         candidate = content[leading:]
+        inline_value_start = _inline_evidence_value_start(candidate)
+        if inline_value_start is not None:
+            payload = candidate[inline_value_start:]
+            payload_leading = len(payload) - len(payload.lstrip(" \t"))
+            start += inline_value_start + payload_leading
+            candidate = payload[payload_leading:]
         if candidate and candidate[0] not in "{[":
             try:
                 parsed, end_offset = _DECODER.raw_decode(candidate)

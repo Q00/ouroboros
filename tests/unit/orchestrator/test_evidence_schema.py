@@ -353,6 +353,53 @@ class TestExtractEvidence:
 
         assert record.data["files_touched"] == ["actual.py"]
 
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "evidence:",
+            "actual evidence:",
+            "validation evidence:",
+            "evidence follows:",
+            "actual evidence follows:",
+            "validation evidence follows:",
+        ],
+    )
+    @pytest.mark.parametrize("terminal_payload", ["null", '"invalid"', "true", "17"])
+    def test_inline_scalar_evidence_label_displaces_stale_object(
+        self,
+        label: str,
+        terminal_payload: str,
+    ) -> None:
+        text = (
+            '{"files_touched":["stale.py"],"commands_run":["pytest"],"tests_passed":["x"]}\n'
+            f"{label} {terminal_payload}"
+        )
+
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            "[undefined]",
+            "[broken,",
+            "[tru,",
+            "[null,",
+            "[{'not': 'json'}]",
+        ],
+    )
+    def test_malformed_inline_array_label_displaces_stale_object(
+        self,
+        terminal_payload: str,
+    ) -> None:
+        text = (
+            '{"files_touched":["stale.py"],"commands_run":["pytest"],"tests_passed":["x"]}\n'
+            f"Actual evidence: {terminal_payload}"
+        )
+
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
     def test_earlier_illustrative_object_does_not_displace_final(self) -> None:
         """Recovery must prefer the terminal evidence object over earlier ones.
 
