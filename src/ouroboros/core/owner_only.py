@@ -291,7 +291,7 @@ def _write_owner_only_dirfd(target: Path, text: str, *, encoding: str) -> bool:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.rename(tmp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.replace(tmp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         return _fsync_directory_fd(parent_fd) and directory_chain.postvalidate()
     except BaseException:
         if raw_fd is not None:
