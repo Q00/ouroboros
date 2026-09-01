@@ -526,6 +526,39 @@ def test_rollout_malformed_tool_calls_in_prior_turn_fails_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+@pytest.mark.parametrize("role", ["system", "developer", "tool", "user"])
+def test_rollout_tool_calls_on_non_assistant_role_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["role"] = role
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+def test_rollout_deeply_nested_tool_input_fails_closed_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    nested: dict[str, Any] = {}
+    current = nested
+    for index in range(2_000):
+        child: dict[str, Any] = {}
+        current[f"level-{index}"] = child
+        current = child
+    record["request"]["messages"][1]["toolCalls"][0]["input"] = nested
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
 @pytest.mark.parametrize("mutation", ["unmatched", "missing_error"])
 def test_rollout_invalid_tool_result_in_prior_turn_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str

@@ -107,6 +107,31 @@ _ZCODE_SESSION_ID_RE = re.compile(
     r"sess_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
 _MAX_ZCODE_ROLLOUT_BYTES = 16 * 1024 * 1024
+_MAX_ZCODE_TOOL_INPUT_DEPTH = 100
+
+
+def _zcode_tool_input_fingerprint(tool_input: dict[str, Any]) -> str | None:
+    stack: list[tuple[Any, int]] = [(tool_input, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > _MAX_ZCODE_TOOL_INPUT_DEPTH:
+            return None
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    return None
+                stack.append((item, depth + 1))
+            continue
+        if isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+            continue
+        if value is None or isinstance(value, str | int | float | bool):
+            continue
+        return None
+    try:
+        return json.dumps(tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
@@ -790,9 +815,11 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         for message in messages:
             if not isinstance(message, dict):
                 return []
+            role = message.get("role")
             tool_calls = message.get("toolCalls")
-            if "toolCalls" in message and not isinstance(tool_calls, list):
-                return []
+            if "toolCalls" in message:
+                if role != "assistant" or not isinstance(tool_calls, list):
+                    return []
             if isinstance(tool_calls, list):
                 for call in tool_calls:
                     if not isinstance(call, dict):
@@ -808,6 +835,11 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                         and isinstance(tool_input, dict)
                     ):
                         return []
+                    if _zcode_tool_input_fingerprint(tool_input) is None:
+                        return []
+            if any(field in message for field in ("toolCallId", "toolName", "isError")):
+                if role != "tool":
+                    return []
 
         # Validate tool results in the complete cumulative history before
         # selecting the current-turn suffix.  Otherwise malformed or
@@ -821,9 +853,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 for call in tool_calls:
                     call_id = call["id"]
                     call_name = call["name"]
-                    call_input = json.dumps(
-                        call["input"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                    )
+                    call_input = _zcode_tool_input_fingerprint(call["input"])
+                    if call_input is None:
+                        return []
                     signature = f"{call_name}\x00{call_input}"
                     prior_call = history_calls.get(call_id)
                     if prior_call is not None and prior_call != signature:
@@ -914,9 +946,9 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                         return []
                     if call_id in prior_tool_ids:
                         return []
-                    input_fingerprint = json.dumps(
-                        tool_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                    )
+                    input_fingerprint = _zcode_tool_input_fingerprint(tool_input)
+                    if input_fingerprint is None:
+                        return []
                     call_signature = (tool_name, input_fingerprint)
                     # Each model-io record is cumulative; earlier calls are
                     # repeated in later requests. Deduplicate only byte-for-
