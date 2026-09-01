@@ -171,6 +171,10 @@ exit 0
             TOOL_BIN_VAR: str(tool_bin_dir),
             OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
             CAPTURES_LOG_VAR: str(tmp_path / "telemetry.log"),
+            # The installer fetches uv from astral.sh when nothing else can
+            # install. Off by default here so no test reaches the network by
+            # accident; the bootstrap tests below opt back in with a fake curl.
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
         }
     )
     if env:
@@ -295,6 +299,29 @@ def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
     assert "BASH_SOURCE" not in result.stderr
 
 
+def test_piped_installer_defaults_to_mcp_v2_and_settings_gui(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path, local_repo=False, piped=True)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "installing MCP v2 + settings GUI" in result.stdout
+    assert "--with mcp==2.0.0" in calls
+    assert "--with textual==8.2.8" in calls
+    assert "--with textual-serve==1.1.3" in calls
+
+
+def test_runtime_less_mcp_v2_guidance_lists_only_compatible_backends(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path, local_repo=False, piped=True)
+
+    assert result.returncode == 0, result.stderr
+    guidance = next(
+        line for line in result.stdout.splitlines() if "Pick an MCP v2-compatible backend" in line
+    )
+    assert "claude-cli" in guidance
+    assert "|claude|" not in guidance
+    assert "claude-sdk" not in guidance
+
+
 def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
     config = tmp_path / "home" / ".ouroboros" / "config.yaml"
     config.parent.mkdir(parents=True)
@@ -332,6 +359,12 @@ def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert "AttributeError" not in result.stderr
     assert not (tmp_path / "telemetry.log").exists()
+
+
+def test_readme_mcp_v2_default_selects_claude_cli_worker() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli" in readme
+    assert "ouroboros-ai[claude]" in readme
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
@@ -1501,7 +1534,12 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
         assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties"}
         events[payload["event"]] = payload
 
-    assert set(events) == {"install_completed"}
+    assert set(events) == {"install_started", "install_completed"}
+    assert set(events["install_started"]["properties"].keys()) == {
+        "os",
+        "version",
+        "ref",
+    }
     assert set(events["install_completed"]["properties"].keys()) == {
         "os",
         "runtime",
@@ -1872,9 +1910,9 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "Runtime: opencode (preserved from" in result.stdout
-    assert "Installing .[tui] ..." in result.stdout
+    assert "Installing .[mcp,tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime opencode --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -1892,7 +1930,7 @@ def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert "Installing .[claude,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -1906,9 +1944,9 @@ def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "Installing .[mcp,tui]" in result.stdout
     assert "--with claude-agent-sdk" not in calls
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" in calls
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -1923,7 +1961,7 @@ def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[claude-sdk,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude-sdk")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -1964,7 +2002,7 @@ def test_cli_backed_claude_config_preserves_cli_profile_on_upgrade(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude-cli (preserved from" in result.stdout
-    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "Installing .[mcp,tui]" in result.stdout
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -1993,7 +2031,7 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2126,7 +2164,7 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
@@ -2291,7 +2329,7 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2420,7 +2458,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     assert "--prerelease=allow" not in calls
@@ -2519,8 +2557,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
-    assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with mcp==2.0.0" not in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
@@ -2711,3 +2749,98 @@ def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "install skipped" in result.stdout
     assert "Manual install: dsh plugin --profile web add" in result.stdout
+
+
+def _uv_bootstrap_curl(installed_uv: str) -> str:
+    """Fake curl that plays astral.sh's installer: emit a script that drops a
+    working `uv` into ~/.local/bin, which is where the real one writes when
+    XDG_BIN_HOME and CARGO_HOME are unset."""
+    return (
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *astral.sh/uv/install.sh*)\n"
+        '    printf \'%s\\n\' "mkdir -p \\"$HOME/.local/bin\\"" \\\n'
+        '      "cat > \\"$HOME/.local/bin/uv\\" <<\'UVEOF\'" \\\n'
+        f"      {shlex.quote(installed_uv)} \\\n"
+        '      "UVEOF" "chmod 755 \\"$HOME/.local/bin/uv\\""\n'
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
+def test_installer_bootstraps_uv_when_no_installer_is_usable(tmp_path: Path) -> None:
+    """With no uv, no pipx and no supported Python, the installer fetches uv
+    rather than exiting — uv carries its own Python, so this is recoverable."""
+    tool_bin_dir = tmp_path / "uv-tool-bin"
+    installed_uv = f"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "uv 0.0.0-bootstrapped"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then
+  echo "{tool_bin_dir}"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  ln -sf "${OUROBOROS_STUB_VAR}" "{tool_bin_dir}/ouroboros"
+fi
+printf 'uv %s\\n' "$*" >> "${CALLS_LOG_VAR}"
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": _uv_bootstrap_curl(installed_uv)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "uv installed: uv 0.0.0-bootstrapped" in result.stdout
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install" in calls
+
+
+def test_installer_declines_to_bootstrap_uv_when_opted_out(tmp_path: Path) -> None:
+    """OUROBOROS_INSTALL_BOOTSTRAP_UV=0 keeps the pre-existing behaviour: print
+    instructions and exit rather than fetch an installer from the network."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 1
+    assert "No installer found" in result.stdout
+    assert "https://astral.sh/uv/install.sh" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "uv tool install" not in calls_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_installer_reports_failure_when_uv_bootstrap_does_not_land(tmp_path: Path) -> None:
+    """A curl that reports success but installs nothing must not be treated as a
+    working uv — the installer falls back to the instructions and exits."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 1
+    assert "not on PATH yet" in result.stdout
+    assert "No installer found" in result.stdout

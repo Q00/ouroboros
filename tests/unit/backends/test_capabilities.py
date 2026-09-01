@@ -487,6 +487,22 @@ def test_mcp_server_instructions_are_provider_neutral_and_budget_safe() -> None:
     # Fits the host instructions budget (Claude Code truncates at ~2KB).
     assert len(text.encode("utf-8")) < 2048
 
+    # Outcome-first routing: WHEN TO USE comes before the plumbing sections so
+    # hosts see the activation rules first, and it routes each intent to one
+    # entry tool without waiting for the literal "ooo" syntax.
+    assert "WHEN TO USE OUROBOROS" in text
+    assert text.index("WHEN TO USE OUROBOROS") < text.index("TOOL DISCOVERY")
+    assert text.index("WHEN TO USE OUROBOROS") < text.index("SUBAGENT FAN-OUT")
+    assert "`ouroboros_interview`" in text
+    assert "`ouroboros_start_auto`" in text
+    assert "`ouroboros_start_execute_seed`" in text
+    # Stagnation signals route to lateral thinking proactively.
+    assert "`ouroboros_lateral_think`" in text
+    assert "stuck" in text
+    assert 'Do not wait for the literal word "ooo"' in text
+    # Guardrail: trivial work must not be force-routed through Ouroboros.
+    assert "Do not route simple questions or small unambiguous edits" in text
+
     # Carries both ubiquitous-language conventions and the shared query/payload keys.
     assert "TOOL DISCOVERY" in text
     assert "SUBAGENT FAN-OUT" in text

@@ -72,7 +72,11 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator import create_agent_runtime, create_agent_runtime_async
+from ouroboros.orchestrator import (
+    create_agent_runtime,
+    create_agent_runtime_async,
+    preflight_agent_runtime,
+)
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_CWD_ARG,
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
@@ -291,7 +295,10 @@ async def _prepare_conductor_successor_seed(
     raw_directive = (
         raw_argument_directive if raw_argument_directive is not None else raw_seed_directive
     )
-    if raw_directive is None:
+    if raw_directive is None or (isinstance(raw_directive, Mapping) and not raw_directive):
+        # Fresh generated Seeds carry an empty placeholder for the optional
+        # conductor directive. It is not a successor request and therefore must
+        # not demand successor-only authorization fields.
         return Result.ok(seed_content)
     if is_resume:
         return Result.err(
@@ -1599,6 +1606,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             else {}
                         ),
                     )
+                    runtime_blocker = preflight_agent_runtime(agent_adapter)
+                    if runtime_blocker is not None:
+                        raise RuntimeError(
+                            f"Runtime '{self.agent_runtime_backend}' cannot execute: "
+                            f"{runtime_blocker}"
+                        )
                     # Host-driven execution: attach the composed bridge and the
                     # job identity its dispatch records correlate under. A
                     # retained-owner resume keeps the adapter this already
@@ -2398,9 +2411,14 @@ class StartExecuteSeedHandler:
         return MCPToolDefinition(
             name="ouroboros_start_execute_seed",
             description=(
-                "Start a seed execution in the background and return a job ID immediately. "
-                "Use ouroboros_ac_tree_hud for live progress snapshots and "
+                "Execute an existing Seed specification. "
+                "Use when: a validated Seed (file path or YAML) already exists. "
+                "Result: a background execution returning a job ID immediately; "
+                "use ouroboros_ac_tree_hud for live progress snapshots and "
                 "ouroboros_job_result for terminal output. "
+                "Do not use when: the request is raw or ambiguous natural "
+                "language with no Seed (use ouroboros_interview or "
+                "ouroboros_start_auto instead). "
                 "In plugin mode, execution is delegated to an OpenCode Task pane and "
                 "job_id is None — results appear in the Task pane instead of being "
                 "pollable via job_status/job_result. "
