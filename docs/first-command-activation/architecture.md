@@ -3,6 +3,9 @@
 > Generated: 2026-08-13
 > Approach: install hint plus setup fallback
 
+> Historical note: the v2 lean telemetry contract stopped collecting this
+> attribution. This document is retained only as implementation history.
+
 ## Overview
 
 The installer translates a documented `OUROBOROS_INSTALL_REF` token into a

@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -1203,6 +1204,23 @@ class ClaudeAgentAdapter:
             cli_path=self._cli_path,
             shared_rate_limit_enabled=self._rate_limit_bucket.enabled,
         )
+
+    def preflight(self) -> str | None:
+        """Return why this runtime cannot execute yet, or ``None`` when it can.
+
+        The SDK import happens lazily inside ``execute_task``; without this
+        check a missing ``claude-agent-sdk`` surfaces only as a per-AC error
+        result, which the executor then retries and route-escalates for every
+        AC before giving up. Checked once, before any dispatch, it is a single
+        actionable configuration error instead.
+        """
+        if importlib.util.find_spec("claude_agent_sdk") is None:
+            return (
+                "Claude Agent SDK is not installed for the 'claude' runtime. "
+                "Install it (pip install claude-agent-sdk, or the ouroboros-ai[claude] "
+                "extra) or use the dependency-free CLI worker: --runtime claude-cli."
+            )
+        return None
 
     # -- AgentRuntime protocol properties ----------------------------------
 

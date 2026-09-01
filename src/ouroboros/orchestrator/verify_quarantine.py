@@ -64,6 +64,7 @@ async def quarantine_unverifiable_result(
                 "verify_command": spec.verify_command,
                 "reason": gate_reason,
                 "status": "unverified",
+                "verify_cause": getattr(verify_gate_outcome, "cause", None),
             },
         )
     )

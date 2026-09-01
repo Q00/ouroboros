@@ -3,7 +3,7 @@
 These tests verify:
 1. Legacy engines lacking rephrase_pending_question get a truthful fallback
    instead of raising AttributeError.
-2. Claude packaged idk/interview skills explicitly relay meta.interview_calibration
+2. Packaged idk/interview skills explicitly relay meta.interview_calibration
    into subsequent interview calls for the full idk→answer→next sequence.
 3. Deterministic inference aligns with public SKILL.md examples:
    - "cannot explain PKCE" → foundational level, PKCE as unknown term
@@ -139,41 +139,30 @@ async def test_calibration_turn_engine_rephrase_is_none_is_truthful() -> None:
     assert result.value.meta["question_rephrased"] is False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Blocker 2: Claude packaged skills relay meta.interview_calibration
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 def test_claude_plugin_idk_skill_instructs_calibration_relay() -> None:
-    """The .claude-plugin/skills/idk/SKILL.md must instruct relaying calibration."""
     test_file = Path(__file__).resolve()
     repo_root = test_file.parent
     while repo_root != repo_root.parent:
         if (repo_root / "pyproject.toml").exists():
             break
         repo_root = repo_root.parent
-    skill_path = repo_root / ".claude-plugin" / "skills" / "idk" / "SKILL.md"
+    skill_path = repo_root / "skills" / "idk" / "SKILL.md"
     content = skill_path.read_text()
-    # Must instruct the host to relay meta.interview_calibration
     assert "meta.interview_calibration" in content
     assert "interview_calibration" in content
-    # Must mention the full idk→answer→next sequence
     assert "subsequent" in content.lower()
 
 
 def test_claude_plugin_interview_skill_instructs_calibration_relay() -> None:
-    """The .claude-plugin/skills/interview/SKILL.md must instruct calibration relay."""
     test_file = Path(__file__).resolve()
     repo_root = test_file.parent
     while repo_root != repo_root.parent:
         if (repo_root / "pyproject.toml").exists():
             break
         repo_root = repo_root.parent
-    skill_path = repo_root / ".claude-plugin" / "skills" / "interview" / "SKILL.md"
+    skill_path = repo_root / "skills" / "interview" / "SKILL.md"
     content = skill_path.read_text()
-    # Must mention interview_calibration relay on subsequent calls
     assert "interview_calibration" in content
-    # Must instruct passing it as an argument
     assert "interview_calibration" in content and "argument" in content.lower()
 
 

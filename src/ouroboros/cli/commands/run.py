@@ -623,6 +623,7 @@ async def _run_orchestrator(
         OrchestratorRunner,
         create_agent_runtime,
         create_agent_runtime_async,
+        preflight_agent_runtime,
         resolve_agent_runtime_backend,
     )
     from ouroboros.orchestrator.session import SessionRepository
@@ -750,6 +751,10 @@ async def _run_orchestrator(
         model=execution_model,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
+    runtime_blocker = preflight_agent_runtime(adapter)
+    if runtime_blocker is not None:
+        print_error(f"Runtime '{resolved_runtime_backend}' cannot execute: {runtime_blocker}")
+        raise typer.Exit(1)
     runner = OrchestratorRunner(
         adapter,
         event_store,

@@ -65,6 +65,9 @@ areas, and do not infer low general ability from an unknown English term, typo,
 or terse answer. Adapt vocabulary, sentence structure, context, and example
 depth only; preserve the original question's decision, constraints, acceptance
 meaning, and all interview gates.
+If the previous `ooo idk` or `ooo interview` response included
+`meta.interview_calibration`, pass it to the next `ouroboros_interview` MCP call
+as the `interview_calibration` argument.
 
 If the user says they do not know a word or invokes `ooo idk` while a question
 is pending, do not forward that statement to MCP as the answer. Explain the term

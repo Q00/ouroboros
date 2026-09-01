@@ -4,8 +4,8 @@ The MCP SDK's stdio session reads stdin via a shielded anyio worker thread
 (``abandon_on_cancel=False``), so an unbounded ``await serve_task`` in the
 shutdown path hangs forever whenever a stop was requested by a signal or the
 watchdog while the client is alive but quiescent — the "server survives kill"
-symptom. The drain is bounded; after the grace, fd 0 is closed (stdio only)
-to EOF the blocked readline so the normal cleanup path completes.
+symptom. The drain is bounded; a serve task that outlives the graces forces a
+hard exit, but only after every cleanup in the finally block has run.
 """
 
 from __future__ import annotations
@@ -95,30 +95,35 @@ async def test_watchdog_dead_client_stops_server(monkeypatch) -> None:
     mock_server.shutdown.assert_awaited_once()
 
 
+class _HardExitCalled(BaseException):
+    """Sentinel the test raises in place of ``os._exit``."""
+
+
 @pytest.mark.asyncio
-async def test_stuck_serve_loop_is_bounded_and_unblocked_by_fd0_close(monkeypatch) -> None:
-    """A serve loop that swallows cancellation must not hang shutdown."""
+async def test_stuck_serve_loop_hard_exits_after_cleanup(monkeypatch) -> None:
+    """A serve loop that swallows cancellation must force a hard exit.
+
+    Under mcp>=2.0 no descriptor close can EOF the SDK's stdin reader (the
+    wire is a private duplicate of fd 0) and the reader thread is non-daemon,
+    so returning normally would hang interpreter teardown forever. The drain
+    must therefore invoke the hard-exit backstop — but only AFTER the finally
+    block's cleanup (server shutdown among it) has run.
+    """
     mock_es, mock_repo, mock_server = _make_mocks()
-    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.1)
 
-    closed_fds: list[int] = []
     release = asyncio.Event()
-    real_close = mcp_module.os.close
+    hard_exit_codes: list[int] = []
 
-    def fake_close(fd: int) -> None:
-        # Intercept only fd 0 (the drain's EOF escalation); everything else
-        # must really close or subprocess plumbing (ps lookups) deadlocks.
-        if fd == 0:
-            closed_fds.append(fd)
-            release.set()
-            return
-        real_close(fd)
+    def fake_hard_exit(code: int) -> None:
+        hard_exit_codes.append(code)
+        release.set()  # let the stuck task finish so the loop tears down clean
+        raise _HardExitCalled
 
-    monkeypatch.setattr(mcp_module.os, "close", fake_close)
+    monkeypatch.setattr(mcp_module, "_flush_and_hard_exit", fake_hard_exit)
 
     async def stuck_serve(*args, **kwargs):
-        # Emulates the shielded stdin readline: swallows cancellation and only
-        # returns once fd 0 is closed (EOF reaches the worker thread).
+        # Emulates the shielded stdin readline: swallows cancellation forever.
         while True:
             try:
                 await release.wait()
@@ -133,31 +138,27 @@ async def test_stuck_serve_loop_is_bounded_and_unblocked_by_fd0_close(monkeypatc
     monkeypatch.setattr(mcp_module, "_client_is_alive", lambda _pid, _start_marker=None: False)
 
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
-    with es_patch, repo_patch, server_patch:
+    with es_patch, repo_patch, server_patch, pytest.raises(_HardExitCalled):
         await asyncio.wait_for(
             mcp_module._run_mcp_server("localhost", 8080, "stdio"),
             timeout=10.0,
         )
 
-    assert 0 in closed_fds, "the drain must EOF fd 0 after the grace expired"
+    assert hard_exit_codes == [0]
+    # Cleanup must have completed BEFORE the hard exit fired.
     mock_server.shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_non_stdio_transport_never_closes_fd0(monkeypatch) -> None:
+async def test_slow_cooperative_unwind_does_not_hard_exit(monkeypatch) -> None:
+    """An unwind that finishes within the graces must exit gracefully."""
     mock_es, mock_repo, mock_server = _make_mocks()
-    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(mcp_module, "_SHUTDOWN_DRAIN_GRACE_SECONDS", 0.3)
 
-    closed_fds: list[int] = []
-    real_close = mcp_module.os.close
-
-    def fake_close(fd: int) -> None:
-        if fd == 0:
-            closed_fds.append(fd)
-            return
-        real_close(fd)
-
-    monkeypatch.setattr(mcp_module.os, "close", fake_close)
+    hard_exit_codes: list[int] = []
+    monkeypatch.setattr(
+        mcp_module, "_flush_and_hard_exit", lambda code: hard_exit_codes.append(code)
+    )
 
     stop_probe = asyncio.Event()
 
@@ -167,7 +168,7 @@ async def test_non_stdio_transport_never_closes_fd0(monkeypatch) -> None:
         except asyncio.CancelledError:
             # One slow unwind beyond the first grace window, then exit.
             stop_probe.set()
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.4)
             raise
 
     mock_server.serve.side_effect = slow_then_cooperative_serve
@@ -183,7 +184,8 @@ async def test_non_stdio_transport_never_closes_fd0(monkeypatch) -> None:
         )
 
     assert stop_probe.is_set()
-    assert closed_fds == [], "fd 0 belongs to the console on network transports"
+    assert hard_exit_codes == [], "a cooperative unwind must never hard-exit"
+    mock_server.shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio

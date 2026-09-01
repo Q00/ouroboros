@@ -81,6 +81,8 @@ Interview calibration
 Then say that the calibration applies to subsequent `ooo interview` turns in
 this conversation and can be revised at any time with another `ooo idk`.
 Do not write a profile to disk or claim that it persists across conversations.
+If the runtime returns `meta.interview_calibration`, relay that value into the
+next `ooo interview` call as the `interview_calibration` argument.
 
 ### 4. Apply it during an active interview
 
@@ -92,6 +94,8 @@ If `ooo idk` is invoked while an interview question is pending:
 3. Preserve the question's decision, constraints, and acceptance meaning.
 4. Ask the rephrased question again; advance the interview only after the user
    answers it.
+5. On subsequent interview calls, pass the latest `meta.interview_calibration`
+   value as the `interview_calibration` argument.
 
 ## Guardrails
 

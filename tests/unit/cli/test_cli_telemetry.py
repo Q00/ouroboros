@@ -130,7 +130,6 @@ def test_dynamic_plugin_dispatch_captures_extension_command_not_plugin_name(
     assert len(captured) == 1
     assert captured[0]["event"] == "command_run"
     assert captured[0]["properties"]["command"] == "extension_command"
-    assert captured[0]["properties"]["is_funnel"] is False
     assert installed_plugin not in repr(captured[0])
 
 

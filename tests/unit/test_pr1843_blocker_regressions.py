@@ -6,7 +6,7 @@ These tests verify:
 2. PM composition compatibility — PMInterviewEngine works with calibration.
 3. Non-persistence of calibration — calibration is stripped from persisted dicts.
 4. Truthful rephrase fallback — failed rephrasing does not claim success.
-5. Claude plugin skill surface — .claude-plugin/skills/idk/SKILL.md exists.
+5. Packaged skill surface — skills/idk/SKILL.md exists.
 """
 
 from __future__ import annotations
@@ -245,17 +245,13 @@ async def test_calibration_turn_rephrase_success_shows_plainer() -> None:
 
 
 def test_claude_plugin_idk_skill_exists() -> None:
-    """The .claude-plugin/skills/idk/SKILL.md must exist for Marketplace users."""
-    # tests/unit/test_pr1843_blocker_regressions.py -> repo root is parents[2]
-    # (tests -> unit -> file), or use pyproject.toml detection
     test_file = Path(__file__).resolve()
-    # Walk up until we find pyproject.toml
     repo_root = test_file.parent
     while repo_root != repo_root.parent:
         if (repo_root / "pyproject.toml").exists():
             break
         repo_root = repo_root.parent
-    skill_path = repo_root / ".claude-plugin" / "skills" / "idk" / "SKILL.md"
+    skill_path = repo_root / "skills" / "idk" / "SKILL.md"
     assert skill_path.exists(), f"Missing: {skill_path}"
     content = skill_path.read_text()
     assert "mcp_tool: ouroboros_interview" in content
