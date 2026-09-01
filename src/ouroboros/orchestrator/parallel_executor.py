@@ -419,7 +419,7 @@ from ouroboros.orchestrator.verifier import (
     verifier_operational_failure_verdict,
 )
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
-from ouroboros.orchestrator.verify_cwd import resolve_verify_command_cwd
+from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
@@ -9798,20 +9798,24 @@ Respond with either ATOMIC or the structured JSON object only.
         # Where the command runs is a per-AC contract (explicit verify_cwd, or
         # the workspace's sole node manifest directory for package-runner
         # commands); artifact checks and digests above stay rooted at ``cwd``.
-        command_cwd, command_cwd_error = resolve_verify_command_cwd(cwd, spec)
-        if command_cwd_error is not None:
+        command_cwd = bind_verify_command_cwd(cwd, spec)
+        if command_cwd.error is not None:
             return _VerifyGateOutcome(
                 passed=False,
-                reason=command_cwd_error,
+                reason=command_cwd.error,
                 output_tail="",
                 workspace_digest=workspace_before,
             )
-        run = await run_with_shell(
-            (verify_shell_path, "-c", command),
-            cwd=command_cwd,
-            env=verify_env,
-            timeout_seconds=self._verify_command_timeout_seconds,
-        )
+        try:
+            run = await run_with_shell(
+                (verify_shell_path, "-c", command),
+                cwd=command_cwd.cwd,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
+                cwd_capability=command_cwd.capability,
+            )
+        finally:
+            command_cwd.close()
 
         if run.start_error is not None:
             return _VerifyGateOutcome(

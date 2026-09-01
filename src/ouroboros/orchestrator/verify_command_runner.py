@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import os
 import subprocess
 
+from ouroboros.core.filesystem_capability import NoFollowDirectoryChain
+
 
 @dataclass(frozen=True, slots=True)
 class VerifyRun:
@@ -116,13 +118,22 @@ def _running_on_windows() -> bool:
     return os.name == "nt"
 
 
-def _spawn_kwargs() -> dict[str, object]:
+def _spawn_kwargs(cwd_capability: NoFollowDirectoryChain | None = None) -> dict[str, object]:
     """Create a verifier process that cannot execute before containment."""
     if _running_on_windows():
         new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         suspended = getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
         return {"creationflags": new_group | suspended}
-    return {"start_new_session": True}
+    kwargs: dict[str, object] = {"start_new_session": True}
+    if cwd_capability is not None:
+        cwd_fd = cwd_capability.leaf_fd
+
+        def enter_bound_cwd() -> None:
+            os.fchdir(cwd_fd)
+
+        kwargs["preexec_fn"] = enter_bound_cwd
+        kwargs["pass_fds"] = (cwd_fd,)
+    return kwargs
 
 
 def _resume_windows_process(pid: int) -> None:
@@ -217,15 +228,22 @@ async def _run_process(
     cwd: str,
     env: Mapping[str, str],
     timeout_seconds: float,
+    cwd_capability: NoFollowDirectoryChain | None = None,
 ) -> VerifyRun:
+    if cwd_capability is not None and not cwd_capability.postvalidate():
+        return VerifyRun(
+            returncode=1,
+            output="",
+            start_error="verify_command cwd binding changed before launch",
+        )
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
-            cwd=cwd,
+            cwd=os.sep if cwd_capability is not None else cwd,
             env=dict(env),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **_spawn_kwargs(),  # type: ignore[arg-type]
+            **_spawn_kwargs(cwd_capability),  # type: ignore[arg-type]
         )
     except Exception as exc:  # pragma: no cover - spawn failure is environmental
         return VerifyRun(returncode=1, output="", start_error=str(exc))
@@ -256,6 +274,13 @@ async def _run_process(
         if job is not None:
             job.close()
 
+    if cwd_capability is not None and not cwd_capability.postvalidate():
+        return VerifyRun(
+            returncode=1,
+            output=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+            start_error="verify_command cwd binding changed during run",
+        )
+
     return VerifyRun(
         returncode=proc.returncode if proc.returncode is not None else 1,
         output=(stdout_bytes or b"").decode("utf-8", errors="replace"),
@@ -268,6 +293,13 @@ async def run_with_shell(
     cwd: str,
     env: Mapping[str, str],
     timeout_seconds: float,
+    cwd_capability: NoFollowDirectoryChain | None = None,
 ) -> VerifyRun:
     """Run the command through a resolved POSIX shell, unmodified."""
-    return await _run_process(argv, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+    return await _run_process(
+        argv,
+        cwd=cwd,
+        env=env,
+        timeout_seconds=timeout_seconds,
+        cwd_capability=cwd_capability,
+    )
