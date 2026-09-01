@@ -43,7 +43,6 @@ _DEFAULT_CODEX_MCP_JSON = CODEX_MCP_JSON
 # unpinned spec is accepted on read so the first sync can introduce the pin.
 MCP_FROM_SPEC_RE = re.compile(r"^ouroboros-ai\[mcp\](?:==(?P<version>[0-9A-Za-z.!+]+))?$")
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
-BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
 VERSION_MARKER_ENVELOPE_RE = re.compile(r"<!-- ooo:VERSION:(.*?) -->", re.DOTALL)
 _MAX_CONFLICT_RESTORE_EXCHANGES = 8
@@ -630,7 +629,7 @@ def _run() -> None:
     originals: dict[Path, bytes] = {}
     original_generations: dict[Path, _PathGeneration] = {}
     setup_markers: dict[Path, tuple[str, str]] = {}
-    for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
+    for path in (SETUP_SKILL_MD,):
         if not path.exists():
             sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
         original_generations[path] = _path_generation(path)

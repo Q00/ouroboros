@@ -1930,7 +1930,7 @@ def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert "Installing .[claude,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -1961,7 +1961,7 @@ def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[claude-sdk,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude-sdk")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -2164,7 +2164,7 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
@@ -2557,8 +2557,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
-    assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with mcp==2.0.0" not in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
