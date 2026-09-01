@@ -282,6 +282,7 @@ class TestMCPCommands:
             allowed_hosts=(),
             allowed_origins=(),
             workspace_roots=(),
+            idle_timeout_seconds=None,
         )
 
     def test_mcp_info(self) -> None:

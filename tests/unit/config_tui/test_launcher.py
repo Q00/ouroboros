@@ -105,6 +105,7 @@ def test_launch_web_treats_zero_port_as_free_port(monkeypatch) -> None:
 
 def test_launch_web_without_textual_serve_prints_hint(monkeypatch, capsys) -> None:
     monkeypatch.setattr(launcher, "_import_server", lambda: None)
+    monkeypatch.setattr(launcher, "_relaunch_with_tui_profile", lambda: False)
     with pytest.raises(SystemExit):
         launcher._launch_web()
     # Rich panels add ANSI styling and box borders; strip both before matching.
@@ -113,6 +114,54 @@ def test_launch_web_without_textual_serve_prints_hint(monkeypatch, capsys) -> No
     output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
     flattened = "".join(line.strip("│╭╮╰╯─ ") for line in output.splitlines())
     assert "ouroboros-ai[tui]" in flattened
+
+
+def test_missing_web_dependencies_relaunch_with_default_profile(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(launcher, "_import_server", lambda: None)
+    monkeypatch.setattr(
+        launcher,
+        "_relaunch_with_tui_profile",
+        lambda: calls.append("bootstrap") or True,
+    )
+
+    launcher._launch_web()
+
+    assert calls == ["bootstrap"]
+
+
+def test_bootstrap_uses_published_mcp_v2_and_tui_profile(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.delenv("OUROBOROS_CONFIG_TUI_BOOTSTRAPPED", raising=False)
+    monkeypatch.setattr(
+        launcher.shutil, "which", lambda name: "/usr/bin/uvx" if name == "uvx" else None
+    )
+    monkeypatch.setattr(launcher.sys, "argv", ["ouroboros", "config", "--no-browser"])
+    monkeypatch.setattr(
+        launcher.os,
+        "execvpe",
+        lambda executable, args, env: captured.update(
+            executable=executable,
+            args=args,
+            env=env,
+        ),
+    )
+
+    assert launcher._relaunch_with_tui_profile() is True
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[:4] == ["/usr/bin/uvx", "--isolated", "--python", ">=3.12"]
+    assert args[4:6] == ["--from", "ouroboros-ai[mcp,tui]"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["OUROBOROS_CONFIG_TUI_BOOTSTRAPPED"] == "1"
+
+
+def test_bootstrap_guard_prevents_recursive_relaunch(monkeypatch) -> None:
+    monkeypatch.setenv("OUROBOROS_CONFIG_TUI_BOOTSTRAPPED", "1")
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: "/usr/bin/uvx")
+
+    assert launcher._relaunch_with_tui_profile() is False
 
 
 @pytest.mark.parametrize(

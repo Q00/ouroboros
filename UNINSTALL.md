@@ -20,6 +20,11 @@ uv tool uninstall ouroboros-ai            # or: pip uninstall ouroboros-ai
 claude plugin uninstall ouroboros         # if using Claude Code plugin
 ```
 
+On Windows (installed with `scripts/install.ps1`), the same two commands work
+in PowerShell. Git and uv were installed through winget and stay in place;
+remove them with `winget uninstall --id astral-sh.uv -e` and
+`winget uninstall --id Git.Git -e` if you no longer want them.
+
 ### Options
 
 | Flag | Effect |

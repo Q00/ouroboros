@@ -143,6 +143,7 @@ from ouroboros.orchestrator.runner import (
 from ouroboros.orchestrator.runtime_factory import (
     create_agent_runtime,
     create_agent_runtime_async,
+    preflight_agent_runtime,
     resolve_agent_runtime_backend,
 )
 from ouroboros.orchestrator.session import (
@@ -167,6 +168,7 @@ __all__ = [
     "TaskResult",
     "create_agent_runtime",
     "create_agent_runtime_async",
+    "preflight_agent_runtime",
     "resolve_agent_runtime_backend",
     # Session
     "SessionRepository",

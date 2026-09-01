@@ -72,11 +72,13 @@ Sponsor = "https://github.com/sponsors/Q00"
 # Claude's default runtime preserves the Agent SDK and its MCP 1.x graph. The
 # MCP 2 server runs in a separate process/profile; these extras must never be
 # selected in one interpreter.
-claude = ["claude-agent-sdk==0.2.139", "anthropic==0.122.0"]
+# claude-agent-sdk 0.2.144 dropped its own MCP 1.x ceiling; the profile
+# contract (MCP 1.x graph) is preserved by pinning it here explicitly.
+claude = ["claude-agent-sdk==0.2.144", "anthropic==0.122.0", "mcp==1.28.1"]
 claude-cli = []
 # Explicit alias for automation and migrations that want to spell out the SDK
 # transport rather than rely on the historical `[claude]` name.
-claude-sdk = ["claude-agent-sdk==0.2.139", "anthropic==0.122.0"]
+claude-sdk = ["claude-agent-sdk==0.2.144", "anthropic==0.122.0", "mcp==1.28.1"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
