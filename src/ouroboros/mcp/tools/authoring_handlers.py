@@ -69,6 +69,7 @@ from ouroboros.mcp.tools.interview_advisory import (
     _attach_question_assist_requests,
     _milestone_for_score,
 )
+from ouroboros.mcp.tools.interview_plugin_advisory import build_plugin_question_advisory_meta
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
 )
@@ -2296,23 +2297,18 @@ class InterviewHandler:
         research_subject = (
             plugin_state.initial_context if plugin_state is not None else str(initial_context or "")
         )
-        factual_question = str(last_question or "").strip()
-        if not factual_question and plugin_state is not None and plugin_state.rounds:
-            factual_question = plugin_state.rounds[-1].question
-        if not factual_question:
-            factual_question = research_subject
-        plugin_advisory_meta: dict[str, Any] = {}
-        _attach_question_assist_requests(
-            plugin_advisory_meta,
+        fallback_question = (
+            plugin_state.rounds[-1].question
+            if plugin_state is not None and plugin_state.rounds
+            else ""
+        )
+        plugin_advisory_meta = build_plugin_question_advisory_meta(
             session_id=str(real_session_id or "new"),
-            question=factual_question,
-            phase="resume_pending" if action == "resume" else action,
-            score=(_load_state_ambiguity_score(plugin_state) if plugin_state is not None else None),
-            last_question=(str(last_question) if last_question else None),
+            action=action,
+            last_question=last_question,
+            fallback_question=fallback_question,
             research_subject=research_subject,
-            dispatch_mode=resolve_request_subagent_dispatch(
-                self.agent_runtime_backend, self.opencode_mode
-            ),
+            score=(_load_state_ambiguity_score(plugin_state) if plugin_state is not None else None),
             runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
             fanout_registry=self._resolved_fanout_registry(),
@@ -2322,9 +2318,7 @@ class InterviewHandler:
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
-            initial_context=(
-                plugin_state.initial_context if plugin_state is not None else initial_context
-            ),
+            initial_context=research_subject,
             answer=answer,
             cwd=arguments.get("cwd"),
             transcript=transcript,
