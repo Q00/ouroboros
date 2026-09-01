@@ -1252,16 +1252,17 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
 
 
 def test_interview_skill_surfaces_match_on_snapshot_contract() -> None:
-    roots = (Path("skills/interview/SKILL.md"), Path(".claude-plugin/skills/interview/SKILL.md"))
     marker = "**Factual research snapshot**"
     end = "   **Milestone lateral-review dispatch**"
-    sections: list[str] = []
-    for root in roots:
-        skill = root.read_text(encoding="utf-8")
-        start = skill.index(marker)
-        stop = skill.index(end, start)
-        sections.append(skill[start:stop])
-    assert sections[0] == sections[1]
+    skill = Path("skills/interview/SKILL.md").read_text(encoding="utf-8")
+    start = skill.index(marker)
+    stop = skill.index(end, start)
+    section = skill[start:stop]
+
+    assert "code_context" in section
+    assert "web_context" in section
+    assert "complete cache hit" in section
+    assert "no `question_advisory_subagents`" in section
 
 
 def test_documented_interview_source_evidence_matches_public_schema() -> None:

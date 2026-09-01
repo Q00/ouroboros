@@ -765,7 +765,11 @@ async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_p
     assert meta["status"] == "invalid_result_entry"
     # Every offender at once: a host with three bad entries should not need
     # three submissions to learn three facts.
-    assert sorted(meta["invalid_keys"]) == sorted(required)
+    invalid_keys = meta["invalid_keys"]
+    assert isinstance(invalid_keys, list)
+    invalid_key_names = [key for key in invalid_keys if isinstance(key, str)]
+    assert len(invalid_key_names) == len(invalid_keys)
+    assert sorted(invalid_key_names) == sorted(required)
 
     # An entry that is not an object, or that names no lane, has no key to be
     # reported under — so it is reported by position rather than dropped. It
@@ -1178,18 +1182,12 @@ def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
     root = Path(__file__).resolve().parents[4]
     skill = root / "skills" / "interview" / "SKILL.md"
     content = skill.read_text(encoding="utf-8")
-    assert "there is no `[from-data]` answer to" in content, skill
-    assert "material for the user's" in content, skill
-    # The drop-after-answer duty is what a measurement crossing issuances is
-    # weighed against (see the cross-issuance test above): the server cannot
-    # tell when a payload was produced, so this rule — not a token the child
-    # echoes — is what keeps a late number from re-opening a settled
-    # decision. It is a host duty, so the duty being *stated* is the whole of
-    # what this side can pin, and losing the sentence would silently retire
-    # the guard the accepted risk rests on.
-    assert "already answered the question by the time the measurement" in content, skill
-    assert "drop it" in content, skill
-    assert "evidence informs a\n     decision, it does not revisit one" in content, skill
+    assert (
+        "material for their judgment"
+        in interview_data_evidence_answer_contract()["runtime_instruction"]
+    )
+    assert "Do not add data, contrarian, simplifier, or architecture subagents" in content, skill
+    assert "Take a measurement directly only when" in content, skill
     assert "data_context" not in content, skill
     assert "[from-data]" not in content, skill
     # The retired gate: leaving it would have hosts waiting to confirm a
@@ -2002,4 +2000,4 @@ def test_ordinary_interview_has_no_timestamped_measurement_surface() -> None:
     content = skill.read_text(encoding="utf-8")
     assert "observed_at" not in content, skill
     assert "Say when each was measured" not in content, skill
-    assert "already answered the question by the time the measurement" in content, skill
+    assert "Take a measurement directly only when" in content, skill
