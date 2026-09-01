@@ -1226,10 +1226,15 @@ def _web_source_evidence_violations(
     if output.get("status") == "references_found":
         references = output.get("references")
         if isinstance(references, list):
+            seen_reference_urls: set[str] = set()
             for index, reference in enumerate(references):
                 if not isinstance(reference, Mapping):
                     continue
                 url = str(reference.get("url") or "")
+                if url in seen_reference_urls:
+                    errors.append(f"references/{index}/url: duplicates an earlier reference URL")
+                else:
+                    seen_reference_urls.add(url)
                 if url not in result_urls:
                     errors.append(f"references/{index}/url: absent from attested search results")
                 fetched_reference = fetched_by_url.get(url)

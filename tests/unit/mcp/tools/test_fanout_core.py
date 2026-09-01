@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 import pytest
@@ -236,6 +237,70 @@ def test_registry_register_and_load_round_trip(tmp_path: Any) -> None:
     assert isinstance(loaded, FanoutRecord)
     assert loaded.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL
     assert loaded.expected_keys == ("researcher", "contrarian")
+
+
+def test_registry_register_refuses_symlinked_directory(tmp_path: Any) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_registry = tmp_path / "fanout"
+    try:
+        linked_registry.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    registry = FanoutRegistry(linked_registry)
+
+    assert (
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="sess-symlink",
+            correlation_key="corr-symlink",
+            expected_keys=["code_context"],
+            synthesizer_input={"question": "Can publication escape?"},
+            fanout_id="fanout_symlinked_registry",
+        )
+        is None
+    )
+    assert not (outside / "fanout_symlinked_registry.json").exists()
+
+
+def test_registry_register_refuses_replaced_directory_after_commit(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.core import owner_only
+
+    registry_path = tmp_path / "fanout"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    detached = tmp_path / "detached-fanout"
+    real_fsync_directory_fd = owner_only._fsync_directory_fd
+
+    def replace_registry_path(directory_fd: int) -> bool:
+        result = real_fsync_directory_fd(directory_fd)
+        registry_path.rename(detached)
+        try:
+            registry_path.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        return result
+
+    monkeypatch.setattr(owner_only, "_fsync_directory_fd", replace_registry_path)
+    registry = FanoutRegistry(registry_path)
+
+    assert (
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="sess-raced",
+            correlation_key="corr-raced",
+            expected_keys=["code_context"],
+            synthesizer_input={"question": "Can publication race?"},
+            fanout_id="fanout_replaced_registry",
+        )
+        is None
+    )
+    assert not (outside / "fanout_replaced_registry.json").exists()
+    shutil.rmtree(detached)
 
 
 def test_registry_load_unknown_returns_none(tmp_path: Any) -> None:
@@ -926,6 +991,41 @@ def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path
     assert outcome["contract_violations"]["web_context"] == [
         "source_evidence/output is not a JSON object"
     ]
+
+
+def test_web_reference_urls_must_be_distinct_even_when_objects_differ(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-duplicate-url"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    web = outputs["web_context"]
+    source_evidence = _web_source_evidence(web)
+    duplicate_url = web["references"][0]["url"]
+    web["references"][1] = {
+        **web["references"][1],
+        "url": duplicate_url,
+        "title": "Different title for the same fetched source",
+        "relevance": "Different relevance text cannot make the URL distinct.",
+    }
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {
+                "key": key,
+                "content": outputs[key],
+                **({"source_evidence": source_evidence} if key == "web_context" else {}),
+            }
+            for key in lane_keys
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["web_context"]
+    assert "references/1/url: duplicates an earlier reference URL" in violations
 
 
 def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any) -> None:

@@ -23,6 +23,11 @@ from pathlib import Path
 import stat
 from uuid import uuid4
 
+from ouroboros.core.filesystem_capability import (
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
+
 #: Files: readable and writable by the owner only.
 OWNER_ONLY_FILE = 0o600
 #: Directories: additionally traversable by the owner only.
@@ -91,19 +96,81 @@ def fsync_parent_directory(file_path: Path) -> bool:
         directory_fd = os.open(file_path.parent, flags)
     except OSError as error:
         return error.errno in (errno.EINVAL, errno.ENOTSUP)
-    durability_confirmed = True
     try:
-        try:
-            os.fsync(directory_fd)
-        except OSError as error:
-            if error.errno not in (errno.EINVAL, errno.ENOTSUP):
-                durability_confirmed = False
+        durability_confirmed = _fsync_directory_fd(directory_fd)
     finally:
         try:
             os.close(directory_fd)
         except OSError:
             durability_confirmed = False
     return durability_confirmed
+
+
+def _fsync_directory_fd(directory_fd: int) -> bool:
+    try:
+        os.fsync(directory_fd)
+    except OSError as error:
+        return error.errno in (errno.EINVAL, errno.ENOTSUP)
+    return True
+
+
+def ensure_directory_no_symlinks(path: Path, *, mode: int = OWNER_ONLY_DIR) -> Path:
+    """Create a directory chain without following existing symlink components."""
+    requested = Path(os.path.abspath(path.expanduser()))
+    _refuse_symlinked_existing_components(requested)
+    target = Path(os.path.realpath(requested))
+    if _directory_dirfd_creation_available():
+        _mkdir_nofollow_directory_chain(target, mode=mode)
+    else:
+        target.mkdir(parents=True, exist_ok=True, mode=mode)
+        _refuse_symlinked_existing_components(target)
+    return target
+
+
+def _directory_dirfd_creation_available() -> bool:
+    return (
+        _posix()
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+    )
+
+
+def _mkdir_nofollow_directory_chain(path: Path, *, mode: int) -> None:
+    if path.anchor != os.sep:
+        msg = "no-follow directory creation requires an absolute POSIX path"
+        raise ValueError(msg)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(os.sep, flags)
+    try:
+        for component in path.parts[1:]:
+            if component in {"", ".", ".."} or Path(component).name != component:
+                msg = "directory capability components must be canonical names"
+                raise ValueError(msg)
+            try:
+                os.mkdir(component, mode=mode, dir_fd=current_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    finally:
+        os.close(current_fd)
+
+
+def _refuse_symlinked_existing_components(path: Path) -> None:
+    for component in (*reversed(path.parents), path):
+        if component.is_symlink() and not _allowed_platform_symlink_component(component):
+            msg = f"Refusing to create directory through symlinked component: {component}"
+            raise OSError(msg)
+
+
+def _allowed_platform_symlink_component(component: Path) -> bool:
+    return component in {Path("/tmp"), Path("/var")} and Path(os.path.realpath(component)) in {
+        Path("/private/tmp"),
+        Path("/private/var"),
+    }
 
 
 def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
@@ -157,6 +224,9 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
                 target,
             )
         return _write_atomic_unscoped(target, text, encoding=encoding)
+    target = ensure_directory_no_symlinks(target.parent, mode=0o777) / target.name
+    if nofollow_directory_capabilities_available() and os.rename in os.supports_dir_fd:
+        return _write_owner_only_dirfd(target, text, encoding=encoding)
     # The temporary must not be longer than the filesystem allows just because
     # the target is near the limit. Embedding the WHOLE target name
     # added a fixed 38 characters, so a caller that had carefully bounded its
@@ -194,6 +264,44 @@ def write_owner_only(path: Path, text: str, *, encoding: str = "utf-8") -> bool:
             os.unlink(tmp_path)
         raise
     return fsync_parent_directory(target)
+
+
+def _write_owner_only_dirfd(target: Path, text: str, *, encoding: str) -> bool:
+    """Write through a held parent directory capability."""
+    if target.name in {"", ".", ".."} or Path(target.name).name != target.name:
+        msg = "owner-only target must be a canonical file name"
+        raise ValueError(msg)
+    parent = Path(os.path.abspath(target.parent))
+    directory_chain = open_nofollow_directory_chain(parent)
+    raw_fd: int | None = None
+    tmp_name = f".{target.name[:_TMP_NAME_PREFIX_CHARS]}.tmp-{uuid4().hex}"
+    try:
+        parent_fd = directory_chain.leaf_fd
+        raw_fd = os.open(
+            tmp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            OWNER_ONLY_FILE,
+            dir_fd=parent_fd,
+        )
+        if stat.S_IMODE(os.fstat(raw_fd).st_mode) != OWNER_ONLY_FILE:
+            raise OSError(f"cannot create {target} with owner-only permissions on this filesystem")
+        handle = os.fdopen(raw_fd, "w", encoding=encoding)
+        raw_fd = None
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.rename(tmp_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        return _fsync_directory_fd(parent_fd) and directory_chain.postvalidate()
+    except BaseException:
+        if raw_fd is not None:
+            with suppress(OSError):
+                os.close(raw_fd)
+        with suppress(OSError):
+            os.unlink(tmp_name, dir_fd=directory_chain.leaf_fd)
+        raise
+    finally:
+        directory_chain.close()
 
 
 def _write_atomic_unscoped(target: Path, text: str, *, encoding: str) -> bool:
@@ -250,8 +358,8 @@ def secure_directory(path: Path) -> None:
     owner-only through :func:`write_owner_only`.
     """
     if not package_owned_directory(path):
-        path.mkdir(parents=True, exist_ok=True)
+        ensure_directory_no_symlinks(path, mode=0o777)
         return
-    path.mkdir(parents=True, exist_ok=True, mode=OWNER_ONLY_DIR)
+    ensure_directory_no_symlinks(path, mode=OWNER_ONLY_DIR)
     with suppress(OSError):
         os.chmod(path, OWNER_ONLY_DIR)

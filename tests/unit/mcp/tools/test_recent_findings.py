@@ -41,7 +41,7 @@ from ouroboros.mcp.tools.recent_findings import (
 )
 from ouroboros.orchestrator.capabilities.pm_schemas import pm_repository_roster
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
-from ouroboros.persistence.artifact_errors import ArtifactNotFoundError
+from ouroboros.persistence.artifact_errors import ArtifactNotFoundError, ArtifactStoreError
 from ouroboros.persistence.artifact_store import ArtifactStore
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
@@ -59,6 +59,23 @@ def store(tmp_path: Path) -> ArtifactStore:
     built = ArtifactStore.for_project(workspace)
     built.initialize()
     return built
+
+
+def test_project_store_refuses_symlinked_ouroboros_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (workspace / ".ouroboros").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    store = ArtifactStore.for_project(workspace)
+
+    with pytest.raises(ArtifactStoreError, match="Artifact database could not be initialized"):
+        store.initialize()
+    assert not (outside / "artifacts" / "artifacts.db").exists()
 
 
 def _publish(
