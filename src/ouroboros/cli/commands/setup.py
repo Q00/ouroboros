@@ -36,6 +36,7 @@ from rich.table import Table
 import typer
 import yaml
 
+from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
@@ -48,6 +49,7 @@ from ouroboros.cli.commands.claude_setup import (
 )
 from ouroboros.cli.commands.pi_bridge import pi_ooo_bridge_source_text
 from ouroboros.cli.commands.setup_atomic_restore import restore_hermes, restore_hermes_receipt
+from ouroboros.cli.commands.setup_completion import print_setup_completion
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -88,11 +90,6 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
-from ouroboros.package_profiles import (
-    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
-    UVX_PYTHON_FLOOR,
-    has_unsupported_claude_sdk_mcp_mix,
-)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -112,7 +109,7 @@ def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     return [
         "--isolated",
         "--python",
-        UVX_PYTHON_FLOOR,
+        package_profiles.UVX_PYTHON_FLOOR,
         "--from",
         package_spec,
         "ouroboros",
@@ -184,15 +181,16 @@ def _commit_runtime_activation(
     runtime_content: str,
     register_host: Callable[[], bool],
     create_defaults: Callable[[Path], object],
+    additional_host_paths: tuple[Path, ...] = (),
 ) -> bool:
     """Commit host registration and runtime files as one recoverable unit."""
     credentials_path = config_path.parent / "credentials.yaml"
     snapshots: tuple[tuple[Path, _PersistentFileState], ...] = ()
     try:
-        snapshots = (
-            (host_path, _capture_persistent_file(host_path)),
-            (config_path, _capture_persistent_file(config_path)),
-            (credentials_path, _capture_persistent_file(credentials_path)),
+        snapshot_paths = tuple(dict.fromkeys((host_path, *additional_host_paths)))
+        snapshots = tuple(
+            (path, _capture_persistent_file(path))
+            for path in (*snapshot_paths, config_path, credentials_path)
         )
         if not register_host():
             _rollback_persistent_files(snapshots)
@@ -453,7 +451,7 @@ _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
     (
         "--python",
-        UVX_PYTHON_FLOOR,
+        package_profiles.UVX_PYTHON_FLOOR,
         "--from",
         "ouroboros-ai[mcp]",
         "ouroboros",
@@ -468,6 +466,19 @@ _CODEX_MANAGED_MCP_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "codex",
     "OUROBOROS_LLM_BACKEND": "codex",
 }
+_CODEX_HOST_MCP_ENV = {
+    "OUROBOROS_AGENT_RUNTIME": "host",
+    "OUROBOROS_LLM_BACKEND": "codex",
+}
+_CODEX_HOST_DIRECT_MCP_ARGS = [
+    "mcp",
+    "serve",
+    "--runtime",
+    "host",
+    "--llm-backend",
+    "codex",
+]
+_CODEX_HOST_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_HOST_DIRECT_MCP_ARGS]
 _CODEX_DIRECT_MCP_BASE_ARGS = ("mcp", "serve")
 _CODEX_DIRECT_MCP_ARGS = [
     *_CODEX_DIRECT_MCP_BASE_ARGS,
@@ -731,7 +742,7 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     env = entry.get("env")
-    if env is not None and env != _CODEX_MANAGED_MCP_ENV:
+    if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
@@ -749,7 +760,10 @@ def _is_setup_managed_codex_mcp_entry(
         )
     if not has_managed_comment:
         return False
-    return tuple(str(arg) for arg in args) in _CODEX_LEGACY_MODULE_MCP_ARGS
+    return tuple(str(arg) for arg in args) in (
+        *_CODEX_LEGACY_MODULE_MCP_ARGS,
+        tuple(_CODEX_HOST_MODULE_MCP_ARGS),
+    )
 
 
 def _command_matches_path_program(command: str, program: str) -> bool:
@@ -3681,7 +3695,6 @@ def _install_pi_ooo_bridge() -> bool:
 
 
 def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
-    """Return the launcher a managed GJC bridge should use for this install."""
     if _is_source_tree_ouroboros_build():
         return sys.executable, ["-m", "ouroboros"]
     try:
@@ -3694,7 +3707,6 @@ def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
 
 
 def _gjc_bridge_source_text() -> str | None:
-    """Return the packaged managed GJC bridge extension source."""
     from importlib import resources
 
     try:
@@ -3722,79 +3734,84 @@ def _gjc_bridge_source_text() -> str | None:
 
 
 def _install_gjc_ooo_bridge() -> bool:
-    """Install the managed GJC extension that routes interactive ``ooo`` input."""
-    import hashlib
-
     from ouroboros.runtime_instruction_artifacts import gjc_agent_dir
 
     dest = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
-    content = _gjc_bridge_source_text()
+    content = None if package_profiles.gjc_mcp_v2_profile_error() else _gjc_bridge_source_text()
     if content is None:
-        print_warning("Could not locate packaged GJC ooo bridge source.")
+        print_warning("Could not activate the GJC MCP v2 profile or locate its bridge source.")
         return False
 
-    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    existing_hash: str | None = None
-    if dest.exists():
-        try:
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-        except OSError:
-            existing_hash = None
-
-    if existing_hash == new_hash:
+    expected = content.encode("utf-8")
+    try:
+        dest_snapshot = _snapshot_path(dest, follow_links=False)
+    except OSError as exc:
+        print_warning(f"Could not inspect existing GJC ooo bridge at {dest}: {exc}")
+        return False
+    if dest_snapshot.kind == "file" and dest_snapshot.contents == expected:
         print_info(f"GJC ooo bridge already up to date: {dest}")
         return True
+    if dest_snapshot.kind != "missing":
+        print_warning(f"Refusing to overwrite existing GJC ooo bridge: {dest}")
+        return False
 
     try:
-        _atomic_write_text(dest, content)
+        _atomic_write_text(dest, content, expected_current=dest_snapshot)
     except OSError as exc:
         print_warning(f"Could not install GJC ooo bridge at {dest}: {exc}")
         return False
 
-    print_success(
-        f"{'Updated' if existing_hash is not None else 'Installed'} GJC ooo bridge: {dest}"
-    )
+    print_success(f"Installed GJC ooo bridge: {dest}")
     print_info("Restart GJC or run /reload in an existing GJC session to load the bridge.")
     return True
 
 
-def _setup_gjc(gjc_path: str) -> None:
-    """Configure Ouroboros for the GJC CLI runtime."""
+def _setup_gjc(gjc_path: str) -> bool:
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-
+    config_snapshot = _snapshot_path(config_path, follow_links=False)
+    config_dict: object = {}
+    if config_snapshot.kind == "file":
+        config_dict = yaml.safe_load((config_snapshot.contents or b"").decode("utf-8")) or {}
+    elif config_snapshot.kind != "missing":
+        print_error("~/.ouroboros/config.yaml is not a regular file — aborting GJC setup.")
+        return False
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting GJC setup.")
-        return
-
-    orch = config_dict.get("orchestrator")
-    if not isinstance(orch, dict):
-        orch = {}
-        config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "gjc"
-    orch["gjc_cli_path"] = gjc_path
-
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "gjc"
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-
+        return False
+    if not _install_gjc_ooo_bridge():
+        return False
+    try:
+        if config_snapshot.kind == "missing":
+            create_default_config(config_dir)
+            config_snapshot = _snapshot_path(config_path, follow_links=False)
+            config_dict = yaml.safe_load((config_snapshot.contents or b"").decode("utf-8")) or {}
+            if not isinstance(config_dict, dict):
+                raise ConfigError("Generated config.yaml top-level is not a mapping")
+        orch = config_dict.get("orchestrator")
+        if not isinstance(orch, dict):
+            orch = {}
+            config_dict["orchestrator"] = orch
+        orch["runtime_backend"] = "gjc"
+        orch["gjc_cli_path"] = gjc_path
+        llm = config_dict.get("llm")
+        if not isinstance(llm, dict):
+            llm = {}
+            config_dict["llm"] = llm
+        llm["backend"] = "gjc"
+        _atomic_write_text(
+            config_path,
+            yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+            expected_current=config_snapshot,
+        )
+    except (OSError, ConfigError) as exc:
+        print_error(f"Could not save GJC configuration to {config_path}: {exc}")
+        return False
     print_success(f"Configured GJC runtime (CLI: {gjc_path})")
     print_info(f"Config saved to: {config_path}")
-    _install_runtime_instruction_artifact("gjc")
-    _install_gjc_ooo_bridge()
+    return True
 
 
 def _setup_gemini(gemini_path: str) -> None:
@@ -3843,15 +3860,18 @@ def _setup_gemini(gemini_path: str) -> None:
     _install_runtime_instruction_artifact("gemini")
 
 
-def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str) -> None:
-    """Configure runtime setup for Antigravity, Grok, or Zcode.
+def _setup_runtime_only_backend(
+    backend: str, cli_path: str | None, cli_config_key: str | None
+) -> None:
+    """Configure runtime setup for Antigravity, Grok, Zcode, or host.
 
     This setup path intentionally sets only ``orchestrator.runtime_backend`` and
-    the CLI path. Antigravity and Grok are runtime-only; Zcode also supports
-    explicit LLM-completion selection, but setup does not silently move
-    ``llm.backend`` because that changes authoring/evaluation traffic.
-    No setup-owned instruction artifact is installed yet — a documented gap in
-    ``docs/runtime-guides/skill-capability-guides.md``.
+    (when applicable) the CLI path. Antigravity and Grok are runtime-only; Zcode
+    also supports explicit LLM-completion selection, but setup does not silently
+    move ``llm.backend`` because that changes authoring/evaluation traffic.
+    ``host`` has no CLI at all — pass ``cli_path=None, cli_config_key=None`` for
+    it. No setup-owned instruction artifact is installed yet — a documented gap
+    in ``docs/runtime-guides/skill-capability-guides.md``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -3875,13 +3895,26 @@ def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str
         orch = {}
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = backend
-    orch[cli_config_key] = cli_path
+    if cli_path is not None and cli_config_key is not None:
+        orch[cli_config_key] = cli_path
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    print_success(f"Configured {backend} runtime (CLI: {cli_path})")
+    if cli_path is not None:
+        print_success(f"Configured {backend} runtime (CLI: {cli_path})")
+    else:
+        print_success(f"Configured {backend} runtime (no CLI — host-driven dispatch)")
     print_info(f"Config saved to: {config_path}")
+
+
+def _setup_host() -> bool:
+    """Configure the CLI-less host runtime and its setup-owned MCP launchers."""
+    import sys
+
+    from ouroboros.cli.commands.setup_host import setup_host
+
+    return setup_host(sys.modules[__name__])
 
 
 def _setup_antigravity(antigravity_path: str) -> None:
@@ -4735,7 +4768,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode, host).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4785,17 +4818,16 @@ def setup(
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup --runtime gjc        # use GJC[/dim]
     [dim]    ouroboros setup --runtime zcode      # use Zcode[/dim]
+    [dim]    ouroboros setup --runtime host       # dispatch to the calling MCP host[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
     """
     if ctx.invoked_subcommand is not None:
         return
-    if has_unsupported_claude_sdk_mcp_mix():
-        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
+    if package_profiles.has_unsupported_claude_sdk_mcp_mix():
+        print_error(escape(package_profiles.UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
-
-    console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
     # Show current backend if already configured
     current_backend = _get_current_backend()
@@ -5007,7 +5039,8 @@ def setup(
                 "Install it, set OUROBOROS_GJC_CLI_PATH, or configure orchestrator.gjc_cli_path."
             )
             raise typer.Exit(1)
-        _setup_gjc(gjc_path)
+        if not _setup_gjc(gjc_path):
+            raise typer.Exit(1)
     elif selected in ("goose", "goose_cli"):
         goose_path = available.get("goose")
         if not goose_path:
@@ -5048,14 +5081,14 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_zcode(zcode_path)
+    elif selected in ("host", "host_dispatch"):
+        if not _setup_host():
+            raise typer.Exit(1)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)
 
-    console.print("\n[bold green]Setup complete![/bold green]")
-    console.print("\n[dim]Next steps:[/dim]")
-    console.print('  ouroboros init start "your idea here"')
-    console.print("  ouroboros run workflow seed.yaml\n")
+    print_setup_completion(console, selected)
 
 
 # ── Artifact refresh subcommand ──────────────────────────────────

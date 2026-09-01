@@ -186,19 +186,21 @@ is absent or too old, the skills use the uv-managed interpreter.
 ### Option 2: pip Install
 
 ```bash
-pip install ouroboros-ai              # Base package (core engine)
-pip install 'ouroboros-ai[claude]'      # + default Claude Agent SDK profile (MCP 1.x)
-pip install 'ouroboros-ai[claude-cli]'  # + dependency-free Claude CLI worker
-pip install 'ouroboros-ai[claude-sdk]'  # + explicit alias for the SDK profile
-pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
-pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
-pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes the MCP 2 server
+# Recommended standalone MCP v2 profile
+pip install 'ouroboros-ai[mcp,tui]'
+ouroboros setup --runtime claude-cli  # or another MCP v2-compatible runtime
 
-ouroboros --version                   # verify CLI
+# Alternative profiles
+pip install 'ouroboros-ai[claude]'      # Claude Agent SDK (MCP 1.x, isolated)
+pip install 'ouroboros-ai[claude-cli]'  # Claude CLI worker only
+pip install 'ouroboros-ai[claude-sdk]'  # explicit alias for the SDK profile
+pip install 'ouroboros-ai[litellm]'     # + LiteLLM; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'         # MCP v2 without the GUI
+pip install 'ouroboros-ai[tui]'         # settings GUI only
+pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes MCP 2
+ouroboros --version
 ```
-
-> **Which extra do I need?** Use `ouroboros-ai[claude]` for the default Agent SDK runtime on MCP 1.x. Use `ouroboros-ai[mcp]` for the modern protocol server in a separate environment; its Claude launcher selects the dependency-free `[claude-cli]` worker. `[claude-sdk]` is an explicit alias for `[claude]`. Never combine either SDK spelling or `[all]` with `[mcp]` in one interpreter. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
+> **Which profile do I need?** The recommended standalone profile is `ouroboros-ai[mcp,tui]`. Select an MCP v2-compatible runtime explicitly, for example `ouroboros setup --runtime claude-cli`; use `[claude]` or `[claude-sdk]` only in an isolated MCP 1.x environment for the Agent SDK. Never combine the SDK profiles with `[mcp]` in one interpreter.
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
@@ -231,7 +233,36 @@ uv run --python 3.13 pytest tests/unit/ -q
 
 ### Windows users
 
-Use WSL 2 for the supported Windows path, then run the Linux install commands from inside the WSL distribution. Windows 11 Home can run WSL 2; if `wsl --install` or distro installation fails, see [Windows WSL 2 troubleshooting](guides/windows-wsl-troubleshooting.md).
+Two paths. Pick by the host you use:
+
+**Native Windows (PowerShell) — experimental.** Nothing needs to be installed
+first: the script installs Git and uv through winget when they are missing, uv
+downloads its own Python, and the plugin's MCP server runs through `uvx`.
+
+```powershell
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+Options go through environment variables, same names as `install.sh`
+(`OUROBOROS_INSTALL_RUNTIME`, `OUROBOROS_INSTALL_RECONFIGURE`,
+`OUROBOROS_INSTALL_PRE`), or bind the script and pass parameters:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1))) -Runtime claude -Reconfigure
+```
+
+Open a new PowerShell window afterwards so the PATH change applies. Use
+Windows Terminal for `ouroboros config` (the TUI needs ANSI support; `cmd.exe`
+is not supported). The PowerShell installer emits no installer telemetry
+events; the `ouroboros setup` it runs follows the normal [controls](../TELEMETRY.md). Limits are
+listed in [platform support](platform-support.md#windows-native-caveats); in
+short, Claude Code works and Codex CLI does not.
+
+**WSL 2 — supported.** Run the Linux install command from inside the WSL
+distribution. This is the path for Codex CLI and for every feature in the
+support matrix. Windows 11 Home can run WSL 2; if `wsl --install` or distro
+installation fails, see
+[Windows WSL 2 troubleshooting](guides/windows-wsl-troubleshooting.md).
 
 ### Prerequisites
 

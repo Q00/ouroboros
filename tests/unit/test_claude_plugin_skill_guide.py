@@ -14,7 +14,7 @@ def test_claude_plugin_ships_rendered_skill_capability_guide() -> None:
 
 
 def test_claude_plugin_interview_skill_includes_bounded_review_dispatch() -> None:
-    skill_path = Path(".claude-plugin") / "skills" / "interview" / "SKILL.md"
+    skill_path = Path("skills") / "interview" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
     assert "**Factual research snapshot**" in skill_text
@@ -33,7 +33,7 @@ def test_claude_plugin_interview_skill_includes_bounded_review_dispatch() -> Non
 
 
 def test_claude_plugin_unstuck_skill_includes_host_capability_contract() -> None:
-    skill_path = Path(".claude-plugin") / "skills" / "unstuck" / "SKILL.md"
+    skill_path = Path("skills") / "unstuck" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
     assert (

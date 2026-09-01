@@ -15,6 +15,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_submitted
 from ouroboros.mcp.tools.fanout import (
+    FANOUT_KIND_HOST_EXECUTION,
     FanoutRegistry,
     PreparedFanoutSynthesis,
     prepare_fanout_results,
@@ -30,6 +31,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.orchestrator.host_dispatch import HOST_EXECUTION_RESULT_KEY
 from ouroboros.persistence.artifact_errors import ArtifactStoreError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -66,6 +68,10 @@ class SubmitFanoutResultsHandler:
 
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     disposable_memory: DisposableMemory | None = field(default=None, repr=False)
+    # HostDispatchBridge from the MCP composition root. Execution-kind
+    # submissions wake the parked runtime waiter through it instead of running
+    # advisory synthesis; ``None`` (a root with no bridge) fails them closed.
+    host_dispatch_bridge: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._registry = self.fanout_registry or FanoutRegistry()
@@ -106,9 +112,11 @@ class SubmitFanoutResultsHandler:
                 "attempt per submitted query and successful fetch evidence for every "
                 "returned reference. A child you could not spawn at all is exactly "
                 "{key, undispatched: true}; never invent output. Missing required keys "
-                "return `status=partial`; retry with EVERY lane. A complete submission "
-                "returns a bounded disposable artifact envelope; fetch its body with "
-                "`ouroboros_fetch_artifact`."
+                "return `status=partial`; retry with EVERY lane. "
+                "Completed advisory fan-outs return a bounded disposable artifact "
+                "envelope for `ouroboros_fetch_artifact`. Host-execution submissions "
+                "instead acknowledge delivery to the execution engine; keep polling "
+                "`ouroboros_job_wait` for verification and further dispatches."
             ),
             parameters=(
                 MCPToolParameter(
@@ -238,6 +246,23 @@ class SubmitFanoutResultsHandler:
     ) -> dict[str, Any] | MCPToolError:
         if not isinstance(prepared, PreparedFanoutSynthesis):
             return prepared
+        if prepared.record.kind == FANOUT_KIND_HOST_EXECUTION:
+            # Execution submissions are transport, not synthesis: deliver the
+            # validated lane to the parked HostDispatchRuntime waiter. The
+            # server-side verify gate — not this reply — judges the work.
+            if self.host_dispatch_bridge is None:
+                return MCPToolError(
+                    "execution dispatch submission requires a composed "
+                    "host-dispatch bridge (start the run through the MCP "
+                    "server that issued this dispatch)",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            undispatched_keys = prepared.completion_report.get("undispatched_keys") or ()
+            return self.host_dispatch_bridge.submit(
+                fanout_id,
+                prepared.provided,
+                undispatched=HOST_EXECUTION_RESULT_KEY in undispatched_keys,
+            )
         if self.disposable_memory is None:
             return MCPToolError(
                 "terminal fan-out synthesis requires a configured disposable artifact service",

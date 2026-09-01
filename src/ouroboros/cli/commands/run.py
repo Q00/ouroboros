@@ -622,6 +622,8 @@ async def _run_orchestrator(
     from ouroboros.orchestrator import (
         OrchestratorRunner,
         create_agent_runtime,
+        create_agent_runtime_async,
+        preflight_agent_runtime,
         resolve_agent_runtime_backend,
     )
     from ouroboros.orchestrator.session import SessionRepository
@@ -729,13 +731,30 @@ async def _run_orchestrator(
     if debug:
         print_info(f"Execution runtime: {resolved_runtime_backend}")
 
+    if resolved_runtime_backend == "host":
+        # Host-driven execution needs an MCP host model pumping job_wait and
+        # spawning dispatch payloads; a terminal run has no such host, so the
+        # dispatch would park forever. Reject with the working alternative.
+        print_error(
+            "The 'host' agent runtime dispatches execution to the calling MCP "
+            "host and cannot run from the terminal. Start the run from your "
+            "host chat session (ooo run / ouroboros_start_execute_seed), or "
+            "pick an executable runtime (claude-cli, codex, opencode, ...)."
+        )
+        raise typer.Exit(1)
+
     execution_model = resolve_execution_model(resolved_runtime_backend)
     print_info(_execution_model_status(resolved_runtime_backend, execution_model))
-    adapter = create_agent_runtime(
+    adapter = await create_agent_runtime_async(
+        create_agent_runtime,
         backend=resolved_runtime_backend,
         model=execution_model,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
+    runtime_blocker = preflight_agent_runtime(adapter)
+    if runtime_blocker is not None:
+        print_error(f"Runtime '{resolved_runtime_backend}' cannot execute: {runtime_blocker}")
+        raise typer.Exit(1)
     runner = OrchestratorRunner(
         adapter,
         event_store,

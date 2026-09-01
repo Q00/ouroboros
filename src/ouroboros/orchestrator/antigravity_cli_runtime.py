@@ -212,6 +212,7 @@ class AntigravityCLIRuntime(GeminiCLIRuntime):
             structured_output=False,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
         )
 
 

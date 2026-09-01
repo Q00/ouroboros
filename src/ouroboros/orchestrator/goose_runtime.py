@@ -115,6 +115,7 @@ class GooseCliRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Goose-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            empty_tool_restriction_support=ParamSupport.IGNORED,
             # Reasoning effort is advised, not enforced: `goose run` exposes no
             # per-invocation effort flag (verified via --help). Declared IGNORED
             # explicitly (also the default) to document the verified decision.

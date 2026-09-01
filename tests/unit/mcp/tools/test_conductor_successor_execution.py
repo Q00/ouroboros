@@ -84,6 +84,20 @@ async def test_authorized_successor_embeds_exact_audited_directive(store: EventS
 
 
 @pytest.mark.asyncio
+async def test_empty_conductor_directive_is_a_fresh_seed_no_op(store: EventStore) -> None:
+    result = await _prepare_conductor_successor_seed(
+        arguments={"conductor_directive": {}},
+        seed_content=_SEED,
+        event_store=store,
+        tool_name="ouroboros_start_execute_seed",
+        is_resume=False,
+    )
+
+    assert result.is_ok
+    assert result.value == _SEED
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "expected_error"),
     [

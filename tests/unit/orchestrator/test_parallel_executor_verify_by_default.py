@@ -2175,9 +2175,17 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
 
 
 @pytest.mark.asyncio
-async def test_final_settlement_rejects_stale_command_without_replay(
+@pytest.mark.parametrize("final_condition", ["before", "after"])
+async def test_final_settlement_replays_stale_command_against_final_workspace(
     tmp_path: Any,
+    final_condition: str,
 ) -> None:
+    """A sibling's later edit does not discard this AC: its contract is re-judged.
+
+    The verify gate already rejects a command that mutates the workspace, so a
+    passing contract is an observation and may be run once more at settlement.
+    The final verdict follows that replay in both directions.
+    """
     counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
     target = tmp_path / "condition.txt"
     target.write_text("before", encoding="utf-8")
@@ -2191,7 +2199,10 @@ async def test_final_settlement_rejects_stale_command_without_replay(
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
-    target.write_text("after", encoding="utf-8")
+    assert cached.passed is True
+    # A later worker touches the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+    target.write_text(final_condition, encoding="utf-8")
 
     settled = await executor._settle_verify_gate_results(
         seed=seed,
@@ -2208,10 +2219,77 @@ async def test_final_settlement_rejects_stale_command_without_replay(
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "1"
-    assert settled[0].success is False
-    assert settled[0].outcome is ACExecutionOutcome.FAILED
-    assert "replaying verify_command is not permitted" in (settled[0].error or "")
+    assert counter.read_text(encoding="utf-8") == "2"
+    if final_condition == "before":
+        assert settled[0].success is True
+        assert settled[0].outcome is ACExecutionOutcome.SUCCEEDED
+        assert settled[0].verify_gate_outcome is not None
+        assert settled[0].verify_gate_outcome.passed is True
+    else:
+        assert settled[0].success is False
+        assert settled[0].outcome is ACExecutionOutcome.FAILED
+        assert "verify_command failed on the final workspace" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_settlement_replay_mutation_invalidates_every_provisional_success(
+    tmp_path: Any,
+) -> None:
+    """A replay that mutates the workspace poisons the whole success set.
+
+    The first run of the command leaves the workspace untouched and passes;
+    the replay (triggered by a sibling edit) writes a side-effect file. That
+    mutation must fold into the settlement-wide state and reject every
+    provisional success — including a contract-less sibling — not just add an
+    individual failure for the replayed AC.
+    """
+    counter = tmp_path.parent / f"settle-mutating-replay-{tmp_path.name}.txt"
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        "n and Path('replay-side-effect.txt').write_text('mutated'); "
+        'raise SystemExit(0)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="contract ac", verify_command=command),
+        AcceptanceCriterionSpec(description="plain sibling"),
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.passed is True
+    # A later worker changes the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="contract ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="plain sibling",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            ),
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert [result.success for result in settled] == [False, False]
+    assert [result.outcome for result in settled] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+    ]
+    assert all("mutated the workspace" in (result.error or "") for result in settled)
 
 
 @pytest.mark.asyncio
@@ -2699,3 +2777,272 @@ async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
 
     assert outcome.passed is False
+
+
+# ---------------------------------------------------------------------------
+# Rejection-cause vocabulary (verify_cause) — machine-readable failure causes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_stamps_machine_readable_causes(tmp_path: Any) -> None:
+    """Each gate failure branch stamps its closed-vocabulary cause; passing
+    outcomes stay unattributed. Rejection analytics must never have to parse
+    the prose `reason` strings."""
+    executor = _make_executor(working_directory=str(tmp_path))
+
+    passed = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="ok", verify_command="exit 0"),
+        cwd=str(tmp_path),
+    )
+    assert passed.cause is None
+
+    nonzero = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="bad", verify_command="exit 3"),
+        cwd=str(tmp_path),
+    )
+    assert nonzero.cause == "exit_nonzero"
+
+    mismatch = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(
+            description="doc",
+            verify_command="printf 'BUILD SUCCESS'",
+            output_assertion="FAILURE",
+        ),
+        cwd=str(tmp_path),
+    )
+    assert mismatch.cause == "output_assertion_unmatched"
+
+    invalid = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec.model_construct(
+            description="assertion only",
+            verify_command=None,
+            expected_artifacts=(),
+            output_assertion="READY",
+        ),
+        cwd=str(tmp_path),
+    )
+    assert invalid.cause == "invalid_contract"
+
+    missing = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec.model_construct(
+            description="artifact",
+            verify_command=None,
+            expected_artifacts=("dist/report.md",),
+            output_assertion=None,
+        ),
+        cwd=str(tmp_path),
+    )
+    assert missing.cause == "artifacts_missing"
+
+    (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+    mutated = await executor._run_ac_verify_gate(
+        spec=AcceptanceCriterionSpec(description="read-only", verify_command="rm keep.txt"),
+        cwd=str(tmp_path),
+    )
+    assert mutated.cause == "workspace_mutated"
+
+
+@pytest.mark.asyncio
+async def test_missing_artifact_found_elsewhere_flags_worker_cd_signature(
+    tmp_path: Any,
+) -> None:
+    """The contract path absent at the gate cwd but present under a
+    subdirectory is the worker-`cd` failure mode discovered in real user
+    transcripts -- it must classify distinctly from a never-created artifact."""
+    nested = tmp_path / "packages" / "app" / "dist"
+    nested.mkdir(parents=True)
+    (nested / "report.md").write_text("built", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="artifact",
+        verify_command=None,
+        expected_artifacts=("dist/report.md",),
+        output_assertion=None,
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.cause == "artifacts_missing_found_elsewhere"
+
+
+def test_verify_gate_outcome_cause_roundtrips_and_legacy_checkpoints_decode() -> None:
+    from ouroboros.orchestrator.parallel_executor import (
+        _deserialize_verify_gate_outcome,
+        _serialize_verify_gate_outcome,
+    )
+
+    original = _VerifyGateOutcome(
+        passed=False,
+        reason="verify_command exited with status 3",
+        output_tail="boom",
+        cause="exit_nonzero",
+    )
+    serialized = _serialize_verify_gate_outcome(original)
+    assert serialized is not None
+    assert serialized["cause"] == "exit_nonzero"
+    assert _deserialize_verify_gate_outcome(serialized) == original
+
+    # Checkpoints written before `cause` existed omit the key and must still
+    # decode (as unattributed) so cached non-idempotent verify results survive
+    # a version upgrade.
+    legacy = dict(serialized)
+    del legacy["cause"]
+    decoded = _deserialize_verify_gate_outcome(legacy)
+    assert decoded is not None
+    assert decoded.cause is None
+
+    # A cause outside the closed vocabulary is rejected, not forwarded.
+    hostile = dict(serialized)
+    hostile["cause"] = "/private/path: boom"
+    assert _deserialize_verify_gate_outcome(hostile) is None
+
+
+@pytest.mark.asyncio
+async def test_quarantined_outcomes_still_reach_rejection_cause_telemetry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`timeout` and `environment_unverifiable` quarantine instead of failing,
+    but they are documented causes — the analytics event must still fire."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    executor = _make_executor(working_directory=str(tmp_path), verify_command_timeout_seconds=1)
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="slow", verify_command="sleep 5"))
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=ACExecutionResult(ac_index=0, ac_content="slow", success=True),
+        session_id="s",
+        execution_id="e",
+    )
+    assert gated.success is True  # quarantined, not failed
+    assert captured == ["timeout"]
+
+    captured.clear()
+    executor_no_shell = _make_executor(working_directory=str(tmp_path))
+    executor_no_shell._verify_shell_identity = None
+    seed_pipe = _seed_with_specs(
+        AcceptanceCriterionSpec(description="pipe", verify_command="echo ok | tee log")
+    )
+    await executor_no_shell._apply_verify_gate(
+        seed=seed_pipe,
+        ac_index=0,
+        result=ACExecutionResult(ac_index=0, ac_content="pipe", success=True),
+        session_id="s",
+        execution_id="e",
+    )
+    assert captured == ["environment_unverifiable"]
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_classifies_missing_artifact_not_as_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A final-boundary artifact loss must be reported as artifacts_missing,
+    never guessed as concurrent workspace mutation."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",))
+    )
+    passing = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    assert passing.passed is True
+
+    target.unlink()  # a sibling deleted the artifact after the atomic gate
+
+    results = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=passing,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert results[0].success is False
+    assert captured == ["artifacts_missing"]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_revalidation_missing_artifact_emits_cause_analytics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The artifacts-only post-coordinator rejection owns its failure
+    (settlement skips non-successful results), so it must emit the local
+    verify-failed event and the closed-cause analytics like every other
+    deterministic gate rejection."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        pe.usage_telemetry,
+        "capture_ac_verify_failed",
+        lambda cause: captured.append(cause),
+    )
+
+    artifact = tmp_path / "target.txt"
+    artifact.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    emitted: list[Any] = []
+
+    async def record_event(event: Any) -> None:
+        emitted.append(event)
+
+    executor._safe_emit_event = record_event
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",))
+    )
+    passing = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    assert passing.passed is True
+
+    artifact.unlink()  # the coordinator's reconciliation removed the artifact
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=passing,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert revalidated[0].success is False
+    assert captured == ["artifacts_missing"]
+    failures = [event for event in emitted if event.type == "execution.verify.failed"]
+    assert len(failures) == 1
+    assert failures[0].data["verify_cause"] == "artifacts_missing"
+    assert failures[0].data["missing_artifacts"] == ["target.txt"]

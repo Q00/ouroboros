@@ -117,6 +117,25 @@ def _pattern_matcher(pattern: str) -> re.Pattern[str]:
     return re.compile(source, re.MULTILINE)
 
 
+# A gateway can wrap a configuration failure in a 5xx: a proxy answering
+# "503 auth_unavailable: no auth available" or "502 unknown provider for model"
+# answers the same way on every retry. These override the status-code match so
+# the run fails once with the real reason instead of burning the retry budget
+# and every route on an AC that cannot start.
+NON_TRANSIENT_OVERRIDE_PATTERNS: tuple[str, ...] = (
+    "auth_unavailable",
+    "no auth available",
+    "unknown provider",
+    "unknown model",
+    "invalid api key",
+    "invalid_api_key",
+    "authentication_error",
+    "unauthorized",
+    "forbidden",
+    "permission denied",
+)
+
+
 def is_transient_error(
     message: str,
     *,
@@ -124,6 +143,8 @@ def is_transient_error(
 ) -> bool:
     """Return whether *message* looks like a transient, retry-worthy failure."""
     lowered = message.lower()
+    if any(pattern in lowered for pattern in NON_TRANSIENT_OVERRIDE_PATTERNS):
+        return False
     for pattern in (*BASE_TRANSIENT_PATTERNS, *extra_patterns):
         if _pattern_matcher(pattern).search(lowered):
             return True
@@ -212,6 +233,7 @@ def retry_async(
 
 __all__ = [
     "BASE_TRANSIENT_PATTERNS",
+    "NON_TRANSIENT_OVERRIDE_PATTERNS",
     "DEFAULT_JITTER_RATIO",
     "MIN_WAIT_SECONDS",
     "is_transient_error",

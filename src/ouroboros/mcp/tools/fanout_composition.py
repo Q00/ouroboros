@@ -51,6 +51,7 @@ def create_fanout_wiring(
     agent_runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     ensure_ready: Callable[[], Awaitable[None]] | None = None,
+    host_dispatch_bridge: Any = None,
 ) -> tuple[
     SubmitFanoutResultsHandler,
     FetchArtifactHandler,
@@ -89,6 +90,9 @@ def create_fanout_wiring(
             event_store,
             ensure_ready=ensure_ready,
         )
+    # Execution-kind submissions route to the parked HostDispatchRuntime
+    # waiter; a root composed without a bridge leaves them failing closed.
+    submit.host_dispatch_bridge = host_dispatch_bridge
     interview = InterviewHandler(
         interview_engine=interview_engine,
         event_store=handler_event_store,

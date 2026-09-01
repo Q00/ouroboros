@@ -1162,24 +1162,39 @@ def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> N
     assert delivered["output"] == proposal
 
 
-def test_data_boundary_survives_outside_ordinary_interview_fanout() -> None:
-    """The data contract remains strict while ordinary interviews stop auto-spawning it."""
-    contract_instruction = interview_data_evidence_answer_contract()["runtime_instruction"]
-    assert "interview answer is the user's own words, never yours" in contract_instruction
-    assert "material for their judgment" in contract_instruction
+def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
+    """`skills/` is the single shipped contract: the wheel's payload and what a
+    marketplace install reads (plugin.json points at it; the old
+    `.claude-plugin/skills/` copy was never loaded and is gone).
 
+    What the contract must carry changed with the lane. There is no
+    confirmation surface to describe any more, and correspondingly less
+    standing between a measurement and the Seed: the host putting the number
+    beside the question rather than into the answer is now the whole of it, so
+    that is the sentence that has to be present.
+    """
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[4]
-    for skill in (
-        root / "skills" / "interview" / "SKILL.md",
-        root / ".claude-plugin" / "skills" / "interview" / "SKILL.md",
-    ):
-        content = skill.read_text(encoding="utf-8")
-        assert "Do not add data, contrarian, simplifier, or architecture subagents" in content
-        assert "Take a measurement directly only when" in content
-        assert "data_context" not in content
-        assert "[from-data]" not in content
+    skill = root / "skills" / "interview" / "SKILL.md"
+    content = skill.read_text(encoding="utf-8")
+    assert "there is no `[from-data]` answer to" in content, skill
+    assert "material for the user's" in content, skill
+    # The drop-after-answer duty is what a measurement crossing issuances is
+    # weighed against (see the cross-issuance test above): the server cannot
+    # tell when a payload was produced, so this rule — not a token the child
+    # echoes — is what keeps a late number from re-opening a settled
+    # decision. It is a host duty, so the duty being *stated* is the whole of
+    # what this side can pin, and losing the sentence would silently retire
+    # the guard the accepted risk rests on.
+    assert "already answered the question by the time the measurement" in content, skill
+    assert "drop it" in content, skill
+    assert "evidence informs a\n     decision, it does not revisit one" in content, skill
+    assert "data_context" not in content, skill
+    assert "[from-data]" not in content, skill
+    # The retired gate: leaving it would have hosts waiting to confirm a
+    # read that already ran.
+    assert "Run a read only after the user confirms" not in content, skill
 
 
 # --------------------------------------------------------------------------- #
@@ -1983,11 +1998,8 @@ def test_ordinary_interview_has_no_timestamped_measurement_surface() -> None:
     """Ordinary interview skills no longer own an automatic measurement lane."""
     from pathlib import Path
 
-    for skill in (
-        Path("skills/interview/SKILL.md"),
-        Path(".claude-plugin/skills/interview/SKILL.md"),
-    ):
-        content = skill.read_text(encoding="utf-8")
-        assert "observed_at" not in content, skill
-        assert "Say when each was measured" not in content, skill
-        assert "Take a measurement directly only when" in content, skill
+    skill = Path("skills/interview/SKILL.md")
+    content = skill.read_text(encoding="utf-8")
+    assert "observed_at" not in content, skill
+    assert "Say when each was measured" not in content, skill
+    assert "already answered the question by the time the measurement" in content, skill
