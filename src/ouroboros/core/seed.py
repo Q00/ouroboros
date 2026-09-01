@@ -378,6 +378,7 @@ regression test.
 _LEGACY_V104_VERSION = "1.0.4"
 _LEGACY_V104_GENERATION_MODE = "revised_after_qa"
 _LEGACY_V104_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-z][a-z0-9_]*$")
+_CANONICAL_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-f0-9]{16}$")
 
 
 class SeedMetadata(BaseModel, frozen=True):
@@ -792,8 +793,10 @@ def _migrate_legacy_v104_seed_dict(data: dict[str, Any]) -> dict[str, Any]:
         for item in criteria:
             if isinstance(item, dict):
                 semantic_ac_key = item.get("semantic_ac_key")
-                if isinstance(semantic_ac_key, str) and _LEGACY_V104_SEMANTIC_AC_KEY_RE.fullmatch(
-                    semantic_ac_key
+                if (
+                    isinstance(semantic_ac_key, str)
+                    and _LEGACY_V104_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
+                    and not _CANONICAL_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
                 ):
                     item = {**item, "semantic_ac_key": None}
                     criteria_changed = True
@@ -991,6 +994,13 @@ class Seed(BaseModel, frozen=True):
             )
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_v104_seed_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _migrate_legacy_v104_seed_dict(value)
+        return value
+
     @field_validator("exit_conditions", mode="before")
     @classmethod
     def _coerce_string_exit_conditions(cls, value: Any) -> Any:
@@ -1090,7 +1100,7 @@ class Seed(BaseModel, frozen=True):
         Returns:
             Seed instance.
         """
-        return cls.model_validate(_migrate_legacy_v104_seed_dict(data))
+        return cls.model_validate(data)
 
 
 def _freeze_seed_extra_value(value: Any, *, path: str) -> Any:

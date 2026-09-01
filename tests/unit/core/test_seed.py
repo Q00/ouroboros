@@ -6,6 +6,7 @@ Tests the immutable Seed schema and related types.
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
 import pytest
@@ -1060,7 +1061,7 @@ class TestSeed:
 
     def test_seed_from_dict_migrates_v104_legacy_contract_fields(self) -> None:
         """Version 1.0.4 revised Seeds normalize legacy parser fields."""
-        seed_dict = {
+        seed_dict: dict[str, Any] = {
             "goal": "Reconcile a campaign",
             "acceptance_criteria": [
                 {
@@ -1089,6 +1090,47 @@ class TestSeed:
         assert reconstructed.ontology_schema.fields[0].description == "manifest_id"
         assert seed_dict["acceptance_criteria"][0]["semantic_ac_key"] == "ac_manifest_exact_frozen"
         assert "description" not in seed_dict["ontology_schema"]["fields"][0]
+
+    @pytest.mark.parametrize(
+        "canonical_key",
+        [
+            "ac_a123456789abcdef",
+            "ac_fedcba9876543210",
+            "ac_0123456789abcdef",
+        ],
+    )
+    def test_v104_migration_preserves_canonical_semantic_ac_keys(
+        self,
+        canonical_key: str,
+    ) -> None:
+        seed_dict: dict[str, Any] = {
+            "goal": "Reconcile a campaign",
+            "acceptance_criteria": [
+                {
+                    "description": "A deterministic receipt is written",
+                    "semantic_ac_key": canonical_key,
+                },
+            ],
+            "ontology_schema": {
+                "name": "Receipt",
+                "description": "A reconciliation receipt",
+                "fields": [
+                    {"name": "manifest_id", "type": "string", "required": True},
+                ],
+            },
+            "metadata": {
+                "version": "1.0.4",
+                "generation_mode": "revised_after_qa",
+            },
+        }
+
+        from_dict_seed = Seed.from_dict(seed_dict)
+        model_seed = Seed.model_validate(seed_dict)
+
+        assert from_dict_seed.acceptance_criteria[0].semantic_ac_key == canonical_key
+        assert model_seed.acceptance_criteria[0].semantic_ac_key == canonical_key
+        assert from_dict_seed.ontology_schema.fields[0].description == "manifest_id"
+        assert model_seed.ontology_schema.fields[0].description == "manifest_id"
 
     def test_seed_from_dict_rejects_malformed_v104_legacy_contract(self) -> None:
         """Compatibility normalization must not weaken malformed-input rejection."""

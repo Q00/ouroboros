@@ -602,3 +602,37 @@ class TestWorkflowIRCommands:
         assert result.exit_code == 1
         assert "Workflow IR inspection failed" in result.output
         assert "acceptance_criteria.0.description" in result.output
+
+    def test_workflow_ir_inspect_accepts_v104_legacy_seed_payload(self, tmp_path: Path) -> None:
+        seed_file = tmp_path / "legacy-seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect legacy Workflow IR",
+                    "acceptance_criteria:",
+                    "  - description: A deterministic receipt is written",
+                    "    semantic_ac_key: ac_a123456789abcdef",
+                    "ontology_schema:",
+                    "  name: Receipt",
+                    "  description: A reconciliation receipt",
+                    "  fields:",
+                    "    - name: manifest_id",
+                    "      type: string",
+                    "      required: true",
+                    "metadata:",
+                    "  seed_id: seed_cli_legacy_ir",
+                    "  version: 1.0.4",
+                    "  generation_mode: revised_after_qa",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert result.exit_code == 0
+        assert '"spec_id": "wfspec_seed_cli_legacy_ir"' in result.output
+        assert '"ok": true' in result.output
+        assert '"acceptance_criteria_count": 1' in result.output
+        assert '"seed_version": "1.0.4"' in result.output
