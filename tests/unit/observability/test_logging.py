@@ -1451,6 +1451,9 @@ class TestSensitiveDataMasking:
             "api_key:opaque-provider-credential",
             "access_token/opaque-provider-credential",
             "credentials:opaquevalue",
+            "workflow.api_key_sk_live_abc123",
+            "workflow.access_token_ghp_credentialshapedvalue",
+            "workflow.client_secret_abc123",
         )
         configure_logging(
             LoggingConfig(mode=LogMode.PROD, log_dir=temp_log_dir, enable_file_logging=True)
@@ -1465,7 +1468,6 @@ class TestSensitiveDataMasking:
         for secret in secrets:
             assert secret not in console
             assert secret not in persistent
-
 
     def test_cyclic_structured_event_safe_in_console_and_file(
         self, capsys: Any, temp_log_dir: Path
