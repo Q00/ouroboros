@@ -355,6 +355,21 @@ def create_agent_runtime(
     )
 
 
+def preflight_agent_runtime(runtime: AgentRuntime) -> str | None:
+    """Return the runtime's blocking configuration problem, if it reports one.
+
+    Runtimes that can tell before the first dispatch that they will fail on
+    every AC (a missing SDK, an unusable CLI) expose ``preflight()``. Callers
+    surface the reason once, up front, instead of paying for an AC dispatch,
+    its retries, and route escalation to learn the same thing.
+    """
+    probe = getattr(runtime, "preflight", None)
+    if probe is None:
+        return None
+    reason = probe()
+    return reason if isinstance(reason, str) and reason.strip() else None
+
+
 async def create_agent_runtime_async(
     runtime_factory: Callable[..., AgentRuntime] = create_agent_runtime,
     **kwargs: object,
@@ -366,5 +381,6 @@ async def create_agent_runtime_async(
 __all__ = [
     "create_agent_runtime",
     "create_agent_runtime_async",
+    "preflight_agent_runtime",
     "resolve_agent_runtime_backend",
 ]

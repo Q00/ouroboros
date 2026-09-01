@@ -31,6 +31,7 @@ class CompletedProviderTurn:
     runtime_handle: RuntimeHandle
     ac_session_id: str | None
     message_count: int
+    message_list_length: int
     final_message: str
     success: bool
     stalled: bool
@@ -48,6 +49,12 @@ class CompletedProviderTurn:
             runtime_handle=runtime_handle,
             ac_session_id=state.ac_session_id,
             message_count=state.message_count,
+            # ``message_count`` counts only runtime messages; the transcript
+            # list may additionally hold synthetic harness entries (the
+            # workspace observation). Truncation and follow-up slicing must
+            # therefore use the actual list boundary, never the runtime
+            # counter, or a queued signal reads the previous turn's tail.
+            message_list_length=len(state.messages),
             final_message=state.final_message,
             success=state.success,
             stalled=state.stalled,
@@ -55,7 +62,7 @@ class CompletedProviderTurn:
 
     def restore(self, state: LeafDispatchState) -> str:
         """Restore the completed primary after a follow-up was aborted pre-entry."""
-        del state.messages[self.message_count :]
+        del state.messages[self.message_list_length :]
         state.runtime_handle = self.runtime_handle
         state.ac_session_id = self.ac_session_id
         state.message_count = self.message_count

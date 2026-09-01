@@ -6,6 +6,7 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import contextlib
 from enum import Enum
 import json
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -79,9 +81,55 @@ _JOB_DRAIN_GRACE_SECONDS = 5.0
 _IDLE_CHECKPOINT_POLL_SECONDS = 300.0
 _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 
+# Idle lifetime bound for network transports: unlike stdio, an sse or
+# streamable-http server has no stdin EOF and — once its spawner dies and it
+# is reparented to launchd/systemd — no parent tether either (the orphan
+# watchdog stands down at ppid 1). Without a bound such a server runs
+# forever, pinning the shared database.
+_IDLE_SHUTDOWN_POLL_SECONDS = 60.0
+_NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS = 7200.0
+
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
 log = structlog.get_logger(__name__)
+
+
+def _effective_idle_timeout(transport: str, idle_timeout_seconds: float | None) -> float:
+    """Resolve the idle-shutdown bound; ``None`` picks the transport default."""
+    if idle_timeout_seconds is not None:
+        return idle_timeout_seconds
+    return 0.0 if transport == "stdio" else _NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS
+
+
+async def _idle_shutdown_loop(
+    stop: asyncio.Event,
+    server: Any,
+    idle_timeout_seconds: float,
+    *,
+    poll_seconds: float = _IDLE_SHUTDOWN_POLL_SECONDS,
+) -> None:
+    """Set ``stop`` once no tool call has arrived for ``idle_timeout_seconds``.
+
+    Network transports only: stdio keeps its EOF/watchdog lifecycle, but an
+    sse/streamable-http server reparented to launchd/systemd has no other
+    tether (the orphan watchdog stands down at ppid 1) and would otherwise
+    run forever, pinning the shared database.
+    """
+    while not stop.is_set():
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+        if stop.is_set():
+            return
+        idle_for = getattr(server, "seconds_since_last_tool_call", None)
+        if not isinstance(idle_for, int | float):
+            return
+        if idle_for < idle_timeout_seconds:
+            continue
+        _stderr_console.print(
+            f"[yellow]No tool call for {int(idle_for)}s (--idle-timeout) — shutting down[/yellow]"
+        )
+        stop.set()
+        return
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -509,6 +557,121 @@ def _resolve_client_identity(orig_ppid: int) -> tuple[int, float | None] | None:
     return None
 
 
+def _make_stdin_peer_probe(stdin_fd: int = 0) -> Callable[[], bool] | None:
+    """Build a dead-peer probe for a socket stdin, or None when inapplicable.
+
+    Some MCP clients hand this server a unix socketpair as stdin. When such a
+    client dies without an orderly close, the socket never delivers a readline
+    EOF — the fd lingers with a gone peer (lsof shows ``->(none)``) and the
+    serve loop blocks forever: the immortal-zombie incident of 2026-08-31.
+
+    The MCP SDK (mcp>=2.0) diverts fd 0 away from the wire while serving, so
+    the probe duplicates the descriptor *now*, before the serve loop starts,
+    and watches the duplicate. ``MSG_PEEK`` keeps protocol bytes in the queue,
+    making the probe non-destructive.
+
+    Returns None on Windows and when stdin is not a socket — a pipe or tty
+    stdin already delivers EOF when the client dies, so no probe is needed.
+    """
+    if sys.platform == "win32":
+        return None
+    try:
+        wire_fd = os.dup(stdin_fd)
+    except OSError:
+        return None
+    try:
+        wire = socket.socket(fileno=wire_fd)
+    except OSError:
+        # Not a socket (ENOTSOCK): socket() does not take ownership on
+        # failure, so release the duplicate ourselves.
+        with contextlib.suppress(OSError):
+            os.close(wire_fd)
+        return None
+    try:
+        wire.setblocking(False)
+    except OSError:
+        wire.close()
+        return None
+
+    def _peer_is_dead() -> bool:
+        try:
+            data = wire.recv(1, socket.MSG_PEEK)
+        except BlockingIOError:
+            return False  # live peer, nothing queued
+        except OSError:
+            return True  # ECONNRESET-class: peer is gone
+        return len(data) == 0  # b"" is an orderly peer close
+
+    return _peer_is_dead
+
+
+async def _orphan_watchdog_loop(
+    *,
+    stop: asyncio.Event,
+    orig_ppid: int,
+    client_identity: tuple[int, float | None] | None,
+    stdin_peer_dead: Callable[[], bool] | None,
+    poll_seconds: float = 5.0,
+) -> None:
+    """Stop the server once the client that owns it is provably gone.
+
+    Three complementary checks, polled every ``poll_seconds``:
+
+    - getppid() vs the original parent (covers direct-parent death; under the
+      shipped ``client -> uvx -> python`` topology the uv wrapper survives the
+      client, so this alone can never fire there),
+    - a stdin socket dead-peer probe (covers a socketpair stdin whose peer
+      vanished without EOF — the state fd-0 lsof reports as ``->(none)``),
+    - the resolved client identity (nearest non-wrapper ancestor, pid + start
+      marker; immune to subreapers and pid recycling).
+
+    A server that starts already detached (``orig_ppid == 1``) with no stdio
+    wire to watch has no tether and must never self-terminate (a real
+    launchd/systemd service). streamable-http idle shutdown is tracked
+    separately (#2325).
+    """
+    if orig_ppid == 1 and stdin_peer_dead is None:
+        return
+    while not stop.is_set():
+        if orig_ppid != 1 and os.getppid() != orig_ppid:
+            _stderr_console.print("[yellow]Parent client gone — orphan exit[/yellow]")
+            stop.set()
+            return
+        if stdin_peer_dead is not None and stdin_peer_dead():
+            _stderr_console.print("[yellow]stdin peer closed — orphan exit[/yellow]")
+            stop.set()
+            return
+        if client_identity is not None:
+            client_pid, client_start = client_identity
+            alive = await asyncio.to_thread(_client_is_alive, client_pid, client_start)
+            if not alive:
+                _stderr_console.print(
+                    f"[yellow]MCP client (pid {client_pid}) gone — orphan exit[/yellow]"
+                )
+                stop.set()
+                return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+
+
+def _flush_and_hard_exit(code: int) -> None:
+    """Terminate the process when graceful teardown is impossible.
+
+    Reached only after the shutdown grace expired with the serve loop still
+    parked on the MCP SDK's stdin reader, and after every cleanup in
+    ``_run_mcp_server``'s finally block (job drain, store close, pid-record
+    removal) has already run. That reader is a shielded, non-daemon anyio
+    worker thread: returning normally instead would leave asyncio.run() and
+    interpreter teardown blocked forever joining it — the immortal-zombie
+    symptom this backstop exists to end.
+    """
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    with contextlib.suppress(Exception):
+        sys.stderr.flush()
+    os._exit(code)
+
+
 app = typer.Typer(
     name="mcp",
     help="MCP (Model Context Protocol) server commands.",
@@ -603,6 +766,7 @@ async def _run_mcp_server(
     allowed_hosts: tuple[str, ...] = (),
     allowed_origins: tuple[str, ...] = (),
     workspace_roots: tuple[str, ...] = (),
+    idle_timeout_seconds: float | None = None,
 ) -> None:
     """Run the MCP server.
 
@@ -619,6 +783,9 @@ async def _run_mcp_server(
         allowed_origins: ``Origin`` header allowlist for network transports.
         workspace_roots: Directories seed execution is confined to. Empty
             leaves execution unrestricted, the historical local behaviour.
+        idle_timeout_seconds: Shut down after this many seconds without a
+            tool call. ``None`` picks the transport default (network
+            transports get a bound, stdio stays unbounded); ``0`` disables.
     """
     from ouroboros.mcp.server.adapter import validate_transport
 
@@ -676,6 +843,7 @@ async def _run_mcp_server(
     stop_task: asyncio.Task[bool] | None = None
     watchdog_task: asyncio.Task[None] | None = None
     idle_checkpoint_task: asyncio.Task[None] | None = None
+    idle_shutdown_task: asyncio.Task[None] | None = None
     serve_exc: BaseException | None = None
 
     # The protective try spans store init -> composition -> serve: a failure
@@ -844,51 +1012,22 @@ async def _run_mcp_server(
                 loop.add_signal_handler(_sig, _request_stop, _sig.name)
 
         # Client-death watchdog: when the MCP client that spawned us dies, exit
-        # instead of pinning the SQLite database forever (streamable-http has no
-        # stdin EOF to rely on; for stdio, EOF stays the primary defense). Two
-        # complementary checks, polled every 5s:
-        #  - getppid() vs the original parent: catches death of whatever spawned
-        #    us directly. Under the shipped `client -> uvx -> python` topology the
-        #    direct parent is the uv wrapper, which blocks on waitpid() and
-        #    survives the client's death — this check alone can never fire there
-        #    (the orphaned wrapper is reparented; our own ppid never changes).
-        #  - the resolved *client* identity (nearest non-wrapper ancestor at
-        #    startup, pid + start time): catches the real client dying behind the
-        #    wrapper. Polling an absolute pid identity is immune to subreapers
-        #    (systemd --user, tini) and to pid recycling. OUROBOROS_CLIENT_PID
-        #    overrides the ancestor walk for spawners that want to pin the
-        #    watched process explicitly.
-        # Skipped when launched already-detached on purpose (orig_ppid == 1,
-        # e.g. a real launchd/systemd service — such servers must never
-        # self-terminate). Not effective on Windows (no POSIX ps, no
-        # reparent-on-death model); SIGINT/stdin EOF cover the common cases
-        # there.
+        # instead of pinning the SQLite database forever (streamable-http has
+        # no stdin EOF to rely on; a socketpair stdin may never deliver one).
+        # Checks and their rationale live on _orphan_watchdog_loop. Not
+        # effective on Windows (no POSIX ps, no reparent-on-death model);
+        # SIGINT/stdin EOF cover the common cases there.
         orig_ppid = os.getppid()
         client_identity: tuple[int, float | None] | None = None
         if orig_ppid != 1:
             # ps lookups can block up to their subprocess timeout — resolve off
             # the event loop so a slow ps never stalls the MCP handshake.
             client_identity = await asyncio.to_thread(_resolve_client_identity, orig_ppid)
+        # Duplicate the stdin descriptor before the SDK's serve loop diverts
+        # fd 0 (mcp>=2.0), so the probe watches the real wire.
+        stdin_peer_dead = _make_stdin_peer_probe() if transport == "stdio" else None
 
-        async def _orphan_watchdog() -> None:
-            if orig_ppid == 1:
-                return
-            while not stop.is_set():
-                if os.getppid() != orig_ppid:
-                    _console_out.print("[yellow]Parent client gone — orphan exit[/yellow]")
-                    stop.set()
-                    return
-                if client_identity is not None:
-                    client_pid, client_start = client_identity
-                    alive = await asyncio.to_thread(_client_is_alive, client_pid, client_start)
-                    if not alive:
-                        _console_out.print(
-                            f"[yellow]MCP client (pid {client_pid}) gone — orphan exit[/yellow]"
-                        )
-                        stop.set()
-                        return
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=5.0)
+        effective_idle_timeout = _effective_idle_timeout(transport, idle_timeout_seconds)
 
         async def _idle_wal_checkpoint() -> None:
             # Long-lived idle servers pin the shared WAL: passive autocheckpoints
@@ -920,10 +1059,23 @@ async def _run_mcp_server(
             name="ouroboros-mcp-serve",
         )
         stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
-        watchdog_task = asyncio.create_task(_orphan_watchdog(), name="ouroboros-mcp-watchdog")
+        watchdog_task = asyncio.create_task(
+            _orphan_watchdog_loop(
+                stop=stop,
+                orig_ppid=orig_ppid,
+                client_identity=client_identity,
+                stdin_peer_dead=stdin_peer_dead,
+            ),
+            name="ouroboros-mcp-watchdog",
+        )
         idle_checkpoint_task = asyncio.create_task(
             _idle_wal_checkpoint(), name="ouroboros-mcp-idle-checkpoint"
         )
+        if effective_idle_timeout > 0:
+            idle_shutdown_task = asyncio.create_task(
+                _idle_shutdown_loop(stop, server, effective_idle_timeout),
+                name="ouroboros-mcp-idle-shutdown",
+            )
 
         # One daily-deduplicated "MCP attached" row per user — the denominator
         # of the attached → used activation funnel. The row must reflect a
@@ -954,7 +1106,9 @@ async def _run_mcp_server(
         # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
         # EventStore.close() always gets to collapse the WAL.
         helper_tasks = [
-            t for t in (watchdog_task, stop_task, idle_checkpoint_task) if t is not None
+            t
+            for t in (watchdog_task, stop_task, idle_checkpoint_task, idle_shutdown_task)
+            if t is not None
         ]
         for _task in helper_tasks:
             if not _task.done():
@@ -962,28 +1116,34 @@ async def _run_mcp_server(
         if serve_task is not None and not serve_task.done():
             serve_task.cancel()
         # Bound the serve drain: the MCP SDK's stdio session reads stdin via a
-        # shielded worker thread (anyio readline, abandon_on_cancel=False), so an
-        # unbounded ``await serve_task`` hangs forever when shutdown was requested
-        # by a signal or the watchdog while the client is alive but quiescent —
-        # the exact "server survives kill" symptom. After the grace, closing fd 0
-        # EOFs the blocked readline (verified empirically on macOS, the primary
-        # fleet; best-effort elsewhere — a second bounded wait below means a
-        # non-waking platform still proceeds to cleanup). os._exit is
-        # deliberately NOT used anywhere here: every exit must run the store
-        # cleanup below.
+        # shielded worker thread (anyio readline, abandon_on_cancel=False), so
+        # an unbounded ``await serve_task`` hangs forever when shutdown was
+        # requested by a signal or the watchdog while the client is alive but
+        # quiescent. No descriptor this function can close will EOF that read:
+        # mcp>=2.0 serves the wire from a private duplicate of fd 0 (fd 0
+        # itself is diverted to /dev/null), so the closing-fd-0 trick of
+        # earlier releases is a no-op. The reader thread is also non-daemon —
+        # if the serve task is still pending after the graces, returning
+        # normally would leave asyncio.run() and interpreter teardown blocked
+        # forever joining it (the immortal-zombie incident). The only working
+        # exit is _flush_and_hard_exit at the END of this finally block: a
+        # hard exit is permitted strictly as the last resort, after the job
+        # drain, store close and pid-record cleanup below have all run.
+        hard_exit_required = False
         pending: set[asyncio.Task[Any]] = {
             t for t in (serve_task, *helper_tasks) if t is not None and not t.done()
         }
         if pending:
+            # Two consecutive graces preserve the historical total budget and
+            # give a slow-but-cooperative unwind time to finish on its own.
             _, pending = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_GRACE_SECONDS)
-            if serve_task is not None and serve_task in pending and transport == "stdio":
-                with contextlib.suppress(OSError):
-                    os.close(0)
+            if pending:
                 _, pending = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_GRACE_SECONDS)
             if pending:
+                hard_exit_required = True
                 _console_out.print(
                     "[yellow]Serve loop did not stop within the shutdown grace; "
-                    "continuing cleanup[/yellow]"
+                    "cleaning up and forcing exit[/yellow]"
                 )
         # Retrieve parked results so completed tasks never log
         # "exception was never retrieved" during interpreter teardown.
@@ -1044,6 +1204,10 @@ async def _run_mcp_server(
         # (SIGTERM/orphan-exit/stdin EOF) and propagates nothing.
         if serve_task is not None and serve_task.done() and not serve_task.cancelled():
             serve_exc = serve_task.exception()
+        if hard_exit_required and serve_exc is None:
+            # Every cleanup above has run; only the unjoinable stdin reader
+            # keeps this process alive. See _flush_and_hard_exit.
+            _flush_and_hard_exit(0)
 
     # Surface a serve-loop failure only after cleanup has collapsed the WAL and
     # released the stores. This preserves the error-propagation contract of the
@@ -1222,6 +1386,17 @@ def serve(
             ),
         ),
     ] = "",
+    idle_timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--idle-timeout",
+            help=(
+                "Shut the server down after this many seconds without a tool "
+                "call. Defaults to 7200 for network transports (sse, "
+                "streamable-http) and disabled for stdio. Pass 0 to disable."
+            ),
+        ),
+    ] = None,
     runtime: Annotated[
         AgentRuntimeBackend | None,
         typer.Option(
@@ -1358,6 +1533,7 @@ def serve(
                 allowed_hosts=allowed_hosts,
                 allowed_origins=allowed_origins,
                 workspace_roots=workspace_roots,
+                idle_timeout_seconds=idle_timeout,
             )
         )
     except KeyboardInterrupt:

@@ -41,7 +41,13 @@
 </p>
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero-ko bash
+```
+
+```powershell
+# Windows (PowerShell) — Python 없어도 됩니다. Git과 uv를 대신 설치합니다
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
 <p align="center"><sub>설치는 위 한 줄입니다. 이후 코딩 에이전트 안에서 <code>ooo setup</code>을 한 번 실행하세요. 자세한 내용은 <a href="#빠른-시작">빠른 시작</a>에 있습니다.</sub></p>
@@ -139,8 +145,19 @@ Ouroboros는 이 철학을 **Double Diamond** 구조로 풀어냅니다:
 **설치** — 한 줄이면 전부 자동:
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-ko bash
 ```
+
+```powershell
+# Windows (PowerShell 5.1+ 또는 pwsh 7+) — 미리 설치할 것 없음
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+Windows 설치 스크립트는 Git과 uv가 없으면 winget으로 설치하고, Python은 uv가
+직접 내려받습니다. 그다음 `ouroboros-ai`를 설치하고 발견한 호스트를 연결합니다.
+네이티브 Windows는 실험 단계이고 Codex CLI는 WSL 2가 필요합니다.
+[플랫폼 지원](./docs/platform-support.md)을 참고하세요.
 
 **첫 명령** — AI 코딩 에이전트를 열고 아래 두 명령을 순서대로 입력하세요:
 

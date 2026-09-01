@@ -42,7 +42,13 @@
 </p>
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-hero-zh bash
+```
+
+```powershell
+# Windows (PowerShell) — 无需 Python；会自动安装 Git 和 uv
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
 ```
 
 <p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
@@ -115,8 +121,18 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 **安装** —— 一条命令，环境自动识别：
 
 ```bash
+# macOS / Linux / WSL 2
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | OUROBOROS_INSTALL_REF=readme-zh bash
 ```
+
+```powershell
+# Windows (PowerShell 5.1+ 或 pwsh 7+) —— 无需预先安装任何东西
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+Windows 安装脚本会在缺少 Git 和 uv 时通过 winget 安装它们，Python 由 uv 自行下载，
+然后安装 `ouroboros-ai` 并接入检测到的宿主。原生 Windows 仍是实验性支持，Codex CLI
+需要 WSL 2，详见[平台支持](./docs/platform-support.md)。
 
 **第一条命令** —— 打开你的 AI 编码 agent，按顺序运行：
 
