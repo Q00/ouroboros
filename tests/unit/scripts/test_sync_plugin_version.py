@@ -68,24 +68,21 @@ def test_release_version_accepts_canonical_versions(version: str) -> None:
     assert sync_plugin_version.require_canonical_version(version) == version
 
 
-def test_main_write_updates_both_setup_skill_markers(
+def test_main_write_updates_the_setup_skill_marker(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
 
     source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.4"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.4"}]}\n')
     codex_plugin_json.write_text('{"version": "1.2.4"}\n')
@@ -95,7 +92,6 @@ def test_main_write_updates_both_setup_skill_markers(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -106,10 +102,8 @@ def test_main_write_updates_both_setup_skill_markers(
 
     captured = capsys.readouterr()
     assert "WRITE skills/setup/SKILL.md (0.39.1 -> 1.2.4)" in captured.out
-    assert "WRITE .claude-plugin/skills/setup/SKILL.md (0.39.1 -> 1.2.4)" in captured.out
     assert "OK    .codex-plugin/plugin.json (1.2.4)" in captured.out
     assert source_skill.read_text() == "<!-- ooo:VERSION:1.2.4 -->\nsource\n"
-    assert bundled_skill.read_text() == "<!-- ooo:VERSION:1.2.4 -->\nbundled\n"
 
 
 def test_write_syncs_codex_plugin_manifest_version(monkeypatch, tmp_path: Path) -> None:
@@ -118,7 +112,6 @@ def test_write_syncs_codex_plugin_manifest_version(monkeypatch, tmp_path: Path) 
     marketplace = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin = tmp_path / ".codex-plugin" / "plugin.json"
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     for path, payload in (
         (claude_plugin, {"version": "0.50.4"}),
         (marketplace, {"plugins": [{"version": "0.50.4"}]}),
@@ -127,16 +120,13 @@ def test_write_syncs_codex_plugin_manifest_version(monkeypatch, tmp_path: Path) 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload))
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:0.50.4 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:0.50.4 -->\nbundled\n")
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", claude_plugin)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -153,21 +143,19 @@ def _seed_sync_fixture(tmp_path: Path, monkeypatch, version: str = "0.50.4") -> 
     claude_plugin = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace = tmp_path / ".claude-plugin" / "marketplace.json"
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     for path, payload in (
         (claude_plugin, {"version": version}),
         (marketplace, {"plugins": [{"version": version}]}),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload))
-    for path, body in ((source_skill, "source"), (bundled_skill, "bundled")):
+    for path, body in ((source_skill, "source"),):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"<!-- ooo:VERSION:{version} -->\n{body}\n")
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", claude_plugin)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
 
 
 def _mcp_descriptor(from_spec: str) -> dict:
@@ -343,7 +331,6 @@ def test_main_write_fails_when_required_setup_skill_is_missing(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
@@ -351,7 +338,6 @@ def test_main_write_fails_when_required_setup_skill_is_missing(
     source_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
-    source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
     plugin_json.write_text('{"version": "1.2.4"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.4"}]}\n')
     codex_plugin_json.write_text('{"version": "1.2.4"}\n')
@@ -361,7 +347,6 @@ def test_main_write_fails_when_required_setup_skill_is_missing(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -381,17 +366,14 @@ def test_main_write_fails_when_setup_marker_is_missing(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("source without marker\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.4"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.4"}]}\n')
     codex_plugin_json.write_text('{"version": "1.2.4"}\n')
@@ -404,7 +386,6 @@ def test_main_write_fails_when_setup_marker_is_missing(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -427,17 +408,14 @@ def test_main_write_preflights_json_targets_before_mutation(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [}\n')
     codex_plugin_json.write_text('{"version": "1.2.3"}\n')
@@ -449,7 +427,6 @@ def test_main_write_preflights_json_targets_before_mutation(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -491,22 +468,18 @@ def test_main_write_preflight_rejects_duplicate_json_keys_before_mutation(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_bytes(b"<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_bytes(b"<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_bytes(b'{"version":"1.2.3"}\n')
     marketplace_json.write_bytes(b'{"plugins":[{"version":"1.2.3","version":"9.9.9"}]}\n')
-    originals = {path: path.read_bytes() for path in (source_skill, bundled_skill, plugin_json)}
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json)}
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -526,17 +499,14 @@ def test_main_write_fails_before_mutation_when_required_json_is_missing(
     missing_target: str,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
     if missing_target != "plugin":
         plugin_json.write_text('{"version": "1.2.3"}\n')
     if missing_target != "marketplace":
@@ -544,7 +514,6 @@ def test_main_write_fails_before_mutation_when_required_json_is_missing(
     codex_plugin_json.write_text('{"version": "1.2.3"}\n')
 
     original_source = source_skill.read_text()
-    original_bundled = bundled_skill.read_text()
     existing_json = marketplace_json if missing_target == "plugin" else plugin_json
     original_json = existing_json.read_text()
     original_codex_plugin_json = codex_plugin_json.read_text()
@@ -554,7 +523,6 @@ def test_main_write_fails_before_mutation_when_required_json_is_missing(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -565,7 +533,6 @@ def test_main_write_fails_before_mutation_when_required_json_is_missing(
         sync_plugin_version.main()
 
     assert source_skill.read_text() == original_source
-    assert bundled_skill.read_text() == original_bundled
     assert existing_json.read_text() == original_json
     assert codex_plugin_json.read_text() == original_codex_plugin_json
 
@@ -586,17 +553,14 @@ def test_main_write_rejects_missing_or_non_string_json_version_before_mutation(
     marketplace_version: object,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
 
     plugin_payload = {} if plugin_version is None else {"version": plugin_version}
     marketplace_plugin = {} if marketplace_version is None else {"version": marketplace_version}
@@ -607,14 +571,12 @@ def test_main_write_rejects_missing_or_non_string_json_version_before_mutation(
     original_marketplace = marketplace_json.read_text()
     original_codex_plugin = codex_plugin_json.read_text()
     original_source = source_skill.read_text()
-    original_bundled = bundled_skill.read_text()
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -628,7 +590,6 @@ def test_main_write_rejects_missing_or_non_string_json_version_before_mutation(
     assert marketplace_json.read_text() == original_marketplace
     assert codex_plugin_json.read_text() == original_codex_plugin
     assert source_skill.read_text() == original_source
-    assert bundled_skill.read_text() == original_bundled
 
 
 def test_main_write_rejects_unsupported_source_version_before_mutation(
@@ -636,23 +597,20 @@ def test_main_write_rejects_unsupported_source_version_before_mutation(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
     codex_plugin_json = tmp_path / ".codex-plugin" / "plugin.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     codex_plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
     codex_plugin_json.write_text('{"version": "1.2.3"}\n')
     originals = {
         path: path.read_text()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json, codex_plugin_json)
+        for path in (source_skill, plugin_json, marketplace_json, codex_plugin_json)
     }
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
@@ -660,7 +618,6 @@ def test_main_write_rejects_unsupported_source_version_before_mutation(
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "CODEX_PLUGIN_JSON", codex_plugin_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -681,27 +638,20 @@ def test_main_write_rejects_malformed_single_marker_value_before_mutation(
     marker_version: str,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text(f"<!-- ooo:VERSION:{marker_version} -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
-    originals = {
-        path: path.read_bytes()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json, marketplace_json)}
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -730,27 +680,20 @@ def test_main_write_rejects_malformed_duplicate_marker_before_mutation(
     source_text: str,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text(source_text)
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
-    originals = {
-        path: path.read_text()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_text() for path in (source_skill, plugin_json, marketplace_json)}
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1203,27 +1146,20 @@ def test_main_write_rolls_back_when_later_write_fails(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
-    originals = {
-        path: path.read_bytes()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json, marketplace_json)}
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1267,21 +1203,17 @@ def test_main_write_does_not_clobber_external_edit_during_rollback(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1326,21 +1258,17 @@ def test_main_write_does_not_roll_back_same_bytes_new_inode_aba(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1393,25 +1321,18 @@ def test_main_write_rolls_back_owned_exchange_when_parent_dir_open_fails(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
-    originals = {
-        path: path.read_bytes()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json, marketplace_json)}
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1444,7 +1365,6 @@ def test_main_write_rolls_back_owned_exchange_when_parent_dir_open_fails(
     assert foreign_generation is not None
     assert source_skill.read_bytes() == originals[source_skill]
     assert sync_plugin_version._path_generation(source_skill) == foreign_generation
-    assert bundled_skill.read_bytes() == originals[bundled_skill]
     assert plugin_json.read_bytes() == originals[plugin_json]
     assert marketplace_json.read_bytes() == originals[marketplace_json]
 
@@ -1458,25 +1378,18 @@ def test_main_write_rolls_back_owned_exchange_when_displaced_quarantine_fails(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
-    originals = {
-        path: path.read_bytes()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json, marketplace_json)}
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1514,28 +1427,23 @@ def test_main_write_rolls_back_owned_exchange_when_displaced_quarantine_fails(
     assert foreign_generation is not None
     assert source_skill.read_bytes() == originals[source_skill]
     assert sync_plugin_version._path_generation(source_skill) == foreign_generation
-    assert bundled_skill.read_bytes() == originals[bundled_skill]
     assert plugin_json.read_bytes() == originals[plugin_json]
     assert marketplace_json.read_bytes() == originals[marketplace_json]
 
 
 def test_main_write_rejects_external_edit_after_preflight(tmp_path: Path, monkeypatch) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1579,14 +1487,11 @@ def test_main_write_revalidates_targets_that_were_already_current(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.4"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     original_marketplace = marketplace_json.read_bytes()
@@ -1595,7 +1500,6 @@ def test_main_write_revalidates_targets_that_were_already_current(
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1636,14 +1540,11 @@ def test_main_write_revalidates_targets_that_were_already_current(
 
 def test_main_read_only_revalidates_targets_after_preflight(tmp_path: Path, monkeypatch) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.4 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.4"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.4"}]}\n')
     external_plugin = b'{"version":"external"}\n'
@@ -1651,7 +1552,6 @@ def test_main_read_only_revalidates_targets_after_preflight(tmp_path: Path, monk
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1680,15 +1580,12 @@ def test_main_write_rolls_back_only_successfully_replaced_targets(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
 
@@ -1696,7 +1593,6 @@ def test_main_write_rolls_back_only_successfully_replaced_targets(
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1749,14 +1645,11 @@ def test_main_write_ignores_untrusted_legacy_transaction_file(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     forged = tmp_path / ".sync-plugin-version.transaction.json"
@@ -1765,7 +1658,6 @@ def test_main_write_ignores_untrusted_legacy_transaction_file(
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",
@@ -1783,14 +1675,11 @@ def test_main_write_ignores_untrusted_legacy_transaction_file(
 
 def test_concurrent_invocations_are_serialized_by_os_lock(tmp_path: Path) -> None:
     source_skill = tmp_path / "skills/setup/SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin/skills/setup/SKILL.md"
     plugin_json = tmp_path / ".claude-plugin/plugin.json"
     marketplace_json = tmp_path / ".claude-plugin/marketplace.json"
     source_skill.parent.mkdir(parents=True)
-    bundled_skill.parent.mkdir(parents=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version":"1.2.3"}\n')
     marketplace_json.write_text('{"plugins":[{"version":"1.2.3"}]}\n')
     ready = tmp_path / "ready"
@@ -1808,7 +1697,6 @@ module.ROOT = root
 module.PLUGIN_JSON = root / ".claude-plugin/plugin.json"
 module.MARKETPLACE_JSON = root / ".claude-plugin/marketplace.json"
 module.SETUP_SKILL_MD = root / "skills/setup/SKILL.md"
-module.BUNDLED_SETUP_SKILL_MD = root / ".claude-plugin/skills/setup/SKILL.md"
 if mode == "hold":
     original = module.update_json
     def hold_first_write(
@@ -1858,7 +1746,6 @@ module.main()
         "1.2.5"
     )
     assert b"VERSION:1.2.5" in source_skill.read_bytes()
-    assert b"VERSION:1.2.5" in bundled_skill.read_bytes()
 
 
 def test_lock_file_is_outside_checkout(tmp_path: Path, monkeypatch) -> None:
@@ -1893,27 +1780,20 @@ def test_main_write_rolls_back_when_marker_update_reports_no_change(
     monkeypatch,
 ) -> None:
     source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
-    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
     plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
     marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
 
     source_skill.parent.mkdir(parents=True, exist_ok=True)
-    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
-    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.3"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
-    originals = {
-        path: path.read_bytes()
-        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
-    }
+    originals = {path: path.read_bytes() for path in (source_skill, plugin_json, marketplace_json)}
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
     monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
     monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
-    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
     monkeypatch.setattr(
         sync_plugin_version.sys,
         "argv",

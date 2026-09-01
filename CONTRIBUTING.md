@@ -6,6 +6,7 @@ Thank you for your interest in contributing to Ouroboros! This guide covers ever
 
 - [Quick Setup](#quick-setup)
 - [Development Workflow](#development-workflow)
+- [Review Boundary Contract](#review-boundary-contract)
 - [Ways to Contribute](#ways-to-contribute)
 - [Development Environment](#development-environment)
 - [Code Style Guide](#code-style-guide)
@@ -42,6 +43,13 @@ uv sync
 uv run ouroboros --version   # verify
 uv run pytest tests/unit/ -q # run tests
 ```
+
+> **`uv sync` is not the whole loop.** The checked-in `.mcp.json` points at the
+> **published PyPI package**, so a clone that you edit is not the code your
+> client runs. Before your first change, read
+> [The Development Loop](./docs/contributing/developing.md) — it covers pointing
+> the tooling at your working tree, where config and state live, and the fastest
+> way to verify each kind of change.
 
 **Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
@@ -140,6 +148,7 @@ the PR description.
 Every change lands through a squash-merged PR.
 
 - Write a clear PR description explaining **what** and **why**
+- Include the structured boundary required by [Review Boundary Contract](#review-boundary-contract)
 - Reference the related issue (e.g., `Closes #123`, or a plain `Refs #123`) —
   the `Issue link present` gate requires it
 - Ensure all tests pass and linting is clean
@@ -150,6 +159,13 @@ Four checks are required to merge (`Ruff Lint`, `MyPy Type Check`,
 on the paths you touched. Every gate, its local reproduction command, and its
 legitimate escape hatch are documented in
 [CI Gates and Branch Protection](./docs/contributing/ci-gates.md).
+
+`ouroboros-agent[bot]` ties each review verdict to the commit it checked. It
+grades your PR against the linked issue's requirements and reproduces the
+defects it reports. Confirm the applicable verdict belongs to the current head,
+then read
+[Review Conventions](./docs/contributing/review-conventions.md) before your first
+push — most review rounds are lost to objections you can preempt.
 
 ### Release Maintenance
 
@@ -175,6 +191,81 @@ The tag-triggered release workflow repeats the read-only check and refuses to bu
 
 The full sequence, including the release-notes convention, is in
 [CI Gates and Branch Protection](./docs/contributing/ci-gates.md#releases).
+
+---
+
+## Review Boundary Contract
+
+Review speed depends on whether the PR boundary is explicit. A focused PR gives contributors, review bots, and maintainers the same contract to evaluate. Every PR that changes code, documentation, or operational guidance MUST define the following before implementation and keep it current in the PR description:
+
+| Boundary field | Required declaration |
+|----------------|----------------------|
+| User problem | One concrete user problem the PR solves |
+| Promised contract | Supported inputs, preconditions, execution conditions, observable behavior, and invariants |
+| Implementation boundary | Existing subsystems and components changed, data or security boundaries crossed, and the current owner |
+| Non-goals | Unsupported inputs or conditions and related risks intentionally excluded from this PR |
+| Evidence | Reproduction steps or tests that prove each promised behavior under the declared conditions |
+
+The declared boundary narrows implementation scope; it MUST NOT waive an existing public or repository contract, an approved issue or RFC requirement, or a maintainer decision. If a proposed non-goal conflicts with one of those baseline obligations, the contributor MUST ask the maintainer to approve a scope change or revisit the RFC before implementation.
+
+Do not begin from an unsupported solution assumption and then absorb every lifecycle, rollback, concurrency, or authority concern that follows from it. If implementation reveals a new subsystem or ownership boundary, stop and let a maintainer decide whether the PR expands, splits, or returns to RFC discussion.
+
+### Responsibilities
+
+- **Contributor**: declares the contract and boundary, keeps the implementation inside them, and does not silently widen either while addressing review feedback.
+- **Review bot or reviewer**: blocks only direct contract violations and immediate user-data or security risks. A valid risk outside the declared boundary becomes a follow-up only when it has a named owner.
+- **Maintainer**: decides whether a proposed subsystem, ownership change, or scope expansion belongs in the current PR, a follow-up PR, or a revised RFC.
+
+### Five-question review rubric
+
+Every finding MUST answer these questions with evidence:
+
+1. Does the finding reproduce under the inputs and execution conditions promised by the PR?
+2. Does the finding violate the contract promised by the PR?
+3. Would resolving it require a new subsystem or a new ownership boundary?
+4. Can the original user problem be solved without the subsystem introduced by the PR?
+5. If the scope is split, does an immediate user-data or security risk remain?
+
+Apply outcomes in this order:
+
+| Evidence | Review outcome |
+|----------|----------------|
+| Questions 1 and 2 are **yes** | **Changes Requested**. The finding is reproducible inside the promised boundary and breaks the PR contract. |
+| Question 5 is **yes**, but resolving the direct risk does not require a new subsystem or owner | **Changes Requested**. Immediate user-data and security risks introduced by the PR are blockers. |
+| Questions 3 and 5 are **yes** | **Stop the PR and revisit the RFC with a maintainer**. The safe fix requires scope or ownership that the current PR cannot decide. |
+| Questions 3 and 4 are **yes**, and question 5 is **no** | **Owned follow-up**. Create or link a follow-up issue or PR with a named owner; it is not a blocker once the current contract is satisfied. |
+| The finding does not reproduce inside the declared conditions, or question 2 is **no** | **Not a blocker**. Record it only as an owned follow-up when it is independently valid and actionable. |
+
+Severity alone does not decide whether a review comment blocks a PR. Boundary, contract impact, and immediate risk do.
+
+### Why unstructured boundaries create review loops
+
+```mermaid
+flowchart LR
+    A[Small user problem] --> B[Unsupported solution assumption]
+    B --> C[New lifecycle ownership]
+    C --> D[Rollback requirement]
+    C --> E[Concurrency requirement]
+    C --> F[Filesystem authority requirement]
+    D --> G[PR scope expands]
+    E --> G
+    F --> G
+    G --> H[New review blockers repeat]
+```
+
+### Preferred flow
+
+```mermaid
+flowchart LR
+    A[Small user problem] --> B[Declare inputs, conditions, and contract]
+    B --> C[Declare subsystem, ownership, and non-goals]
+    C --> D[Implement the smallest contract-satisfying change]
+    D --> E[Prove behavior under declared conditions]
+    E --> F{Five-question review}
+    F -->|Q1 + Q2| G[Changes Requested]
+    F -->|Q3 + Q4 and not Q5| H[Owned follow-up]
+    F -->|Q3 + Q5| I[Stop and revisit RFC]
+```
 
 ---
 
@@ -246,10 +337,11 @@ See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for 
 
 When submitting a PR:
 
-1. **Small, focused changes**: One logical change per PR
-2. **Tests included**: New features need tests
-3. **Docs updated**: Update relevant documentation
-4. **Clean history**: Squash commits before submitting if needed
+1. **Boundary declared**: State the user problem, promised contract, implementation boundary, non-goals, and evidence required by [Review Boundary Contract](#review-boundary-contract)
+2. **Small, focused changes**: One logical change per PR
+3. **Tests included**: New observable behavior needs contract-level tests
+4. **Docs updated**: Update relevant documentation
+5. **Clean history**: Squash commits before submitting if needed
 
 ### Documentation
 
@@ -264,11 +356,12 @@ When reporting or fixing a documentation problem, apply the [Documentation Issue
 
 ### Code Review
 
-Review open PRs to:
+Review open PRs using the [five-question review rubric](#five-question-review-rubric):
 
-- Catch bugs before merge
-- Suggest improvements
-- Learn the codebase
+- Request changes only for contract violations or immediate user-data or security risks
+- Move valid out-of-boundary risks to an owned follow-up instead of expanding the PR
+- Escalate new subsystem or ownership requirements to a maintainer when they also carry immediate risk
+- Suggest non-blocking improvements without presenting them as merge requirements
 
 ---
 
@@ -752,14 +845,14 @@ When adding support for a **new runtime backend** (e.g., new entry in `AgentRunt
 
 ### Documentation Issue Severity Rubric
 
-When a reviewer or contributor identifies a documentation problem, classify it by severity before filing an issue or leaving a PR comment. This classification determines urgency and whether a PR can be merged with the issue open.
+When a reviewer or contributor identifies a documentation problem, classify it by severity for urgency and triage. Apply the [Review Boundary Contract](#review-boundary-contract) first: severity does not independently decide whether a PR comment blocks.
 
 | Severity | Issue marker | Definition | User Impact | Merge Policy |
 |----------|--------------|------------|-------------|--------------|
-| **Critical** | `documentation` label + `**Severity:** critical` in the issue/PR body | The documented information is **factually wrong**: a command, flag, path, or option described in the docs does not exist or behaves differently than described. | User follows the docs and **fails** — the command errors, the path is missing, the flag is rejected. | **Block merge.** The PR must not ship until fixed. |
-| **High** | `documentation` label + `**Severity:** high` in the issue/PR body | The documentation is **misleading**: information is technically present but framed in a way that causes confusion, omits a required step, or implies a capability that is unimplemented. This includes wrong environment variable names that silently have no effect. | User follows the docs and **proceeds incorrectly** — they finish the step but reach a wrong state or have false expectations. | **Block merge** unless the issue is filed and linked. Fix within the same sprint. |
-| **Medium** | `documentation` label + `**Severity:** medium` in the issue/PR body | The documentation has **inconsistent style or terminology**: the same concept is named differently across files, formatting does not follow the project's conventions, or phrasing is ambiguous but not incorrect. Also applies to missing-content findings where the gap is for an edge case or optional feature and users can succeed with defaults or alternative docs. | User is mildly confused by inconsistency but can still succeed. | **Non-blocking.** Can merge; fix before the next release. |
-| **Low** | `documentation` label + `**Severity:** low` in the issue/PR body | The documentation has a **minor cosmetic gap**: an alternative invocation form is undocumented, a behavior note is absent but has no user-visible impact, or an edge case is missing from one file but covered elsewhere. No confusion or incorrect behavior results. | User experiences minor friction at most; no incorrect outcome. | **Non-blocking.** Address opportunistically. |
+| **Critical** | `documentation` label + `**Severity:** critical` in the issue/PR body | The documented information is **factually wrong**: a command, flag, path, or option described in the docs does not exist or behaves differently than described. | User follows the docs and **fails** — the command errors, the path is missing, or the flag is rejected. | **Changes Requested** when it reproduces under the PR's declared conditions and violates its contract, or when it creates immediate user-data/security risk. Otherwise use an owned follow-up. |
+| **High** | `documentation` label + `**Severity:** high` in the issue/PR body | The documentation is **misleading**: information is technically present but framed in a way that causes confusion, omits a required step, or implies an unimplemented capability. | User follows the docs and **proceeds incorrectly** — they finish the step but reach a wrong state or have false expectations. | Apply the boundary and contract test. Do not block by severity alone; link a named owner for valid out-of-boundary follow-up. |
+| **Medium** | `documentation` label + `**Severity:** medium` in the issue/PR body | The documentation has **inconsistent style or terminology** or an ambiguity that does not make the documented path incorrect. | User is mildly confused by inconsistency but can still succeed. | **Non-blocking.** Can merge; assign an owner when follow-up is needed. |
+| **Low** | `documentation` label + `**Severity:** low` in the issue/PR body | The documentation has a **minor cosmetic gap** or an edge case missing where another safe documented path exists. | User experiences minor friction at most; no incorrect outcome. | **Non-blocking.** Address opportunistically. |
 
 #### Severity Examples
 
@@ -781,7 +874,7 @@ When a reviewer or contributor identifies a documentation problem, classify it b
 1. **When reviewing a docs-affecting PR**, scan each changed file against the [Documentation Decay Detection](#documentation-decay-detection) checks below and classify any finding using the table above.
 2. **When filing a GitHub issue** for a documentation problem, add the existing `documentation` label and include a body line such as `**Severity:** critical`, `**Severity:** high`, `**Severity:** medium`, or `**Severity:** low`.
 3. **When writing a PR description** that fixes a documentation problem, state the severity in the PR summary (e.g., _"Fixes documentation severity: critical — `--resume` flag was listed with wrong default"_).
-4. **Critical and High issues found during review must be resolved or have a linked follow-up issue before the PR is approved.**
+4. **Apply the Review Boundary Contract before severity:** direct contract violations and immediate user-data/security risks require changes; valid risks outside the boundary require a linked follow-up with a named owner; new subsystem or ownership plus immediate risk requires maintainer/RFC escalation.
 5. **Track open documentation findings in GitHub issues** with the `documentation` label; do not rely on a separate register file unless one is introduced and kept current.
 
 > **Current open documentation issues** are tracked with the [`documentation`](https://github.com/Q00/ouroboros/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation) label.
@@ -826,6 +919,8 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 
 - [Architecture Overview](./docs/contributing/architecture-overview.md) - How the system fits together
 - [Testing Guide](./docs/contributing/testing-guide.md) - How to write and run tests
+- [The Development Loop](./docs/contributing/developing.md) - Run your own code: local MCP, config, state, per-change verification
+- [Review Conventions](./docs/contributing/review-conventions.md) - What the review bot demands, and how to preempt a round
 - [Key Patterns](./docs/contributing/key-patterns.md) - Core patterns with code examples
 - [CI Gates and Branch Protection](./docs/contributing/ci-gates.md) - What CI enforces, how to reproduce it locally, and how releases land
 

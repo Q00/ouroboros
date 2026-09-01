@@ -131,9 +131,7 @@ _CLAUDE_RESERVED_SKILL_NAMES = frozenset(
 )
 _SKILL_ALIAS_FIELDS = ("alias", "aliases", "command_aliases", "skill_aliases", "commands")
 _PYTHON_SKILL_PATHS = tuple(
-    Path(root) / skill / "SKILL.md"
-    for root in ("skills", ".claude-plugin/skills")
-    for skill in ("welcome", "setup", "seed")
+    Path("skills") / skill / "SKILL.md" for skill in ("welcome", "setup", "seed")
 )
 _PYTHON_RESOLVER_START = "<!-- ouroboros-python-resolver:start -->"
 _PYTHON_RESOLVER_END = "<!-- ouroboros-python-resolver:end -->"
@@ -321,14 +319,13 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     }
     assert (repo_root / "skills" / "config" / "SKILL.md").is_file()
     assert (repo_root / "skills" / "ooo" / "SKILL.md").is_file()
-    assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()
 
 
 def test_fanout_synthesis_fetch_contract_is_shipped_to_every_host() -> None:
     """Every MCP-only host must be able to consume a completed fan-out."""
     repo_root = Path(__file__).resolve().parents[3]
 
-    for skill_root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for skill_root in (repo_root / "skills",):
         skill_path = skill_root / "interview" / "SKILL.md"
         content = skill_path.read_text(encoding="utf-8")
         assert "A complete set returns a bounded artifact envelope" in content, skill_path
@@ -348,7 +345,7 @@ def test_shipped_skill_metadata_never_claims_claude_reserved_command_names() -> 
         "status": "ouroboros-status",
     }
 
-    for skill_root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for skill_root in (repo_root / "skills",):
         for skill_path in sorted(skill_root.glob("*/SKILL.md")):
             frontmatter = _skill_frontmatter(skill_path)
             claimed = _claimed_skill_names(frontmatter)
@@ -396,34 +393,6 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     assert "name: ooo" in codex_entry
     assert "../welcome/SKILL.md" in codex_entry
 
-    claude_welcome = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Setup Gate: First Use" in claude_welcome
-    assert "../setup/SKILL.md" in claude_welcome
-    assert "previously completed welcome must never hide the setup gate" in claude_welcome
-    assert "runtime_backend: claude" in claude_welcome
-    assert "marketplace plugin owns its MCP capability" in claude_welcome
-    assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in claude_welcome
-    for codex_only_phrase in (
-        "CODEX_SETUP_REQUIRED",
-        "LEGACY_CODEX_MODEL_MIGRATION_REQUIRED",
-        "Use Codex default model",
-        "Codex 선택으로 전환하기",
-        "gpt-5 고정 유지하기",
-    ):
-        assert codex_only_phrase not in claude_welcome
-
-    claude_setup = (repo_root / ".claude-plugin" / "skills" / "setup" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    claude_config = (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Codex" not in claude_setup
-    assert "Codex" not in claude_config
-    assert "execution.default_model" in claude_config
-
     codex_rules = (repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md").read_text(
         encoding="utf-8"
     )
@@ -431,7 +400,7 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     assert "직접 모델 설정하기" in codex_rules
     assert "mere existence" in codex_rules
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         setup = (root / "setup" / "SKILL.md").read_text(encoding="utf-8")
         assert "### Step 5.1: Model Choice (Claude Code)" in setup
         assert "직접 모델 설정하기" in setup
@@ -1114,9 +1083,7 @@ def test_claude_setup_gate_accepts_default_sdk_without_host_mcp_file(tmp_path: P
         """llm:\n  qa_model: claude\n  backend: claude\norchestrator:\n  retries: 3\n  timeout: 20\n  runtime_backend: claude\n""",
         encoding="utf-8",
     )
-    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     setup_gate_start = skill.index("### Setup Gate: First Use")
     start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
@@ -1136,9 +1103,7 @@ def test_claude_setup_gate_accepts_yaml_flow_mappings_without_host_mcp_file(
         f"orchestrator: {{runtime_backend: {runtime_backend}}}\nllm: {{backend: claude}}\n",
         encoding="utf-8",
     )
-    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     setup_gate_start = skill.index("### Setup Gate: First Use")
     start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
@@ -1160,9 +1125,7 @@ def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
         "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
         encoding="utf-8",
     )
-    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     precheck_context = skill.index("Before honoring that completion marker")
     start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', precheck_context)
     gate = skill[start : skill.index("\n```", start)] + '\nprintf "%s" "${SETUP_READY:-}"\n'
@@ -1184,9 +1147,7 @@ def test_claude_setup_gate_rejects_incomplete_runtime_config(tmp_path: Path, con
     config_path = tmp_path / ".ouroboros" / "config.yaml"
     config_path.parent.mkdir()
     config_path.write_text(config, encoding="utf-8")
-    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     setup_gate_start = skill.index("### Setup Gate: First Use")
     start = skill.index('if ouroboros_python - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
@@ -1198,18 +1159,10 @@ def test_welcome_surfaces_describe_default_claude_sdk_profile() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     expected = "Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x."
 
-    for relative_path in (
-        Path("skills/welcome/SKILL.md"),
-        Path(".claude-plugin/skills/welcome/SKILL.md"),
-    ):
-        content = (repo_root / relative_path).read_text(encoding="utf-8")
-        assert expected in content
-        assert "Ordinary Claude setup uses the dependency-free CLI profile" not in content
-
-    plugin_welcome = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in plugin_welcome
+    content = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    assert expected in content
+    assert "Ordinary Claude setup uses the dependency-free CLI profile" not in content
+    assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in content
 
 
 def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package_is_stub(
@@ -1280,7 +1233,7 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
         ],
     }
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         assert "the same tool-discovery load query you used above" not in "\n".join(
             skill_path.read_text(encoding="utf-8") for skill_path in root.glob("*/SKILL.md")
         )
@@ -1309,7 +1262,7 @@ def test_packaged_skills_gate_fallback_on_callability_not_empty_discovery() -> N
         "If not → skip to **Fallback**",
         "returns no matching tools → proceed to **Path B**",
     )
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill_path in root.glob("*/SKILL.md"):
             text = skill_path.read_text(encoding="utf-8")
             for phrase in forbidden:
@@ -1329,7 +1282,7 @@ def test_brownfield_default_selection_ends_turn_in_every_skill_bundle() -> None:
     """All shipped host bundles must render the repo list before selection."""
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("brownfield", "setup"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             compact = " ".join(text.split())
@@ -1345,9 +1298,8 @@ def test_brownfield_scan_contract_matches_runtime_in_every_skill_bundle() -> Non
 
     ``scan_home_for_repos()`` walks ``scan_root`` at most two levels deep and
     registers each candidate self-only — it never expands Git worktree families
-    via ``git worktree list``. Skill instructions in both ``skills/`` and
-    ``.claude-plugin/skills/`` must not advertise the retired outside-root
-    worktree-expansion behavior.
+    via ``git worktree list``. Skill instructions in ``skills/`` must not
+    advertise the retired outside-root worktree-expansion behavior.
     """
     repo_root = Path(__file__).resolve().parents[3]
     stale_phrases = (
@@ -1357,7 +1309,7 @@ def test_brownfield_scan_contract_matches_runtime_in_every_skill_bundle() -> Non
         "git worktree list --porcelain",
     )
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("brownfield", "setup"):
             skill_path = root / skill / "SKILL.md"
             text = skill_path.read_text(encoding="utf-8")
@@ -1379,7 +1331,7 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     """Background skills delegate polling while the parent relays child events."""
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("run", "auto", "ralph"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             normalized = text.lower()
@@ -1422,7 +1374,7 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
 def test_run_and_auto_route_human_intent_without_exposing_internal_ids() -> None:
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("run", "auto"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             normalized = text.lower()
@@ -1439,7 +1391,7 @@ def test_active_conductor_skill_copies_cover_start_and_progress_briefing() -> No
     """Every supported host gets the same user-facing control-surface facts."""
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("run", "auto"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             normalized = text.lower()
@@ -1461,7 +1413,7 @@ def test_run_skill_copies_preserve_automatic_model_tier_omission() -> None:
     """Normal run guidance must not silently turn omission into a medium-tier pin."""
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         text = (root / "run" / "SKILL.md").read_text(encoding="utf-8")
         compact = " ".join(text.lower().split())
         assert 'model_tier: "medium"' not in text
@@ -1472,7 +1424,7 @@ def test_run_skill_copies_preserve_automatic_model_tier_omission() -> None:
 def test_active_conductor_skill_copies_cover_synapse_and_audited_action_order() -> None:
     repo_root = Path(__file__).resolve().parents[3]
 
-    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+    for root in (repo_root / "skills",):
         for skill in ("run", "auto", "ralph"):
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
             normalized = text.lower()
@@ -1492,7 +1444,7 @@ def test_active_conductor_guidance_is_english_canonical_without_locale_catalogs(
     repo_root = Path(__file__).resolve().parents[3]
     paths = [
         root / skill / "SKILL.md"
-        for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills")
+        for root in (repo_root / "skills",)
         for skill in ("run", "auto", "ralph")
     ] + [repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md"]
 
