@@ -9,6 +9,10 @@
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
 #   4. Auto-detect single CLI on PATH; default to claude in pipe mode.
+#
+# When no usable installer is present, uv is fetched from astral.sh because it
+# carries its own Python. Set OUROBOROS_INSTALL_BOOTSTRAP_UV=0 to decline that
+# and get installation instructions instead.
 set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
@@ -19,6 +23,7 @@ LITELLM_PYTHON_SPEC=">=3.12,<3.14"
 IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
 EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
+BOOTSTRAP_UV="${OUROBOROS_INSTALL_BOOTSTRAP_UV:-1}"
 
 if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; } && { [ "${TERM:-}" != "dumb" ] || [ -n "${FORCE_COLOR:-}" ]; }; then
   BOLD="$(printf '\033[1m')"
@@ -754,20 +759,12 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
 # _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
 _telemetry_ping() {
   _telemetry_enabled || return 0
-  local event="$1" id os arch py body kv k v props api_key_safe event_safe id_safe
+  local event="$1" id os py body kv k v props api_key_safe event_safe id_safe
   shift
   id=$(_telemetry_distinct_id) || return 0
 
-  # Token-constrain os/arch at the source: a hostile executable earlier on
-  # PATH (or a nonstandard uname) can emit anything, including embedded
-  # quotes that would otherwise mutate the JSON structure below -- neither
-  # os nor arch legitimately needs more than this charset (darwin, linux,
-  # arm64, x86_64, ...), so anything that doesn't fullmatch is discarded
-  # outright rather than partially trusted.
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   [[ "$os" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || os="unknown"
-  arch=$(uname -m)
-  [[ "$arch" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || arch="unknown"
 
   py=$(command -v python3 2>/dev/null || true)
   body=""
@@ -784,10 +781,11 @@ _telemetry_ping() {
     body=$("$py" -c '
 import json, re, sys
 
-event, distinct_id, api_key, os_name, arch = sys.argv[1:6]
-props = {"source": "install_sh", "os": os_name, "arch": arch}
 key_re = re.compile(r"^[A-Za-z0-9_]+$")
-for kv in sys.argv[6:]:
+
+event, distinct_id, api_key, os_name = sys.argv[1:5]
+props = {"os": os_name}
+for kv in sys.argv[5:]:
     key, sep, value = kv.partition("=")
     if sep and key_re.match(key):
         props[key] = value
@@ -800,7 +798,7 @@ print(json.dumps(
     },
     separators=(",", ":"),
 ))
-' "$event" "$id" "$PH_API_KEY" "$os" "$arch" "$@" 2>/dev/null)
+' "$event" "$id" "$PH_API_KEY" "$os" "$@" 2>/dev/null)
   fi
 
   if [ -z "$body" ]; then
@@ -813,7 +811,7 @@ print(json.dumps(
     # doesn't is stripped down to it (then length-capped) or falls back to
     # `unknown` -- best-effort, consistent with the identity/notice
     # readers' own NO_PYTHON3 fallback posture elsewhere in this file.
-    props='"source":"install_sh","os":"'"$os"'","arch":"'"$arch"'"'
+    props='"os":"'"$os"'"'
     for kv in "$@"; do
       k=$(printf '%s' "${kv%%=*}" | tr -cd 'A-Za-z0-9_')
       [ -n "$k" ] || continue
@@ -878,48 +876,29 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   fi
 fi
 
-# Optional install-channel attribution. A docs page or listing can prepend
-# OUROBOROS_INSTALL_REF=<channel> to the install command so install_started /
-# install_completed carry which surface the install came from. Same privacy
-# contract as every other property here: a short opaque token chosen by us,
-# never derived from the machine. Token-constrained like os/arch above so a
-# hostile value cannot ride into the payload; anything else becomes "direct".
-INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
-[[ "$INSTALL_REF" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || INSTALL_REF="direct"
-
-# Preserve a coarse onboarding hint for the first MCP session. This is not a
-# user identifier and is never sent as an install property; telemetry reads
-# only the fixed enum after install, until setup creates config.yaml. Existing
-# setup or an existing hint wins, so re-running the installer cannot
-# relabel a user's first documented install surface.
-_persist_first_command_surface_hint() {
-  local surface=""
-  case "$INSTALL_REF" in
-    readme|readme-*) surface="readme_quickstart" ;;
-    getting-started|getting_started|getting-started-*|docs-getting-started) surface="getting_started" ;;
-    *) return 0 ;;
-  esac
-  local dir="$HOME/.ouroboros" tmp="$HOME/.ouroboros/first_command_surface.$$"
-  [ -f "$dir/config.yaml" ] && return 0
-  [ -s "$dir/first_command_surface" ] && return 0
-  if mkdir -p "$dir" 2>/dev/null; then
-    (umask 077; printf '%s\n' "$surface" > "$tmp" && mv -f "$tmp" "$dir/first_command_surface") \
-      2>/dev/null || rm -f "$tmp" 2>/dev/null || true
-  fi
-}
-_persist_first_command_surface_hint
+# Closed install-channel vocabulary. Unknown values may contain private slugs,
+# customer names, or account identifiers, so they always fold to `direct`.
+case "${OUROBOROS_INSTALL_REF:-direct}" in
+  direct|readme|readme-hero|readme-ko|readme-hero-ko|readme-zh|readme-hero-zh|docs-getting-started)
+    INSTALL_REF="${OUROBOROS_INSTALL_REF:-direct}"
+    ;;
+  *) INSTALL_REF="direct" ;;
+esac
 
 _banner
 
 _telemetry_notice
-_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
+
+# Installs are rare, so install_started needs no daily dedupe: paired with
+# install_completed it measures install drop-off by version and ref.
+_telemetry_ping install_started "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
 HAS_PIPX=false
 PYTHON=""
 
-_step "1/4  Checking Python tooling" "Prefer uv, then pipx, then pip."
+_step "1/4  Checking Python tooling" "Prefer uv, then pipx, then pip. uv is installed when none of them can run."
 
 if command -v uv &>/dev/null; then
   HAS_UV=true
@@ -953,6 +932,52 @@ _python_requirement_message() {
   else
     printf 'Python %s' "$DEFAULT_PYTHON_SPEC"
   fi
+}
+
+_bootstrap_uv() {
+  # uv carries its own Python, so installing uv is the single move that unblocks
+  # a machine with no usable interpreter — the case that previously just exited.
+  # install.ps1 does the same on Windows (winget, then this script as fallback);
+  # here the script is the only path needing no package manager and no
+  # privileges. Everything that already works — an existing uv, or pipx with a
+  # supported Python — reaches its installer before this is ever called.
+  if [ "$BOOTSTRAP_UV" = "0" ]; then
+    # Fetching and running an installer from the network is the one thing here
+    # a caller may reasonably refuse; declining returns to the instructions.
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    _err "curl is required to install uv automatically."
+    return 1
+  fi
+
+  _blank
+  _say "${BOLD}Installing uv${RESET} — it provides its own Python, so none needs to be installed separately."
+  _info "Source: https://astral.sh/uv/install.sh"
+  if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    _err "uv installation failed."
+    return 1
+  fi
+
+  # The installer does not touch the running shell's PATH, so look where it
+  # actually writes before deciding it failed.
+  local candidate
+  for candidate in "${XDG_BIN_HOME:-}" "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.local/bin"; do
+    if [ -n "$candidate" ] && [ -x "$candidate/uv" ]; then
+      PATH="$candidate:$PATH"
+      export PATH
+      break
+    fi
+  done
+
+  if ! command -v uv >/dev/null 2>&1; then
+    _err "uv was installed but is not on PATH yet."
+    _info "Open a new shell and run this installer again."
+    return 1
+  fi
+
+  _ok "uv installed: $(uv --version)"
+  return 0
 }
 
 _print_python_install_remediation() {
@@ -1052,18 +1077,18 @@ _runtime_to_extras() {
   case "$1" in
     claude) EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
     claude-sdk) EXTRAS="[claude-sdk,tui]"; RUNTIME="claude-sdk" ;;
-    claude-cli) EXTRAS="[claude-cli,tui]"; RUNTIME="claude-cli" ;;
-    codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
-    opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
+    claude-cli) EXTRAS="[mcp,tui]"; RUNTIME="claude-cli" ;;
+    codex)   EXTRAS="[mcp,tui]"; RUNTIME="codex" ;;
+    opencode) EXTRAS="[mcp,tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
-    gemini)  EXTRAS="[tui]"; RUNTIME="gemini" ;;
-    goose)   EXTRAS="[tui]"; RUNTIME="goose" ;;
-    kiro)    EXTRAS="[tui]"; RUNTIME="kiro" ;;
-    copilot) EXTRAS="[tui]"; RUNTIME="copilot" ;;
-    pi)      EXTRAS="[tui]"; RUNTIME="pi" ;;
-    gjc)     EXTRAS="[tui]"; RUNTIME="gjc" ;;
+    gemini)  EXTRAS="[mcp,tui]"; RUNTIME="gemini" ;;
+    goose)   EXTRAS="[mcp,tui]"; RUNTIME="goose" ;;
+    kiro)    EXTRAS="[mcp,tui]"; RUNTIME="kiro" ;;
+    copilot) EXTRAS="[mcp,tui]"; RUNTIME="copilot" ;;
+    pi)      EXTRAS="[mcp,tui]"; RUNTIME="pi" ;;
+    gjc)     EXTRAS="[mcp,tui]"; RUNTIME="gjc" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
-    "")      EXTRAS="[tui]"; RUNTIME="" ;;
+    "")      EXTRAS="[mcp,tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
       _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
@@ -1115,16 +1140,16 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 1 "Claude SDK" "MCP 1.x Agent SDK profile (${PACKAGE_NAME}[claude,tui]); choose Claude CLI for MCP 2"
+    _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 5 "Gemini" "Gemini CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 6 "Goose" "Goose CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 7 "Kiro" "Kiro CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
@@ -1172,18 +1197,18 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 1 "Claude SDK" "MCP 1.x Agent SDK profile (${PACKAGE_NAME}[claude,tui]); choose Claude CLI for MCP 2"
+    _choice 2 "Codex" "Codex plugin artifacts + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP 2 server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 5 "Gemini" "Gemini CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 6 "Goose" "Goose CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 7 "Kiro" "Kiro CLI integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
-    _choice 0 "None" "Base CLI only; choose a backend later"
+    _choice 0 "MCP 2 default" "Install MCP 2 + settings GUI; choose a compatible backend later"
     _prompt "Select [1]: "
     read -r choice
     case "${choice:-1}" in
@@ -1201,10 +1226,10 @@ else
       *) _runtime_to_extras "claude" ;;
     esac
   else
-    # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
+    # Pipe mode (curl | bash): install the MCP v2 + settings GUI default profile.
     _blank
-    _warn "No runtime detected in non-interactive mode; installing the base package."
-    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+    _warn "No runtime detected in non-interactive mode; installing MCP v2 + settings GUI."
+    _info "Pick an MCP v2-compatible backend afterwards with: ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
     _runtime_to_extras ""
   fi
 fi
@@ -1237,12 +1262,21 @@ if [ "$HAS_UV" = false ]; then
     done
     if [ -z "$PYTHON" ]; then
       _blank
-      _err "pipx requires $(_python_requirement_message), but none was found."
-      _blank
-      _print_python_install_remediation
-      exit 1
+      _warn "pipx requires $(_python_requirement_message), but none was found."
+      if _bootstrap_uv; then
+        HAS_UV=true
+        HAS_PIPX=false
+      else
+        _blank
+        _err "pipx requires $(_python_requirement_message), but none was found."
+        _blank
+        _print_python_install_remediation
+        exit 1
+      fi
     fi
-    _ok "Python found: $($PYTHON --version)"
+    if [ "$HAS_UV" = false ]; then
+      _ok "Python found: $($PYTHON --version)"
+    fi
   else
     # pip fallback: prefer explicit compatible versions for constrained profiles.
     if [ "$INSTALL_PYTHON_SPEC" = "$LITELLM_PYTHON_SPEC" ]; then
@@ -1258,12 +1292,20 @@ if [ "$HAS_UV" = false ]; then
     done
     if [ -z "$PYTHON" ]; then
       _blank
-      _err "No installer found: uv, pipx, or $(_python_requirement_message)."
-      _blank
-      _print_python_install_remediation
-      exit 1
+      _warn "No installer found: uv, pipx, or $(_python_requirement_message)."
+      if _bootstrap_uv; then
+        HAS_UV=true
+      else
+        _blank
+        _err "No installer found: uv, pipx, or $(_python_requirement_message)."
+        _blank
+        _print_python_install_remediation
+        exit 1
+      fi
     fi
-    _ok "Python found: $($PYTHON --version)"
+    if [ "$HAS_UV" = false ]; then
+      _ok "Python found: $($PYTHON --version)"
+    fi
   fi
 fi
 
@@ -1291,8 +1333,9 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[claude,tui]" | "[claude-sdk,tui]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.139"
+        --with "claude-agent-sdk==0.2.144"
         --with "anthropic==0.122.0"
+        --with "mcp==1.28.1"
       )
       ;;
     "[mcp,tui]")
@@ -1300,8 +1343,9 @@ if [ "$HAS_UV" = true ]; then
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "claude-agent-sdk==0.2.139"
+        --with "claude-agent-sdk==0.2.144"
         --with "anthropic==0.122.0"
+        --with "mcp==1.28.1"
         --with "litellm==1.91.0"
       )
       ;;
@@ -1465,8 +1509,8 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
-_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
-  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
+_telemetry_ping install_completed "runtime=${RUNTIME:-none}" \
+  "version=${LATEST:-unknown}" "ref=$INSTALL_REF"
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"

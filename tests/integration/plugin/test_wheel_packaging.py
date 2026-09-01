@@ -200,7 +200,11 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         )
         assert unsupported.returncode != 0
         resolver_error = unsupported.stdout + unsupported.stderr
-        assert "claude-agent-sdk" in resolver_error
+        # The conflict is now a direct mcp==1.28.1 (claude extras) vs
+        # mcp==2.0.0 ([mcp]) clash, so the resolver names the conflicting
+        # ouroboros-ai extras and the mcp pins rather than claude-agent-sdk's
+        # own ceiling.
+        assert "ouroboros-ai[" in resolver_error
         assert "mcp" in resolver_error
 
     # A clean MCP 2 + CLI-worker install with no persisted runtime would

@@ -24,12 +24,33 @@ If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch 
 
 ## Natural Language Mapping
 
-For natural-language requests, map to the corresponding MCP tool:
-- "clarify requirements", "interview me", "socratic interview" → call `ouroboros_interview`
+Do not wait for the literal word `ooo`. When a natural-language request clearly
+matches these cases, route it to the corresponding MCP tool proactively:
+
+- "clarify requirements", "interview me", "socratic interview",
+  "the requirements are vague", "let's pin down the scope first",
+  a request with no acceptance criteria → call `ouroboros_interview`
+- "build this feature", "implement this end to end and verify it",
+  a multi-step feature, a migration, or a high-risk change that needs
+  verified execution → call `ouroboros_start_auto`
 - "generate a seed", "freeze requirements" → call `ouroboros_generate_seed`
-- "run the seed", "execute the workflow" → call `ouroboros_start_execute_seed`
+- "run the seed", "run this Seed", "execute the workflow" (a Seed file or
+  YAML already exists) → call `ouroboros_start_execute_seed`
 - "check status", "am I drifting?" → call `ouroboros_session_status`
 - "evaluate", "verify the result" → call `ouroboros_start_evaluate`
+- "I'm stuck", "we keep going in circles", "still failing after several
+  tries", "is there another way?" → call `ouroboros_lateral_think`
+
+`ouroboros_lateral_think` is also a proactive tool, not only a user-invoked
+one: when you observe stagnation yourself — the same fix attempted twice, a
+debugging loop that oscillates between the same two states, or no measurable
+progress across several turns — call it with the problem context and what has
+been tried, without waiting for the user to say "lateral" or "unstuck".
+
+Before routing, check the user's intent and which artifacts already exist:
+an existing Seed goes to `ouroboros_start_execute_seed`, not back through
+interview or auto. Do not send every request to auto, and do not route simple
+questions or small unambiguous single-file edits through Ouroboros at all.
 
 `ooo run` is a convergence pipeline by default: observe the run job, then the
 `chained_evaluate_job_id`, then any `chained_ralph_job_id` exposed by the rejected

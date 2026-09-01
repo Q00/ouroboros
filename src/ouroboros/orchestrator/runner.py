@@ -1115,6 +1115,11 @@ class OrchestratorRunner:
                 pinned_model=_model_pin,
                 base_tier_override=base_model_tier,
             )
+        if self._model_router is None:
+            # A backend without a verified tier ladder (including GJC) cannot
+            # enforce an explicit tier. Do not persist an advisory-only input as
+            # a resume contract field that requires a router to restore.
+            self._requested_model_tier = None
         self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
         self._execution_contract_restore_lock = RLock()

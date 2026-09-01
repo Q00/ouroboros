@@ -94,9 +94,88 @@ PY
 fi
 ```
 
-Before honoring that completion marker, determine whether the Codex setup is
-ready. A previously completed welcome must never hide the setup gate from a
-user who chose **나중에** or whose setup was later removed:
+Before honoring that completion marker, determine whether setup is ready for
+the active runtime.
+A previously completed welcome must never hide the setup gate from a user who
+chose **나중에** or whose setup was later removed.
+
+First accept a completed Claude Code setup:
+
+```bash
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    yaml = None
+
+config_path = Path(sys.argv[1])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read the top-level mapping scalars this readiness gate owns."""
+    if yaml is not None:
+        loaded = yaml.safe_load(source) or {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+
+    def scalar_value(raw: str) -> str:
+        return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
+
+    def flow_mapping(raw: str) -> dict[str, str]:
+        value = raw.strip().split(" #", 1)[0].strip()
+        if not (value.startswith("{") and value.endswith("}")):
+            return {}
+        fields: dict[str, str] = {}
+        for part in value[1:-1].split(","):
+            key, separator, field_value = part.partition(":")
+            if separator:
+                fields[key.strip().strip("'\"")] = scalar_value(field_value)
+        return fields
+
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed[section] = flow_mapping(raw_value)
+        elif section is not None:
+            parsed.setdefault(section, {})[key.strip("'\"")] = scalar_value(raw_value)
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+# The marketplace plugin owns its MCP capability. Host-owned
+# ~/.claude/mcp.json is intentionally not part of SDK setup readiness.
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
+  SETUP_READY="true"
+fi
+```
+
+If `SETUP_READY` is not true, determine whether the Codex setup is ready:
 
 ```bash
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
@@ -449,7 +528,7 @@ Pass `kept-gpt-5-v1` instead of `automatic-v1` for the keep choice. If welcome
 was already completed, show a short confirmation and exit after recording this
 decision; do not make the user answer the generic welcome question too.
 
-**If `ALREADY_COMPLETED` is true, `CODEX_READY` is true, AND no `--force` flag:**
+**If `ALREADY_COMPLETED` is true, `SETUP_READY` or `CODEX_READY` is true, AND no `--force` flag:**
 
 Use **AskUserQuestion**:
 ```json
@@ -468,8 +547,8 @@ Use **AskUserQuestion**:
 - **Skip**: Mark as complete and exit
 - **Re-run welcome**: Continue to Step 1 below
 
-If the welcome was completed but `CODEX_READY` is not true, bypass this
-completion prompt and continue to the Setup Gate below.
+If the welcome was completed but neither `SETUP_READY` nor `CODEX_READY` is
+true, bypass this completion prompt and continue to the Setup Gate below.
 
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
@@ -507,9 +586,94 @@ PY
 
 ### Setup Gate: First Use
 
-Before showing the welcome banner, check whether **Codex** is prepared on this
-machine. A global `config.yaml` alone is not enough: it may belong to a Claude
-or another runtime.
+Before showing the welcome banner, check whether setup is prepared for the
+active runtime on this machine. A global `config.yaml` alone is not enough: it
+must name a runtime this gate recognizes.
+
+First accept a completed **Claude Code** setup. The marketplace plugin owns
+its MCP capability; host-owned `~/.claude/mcp.json` is intentionally not part
+of SDK setup readiness:
+
+```bash
+if ouroboros_python - "$HOME/.ouroboros/config.yaml" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    yaml = None
+
+config_path = Path(sys.argv[1])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read only the top-level mapping scalars owned by this readiness gate."""
+    if yaml is not None:
+        loaded = yaml.safe_load(source) or {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+
+    def scalar_value(raw: str) -> str:
+        return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
+
+    def flow_mapping(raw: str) -> dict[str, str]:
+        value = raw.strip().split(" #", 1)[0].strip()
+        if not (value.startswith("{") and value.endswith("}")):
+            return {}
+        fields: dict[str, str] = {}
+        for part in value[1:-1].split(","):
+            key, separator, field_value = part.partition(":")
+            if separator:
+                fields[key.strip().strip("'\"")] = scalar_value(field_value)
+        return fields
+
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed[section] = flow_mapping(raw_value)
+        elif section is not None:
+            parsed.setdefault(section, {})[key.strip("'\"")] = scalar_value(raw_value)
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+# The marketplace plugin owns its MCP capability. Host-owned
+# ~/.claude/mcp.json is intentionally not part of SDK setup readiness.
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") in {"claude", "claude_mcp"}
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
+  echo "SETUP_READY"
+else
+  echo "SETUP_REQUIRED"
+fi
+```
+
+If the Claude gate printed `SETUP_READY`, setup is complete: skip the Codex
+gate below and continue directly to the welcome banner.
+
+Otherwise check whether **Codex** is prepared:
 
 ```bash
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
@@ -682,9 +846,11 @@ else
 fi
 ```
 
-If Codex setup is required, ask one concise question in the user's language.
-This includes a user who has an existing Ouroboros configuration for another
-runtime. For a Korean conversation, use:
+If neither gate reports ready (the Claude gate printed `SETUP_REQUIRED` and
+the Codex gate printed `CODEX_SETUP_REQUIRED`), ask one concise question in
+the user's language. This includes a user whose existing Ouroboros
+configuration names a runtime neither gate recognizes. For a Korean
+conversation, use:
 
 ```json
 {
