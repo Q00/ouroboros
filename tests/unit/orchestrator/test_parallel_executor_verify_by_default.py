@@ -2175,9 +2175,17 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
 
 
 @pytest.mark.asyncio
-async def test_final_settlement_rejects_stale_command_without_replay(
+@pytest.mark.parametrize("final_condition", ["before", "after"])
+async def test_final_settlement_replays_stale_command_against_final_workspace(
     tmp_path: Any,
+    final_condition: str,
 ) -> None:
+    """A sibling's later edit does not discard this AC: its contract is re-judged.
+
+    The verify gate already rejects a command that mutates the workspace, so a
+    passing contract is an observation and may be run once more at settlement.
+    The final verdict follows that replay in both directions.
+    """
     counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
     target = tmp_path / "condition.txt"
     target.write_text("before", encoding="utf-8")
@@ -2191,7 +2199,10 @@ async def test_final_settlement_rejects_stale_command_without_replay(
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
-    target.write_text("after", encoding="utf-8")
+    assert cached.passed is True
+    # A later worker touches the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+    target.write_text(final_condition, encoding="utf-8")
 
     settled = await executor._settle_verify_gate_results(
         seed=seed,
@@ -2208,10 +2219,77 @@ async def test_final_settlement_rejects_stale_command_without_replay(
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "1"
-    assert settled[0].success is False
-    assert settled[0].outcome is ACExecutionOutcome.FAILED
-    assert "replaying verify_command is not permitted" in (settled[0].error or "")
+    assert counter.read_text(encoding="utf-8") == "2"
+    if final_condition == "before":
+        assert settled[0].success is True
+        assert settled[0].outcome is ACExecutionOutcome.SUCCEEDED
+        assert settled[0].verify_gate_outcome is not None
+        assert settled[0].verify_gate_outcome.passed is True
+    else:
+        assert settled[0].success is False
+        assert settled[0].outcome is ACExecutionOutcome.FAILED
+        assert "verify_command failed on the final workspace" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_settlement_replay_mutation_invalidates_every_provisional_success(
+    tmp_path: Any,
+) -> None:
+    """A replay that mutates the workspace poisons the whole success set.
+
+    The first run of the command leaves the workspace untouched and passes;
+    the replay (triggered by a sibling edit) writes a side-effect file. That
+    mutation must fold into the settlement-wide state and reject every
+    provisional success — including a contract-less sibling — not just add an
+    individual failure for the replayed AC.
+    """
+    counter = tmp_path.parent / f"settle-mutating-replay-{tmp_path.name}.txt"
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        "n and Path('replay-side-effect.txt').write_text('mutated'); "
+        'raise SystemExit(0)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="contract ac", verify_command=command),
+        AcceptanceCriterionSpec(description="plain sibling"),
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.passed is True
+    # A later worker changes the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="contract ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="plain sibling",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            ),
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert [result.success for result in settled] == [False, False]
+    assert [result.outcome for result in settled] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+    ]
+    assert all("mutated the workspace" in (result.error or "") for result in settled)
 
 
 @pytest.mark.asyncio
