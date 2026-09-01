@@ -392,6 +392,8 @@ class TestMCPStartupAutoCleanup:
                 "ouroboros.mcp.server.adapter.create_ouroboros_server",
                 return_value=mock_server,
             ),
+            patch("ouroboros.telemetry.capture_service_active") as capture_service,
+            patch("ouroboros.telemetry.capture_mcp_serve_started") as capture_attach,
         ):
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
@@ -401,6 +403,37 @@ class TestMCPStartupAutoCleanup:
         # Cleanup still ran despite the failure: adapter shutdown owns store
         # closure, so the WAL checkpoint path is reached even when serve fails.
         mock_server.shutdown.assert_awaited_once()
+        capture_service.assert_not_called()
+        # A bind/listen failure is not an attachment: the daily funnel
+        # denominator must only count servers that reached their serve loop.
+        capture_attach.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_successful_serve_records_one_attachment_row(self) -> None:
+        """A serve loop that actually runs (here: completes cleanly, the
+        short-session case) records exactly one daily attachment row."""
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+            patch("ouroboros.telemetry.capture_mcp_serve_started") as capture_attach,
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        capture_attach.assert_called_once_with("stdio")
 
     @pytest.mark.asyncio
     async def test_event_store_init_failure_aborts_startup(self) -> None:

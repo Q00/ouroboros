@@ -1935,7 +1935,14 @@ class InterviewHandler:
         return MCPToolDefinition(
             name="ouroboros_interview",
             description=(
-                "Interactive interview for requirement clarification. "
+                "Socratic interview that clarifies requirements before any "
+                "implementation. "
+                "Use when: a request is ambiguous, has unclear scope, or lacks "
+                "acceptance criteria — even if the user never says 'ooo'. "
+                "Result: a closed requirements state ready for Seed generation. "
+                "Do not use when: a validated Seed already exists "
+                "(use ouroboros_start_execute_seed) or the request is a simple "
+                "question or small unambiguous edit. "
                 "Start a new interview with initial_context, resume with session_id, "
                 "or record an answer to the current question. "
                 "In plugin mode, returns a delegation receipt "

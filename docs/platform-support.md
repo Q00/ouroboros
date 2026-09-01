@@ -43,7 +43,14 @@ Windows 11 Home is a valid WSL 2 host when virtualization and the required Windo
 
 ## Windows (native) Caveats
 
-Native Windows support is **experimental**. Known limitations:
+Native Windows support is **experimental**. Install with the PowerShell script,
+which needs no Python, Git, or uv beforehand:
+
+```powershell
+irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | iex
+```
+
+Known limitations:
 
 - **File path handling**: Some workflow operations assume POSIX-style paths.
 - **Process management**: Subprocess spawning and signal handling differ on Windows.

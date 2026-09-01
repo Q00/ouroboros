@@ -171,6 +171,10 @@ exit 0
             TOOL_BIN_VAR: str(tool_bin_dir),
             OUROBOROS_STUB_VAR: str(_cached_executable(_OUROBOROS_STUB)),
             CAPTURES_LOG_VAR: str(tmp_path / "telemetry.log"),
+            # The installer fetches uv from astral.sh when nothing else can
+            # install. Off by default here so no test reaches the network by
+            # accident; the bootstrap tests below opt back in with a fake curl.
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
         }
     )
     if env:
@@ -274,46 +278,8 @@ def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
-
-
-@pytest.mark.parametrize(
-    ("install_ref", "expected_surface"),
-    (("readme", "readme_quickstart"), ("docs-getting-started", "getting_started")),
-)
-def test_installer_persists_first_command_surface_hint(
-    tmp_path: Path, install_ref: str, expected_surface: str
-) -> None:
-    result = _run_installer(
-        tmp_path,
-        local_repo=False,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": install_ref},
-        fake_commands=_telemetry_fake_commands(),
-    )
-
-    assert result.returncode == 0, result.stderr
-    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
-    assert hint.read_text(encoding="utf-8") == f"{expected_surface}\n"
-
-
-def test_installer_does_not_relabel_existing_first_command_surface_hint(
-    tmp_path: Path,
-) -> None:
-    hint = tmp_path / "home" / ".ouroboros" / "first_command_surface"
-    hint.parent.mkdir(parents=True)
-    hint.write_text("readme_quickstart\n", encoding="utf-8")
-
-    result = _run_installer(
-        tmp_path,
-        local_repo=False,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "docs-getting-started"},
-        fake_commands=_telemetry_fake_commands(),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert hint.read_text(encoding="utf-8") == "readme_quickstart\n"
 
 
 def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
@@ -331,6 +297,29 @@ def test_piped_installer_does_not_require_bash_source(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "BASH_SOURCE" not in result.stderr
+
+
+def test_piped_installer_defaults_to_mcp_v2_and_settings_gui(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path, local_repo=False, piped=True)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "installing MCP v2 + settings GUI" in result.stdout
+    assert "--with mcp==2.0.0" in calls
+    assert "--with textual==8.2.8" in calls
+    assert "--with textual-serve==1.1.3" in calls
+
+
+def test_runtime_less_mcp_v2_guidance_lists_only_compatible_backends(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path, local_repo=False, piped=True)
+
+    assert result.returncode == 0, result.stderr
+    guidance = next(
+        line for line in result.stdout.splitlines() if "Pick an MCP v2-compatible backend" in line
+    )
+    assert "claude-cli" in guidance
+    assert "|claude|" not in guidance
+    assert "claude-sdk" not in guidance
 
 
 def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> None:
@@ -370,6 +359,12 @@ def test_installer_old_schema_without_telemetry_fails_closed(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert "AttributeError" not in result.stderr
     assert not (tmp_path / "telemetry.log").exists()
+
+
+def test_readme_mcp_v2_default_selects_claude_cli_worker() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli" in readme
+    assert "ouroboros-ai[claude]" in readme
 
 
 def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
@@ -1030,7 +1025,6 @@ def test_installer_notice_is_persisted_before_first_capture(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     captures = _wait_for_telemetry(tmp_path)
     assert "capture-before-notice" not in captures
-    assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
     state = (tmp_path / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
@@ -1470,7 +1464,6 @@ def test_installer_ping_escapes_hostile_uname_output_with_python3(tmp_path: Path
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["properties"]["is_local"] == "true"
 
 
@@ -1514,7 +1507,6 @@ def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: P
     assert "leaked" not in payload
     assert "leaked" not in payload.get("properties", {})
     assert payload["properties"]["os"] == "unknown"
-    assert payload["properties"]["arch"] == "unknown"
     assert payload["distinct_id"] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 
 
@@ -1544,21 +1536,13 @@ def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -
 
     assert set(events) == {"install_started", "install_completed"}
     assert set(events["install_started"]["properties"].keys()) == {
-        "source",
         "os",
-        "arch",
-        "is_local",
-        "pre",
         "version",
         "ref",
     }
     assert set(events["install_completed"]["properties"].keys()) == {
-        "source",
         "os",
-        "arch",
-        "method",
         "runtime",
-        "detected_runtimes",
         "version",
         "ref",
     }
@@ -1591,18 +1575,13 @@ def test_installer_ping_ref_defaults_to_direct_when_unset(tmp_path: Path) -> Non
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "direct"
     assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
-def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
-    """A well-formed `OUROBOROS_INSTALL_REF` (matches `^[A-Za-z0-9._-]{1,32}$`)
-    is carried through to both events verbatim -- this is the actual
-    attribution path a docs page or listing is meant to use.
-    """
+def test_installer_ping_ref_carries_approved_channel_token(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
-        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "hellogithub"},
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "readme-hero"},
         fake_commands={
             **_telemetry_fake_commands(),
             "curl": _capture_dashd_curl(),
@@ -1618,18 +1597,28 @@ def test_installer_ping_ref_carries_valid_channel_token(tmp_path: Path) -> None:
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "hellogithub"
-    assert events["install_completed"]["properties"]["ref"] == "hellogithub"
+    assert events["install_completed"]["properties"]["ref"] == "readme-hero"
+
+
+def test_installer_ping_ref_folds_valid_shaped_unknown_to_direct(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "private-project-2278"},
+        fake_commands={
+            **_telemetry_fake_commands(),
+            "curl": _capture_dashd_curl(),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    payload = json.loads(next(line for line in captures.splitlines() if line))
+    assert payload["properties"]["ref"] == "direct"
+    assert "private-project-2278" not in captures
 
 
 def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> None:
-    """A value outside `^[A-Za-z0-9._-]{1,32}$` (shell metacharacters, spaces,
-    or over-length) must never reach the telemetry payload -- it degrades to
-    `direct` exactly like an unset value. `[[ =~ ]]` never executes its
-    operand, so this is a payload-shape guarantee, not a shell-injection
-    probe; the point is that a hostile value chosen by whoever writes the
-    install command cannot ride into what we record.
-    """
+    """Invalid shell-shaped values also fold to the closed `direct` token."""
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_TELEMETRY": "", "OUROBOROS_INSTALL_REF": "evil; rm -rf /"},
@@ -1648,7 +1637,6 @@ def test_installer_ping_ref_degrades_hostile_value_to_direct(tmp_path: Path) -> 
         payload = json.loads(line)
         events[payload["event"]] = payload
 
-    assert events["install_started"]["properties"]["ref"] == "direct"
     assert events["install_completed"]["properties"]["ref"] == "direct"
 
 
@@ -1922,9 +1910,9 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "Runtime: opencode (preserved from" in result.stdout
-    assert "Installing .[tui] ..." in result.stdout
+    assert "Installing .[mcp,tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime opencode --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -1942,7 +1930,7 @@ def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert "Installing .[claude,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -1956,9 +1944,9 @@ def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "Installing .[mcp,tui]" in result.stdout
     assert "--with claude-agent-sdk" not in calls
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" in calls
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -1973,7 +1961,7 @@ def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[claude-sdk,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude-sdk")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
     assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
@@ -2014,7 +2002,7 @@ def test_cli_backed_claude_config_preserves_cli_profile_on_upgrade(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude-cli (preserved from" in result.stdout
-    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "Installing .[mcp,tui]" in result.stdout
     assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
@@ -2043,7 +2031,7 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2176,7 +2164,7 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
@@ -2341,7 +2329,7 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
@@ -2470,7 +2458,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with mcp==2.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     assert "--prerelease=allow" not in calls
@@ -2569,8 +2557,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
-    assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.139" in calls
+    assert "--with mcp==2.0.0" not in calls
+    assert "--with claude-agent-sdk==0.2.144" in calls
     assert "--with anthropic==0.122.0" in calls
 
 
@@ -2761,3 +2749,98 @@ def test_installer_survives_a_failing_dsh(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "install skipped" in result.stdout
     assert "Manual install: dsh plugin --profile web add" in result.stdout
+
+
+def _uv_bootstrap_curl(installed_uv: str) -> str:
+    """Fake curl that plays astral.sh's installer: emit a script that drops a
+    working `uv` into ~/.local/bin, which is where the real one writes when
+    XDG_BIN_HOME and CARGO_HOME are unset."""
+    return (
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *astral.sh/uv/install.sh*)\n"
+        '    printf \'%s\\n\' "mkdir -p \\"$HOME/.local/bin\\"" \\\n'
+        '      "cat > \\"$HOME/.local/bin/uv\\" <<\'UVEOF\'" \\\n'
+        f"      {shlex.quote(installed_uv)} \\\n"
+        '      "UVEOF" "chmod 755 \\"$HOME/.local/bin/uv\\""\n'
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
+def test_installer_bootstraps_uv_when_no_installer_is_usable(tmp_path: Path) -> None:
+    """With no uv, no pipx and no supported Python, the installer fetches uv
+    rather than exiting — uv carries its own Python, so this is recoverable."""
+    tool_bin_dir = tmp_path / "uv-tool-bin"
+    installed_uv = f"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "uv 0.0.0-bootstrapped"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then
+  echo "{tool_bin_dir}"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  ln -sf "${OUROBOROS_STUB_VAR}" "{tool_bin_dir}/ouroboros"
+fi
+printf 'uv %s\\n' "$*" >> "${CALLS_LOG_VAR}"
+exit 0
+"""
+
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": _uv_bootstrap_curl(installed_uv)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "uv installed: uv 0.0.0-bootstrapped" in result.stdout
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install" in calls
+
+
+def test_installer_declines_to_bootstrap_uv_when_opted_out(tmp_path: Path) -> None:
+    """OUROBOROS_INSTALL_BOOTSTRAP_UV=0 keeps the pre-existing behaviour: print
+    instructions and exit rather than fetch an installer from the network."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "0",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 1\n"},
+    )
+
+    assert result.returncode == 1
+    assert "No installer found" in result.stdout
+    assert "https://astral.sh/uv/install.sh" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "uv tool install" not in calls_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_installer_reports_failure_when_uv_bootstrap_does_not_land(tmp_path: Path) -> None:
+    """A curl that reports success but installs nothing must not be treated as a
+    working uv — the installer falls back to the instructions and exits."""
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={
+            "OUROBOROS_INSTALL_RUNTIME": "codex",
+            "OUROBOROS_INSTALL_BOOTSTRAP_UV": "1",
+        },
+        fake_commands={"curl": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 1
+    assert "not on PATH yet" in result.stdout
+    assert "No installer found" in result.stdout

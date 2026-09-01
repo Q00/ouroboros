@@ -13,6 +13,7 @@ separate web UI.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import sys
 import threading
@@ -23,10 +24,11 @@ from ouroboros.cli.formatters.panels import print_error, print_info
 # Note the escaped brackets: rich would otherwise treat [tui] as a markup tag.
 _TUI_INSTALL_HINT = (
     "Settings GUI dependencies not installed.\n\n"
-    "Install with:\n"
+    "Install in the current environment:\n"
     "  pip install 'ouroboros-ai\\[tui]'\n\n"
-    "Or run directly with uvx:\n"
-    "  uvx --python '>=3.12' --from 'ouroboros-ai\\[tui]' ouroboros config"
+    "Or run in an isolated MCP v2 profile with uvx:\n"
+    "  uvx --isolated --python '>=3.12' --from 'ouroboros-ai\\[mcp,tui]' "
+    "ouroboros config"
 )
 
 
@@ -39,6 +41,34 @@ def is_harness_context() -> bool:
     if os.environ.get("CLAUDECODE", "").strip():
         return True
     return not sys.stdout.isatty()
+
+
+def _bootstrap_profile_args() -> list[str]:
+    """Return the published MCP v2 and settings GUI profile selector."""
+    return ["--from", "ouroboros-ai[mcp,tui]"]
+
+
+def _relaunch_with_tui_profile() -> bool:
+    """Replace a base install with an isolated GUI-capable invocation."""
+    if os.environ.get("OUROBOROS_CONFIG_TUI_BOOTSTRAPPED"):
+        return False
+    uvx = shutil.which("uvx")
+    if uvx is None:
+        return False
+    env = os.environ.copy()
+    env["OUROBOROS_CONFIG_TUI_BOOTSTRAPPED"] = "1"
+    args = [
+        uvx,
+        "--isolated",
+        "--python",
+        ">=3.12",
+        *_bootstrap_profile_args(),
+        "ouroboros",
+        "config",
+        *sys.argv[2:],
+    ]
+    os.execvpe(uvx, args, env)
+    return True
 
 
 def is_remote_session() -> bool:
@@ -83,6 +113,8 @@ def _launch_inline() -> None:
     try:
         from ouroboros.config_tui.app import SettingsApp
     except ImportError:
+        if _relaunch_with_tui_profile():
+            return
         print_error(_TUI_INSTALL_HINT)
         raise SystemExit(1) from None
     SettingsApp().run()
@@ -111,8 +143,10 @@ def _launch_web(
 ) -> None:
     server_cls = _import_server()
     if server_cls is None:
+        if _relaunch_with_tui_profile():
+            return
         print_error(_TUI_INSTALL_HINT)
-        print_info("Manual fallback: run [bold]uv run ouroboros config[/] in a regular terminal.")
+        print_info("Manual fallback: install [bold]ouroboros-ai\\[tui][/] in this environment.")
         raise SystemExit(1)
 
     if port in (None, 0):

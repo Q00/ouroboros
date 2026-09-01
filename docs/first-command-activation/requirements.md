@@ -3,6 +3,9 @@
 > Generated: 2026-08-13
 > Status: Implemented, awaiting post-release measurement
 
+> Historical note: this measurement program ended when v2 telemetry reduced
+> collection to installs, daily activity, adoption dimensions, and failures.
+
 ## Original requirement
 
 Reduce the PostHog drop-off between MCP server startup and the user's first
