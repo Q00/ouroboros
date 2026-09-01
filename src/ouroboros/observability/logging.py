@@ -194,8 +194,8 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
 
 
 _EXCEPTION_SECRET_QUOTED_ASSIGNMENT = re.compile(
-    r'''(?i)(["'])(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|'''
-    r'''authorization|credential|secret|token)\1\s*:\s*(["'])(?:\\.|(?!\3).)*\3'''
+    r"""(?i)(["'])(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"""
+    r"""authorization|credential|secret|token)\1\s*:\s*(["'])(?:\\.|(?!\3).)*\3"""
 )
 _EXCEPTION_SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|api[-_]?key|access[-_]?token|client[-_]?secret|"
@@ -216,6 +216,14 @@ def _sanitize_exception_text(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         token = match.group(0)
+        if (
+            match.start() > 0
+            and text[match.start() - 1] in ("'", '"')
+            and match.end() + 1 < len(text)
+            and text[match.end()] == text[match.start() - 1]
+            and text[match.end() + 1] == ":"
+        ):
+            return token
         if is_credential_shaped(token):
             return mask_sensitive_value(token)
         return token

@@ -365,12 +365,23 @@ def _is_opaque_credential_shape(normalized: str) -> bool:
 
 
 _STRUCTURED_EVENT_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_SAFE_CREDENTIAL_NAMED_STRUCTURED_EVENTS = frozenset(
+    {
+        "context.token_count.failed",
+        "mcp.auth.invalid_api_key",
+        "mcp.auth.token_valid",
+    }
+)
 
 
 def is_safe_structured_event_identifier(value: str) -> bool:
     """Return whether an event name is structured and contains no opaque token."""
     normalized, fail_closed = _normalize_credential_shape(value)
     if fail_closed or not normalized or not _STRUCTURED_EVENT_IDENTIFIER_RE.fullmatch(normalized):
+        return False
+    if normalized in _SAFE_CREDENTIAL_NAMED_STRUCTURED_EVENTS:
+        return True
+    if is_credential_shaped(normalized):
         return False
     candidates = (normalized, *(part for part in normalized.split(".") if part))
     return not any(
