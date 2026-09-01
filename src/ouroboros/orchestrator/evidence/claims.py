@@ -10,6 +10,7 @@ import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
+from ouroboros.orchestrator.evidence.harness_observation import observation_from_message
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _normalized_command_claim_aliases,
@@ -347,6 +348,7 @@ def _runtime_messages_support_file_claim(
                     index=index,
                     task_cwd=task_cwd,
                     allow_bash_command_text=False,
+                    allow_observation=False,
                 )
                 for index, message in enumerate(messages)
             ):
@@ -386,11 +388,20 @@ def _runtime_message_supports_file_reference(
     index: int,
     task_cwd: str | None,
     allow_bash_command_text: bool = True,
+    allow_observation: bool = True,
 ) -> bool:
     """Return True when one message plausibly reports touching a file reference."""
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
+    observation = observation_from_message(message)
+    if observation is not None:
+        # The harness saw the workspace change during this leaf's window; that
+        # is support the leaf could not have narrated into existence. The
+        # observation only ever answers for the full workspace-relative claim:
+        # the basename fallback passes ``allow_observation=False`` so a changed
+        # ``foo.py`` cannot vouch for an unchanged ``nested/foo.py``.
+        return allow_observation and observation.supports_file_claim(reference)
     if message.tool_name == "Bash":
         return _bash_message_mutates_file_reference(
             message,
