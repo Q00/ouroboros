@@ -540,6 +540,7 @@ class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
             if (
                 Path(os.fsdecode(path)) == target_path
                 and kwargs.get("follow_symlinks") is False
+                and not target_path.joinpath("SKILL.md").exists()
                 and stat_failures_remaining
             ):
                 stat_failures_remaining -= 1
