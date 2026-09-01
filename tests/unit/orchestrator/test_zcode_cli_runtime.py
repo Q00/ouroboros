@@ -289,6 +289,31 @@ def test_rollout_conflicting_exact_identity_records_fail_closed(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_cumulative_prefix_preserves_json_type_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"]["messages"][2]["isError"] = 0
+    second = json.loads(path.read_text(encoding="utf-8"))
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
 def test_rollout_full_snapshot_may_drop_ephemeral_cache_markers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -552,6 +577,22 @@ def test_rollout_deeply_nested_tool_input_fails_closed_without_raising(
         current[f"level-{index}"] = child
         current = child
     record["request"]["messages"][1]["toolCalls"][0]["input"] = nested
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+@pytest.mark.parametrize(
+    "tool_input", [{"value": float("nan")}, {"value": float("inf")}, {"value": float("-inf")}]
+)
+def test_rollout_non_finite_tool_input_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_input: dict[str, float]
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["toolCalls"][0]["input"] = tool_input
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
     converted = runtime._convert_event(event, None)
