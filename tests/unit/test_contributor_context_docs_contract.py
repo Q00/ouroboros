@@ -108,6 +108,20 @@ def test_pr_parity_commands_have_one_executable_owner() -> None:
     assert not duplicates, f"Mutating PR-parity command is duplicated in: {duplicates}"
 
 
+def test_ci_gate_consumers_link_to_testing_guide_for_executable_parity_commands() -> None:
+    broad_pytest_command = "uv run --python 3.12 --no-sync pytest tests/"
+    owner = REPO_ROOT / "docs" / "contributing" / "testing-guide.md"
+    stale_copies = [
+        str(path.relative_to(REPO_ROOT))
+        for path in PARITY_COMMAND_CONSUMERS
+        if path != owner and broad_pytest_command in path.read_text(encoding="utf-8")
+    ]
+
+    assert not stale_copies, "PR-parity pytest command is duplicated outside Testing Guide: " + str(
+        stale_copies
+    )
+
+
 def test_testing_guide_uses_a_supported_dependency_profile() -> None:
     guide = (REPO_ROOT / "docs" / "contributing" / "testing-guide.md").read_text(encoding="utf-8")
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -122,14 +136,19 @@ def test_testing_guide_uses_a_supported_dependency_profile() -> None:
     )
 
 
-def test_invalid_all_extras_profile_is_not_documented_for_contributors() -> None:
+def test_invalid_dependency_profiles_are_not_documented_for_contributors() -> None:
+    invalid_patterns = (
+        re.compile(r"uv sync(?:\s+#|\s*$)", re.MULTILINE),
+        re.compile(r"uv sync[^\n]*--all-extras"),
+    )
     violations = [
-        str(path.relative_to(REPO_ROOT))
+        f"{path.relative_to(REPO_ROOT)} contains {pattern.pattern!r}"
         for path in PROFILE_GUIDANCE_CONSUMERS
-        if "uv sync --python 3.13 --all-extras" in path.read_text(encoding="utf-8")
+        for pattern in invalid_patterns
+        if pattern.search(path.read_text(encoding="utf-8"))
     ]
 
-    assert not violations, f"Unsupported all-extras contributor profile remains in: {violations}"
+    assert not violations, f"Unsupported contributor setup profiles remain in: {violations}"
 
 
 def test_testing_guide_names_the_real_isolation_and_ci_boundaries() -> None:
