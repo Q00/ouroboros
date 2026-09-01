@@ -314,6 +314,45 @@ def test_rollout_cumulative_prefix_preserves_json_type_identity(
     assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
 
 
+def test_rollout_cumulative_prefix_accepts_deep_non_tool_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    nested: dict[str, Any] = {}
+    current = nested
+    for index in range(101):
+        child: dict[str, Any] = {}
+        current[f"level-{index}"] = child
+        current = child
+    first["request"]["messages"][0]["content"] = nested
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
 def test_rollout_full_snapshot_may_drop_ephemeral_cache_markers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
