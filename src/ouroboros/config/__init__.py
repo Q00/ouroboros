@@ -86,7 +86,6 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
-    telemetry_opt_out_environ,
 )
 from ouroboros.config.models import (
     ClarificationConfig,
@@ -115,6 +114,7 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_opt_out import telemetry_opt_out_environ
 
 __all__ = [
     # Models

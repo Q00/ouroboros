@@ -38,6 +38,10 @@ import yaml
 
 from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_mcp_telemetry import MCP_SECTION_TEMPLATE as _CODEX_MCP_SECTION_TEMPLATE
+from ouroboros.cli.codex_mcp_telemetry import base_env as _codex_mcp_base_env
+from ouroboros.cli.codex_mcp_telemetry import env_is_setup_owned as _codex_mcp_env_is_setup_owned
+from ouroboros.cli.codex_mcp_telemetry import render_env_lines as _render_codex_mcp_env_lines
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
@@ -423,18 +427,6 @@ def _detect_runtimes() -> dict[str, str | None]:
     return runtimes
 
 
-_CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
-# Keep Ouroboros runtime settings and per-role model overrides in
-# ~/.ouroboros/config.yaml (for example: clarification.default_model,
-# llm.qa_model, evaluation.semantic_model, consensus.*).
-# This file is only for the Codex MCP/env registration block.
-
-[mcp_servers.ouroboros]
-{command_lines}
-
-[mcp_servers.ouroboros.env]
-{env_lines}
-"""
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -469,9 +461,6 @@ _CODEX_HOST_MCP_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "host",
     "OUROBOROS_LLM_BACKEND": "codex",
 }
-_CODEX_TELEMETRY_OPT_OUT_ENV_KEYS = frozenset({"DO_NOT_TRACK", "OUROBOROS_TELEMETRY"})
-_CODEX_TELEMETRY_OPT_OUT_TRUTHY = frozenset({"1", "true", "on", "yes"})
-_CODEX_TELEMETRY_OPT_OUT_FALSY = frozenset({"0", "false", "off", "no"})
 _CODEX_HOST_DIRECT_MCP_ARGS = [
     "mcp",
     "serve",
@@ -651,50 +640,6 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _codex_mcp_base_env(env: dict[str, object]) -> dict[str, object]:
-    """Return Codex MCP env without telemetry opt-out keys."""
-    return {
-        key: value for key, value in env.items() if key not in _CODEX_TELEMETRY_OPT_OUT_ENV_KEYS
-    }
-
-
-def _codex_mcp_env_is_setup_owned(env: object) -> bool:
-    """Return whether Codex MCP env is still setup-owned, including opt-out keys."""
-    if env is None:
-        return True
-    if not isinstance(env, dict):
-        return False
-    extra_keys = set(env) - set(_CODEX_MANAGED_MCP_ENV) - set(_CODEX_HOST_MCP_ENV)
-    if extra_keys - _CODEX_TELEMETRY_OPT_OUT_ENV_KEYS:
-        return False
-    base = _codex_mcp_base_env(env)
-    if base != _CODEX_MANAGED_MCP_ENV and base != _CODEX_HOST_MCP_ENV:
-        return False
-    do_not_track = env.get("DO_NOT_TRACK")
-    if do_not_track is not None and str(do_not_track).strip().lower() not in (
-        _CODEX_TELEMETRY_OPT_OUT_TRUTHY
-    ):
-        return False
-    telemetry_flag = env.get("OUROBOROS_TELEMETRY")
-    return telemetry_flag is None or str(telemetry_flag).strip().lower() in (
-        _CODEX_TELEMETRY_OPT_OUT_FALSY
-    )
-
-
-def _codex_mcp_registration_env(base: dict[str, str]) -> dict[str, str]:
-    """Merge setup-owned Codex MCP env with the current process opt-out."""
-    from ouroboros.config.loader import telemetry_opt_out_environ
-
-    return {**base, **telemetry_opt_out_environ()}
-
-
-def _render_codex_mcp_env_lines(base: dict[str, str]) -> str:
-    """Render the Codex MCP env table body for a setup-owned registration."""
-    return "\n".join(
-        f"{key} = {_toml_string(value)}" for key, value in _codex_mcp_registration_env(base).items()
-    )
-
-
 def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
     """Resolve a launchable release MCP command for the current machine."""
     uvx_path = shutil.which("uvx")
@@ -756,7 +701,7 @@ def _render_codex_mcp_section() -> str | None:
     )
     return _CODEX_MCP_SECTION_TEMPLATE.format(
         command_lines=command_lines,
-        env_lines=_render_codex_mcp_env_lines(_CODEX_MANAGED_MCP_ENV),
+        env_lines=_render_codex_mcp_env_lines(_CODEX_MANAGED_MCP_ENV, _toml_string),
     )
 
 
@@ -791,7 +736,9 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     env = entry.get("env")
-    if env is not None and not _codex_mcp_env_is_setup_owned(env):
+    if env is not None and not _codex_mcp_env_is_setup_owned(
+        env, managed_env=_CODEX_MANAGED_MCP_ENV, host_env=_CODEX_HOST_MCP_ENV
+    ):
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
