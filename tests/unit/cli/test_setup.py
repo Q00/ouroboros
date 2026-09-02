@@ -9958,9 +9958,7 @@ class TestHostRuntimeSetup:
                     'args = ["mcp", "serve", "--runtime", "codex", '
                     '"--llm-backend", "codex"]'
                 ),
-                env_lines=(
-                    'OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "codex"'
-                ),
+                env_lines=('OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "codex"'),
             ),
             encoding="utf-8",
         )
