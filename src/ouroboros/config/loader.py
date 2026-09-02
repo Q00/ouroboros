@@ -57,6 +57,7 @@ from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
     RuntimeControlsConfig,
+    TelemetryConfig,
     get_config_dir,
     get_default_config,
     get_default_credentials,
@@ -342,6 +343,10 @@ def create_default_config(
 
     # Create config.yaml
     default_config = get_default_config()
+    if telemetry_opt_out_environ():
+        default_config = default_config.model_copy(
+            update={"telemetry": TelemetryConfig(enabled=False)}
+        )
     config_dict = _model_to_yaml_dict(default_config)
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(
@@ -1527,6 +1532,26 @@ def get_opencode_mode() -> str | None:
         return config.orchestrator.opencode_mode
     except ConfigError:
         return None
+
+
+def telemetry_opt_out_environ() -> dict[str, str]:
+    """Return normalized process-level telemetry opt-out variables.
+
+    Only environment signals are included. A persisted
+    ``telemetry.enabled: false`` is not copied into the mapping: that
+    file-level preference already applies in this process, and MCP child
+    environments should not invent keys the operator did not set.
+
+    Values are normalized to ``DO_NOT_TRACK=1`` and ``OUROBOROS_TELEMETRY=0``
+    so Codex MCP registrations inherit a stable opt-out regardless of the
+    original spelling (``true``/``yes``/``off``/``no``).
+    """
+    env: dict[str, str] = {}
+    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
+        env["DO_NOT_TRACK"] = "1"
+    if _env_flag("OUROBOROS_TELEMETRY") is False:
+        env["OUROBOROS_TELEMETRY"] = "0"
+    return env
 
 
 def get_telemetry_enabled() -> bool:

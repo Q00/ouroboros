@@ -433,8 +433,7 @@ _CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
 {command_lines}
 
 [mcp_servers.ouroboros.env]
-OUROBOROS_AGENT_RUNTIME = "codex"
-OUROBOROS_LLM_BACKEND = "codex"
+{env_lines}
 """
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
@@ -470,6 +469,9 @@ _CODEX_HOST_MCP_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "host",
     "OUROBOROS_LLM_BACKEND": "codex",
 }
+_CODEX_TELEMETRY_OPT_OUT_ENV_KEYS = frozenset({"DO_NOT_TRACK", "OUROBOROS_TELEMETRY"})
+_CODEX_TELEMETRY_OPT_OUT_TRUTHY = frozenset({"1", "true", "on", "yes"})
+_CODEX_TELEMETRY_OPT_OUT_FALSY = frozenset({"0", "false", "off", "no"})
 _CODEX_HOST_DIRECT_MCP_ARGS = [
     "mcp",
     "serve",
@@ -649,6 +651,50 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _codex_mcp_base_env(env: dict[str, object]) -> dict[str, object]:
+    """Return Codex MCP env without telemetry opt-out keys."""
+    return {
+        key: value for key, value in env.items() if key not in _CODEX_TELEMETRY_OPT_OUT_ENV_KEYS
+    }
+
+
+def _codex_mcp_env_is_setup_owned(env: object) -> bool:
+    """Return whether Codex MCP env is still setup-owned, including opt-out keys."""
+    if env is None:
+        return True
+    if not isinstance(env, dict):
+        return False
+    extra_keys = set(env) - set(_CODEX_MANAGED_MCP_ENV) - set(_CODEX_HOST_MCP_ENV)
+    if extra_keys - _CODEX_TELEMETRY_OPT_OUT_ENV_KEYS:
+        return False
+    base = _codex_mcp_base_env(env)
+    if base != _CODEX_MANAGED_MCP_ENV and base != _CODEX_HOST_MCP_ENV:
+        return False
+    do_not_track = env.get("DO_NOT_TRACK")
+    if do_not_track is not None and str(do_not_track).strip().lower() not in (
+        _CODEX_TELEMETRY_OPT_OUT_TRUTHY
+    ):
+        return False
+    telemetry_flag = env.get("OUROBOROS_TELEMETRY")
+    return telemetry_flag is None or str(telemetry_flag).strip().lower() in (
+        _CODEX_TELEMETRY_OPT_OUT_FALSY
+    )
+
+
+def _codex_mcp_registration_env(base: dict[str, str]) -> dict[str, str]:
+    """Merge setup-owned Codex MCP env with the current process opt-out."""
+    from ouroboros.config.loader import telemetry_opt_out_environ
+
+    return {**base, **telemetry_opt_out_environ()}
+
+
+def _render_codex_mcp_env_lines(base: dict[str, str]) -> str:
+    """Render the Codex MCP env table body for a setup-owned registration."""
+    return "\n".join(
+        f"{key} = {_toml_string(value)}" for key, value in _codex_mcp_registration_env(base).items()
+    )
+
+
 def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
     """Resolve a launchable release MCP command for the current machine."""
     uvx_path = shutil.which("uvx")
@@ -708,7 +754,10 @@ def _render_codex_mcp_section() -> str | None:
             "args = [" + ", ".join(_toml_string(arg) for arg in args) + "]",
         )
     )
-    return _CODEX_MCP_SECTION_TEMPLATE.format(command_lines=command_lines)
+    return _CODEX_MCP_SECTION_TEMPLATE.format(
+        command_lines=command_lines,
+        env_lines=_render_codex_mcp_env_lines(_CODEX_MANAGED_MCP_ENV),
+    )
 
 
 def _has_managed_codex_mcp_comment(raw: str) -> bool:
@@ -742,7 +791,7 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     env = entry.get("env")
-    if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
+    if env is not None and not _codex_mcp_env_is_setup_owned(env):
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
@@ -753,9 +802,10 @@ def _is_setup_managed_codex_mcp_entry(
         args_tuple = tuple(str(arg) for arg in args)
         if has_managed_comment:
             return args_tuple in _CODEX_LEGACY_DIRECT_MCP_ARGS
+        base_env = _codex_mcp_base_env(env) if isinstance(env, dict) else env
         return (
             args_tuple == _CODEX_DIRECT_MCP_BASE_ARGS
-            and env == _CODEX_MANAGED_MCP_ENV
+            and base_env == _CODEX_MANAGED_MCP_ENV
             and _command_matches_path_program(command, "ouroboros")
         )
     if not has_managed_comment:

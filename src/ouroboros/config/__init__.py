@@ -86,6 +86,7 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
+    telemetry_opt_out_environ,
 )
 from ouroboros.config.models import (
     ClarificationConfig,
@@ -200,6 +201,7 @@ __all__ = [
     "get_runtime_profile",
     "get_semantic_model",
     "get_telemetry_enabled",
+    "telemetry_opt_out_environ",
     "get_usage_limit_pause_seconds",
     "MAX_USAGE_LIMIT_PAUSE_SECONDS",
     "get_wonder_model",
