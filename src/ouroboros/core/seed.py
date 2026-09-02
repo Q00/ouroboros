@@ -375,6 +375,11 @@ here because ``ledger_seed`` imports this module. The two are pinned equal by a
 regression test.
 """
 
+_LEGACY_V104_VERSION = "1.0.4"
+_LEGACY_V104_GENERATION_MODE = "revised_after_qa"
+_LEGACY_V104_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-z][a-z0-9_]*$")
+_HASH_SHAPED_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-f0-9]+$")
+
 
 class SeedMetadata(BaseModel, frozen=True):
     """Metadata about the Seed generation.
@@ -765,6 +770,61 @@ def ac_texts(criteria: Any) -> tuple[str, ...]:
     return tuple(ac_text(criterion) for criterion in criteria)
 
 
+def _migrate_legacy_v104_seed_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize only the persisted v1.0.4 ``revised_after_qa`` parser shape."""
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict) or (
+        metadata.get("version") != _LEGACY_V104_VERSION
+        or metadata.get("generation_mode") != _LEGACY_V104_GENERATION_MODE
+    ):
+        return data
+
+    normalized = dict(data)
+    criteria = data.get("acceptance_criteria")
+    if isinstance(criteria, list | tuple):
+        normalized_criteria: list[Any] = []
+        criteria_changed = False
+        for item in criteria:
+            semantic_ac_key = item.get("semantic_ac_key") if isinstance(item, dict) else None
+            if (
+                isinstance(semantic_ac_key, str)
+                and _LEGACY_V104_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
+                and not _HASH_SHAPED_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
+            ):
+                item = {**item, "semantic_ac_key": None}
+                criteria_changed = True
+            normalized_criteria.append(item)
+        if criteria_changed:
+            normalized["acceptance_criteria"] = (
+                tuple(normalized_criteria) if isinstance(criteria, tuple) else normalized_criteria
+            )
+
+    ontology_schema = data.get("ontology_schema")
+    if isinstance(ontology_schema, dict):
+        fields = ontology_schema.get("fields")
+        if isinstance(fields, list | tuple):
+            normalized_fields: list[Any] = []
+            fields_changed = False
+            for item in fields:
+                if (
+                    isinstance(item, dict)
+                    and "description" not in item
+                    and isinstance(item.get("name"), str)
+                    and item["name"].strip()
+                ):
+                    item = {**item, "description": item["name"]}
+                    fields_changed = True
+                normalized_fields.append(item)
+            if fields_changed:
+                normalized_schema = dict(ontology_schema)
+                normalized_schema["fields"] = (
+                    tuple(normalized_fields) if isinstance(fields, tuple) else normalized_fields
+                )
+                normalized["ontology_schema"] = normalized_schema
+
+    return normalized
+
+
 class Seed(BaseModel, frozen=True):
     """Immutable specification for workflow execution.
 
@@ -870,6 +930,13 @@ class Seed(BaseModel, frozen=True):
         ...,
         description="Generation metadata (version, timestamp, etc.)",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_v104_parser_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return _migrate_legacy_v104_seed_dict(data)
+        return data
 
     @field_validator("task_type", mode="before")
     @classmethod

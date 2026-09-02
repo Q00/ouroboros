@@ -603,3 +603,72 @@ class TestWorkflowIRCommands:
         assert result.exit_code == 1
         assert "Workflow IR inspection failed" in result.output
         assert "acceptance_criteria.0.description" in result.output
+
+    def test_workflow_ir_inspect_preserves_v104_criterion_semantic_key(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from ouroboros.cli.commands.workflow_ir import _load_seed
+
+        seed_file = tmp_path / "legacy-seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect legacy Workflow IR",
+                    "acceptance_criteria:",
+                    "  - criterion: A",
+                    "    semantic_ac_key: ac_a123456789abcdef",
+                    "ontology_schema:",
+                    "  name: Receipt",
+                    "  description: A reconciliation receipt",
+                    "  fields: []",
+                    "metadata:",
+                    "  seed_id: seed_cli_legacy_ir",
+                    "  version: 1.0.4",
+                    "  generation_mode: revised_after_qa",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = _load_seed(seed_file)
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert loaded.acceptance_criteria[0].description == "A"
+        assert loaded.acceptance_criteria[0].semantic_ac_key == "ac_a123456789abcdef"
+        assert result.exit_code == 0
+        assert '"spec_id": "wfspec_seed_cli_legacy_ir"' in result.output
+        assert '"ok": true' in result.output
+
+    def test_workflow_ir_inspect_rejects_v104_hash_shaped_noncanonical_key(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        seed_file = tmp_path / "legacy-seed.yaml"
+        seed_file.write_text(
+            "\n".join(
+                [
+                    "goal: Inspect legacy Workflow IR",
+                    "acceptance_criteria:",
+                    "  - criterion: A",
+                    "    semantic_ac_key: ac_a123456789abcdef0",
+                    "ontology_schema:",
+                    "  name: Receipt",
+                    "  description: A reconciliation receipt",
+                    "  fields: []",
+                    "metadata:",
+                    "  seed_id: seed_cli_invalid_legacy_ir",
+                    "  version: 1.0.4",
+                    "  generation_mode: revised_after_qa",
+                    "  ambiguity_score: 0.1",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["workflow-ir", "inspect", str(seed_file), "--json"])
+
+        assert result.exit_code == 1
+        assert "Workflow IR inspection failed" in result.output
+        assert "semantic_ac_key" in result.output

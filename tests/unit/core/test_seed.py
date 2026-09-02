@@ -6,6 +6,7 @@ Tests the immutable Seed schema and related types.
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
 import pytest
@@ -37,6 +38,25 @@ def _multibyte_artifact_at_byte_budget(*, overflow_bytes: int = 0) -> str:
     path = "/".join(("😀" * 62, "a" * (6 + overflow_bytes)))
     assert len(path.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + overflow_bytes
     return path
+
+
+def _v104_revised_after_qa_seed(semantic_ac_key: str) -> dict[str, Any]:
+    """Return the persisted v1.0.4 shape that needs compatibility loading."""
+    return {
+        "goal": "Reconcile a campaign",
+        "acceptance_criteria": [
+            {
+                "description": "A deterministic receipt is written",
+                "semantic_ac_key": semantic_ac_key,
+            },
+        ],
+        "ontology_schema": {
+            "name": "Receipt",
+            "description": "A reconciliation receipt",
+            "fields": [{"name": "manifest_id", "type": "string", "required": True}],
+        },
+        "metadata": {"version": "1.0.4", "generation_mode": "revised_after_qa"},
+    }
 
 
 class TestSeedMetadata:
@@ -1071,6 +1091,45 @@ class TestSeed:
         assert (
             reconstructed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
         )
+
+    @pytest.mark.parametrize("loader", (Seed.from_dict, Seed.model_validate))
+    @pytest.mark.parametrize(
+        "semantic_ac_key",
+        ("ac_a123456789abcdef0", "ac_deadbeef"),
+    )
+    def test_v104_migration_rejects_hash_shaped_noncanonical_semantic_keys(
+        self,
+        loader: Any,
+        semantic_ac_key: str,
+    ) -> None:
+        """All-hex noncanonical keys stay strict validation errors, never legacy labels."""
+        with pytest.raises(PydanticValidationError, match="semantic_ac_key"):
+            loader(_v104_revised_after_qa_seed(semantic_ac_key))
+
+    @pytest.mark.parametrize("loader", (Seed.from_dict, Seed.model_validate))
+    def test_v104_migration_preserves_exact_canonical_semantic_key(self, loader: Any) -> None:
+        """Both direct Seed loaders retain a canonical persisted identity verbatim."""
+        canonical_key = "ac_a123456789abcdef"
+
+        seed = loader(_v104_revised_after_qa_seed(canonical_key))
+
+        assert seed.acceptance_criteria[0].semantic_ac_key == canonical_key
+        assert seed.ontology_schema.fields[0].description == "manifest_id"
+
+    def test_v104_migration_rehashes_descriptive_legacy_key_and_fills_ontology_description(
+        self,
+    ) -> None:
+        """The exact legacy envelope still repairs only its descriptive parser fields."""
+        seed_dict = _v104_revised_after_qa_seed("ac_manifest_exact_frozen")
+
+        seed = Seed.from_dict(seed_dict)
+        criterion = seed.acceptance_criteria[0]
+
+        assert criterion.semantic_ac_key == derive_semantic_ac_key(criterion)
+        assert criterion.semantic_ac_key != "ac_manifest_exact_frozen"
+        assert seed.ontology_schema.fields[0].description == "manifest_id"
+        assert seed_dict["acceptance_criteria"][0]["semantic_ac_key"] == "ac_manifest_exact_frozen"
+        assert "description" not in seed_dict["ontology_schema"]["fields"][0]
 
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
         """Seed can roundtrip through dict serialization."""
