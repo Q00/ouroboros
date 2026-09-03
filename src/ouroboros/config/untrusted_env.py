@@ -59,6 +59,7 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GOOSE_CLI_PATH",
         "OUROBOROS_GEMINI_CLI_PATH",
         "OUROBOROS_PI_CLI_PATH",
+        "OUROBOROS_OMP_CLI_PATH",
         "OUROBOROS_GJC_CLI_PATH",
         "OUROBOROS_ANTIGRAVITY_CLI_PATH",
         "OUROBOROS_GROK_CLI_PATH",
@@ -100,6 +101,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
         "PI_CONFIG_DIR",
+        # OMP (Oh My Pi) resolves its agent dir — sessions, extensions, and rules
+        # loaded into every spawned session — from this var (see `omp --help`).
+        # Same spawned-CLI discovery-root class as GJC/PI above: an untrusted
+        # repo .env must not point a spawned omp at attacker extensions.
+        "PI_CODING_AGENT_DIR",
         # Copilot custom-instruction roots — same instruction-injection class
         # as GJC_CODING_AGENT_DIR. `copilot/cli_policy.py` derives the child
         # env from os.environ and only *appends* the setup-owned dir, so an

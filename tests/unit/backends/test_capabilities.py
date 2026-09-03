@@ -82,6 +82,7 @@ def test_runtime_choices_include_runtime_only_backends() -> None:
     choices = runtime_backend_choices()
     assert "hermes" in choices
     assert "pi" in choices
+    assert "omp" in choices
     assert "gjc" in choices
     assert resolve_runtime_backend_name("gajae_code") == "gjc"
     assert "litellm" not in choices
@@ -92,6 +93,7 @@ def test_llm_choices_include_hermes_adapter() -> None:
     assert "codex" in choices
     assert "hermes" in choices
     assert "pi" in choices
+    assert "omp" in choices
     assert "gjc" in choices
 
 
@@ -116,6 +118,7 @@ def test_tool_envelope_support_is_registry_owned() -> None:
     assert backend_supports_tool_envelope("gemini_cli")
     assert not backend_supports_tool_envelope("hermes")
     assert not backend_supports_tool_envelope("pi")
+    assert not backend_supports_tool_envelope("omp")
     assert not backend_supports_tool_envelope("gjc")
 
 

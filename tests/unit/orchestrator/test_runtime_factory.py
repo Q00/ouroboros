@@ -111,6 +111,7 @@ class TestCreateAgentRuntime:
             "opencode",
             "goose",
             "pi",
+            "omp",
             "gjc",
             "antigravity",
             "grok",
