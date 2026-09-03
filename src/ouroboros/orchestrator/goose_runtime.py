@@ -188,11 +188,20 @@ class GooseCliRuntime(CodexCliRuntime):
         back to the last streamed assistant/result content.
         """
         self._reconcile_cli_executable_identity()
+        requested_resume_session_id = resume_session_id
+        resume_session_id = self._retire_resume_after_drift(resume_session_id, runtime_handle)
         del output_last_message_path, prompt
 
+        # A retired resume target must not leak back in as the ``-n`` name:
+        # that would address the pre-drift session under the new inputs.
+        resume_retired = requested_resume_session_id is not None and resume_session_id is None
         session_name = (
             resume_session_id
-            or (runtime_handle.native_session_id if runtime_handle is not None else None)
+            or (
+                runtime_handle.native_session_id
+                if runtime_handle is not None and not resume_retired
+                else None
+            )
             or self._derive_session_name(runtime_handle)
             or f"ouroboros-{uuid4().hex[:12]}"
         )
@@ -265,7 +274,7 @@ class GooseCliRuntime(CodexCliRuntime):
         self,
         current_handle: RuntimeHandle | None,
     ) -> str | None:
-        if current_handle is None:
+        if current_handle is None or self._drift.handle_predates_drift(current_handle):
             return None
         if current_handle.metadata.get(_GOOSE_INITIAL_LAUNCH_METADATA_KEY) == "pending":
             return None

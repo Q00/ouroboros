@@ -4468,6 +4468,81 @@ def test_drift_is_reported_to_telemetry_with_closed_kind(
     assert captured == ["codex_config", "unknown"]
 
 
+def test_unloadable_config_mid_run_keeps_frozen_routing_instead_of_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config that stops loading is observed, not adopted as new routing.
+
+    The resolver's role path degrades to the unprofiled default when
+    ``load_config`` raises; re-baselining on that would silently drop the
+    selected model/profile from every later command. Keep the frozen route.
+    """
+    from ouroboros.config.loader import ConfigError
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    config = OuroborosConfig(
+        llm_profiles={
+            "standard": {"providers": {"codex": {"profile": "ouroboros-standard"}}},
+        },
+        llm_role_profiles={
+            "agent_runtime": "standard",
+            "agent_runtime_implementation": "standard",
+        },
+    )
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        role_command = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
+        default_command = runtime._build_command("/tmp/out.txt")
+    assert role_command[role_command.index("--profile") + 1] == "ouroboros-standard"
+    assert default_command[default_command.index("--profile") + 1] == "ouroboros-standard"
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_drift.usage_telemetry.capture_runtime_drift",
+        lambda kind: captured.append(kind),
+    )
+    with patch(
+        "ouroboros.providers.profiles.load_config",
+        side_effect=ConfigError("config.yaml is not valid YAML"),
+    ):
+        role_command = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
+        role_again = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
+        default_command = runtime._build_command("/tmp/out.txt")
+
+    # Observed once as an unavailable baseline, never as adopted routing.
+    assert captured == ["baseline_unavailable"]
+    assert role_command[role_command.index("--profile") + 1] == "ouroboros-standard"
+    assert role_again == role_command
+    assert default_command[default_command.index("--profile") + 1] == "ouroboros-standard"
+    assert runtime._resolved_fallback_profile == "ouroboros-standard"
+
+    # Once the config loads again, valid routing is adopted as before.
+    drifted = OuroborosConfig(
+        llm_profiles={
+            "frontier": {"providers": {"codex": {"profile": "drifted-frontier"}}},
+        },
+        llm_role_profiles={
+            "agent_runtime": "frontier",
+            "agent_runtime_implementation": "frontier",
+        },
+    )
+    with patch("ouroboros.providers.profiles.load_config", return_value=drifted):
+        role_command = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
+    # (The remap also changes which native Codex profile is in force, so a
+    # ``codex_config`` observation may follow; the unavailable state itself
+    # is not reported again.)
+    assert captured[:2] == ["baseline_unavailable", "profile_routing"]
+    assert captured.count("baseline_unavailable") == 1
+    assert role_command[role_command.index("--profile") + 1] == "drifted-frontier"
+
+
 def test_cli_upgrade_mid_run_is_observed_and_new_binary_becomes_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

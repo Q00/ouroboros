@@ -356,6 +356,10 @@ class CodexCliRuntime:
             )
             self._runtime_handle_profile_fingerprints: dict[str, str] = {}
             self._runtime_handle_codex_config_fingerprints: dict[str, str] = {}
+            # Per-selector routing from the last loadable config.
+            self._runtime_handle_resolved_routing: dict[
+                str, tuple[str | None, str | None, str | None]
+            ] = {}
         else:
             # Subclasses reuse the process/session machinery but implement
             # their own model/config semantics. Do not make their construction
@@ -371,6 +375,7 @@ class CodexCliRuntime:
             self._builtin_mcp_handler_registry_fingerprint = None
             self._runtime_handle_profile_fingerprints = {}
             self._runtime_handle_codex_config_fingerprints = {}
+            self._runtime_handle_resolved_routing = {}
         # Drift of frozen authority inputs is observed, not fatal (runtime_drift.py).
         self._drift = RuntimeDriftLedger(runtime_backend=self._runtime_backend)
         # Item-lifecycle correlation state (#1690): item ids whose
@@ -671,6 +676,13 @@ class CodexCliRuntime:
         runtime_handle: RuntimeHandle | None = None,
     ) -> str:
         """Hash only Ouroboros profile fields that can alter a Codex command."""
+        return self._observe_profile_resolution_config(runtime_handle)[0]
+
+    def _observe_profile_resolution_config(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> tuple[str, bool]:
+        """Return (fingerprint, loadable); an unloadable config is never adopted as routing."""
         from ouroboros.providers import profiles as profile_module
 
         try:
@@ -678,7 +690,10 @@ class CodexCliRuntime:
         except Exception as exc:
             # Role resolution also falls back when config loading fails. Keep
             # that state stable without persisting path-rich error messages.
-            return self._hash_json_payload({"version": 1, "load_error": type(exc).__name__})
+            return (
+                self._hash_json_payload({"version": 1, "load_error": type(exc).__name__}),
+                False,
+            )
 
         relevant_role_profiles: dict[str, str] = {}
         relevant_profile_names: set[str] = set()
@@ -748,12 +763,15 @@ class CodexCliRuntime:
                 profile_contract["reasoning_effort"] = profile.reasoning_effort
             profiles[name] = profile_contract
 
-        return self._hash_json_payload(
-            {
-                "version": 1,
-                "llm_profiles": profiles,
-                "llm_role_profiles": dict(sorted(relevant_role_profiles.items())),
-            }
+        return (
+            self._hash_json_payload(
+                {
+                    "version": 1,
+                    "llm_profiles": profiles,
+                    "llm_role_profiles": dict(sorted(relevant_role_profiles.items())),
+                }
+            ),
+            True,
         )
 
     @staticmethod
@@ -1217,14 +1235,19 @@ class CodexCliRuntime:
     def _reconcile_profile_resolution_config(
         self,
         runtime_handle: RuntimeHandle | None = None,
-    ) -> None:
-        """Re-baseline on routing drift; threads are retired, so honor the new routing."""
+    ) -> bool:
+        """Re-baseline on valid routing drift; return whether config is loadable.
+
+        An unloadable config is observed once (``baseline_unavailable``) but the
+        frozen routing is kept: the resolver's role path would otherwise
+        silently retarget the run onto the unprofiled default.
+        """
         if self._runtime_backend != "codex":
-            return
+            return True
         key = self._runtime_handle_fingerprint_key(runtime_handle)
         if runtime_handle is not None and key is None:
-            return
-        current = self._fingerprint_profile_resolution_config(
+            return True
+        current, loadable = self._observe_profile_resolution_config(
             runtime_handle if key is not None else None
         )
         if key is not None:
@@ -1233,9 +1256,21 @@ class CodexCliRuntime:
                 previous = self._profile_resolution_fingerprint
                 self._runtime_handle_profile_fingerprints[key] = previous
             if current == previous:
-                return
+                return loadable
         elif current == self._profile_resolution_fingerprint:
-            return
+            return loadable
+        if not loadable:
+            self._drift.observe(
+                "baseline_unavailable",
+                "Ouroboros config became unloadable after initialization; "
+                "keeping the frozen profile routing",
+            )
+            # Reported once; resolved routing deliberately untouched.
+            if key is not None:
+                self._runtime_handle_profile_fingerprints[key] = current
+            else:
+                self._profile_resolution_fingerprint = current
+            return False
         self._drift.observe(
             "profile_routing", "Ouroboros Codex profile routing changed after initialization"
         )
@@ -1246,8 +1281,10 @@ class CodexCliRuntime:
         ) = self._resolve_runtime_codex_config_uncached(None)
         self._profile_resolution_fingerprint = self._fingerprint_profile_resolution_config()
         self._runtime_handle_profile_fingerprints = {}
+        self._runtime_handle_resolved_routing = {}
         if key is not None:
             self._runtime_handle_profile_fingerprints[key] = current
+        return True
 
     def execution_identity_contract(
         self,
@@ -1479,8 +1516,16 @@ class CodexCliRuntime:
                 self._resolved_fallback_profile,
                 self._resolved_fallback_reasoning_effort,
             )
-        self._reconcile_profile_resolution_config(runtime_handle)
-        return self._resolve_runtime_codex_config_uncached(runtime_handle)
+        loadable = self._reconcile_profile_resolution_config(runtime_handle)
+        key = self._runtime_handle_fingerprint_key(runtime_handle)
+        if not loadable and key is not None:
+            frozen = self._runtime_handle_resolved_routing.get(key)
+            if frozen is not None:
+                return frozen
+        routing = self._resolve_runtime_codex_config_uncached(runtime_handle)
+        if loadable and key is not None:
+            self._runtime_handle_resolved_routing[key] = routing
+        return routing
 
     def _build_runtime_handle(
         self,
@@ -2023,15 +2068,7 @@ class CodexCliRuntime:
             self._reconcile_profile_resolution_config(runtime_handle)
         self._reconcile_codex_config_files(runtime_handle)
         self._reconcile_cli_executable_identity()
-        if resume_session_id is not None and self._drift.handle_predates_drift(runtime_handle):
-            # Never resume a native thread created under the previous
-            # authority inputs; start a fresh one on the reconciled inputs.
-            log.info(
-                "codex_cli_runtime.resume_dropped_after_drift",
-                drift_epoch=self._drift.epoch,
-                runtime_backend=self._runtime_backend,
-            )
-            resume_session_id = None
+        resume_session_id = self._retire_resume_after_drift(resume_session_id, runtime_handle)
         command = [self._cli_path, "exec"]
 
         normalized_model = self._normalize_model(model or self._model)
@@ -2109,6 +2146,25 @@ class CodexCliRuntime:
                 "resume_session_id": resume_session_id,
             },
         }
+
+    def _retire_resume_after_drift(
+        self,
+        resume_session_id: str | None,
+        runtime_handle: RuntimeHandle | None,
+    ) -> str | None:
+        """Drop a resume target whose thread predates the last observed drift.
+
+        Every ``_build_command`` override calls this *after* its reconcile
+        checks, which may advance the epoch on this very call.
+        """
+        if resume_session_id is None or not self._drift.handle_predates_drift(runtime_handle):
+            return resume_session_id
+        log.info(
+            "codex_cli_runtime.resume_dropped_after_drift",
+            drift_epoch=self._drift.epoch,
+            runtime_backend=self._runtime_backend,
+        )
+        return None
 
     def _resolve_resume_session_id(
         self,
