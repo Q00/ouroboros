@@ -1850,6 +1850,8 @@ def build_lateral_multi_subagent(
     problem_context: str,
     current_approach: str,
     failed_attempts: tuple[str, ...] = (),
+    mode: str = "unstuck",
+    research: bool = False,
 ) -> list[SubagentPayload]:
     """Build N subagent payloads — one per lateral-thinking persona.
 
@@ -1863,6 +1865,11 @@ def build_lateral_multi_subagent(
         problem_context: Description of the stuck situation.
         current_approach: What has been tried and isn't working.
         failed_attempts: Previous failed approaches shared across all panes.
+        mode: ``"unstuck"`` (default) or ``"decision"`` — selects the persona
+              task block (see lateral_decision.py, grounded-lateral RFC D2).
+        research: Deep tier opt-in (RFC D3/D4): personas ground claims in web
+              evidence when their runtime has web tools, else degrade to
+              opinion-only — never an error.
 
     Returns:
         List of SubagentPayload, one per unique persona.
@@ -1870,6 +1877,7 @@ def build_lateral_multi_subagent(
     Raises:
         ValueError: If personas empty, unknown, or required fields missing.
     """
+    from ouroboros.mcp.tools import lateral_decision as _ld
     from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
 
     if not personas:
@@ -1927,26 +1935,18 @@ def build_lateral_multi_subagent(
             continue
 
         lateral = result.unwrap()
-        # Wrap the persona prompt with an explicit instruction for the
-        # subagent to produce a concrete alternative plan, not just restate.
-        prompt = (
-            f"{lateral.prompt}\n\n"
-            "---\n\n"
-            "## Task for you (subagent)\n"
-            f"You are thinking as the **{persona.value}** persona. Apply the "
-            "instructions above to this specific problem. Produce:\n"
-            "1. A concrete alternative plan (3-5 bullet steps).\n"
-            "2. The single biggest assumption you challenge.\n"
-            "3. A one-line verdict: would this plan work? why/why not?\n\n"
-            "Keep it tight. Your output will be compared with 4 other personas "
-            "thinking in parallel. Be distinctive — lean hard into your persona."
-        )
+        # Mode/evidence prompt blocks live in lateral_decision.py (#1797).
+        task_block = _ld.build_lateral_task_block(persona.value, mode)
+        research_block = _ld.build_lateral_research_block(research)
+        prompt = f"{lateral.prompt}\n\n---\n\n{task_block}{research_block}"
 
         context = {
             "persona": persona.value,
             "problem_context": problem_context,
             "current_approach": current_approach,
             "failed_attempts": list(failed_attempts),
+            "mode": mode,
+            **({"research": True} if research else {}),
         }
 
         payloads.append(

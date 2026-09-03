@@ -496,9 +496,13 @@ def test_mcp_server_instructions_are_provider_neutral_and_budget_safe() -> None:
     assert "`ouroboros_interview`" in text
     assert "`ouroboros_start_auto`" in text
     assert "`ouroboros_start_execute_seed`" in text
-    # Stagnation signals route to lateral thinking proactively.
+    # Stagnation signals AND consequential decisions route to lateral thinking
+    # proactively; a session that already settled the spec routes straight to
+    # seed generation without the interview (grounded-lateral RFC D1/D6).
     assert "`ouroboros_lateral_think`" in text
     assert "stuck" in text
+    assert "consequential choice" in text
+    assert "`ouroboros_generate_seed`" in text
     assert 'Do not wait for the literal word "ooo"' in text
     # Guardrail: trivial work must not be force-routed through Ouroboros.
     assert "Do not route simple questions or small unambiguous edits" in text
