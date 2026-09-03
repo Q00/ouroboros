@@ -56,6 +56,7 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
+from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -94,11 +95,6 @@ from ouroboros.orchestrator.execution_authority import (
 )
 from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.model_routing import tier_from_model_tier_arg
-from ouroboros.orchestrator.run_failure_cause import (
-    UNKNOWN_RUN_FAILURE_CAUSE,
-    derive_run_failure_cause,
-    failure_reason_code_for_run_cause,
-)
 from ouroboros.orchestrator.runner import (
     OrchestratorRunner,
     clear_cancellation,
@@ -567,62 +563,6 @@ def _classify_synchronous_execution_status(
     if session_status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
         return session_status.value, False, True, "Seed Execution FINISHED"
     return "unknown", False, True, "Seed Execution FINISHED"
-
-
-_RUN_FAILURE_EVIDENCE_EVENT_TYPES = (
-    "execution.verify.failed",
-    "execution.ac.recovery_exhausted",
-    "execution.ac.attempt_judged",
-)
-_RUN_FAILURE_EVIDENCE_LIMIT = 5000
-
-
-async def _derive_run_failure_meta(
-    event_store: EventStore,
-    *,
-    session_id: str,
-    execution_id: str,
-    session_status: SessionStatus | None,
-) -> dict[str, Any]:
-    """Attach a closed failure cause to a failed/cancelled run's result meta.
-
-    Reads only the durable, machine-readable evidence the executor already
-    wrote (verify-gate causes, retry exhaustion, judged outcomes, the audited
-    session error type) — never prose. Best-effort: an unreadable store yields
-    ``unknown`` rather than a failed tool result.
-    """
-    terminal_status = session_status.value if session_status is not None else None
-    cause = UNKNOWN_RUN_FAILURE_CAUSE
-    try:
-        events: list[Any] = []
-        for event_type in _RUN_FAILURE_EVIDENCE_EVENT_TYPES:
-            events.extend(
-                await event_store.query_events(
-                    aggregate_id=execution_id,
-                    event_type=event_type,
-                    limit=_RUN_FAILURE_EVIDENCE_LIMIT,
-                )
-            )
-        events.extend(
-            await event_store.query_events(
-                aggregate_id=session_id,
-                event_type="orchestrator.session.failed",
-                limit=_RUN_FAILURE_EVIDENCE_LIMIT,
-            )
-        )
-        cause = derive_run_failure_cause(
-            events, session_id=session_id, terminal_status=terminal_status
-        )
-    except Exception:
-        log.warning(
-            "mcp.tool.execute_seed.failure_cause_unavailable",
-            session_id=session_id,
-            execution_id=execution_id,
-        )
-    return {
-        "failure_cause": cause,
-        "failure_reason_code": failure_reason_code_for_run_cause(cause).value,
-    }
 
 
 def _run_only_verification_meta(
@@ -2155,7 +2095,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     SessionStatus.FAILED,
                     SessionStatus.CANCELLED,
                 }:
-                    failure_meta = await _derive_run_failure_meta(
+                    failure_meta = await derive_run_failure_meta(
                         event_store,
                         session_id=tracker.session_id,
                         execution_id=tracker.execution_id,

@@ -9,7 +9,7 @@ import pytest
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.mcp.tools.execution_handlers import _derive_run_failure_meta
+from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
 from ouroboros.orchestrator.session import SessionStatus
 
 SESSION = "orch_failure_cause"
@@ -49,7 +49,7 @@ async def test_failed_run_meta_names_settlement_cause_and_reason_code() -> None:
         }
     )
 
-    meta = await _derive_run_failure_meta(
+    meta = await derive_run_failure_meta(
         store,
         session_id=SESSION,
         execution_id=EXECUTION,
@@ -71,7 +71,7 @@ async def test_failed_run_meta_names_settlement_cause_and_reason_code() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_run_meta_is_cancelled() -> None:
-    meta = await _derive_run_failure_meta(
+    meta = await derive_run_failure_meta(
         _store_with({}),
         session_id=SESSION,
         execution_id=EXECUTION,
@@ -86,7 +86,7 @@ async def test_unreadable_store_degrades_to_unknown_without_raising() -> None:
     store = AsyncMock()
     store.query_events = AsyncMock(side_effect=PersistenceError("locked"))
 
-    meta = await _derive_run_failure_meta(
+    meta = await derive_run_failure_meta(
         store,
         session_id=SESSION,
         execution_id=EXECUTION,
