@@ -70,7 +70,7 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
     clear_attested_codex_child_environment,
     codex_cli_runtime_attestation,
 )
-from ouroboros.orchestrator.runtime_drift import RuntimeDriftLedger
+from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
@@ -1525,9 +1525,8 @@ class CodexCliRuntime:
             return self._frozen_fallback_routing()
         loadable = self._reconcile_profile_resolution_config(runtime_handle)
         key = self._runtime_handle_fingerprint_key(runtime_handle)
-        # Native ``codex_profile`` metadata needs no Ouroboros config. Otherwise an
-        # unloadable config serves the selector's last valid routing, else the
-        # frozen role default (never the resolver's unprofiled fallback).
+        # Native ``codex_profile`` needs no Ouroboros config; otherwise unloadable
+        # config serves the last valid routing, else the frozen role default.
         if (
             not loadable
             and key is not None
@@ -2095,7 +2094,6 @@ class CodexCliRuntime:
         runtime_model, runtime_profile, runtime_effort = self._resolve_runtime_codex_config(
             runtime_handle
         )
-        # Sealed only after the last reconcile (routing resolution included).
         resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
 
         # Codex accepts one active --profile. The backend runtime profile is
@@ -3667,7 +3665,10 @@ class CodexCliRuntime:
                 ),
             )
 
-        current_handle = resume_handle or self._build_runtime_handle(resume_session_id)
+        # Bare session id: admission history unknown (see DRIFT_EPOCH_UNKNOWN).
+        current_handle = resume_handle or self._build_runtime_handle(
+            resume_session_id, drift_epoch=DRIFT_EPOCH_UNKNOWN
+        )
         intercepted_messages = await self._maybe_dispatch_skill_intercept(prompt, current_handle)
         if intercepted_messages is not None:
             for message in intercepted_messages:

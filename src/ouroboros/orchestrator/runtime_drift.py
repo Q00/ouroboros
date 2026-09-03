@@ -40,6 +40,9 @@ RUNTIME_DRIFT_KINDS = frozenset(
     }
 )
 DRIFT_EPOCH_METADATA_KEY = "ouroboros_runtime_drift_epoch"
+# Stamp for a handle manufactured from a bare session id: its thread's
+# admission epoch is unknown, so it predates any drift observed so far.
+DRIFT_EPOCH_UNKNOWN = -1
 
 
 class RuntimeDriftLedger:
@@ -97,7 +100,13 @@ class RuntimeDriftLedger:
         if runtime_handle is None or self.epoch == 0:
             return False
         stamped = runtime_handle.metadata.get(DRIFT_EPOCH_METADATA_KEY)
-        return not isinstance(stamped, int) or stamped != self.epoch
+        # ``type`` not ``isinstance``: bool is an int subtype and True == 1.
+        return type(stamped) is not int or stamped != self.epoch
 
 
-__all__ = ["DRIFT_EPOCH_METADATA_KEY", "RUNTIME_DRIFT_KINDS", "RuntimeDriftLedger"]
+__all__ = [
+    "DRIFT_EPOCH_METADATA_KEY",
+    "DRIFT_EPOCH_UNKNOWN",
+    "RUNTIME_DRIFT_KINDS",
+    "RuntimeDriftLedger",
+]

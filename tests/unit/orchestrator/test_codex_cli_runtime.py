@@ -4725,6 +4725,64 @@ async def test_resume_retired_inside_the_build_is_not_reported_as_attempted(
     assert messages[-1].data.get("recovery") is None
 
 
+def test_bare_resume_session_id_is_retired_once_any_drift_was_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handle manufactured from a bare session id has unknown admission history.
+
+    Adversarial probe: after a drift, ``execute_task(resume_session_id=...)``
+    used to stamp the manufactured handle with the *current* epoch and resume
+    the pre-drift thread. It is stamped unknown and retired instead; with no
+    drift observed yet it still resumes as before.
+    """
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN
+
+    fresh = runtime._build_runtime_handle("thread-old", drift_epoch=DRIFT_EPOCH_UNKNOWN)
+    assert fresh is not None
+    assert runtime._resolve_resume_session_id(fresh) == "thread-old"
+
+    runtime._drift.observe("codex_config", "drift after thread-old was created")
+    stale = runtime._build_runtime_handle("thread-old", drift_epoch=DRIFT_EPOCH_UNKNOWN)
+    assert stale is not None
+    assert runtime._resolve_resume_session_id(stale) is None
+    command = runtime._build_command(
+        "/tmp/out.txt", resume_session_id="thread-old", runtime_handle=stale
+    )
+    assert "resume" not in command
+
+    # Through the real entry point: the manufactured handle is stamped unknown
+    # and the build receives no resume target.
+    seen: dict[str, Any] = {}
+
+    def capture(**kwargs: Any) -> list[str]:
+        seen.update(kwargs)
+        raise RuntimeError("stop before launch")
+
+    monkeypatch.setattr(runtime, "_build_command", capture)
+
+    async def drive() -> None:
+        async for _ in runtime.execute_task("hello", resume_session_id="thread-old"):
+            pass
+
+    asyncio.run(drive())
+    assert seen["resume_session_id"] is None
+    assert seen["runtime_handle"].metadata["ouroboros_runtime_drift_epoch"] == DRIFT_EPOCH_UNKNOWN
+
+
+def test_bool_epoch_stamp_is_not_mistaken_for_the_current_epoch() -> None:
+    from ouroboros.orchestrator.runtime_drift import RuntimeDriftLedger
+
+    ledger = RuntimeDriftLedger(runtime_backend="codex")
+    ledger.observe("codex_config", "x")
+    assert ledger.epoch == 1
+    handle = RuntimeHandle(backend="codex_cli", metadata={"ouroboros_runtime_drift_epoch": True})
+    assert ledger.handle_predates_drift(handle) is True
+
+
 def test_cli_upgrade_mid_run_is_observed_and_new_binary_becomes_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
