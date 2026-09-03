@@ -3705,6 +3705,9 @@ class CodexCliRuntime:
                 build_kwargs["model"] = model
             command = self._build_command(**build_kwargs)
             stream_item_scope.admitted_drift_epoch = self._drift.epoch
+            # A resume retired inside the build was never attempted; do not
+            # report an early failure as a resume-bootstrap failure.
+            attempted_resume_session_id = self._resolve_resume_session_id(current_handle)
         except Exception as e:
             yield AgentMessage(
                 type="result",

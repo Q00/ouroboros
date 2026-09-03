@@ -4688,6 +4688,43 @@ def test_unchanged_unavailable_attestation_is_reported_once_and_recovers(
     assert captured == ["baseline_unavailable"]
 
 
+@pytest.mark.asyncio
+async def test_resume_retired_inside_the_build_is_not_reported_as_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An early failure after in-build retirement is not a resume-bootstrap failure.
+
+    ``attempted_resume_session_id`` is resolved before the command build; if
+    the build retires it, the launch never resumed anything, so the result
+    must not carry ``resume_retry`` recovery (the runner would pause and tell
+    the user to retry the same --resume session).
+    """
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="/nonexistent/codex", cwd="/tmp/project")
+    handle = runtime._build_runtime_handle("thread-old")
+    assert handle is not None
+
+    config_path.write_text('model = "gpt-other"\n', encoding="utf-8")
+    with patch(
+        "asyncio.create_subprocess_exec",
+        side_effect=FileNotFoundError("/nonexistent/codex"),
+    ):
+        messages = [
+            message async for message in runtime.execute_task("hello", resume_handle=handle)
+        ]
+
+    # Config drift (plus the unresolvable executable's attestation) observed;
+    # the retired resume is not reported as attempted.
+    assert runtime._drift.epoch >= 1
+    assert messages[-1].type == "result"
+    assert messages[-1].is_error
+    assert messages[-1].data.get("recovery") is None
+
+
 def test_cli_upgrade_mid_run_is_observed_and_new_binary_becomes_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

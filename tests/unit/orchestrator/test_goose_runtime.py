@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
+from ouroboros.orchestrator.codex_cli_runtime import _CodexItemCorrelationScope
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
 
@@ -495,9 +496,23 @@ def test_goose_executable_drift_retires_resume_and_pre_drift_session_name(
     assert runtime._drift.epoch == 1
     assert "--resume" not in command
     assert runtime._resolve_resume_session_id(handle) is None
-    # The derived name is deterministic, so the fresh thread is still
-    # recoverable from the handle metadata; only ``--resume`` is gone.
-    assert command[command.index("-n") + 1] == first_name
+    # Goose resolves --resume by name and ``run -n`` creates a second session
+    # under an existing name, so the post-drift thread gets a new, still
+    # deterministic name; event normalization recovers the same name from the
+    # admitted epoch, so the next turn resumes the new thread, not the old one.
+    new_name = command[command.index("-n") + 1]
+    assert new_name != first_name
+    scope = _CodexItemCorrelationScope()
+    scope.admitted_drift_epoch = runtime._drift.epoch
+    recovered = runtime._convert_event(
+        {"type": "message", "message": {"content": [{"type": "text", "text": "Done"}]}},
+        handle,
+        item_scope=scope,
+    )[0].resume_handle
+    assert recovered is not None
+    assert recovered.native_session_id == new_name
+    assert recovered.metadata["ouroboros_runtime_drift_epoch"] == 1
+    assert runtime._resolve_resume_session_id(recovered) == new_name
 
     # A handle stamped after the drift resumes normally on the new binary.
     fresh = runtime._build_runtime_handle("goose-new", handle)
