@@ -344,6 +344,8 @@ async def test_degraded_seed_with_safety_blocker_still_terminates(tmp_path) -> N
     # The safety blocker terminates — we must NOT see a partial product
     # terminal here, even though the Seed is degraded.
     assert result.partial_product is False
+    assert result.stop_reason_code == "degraded_seed_safety_blockers"
+    assert state.last_error_code == "degraded_seed_safety_blockers"
     # ``auto.product.partial_emitted`` MUST NOT be emitted when the pipeline
     # blocks on a safety marker.
     partial_events = [
