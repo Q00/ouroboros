@@ -60,6 +60,7 @@ class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
     GOOSE = "goose"
     KIRO = "kiro"
     PI = "pi"
+    OMP = "omp"
     GJC = "gjc"
     ANTIGRAVITY = "antigravity"
     GROK = "grok"

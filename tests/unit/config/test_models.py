@@ -234,6 +234,11 @@ class TestLLMConfig:
         config = LLMConfig(backend="pi")
         assert config.backend == "pi"
 
+    def test_llm_config_accepts_omp_backend(self) -> None:
+        """LLMConfig accepts OMP as a local CLI backend."""
+        config = LLMConfig(backend="omp")
+        assert config.backend == "omp"
+
     def test_llm_config_accepts_gjc_backend(self) -> None:
         """LLMConfig accepts GJC now that the GJC LLM adapter is registered."""
         config = LLMConfig(backend="gjc")
@@ -805,6 +810,13 @@ class TestOrchestratorConfig:
         assert config.pi_cli_path is not None
         assert "~" not in config.pi_cli_path
 
+    def test_orchestrator_config_accepts_omp_backend(self) -> None:
+        """OMP is a valid runtime backend."""
+        config = OrchestratorConfig(runtime_backend="omp", omp_cli_path="~/bin/omp")
+        assert config.runtime_backend == "omp"
+        assert config.omp_cli_path is not None
+        assert "~" not in config.omp_cli_path
+
     def test_orchestrator_config_accepts_gjc_backend(self) -> None:
         """GJC is a valid runtime-only backend."""
         config = OrchestratorConfig(runtime_backend="gjc", gjc_cli_path="~/bin/gjc")
@@ -970,6 +982,11 @@ class TestRuntimeProfileConfig:
         profile = RuntimeProfileConfig(default="pi", stages={"execute": "pi_cli"})
         assert profile.default == "pi"
         assert profile.stages == {"execute": "pi_cli"}
+
+    def test_runtime_profile_accepts_omp_backends(self) -> None:
+        profile = RuntimeProfileConfig(default="omp", stages={"execute": "omp_cli"})
+        assert profile.default == "omp"
+        assert profile.stages == {"execute": "omp_cli"}
 
     def test_runtime_profile_accepts_gjc_backends(self) -> None:
         profile = RuntimeProfileConfig(default="gjc", stages={"execute": "gjc_cli"})

@@ -950,6 +950,7 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
     provided = prepared.provided
     completion_report = prepared.completion_report
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
+        from ouroboros.mcp.tools.citation_check import audit_citations
         from ouroboros.mcp.tools.subagent import (
             continue_interview_after_lateral_persona_synthesis,
         )
@@ -961,7 +962,19 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             _fanout_identity_synthesis,
             _fanout_identity_continuation,
         )
-        return {
+        # Deep-tier citation gate (grounded-lateral RFC D4): audit the URLs
+        # personas cited in their fenced evidence blocks. Withhold-only — a
+        # panel with no evidence blocks touches no network and gains no key,
+        # and an unreachable citation is marked for the synthesizer to demote,
+        # never a synthesis failure.
+        try:
+            audit = audit_citations(
+                output if isinstance(output, str) else json.dumps(output, default=str)
+                for output in provided.values()
+            )
+        except Exception:
+            audit = None
+        response = {
             "status": "complete",
             "fanout_id": fanout_id,
             "kind": record.kind,
@@ -969,6 +982,9 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             "result": outcome,
             **completion_report,
         }
+        if audit is not None:
+            response["citation_audit"] = audit
+        return response
 
     if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
         from ouroboros.mcp.tools.subagent import synthesize_code_investigation_when_complete

@@ -84,7 +84,7 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow - see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow - see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
 | `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
 | `--skip-run` | Stop after creating an A-grade Seed |
@@ -259,7 +259,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`, `host`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`, `host`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, `stdio`, or native-Windows-only explicit `http` |
@@ -267,6 +267,10 @@ ouroboros setup [OPTIONS]
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
 `ooo ...` commands into Ouroboros through the shared skill router.
+For OMP (Oh My Pi), setup also installs
+`~/.omp/agent/extensions/ouroboros-ooo-bridge.ts` (dispatch timeout:
+`OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`). Restart OMP and interactive OMP sessions
+can dispatch `ooo ...` commands into Ouroboros through the shared skill router.
 For GJC, setup installs the GJC-side `ooo` bridge extension into
 `<agent-dir>/extensions` and a renderer-generated skill capability guide into
 `<agent-dir>/rules/ouroboros-skill-capability-guide.md`. Interactive GJC
@@ -381,8 +385,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -454,7 +458,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | Option | Description |
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
-| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
+| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
@@ -675,7 +679,7 @@ ouroboros config backend [BACKEND]
 
 | Argument | Description |
 |----------|-------------|
-| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `zcode`, `hermes`, `goose`, `pi`, `gjc`, `antigravity`, or `grok`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
+| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `zcode`, `hermes`, `goose`, `pi`, `omp`, `gjc`, `antigravity`, or `grok`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
 
 **Examples:**
 
@@ -1171,8 +1175,8 @@ ouroboros mcp serve [OPTIONS]
 | `--allowed-origin TEXT` | `Origin` header value to permit. Repeatable. Empty by default, which rejects every browser-originated request. |
 | `--workspace-root TEXT` | Confines seed execution to directories under this path. Repeatable. Strongly recommended for network binds; unset means a caller may name any existing directory on the machine as an agent working tree. |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -1284,8 +1288,8 @@ ouroboros mcp info [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `zcode`, `dsh`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
@@ -1301,7 +1305,7 @@ ouroboros mcp info [OPTIONS]
 ## Typical Workflows
 
 > For first-time setup and the complete onboarding flow, see **[Getting Started](getting-started.md)**.
-> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), [Pi CLI](runtime-guides/pi.md), and [GJC](runtime-guides/gjc.md) references.
+> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), [Pi CLI](runtime-guides/pi.md), [OMP CLI](runtime-guides/omp.md), and [GJC](runtime-guides/gjc.md) references.
 
 ### Cancelling Stuck Executions
 
