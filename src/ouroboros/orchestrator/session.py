@@ -199,6 +199,7 @@ _STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {
     "codex_cli": "codex_cli",
     "goose": "goose",
     "pi": "pi",
+    "omp": "omp",
     "hermes": "hermes_cli",
     "hermes_cli": "hermes_cli",
     "opencode": "opencode",

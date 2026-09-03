@@ -463,3 +463,95 @@ async def test_seed_generator_returns_typed_reopen_error_for_conflict(tmp_path) 
     assert result.error.details["code"] == "interview_reopen_required"
     assert result.error.details["blockers"][0]["reason"] == "conflict_requires_tradeoff"
     adapter.complete.assert_not_awaited()
+
+
+def test_resolved_reference_with_drifted_round_text_does_not_reblock() -> None:
+    # The 0.52.0 field incident: the resolution ledger said RESOLVED, but the
+    # persisted round question had drifted from asked_question (host-rendered
+    # echo), so the round walk missed it and the unresolved-contrast blocker
+    # was resurrected -- Seed generation pinned on
+    # reference_confirmation_required with no way out. The ledger is the
+    # authority: a RESOLVED reference must never re-block on round-text drift.
+    state = _reference_state()
+    drifted_rounds = list(state.rounds)
+    drifted_rounds[1] = InterviewRound(
+        round_number=2,
+        question="[rendered by host] " + drifted_rounds[1].question[:40],
+        user_response=drifted_rounds[1].user_response,
+    )
+    state = state.model_copy(update={"rounds": drifted_rounds})
+
+    applied = apply_requirement_distillation(_requirements(), build_requirement_distillation(state))
+
+    assert applied.promotion.is_ready_for_seed
+    contrast = [
+        candidate
+        for candidate in applied.distillation.candidates
+        if candidate.reference_ids == ("linear",)
+        and candidate.resolution is CandidateResolution.NEEDS_CONFIRMATION
+    ]
+    assert len(contrast) == 1
+    assert contrast[0].text == "Copy the workflow speed, not the command menu."
+
+
+def test_whitespace_drifted_round_text_still_promotes_contrast_via_round_walk() -> None:
+    state = _reference_state()
+    drifted_rounds = list(state.rounds)
+    drifted_rounds[1] = InterviewRound(
+        round_number=2,
+        question="  " + drifted_rounds[1].question.replace("\n", " \n ").upper(),
+        user_response=drifted_rounds[1].user_response,
+    )
+    state = state.model_copy(update={"rounds": drifted_rounds})
+
+    distillation = build_requirement_distillation(state)
+
+    contrast = [
+        candidate
+        for candidate in distillation.candidates
+        if candidate.reference_ids == ("linear",)
+        and candidate.resolution is CandidateResolution.NEEDS_CONFIRMATION
+    ]
+    assert len(contrast) == 1
+    assert contrast[0].candidate_id.startswith("round-2")
+
+
+def test_anchor_backstop_appends_dropped_promoted_requirement() -> None:
+    from ouroboros.bigbang.requirement_distillation import anchor_promoted_requirements
+
+    committed = "The exporter must emit RFC 3339 timestamps, required."
+    state = _reference_state(confirmation=committed)
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    # Simulate the LLM extraction dropping/paraphrasing the committed line.
+    # "must" without a constraint marker classifies it as an acceptance
+    # criterion (_CONSTRAINT_RE), so that is where the verbatim copy lands.
+    requirements = {"goal": "Build an issue tool", "acceptance_criteria": ["Fast triage"]}
+    updated, appended = anchor_promoted_requirements(requirements, applied.promotion)
+
+    assert appended == 1
+    assert updated["acceptance_criteria"] == ["Fast triage", committed]
+
+
+def test_anchor_backstop_is_a_noop_when_wording_survived() -> None:
+    from ouroboros.bigbang.requirement_distillation import anchor_promoted_requirements
+
+    committed = "The exporter must emit RFC 3339 timestamps, required."
+    state = _reference_state(confirmation=committed)
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    # Extraction kept the wording (whitespace/case drift tolerated) — the
+    # backstop must not duplicate it.
+    survived = "  The exporter must emit  RFC 3339 timestamps, REQUIRED. "
+    requirements = {
+        "goal": "Build an issue tool",
+        "acceptance_criteria": [survived],
+        "constraints": [],
+    }
+    updated, appended = anchor_promoted_requirements(requirements, applied.promotion)
+
+    assert appended == 0
+    assert updated["acceptance_criteria"] == [survived]
+    assert updated["constraints"] == []

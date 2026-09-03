@@ -29,6 +29,8 @@ _BACKEND_ALIASES = {
     "opencode_cli": "opencode",
     "pi": "pi",
     "pi_cli": "pi",
+    "omp": "omp",
+    "omp_cli": "omp",
     "gjc": "gjc",
     "gjc_cli": "gjc",
     "ourocode": "ourocode",

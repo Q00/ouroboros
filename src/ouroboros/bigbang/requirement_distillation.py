@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from ouroboros.bigbang.answer_provenance import classify_answer_provenance
 from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
@@ -31,6 +32,7 @@ from ouroboros.core.seed import (
 from ouroboros.interview_adapters import (
     ReferenceResolutionStatus,
     candidates_from_contrast_answer,
+    normalized_question_key,
 )
 
 _EXPLICIT_REQUIREMENT_RE = re.compile(
@@ -109,8 +111,12 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             )
         )
 
+    # Keyed by normalized question text: rounds can carry a host-rendered echo
+    # of the asked question (whitespace/case drift), and a missed lookup here
+    # used to resurrect the unresolved-contrast blocker for an already-RESOLVED
+    # reference. See normalized_question_key.
     reference_by_question = {
-        resolution.asked_question: cue
+        normalized_question_key(resolution.asked_question): cue
         for resolution in state.reference_resolutions
         for cue in state.reference_cues
         if (
@@ -119,6 +125,11 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             and resolution.answer
             and resolution.reference_id == cue.reference_id
         )
+    }
+    resolved_answers_by_id = {
+        resolution.reference_id: resolution.answer
+        for resolution in state.reference_resolutions
+        if resolution.status is ReferenceResolutionStatus.RESOLVED and resolution.answer
     }
     resolved_reference_ids: set[str] = set()
 
@@ -134,7 +145,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             # too (#1755). Note the evidence kind below is USER_STATEMENT: an
             # observation entering here would be labelled a user statement.
             continue
-        reference_cue = reference_by_question.get(round_data.question)
+        reference_cue = reference_by_question.get(normalized_question_key(round_data.question))
         if reference_cue is not None:
             if reference_cue.reference_id in resolved_reference_ids:
                 continue
@@ -203,6 +214,27 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
 
     for index, cue in enumerate(state.reference_cues):
         if cue.reference_id in resolved_reference_ids:
+            continue
+        resolved_answer = resolved_answers_by_id.get(cue.reference_id)
+        if resolved_answer and classify_answer_provenance(resolved_answer) != "observation":
+            # The resolution ledger is the authority on whether a contrast was
+            # answered — not a re-derivation from round question text. A
+            # RESOLVED reference whose round text drifted from asked_question
+            # used to fall through to the unresolved blocker below and pin
+            # Seed generation on reference_confirmation_required permanently;
+            # emit its contrast candidate from the stored answer instead. The
+            # #1755 withholding rule still applies on this walk too: an
+            # observation (adopted fact) resolving the ledger is not a user
+            # decision, so it falls through to the unresolved blocker exactly
+            # as the round walk would have refused it.
+            contrast_evidence, contrast_candidate = candidates_from_contrast_answer(
+                cue=cue,
+                answer=resolved_answer,
+                candidate_id_prefix=f"reference-{index}",
+            )
+            evidence.append(contrast_evidence)
+            candidates.append(contrast_candidate)
+            resolved_reference_ids.add(cue.reference_id)
             continue
         evidence_id = f"reference-{index}:cue"
         evidence.append(
@@ -301,6 +333,84 @@ def apply_requirement_distillation(
         distillation=distillation,
         promotion=promotion,
     )
+
+
+def _anchor_text_key(text: str) -> str:
+    """Whitespace-collapsed, casefolded comparison key for anchor membership."""
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _requirement_entry_text(entry: object) -> str:
+    """Extract the comparable text of one extracted requirement entry.
+
+    Extraction can yield bare strings or AC-spec-shaped mappings; the
+    user-visible wording lives in the string itself or the ``description``.
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return str(entry.get("description") or "")
+    return str(entry)
+
+
+def anchor_promoted_requirements(
+    requirements: dict[str, Any],
+    promotion: PromotionResult,
+) -> tuple[dict[str, Any], int]:
+    """Append promoted user requirements the LLM extraction dropped or re-worded.
+
+    The verbatim-anchor backstop at the SeedGenerator chokepoint
+    (grounded-lateral RFC D6, owner decision 2026-09-01): a requirement the
+    user explicitly committed during the interview (promoted candidate,
+    CONFIRMED by USER authority) must reach the Seed in the user's own
+    wording. LLM extraction remains the composer for everything else — this
+    only *adds*, never rewrites or removes, so extraction quality is
+    untouched while no committed requirement can silently vanish or survive
+    only as a paraphrase.
+
+    Membership is judged by whitespace/case-normalized equality — no
+    similarity scoring, so a paraphrase does not count as present and the
+    verbatim original is appended alongside it. That duplication is the
+    deliberate price of the guarantee, and it is bounded: only answers that
+    matched the explicit-requirement pattern ever become promoted candidates.
+
+    Returns the (possibly updated) requirements dict and how many verbatim
+    entries were appended.
+    """
+    section_keys = {
+        RequirementSection.CONSTRAINT: "constraints",
+        RequirementSection.EXISTING_CONSTRAINT: "constraints",
+        RequirementSection.ACCEPTANCE_CRITERION: "acceptance_criteria",
+    }
+    appended = 0
+    updated = dict(requirements)
+    for candidate in promotion.promoted:
+        key = section_keys.get(candidate.section)
+        if key is None:
+            continue
+        if candidate.resolution is not CandidateResolution.CONFIRMED:
+            continue
+        if candidate.confirmation_authority is not ConfirmationAuthority.USER:
+            continue
+        text = candidate.text.strip()
+        if not text:
+            continue
+        raw_existing = updated.get(key)
+        if isinstance(raw_existing, (list, tuple)):
+            existing = list(raw_existing)
+        elif isinstance(raw_existing, str) and raw_existing.strip():
+            existing = [raw_existing]
+        else:
+            existing = []
+        anchor_key = _anchor_text_key(text)
+        if any(
+            _anchor_text_key(_requirement_entry_text(entry)) == anchor_key for entry in existing
+        ):
+            continue
+        existing.append(text)
+        updated[key] = existing
+        appended += 1
+    return updated, appended
 
 
 def _normalized_requirement_values(raw_value: object) -> tuple[str, ...]:

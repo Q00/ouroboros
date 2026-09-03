@@ -113,7 +113,6 @@ GRANDFATHERED: dict[str, int] = {
     "src/ouroboros/evaluation/detector.py": 2362,
     "src/ouroboros/orchestrator/mcp_tools.py": 2296,
     "src/ouroboros/auto/answerer.py": 2287,
-    "src/ouroboros/mcp/tools/evaluation_handlers.py": 2268,
     "src/ouroboros/orchestrator/capabilities/__init__.py": 2232,
     "src/ouroboros/mcp/tools/job_handlers.py": 2208,
     "src/ouroboros/orchestrator/adapter.py": 2125,
