@@ -764,6 +764,26 @@ class TestCapture:
         assert "failure_cause" not in sent[0]["properties"]
         assert "failure_reason_code" not in sent[0]["properties"]
 
+    def test_runtime_drift_keeps_closed_kind_only(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        telemetry.set_context(runtime_backend="codex")
+        telemetry.capture_runtime_drift("cli_executable")
+        telemetry.capture_runtime_drift("/Users/private/codex was replaced")
+        telemetry.flush(timeout=2.0)
+
+        assert [event["event"] for event in sent] == ["runtime_drift", "runtime_drift"]
+        assert sent[0]["properties"]["kind"] == "cli_executable"
+        assert sent[1]["properties"]["kind"] == "unknown"
+        assert set(sent[0]["properties"]) == {
+            "kind",
+            "runtime_backend",
+            "app_version",
+            "os",
+        }
+        assert "private" not in json.dumps(sent)
+
     def test_never_raises_when_post_fails(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:

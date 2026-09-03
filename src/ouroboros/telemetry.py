@@ -356,6 +356,31 @@ _AC_VERIFY_CAUSES = frozenset(
     }
 )
 _UNKNOWN_VERIFY_CAUSE = "unknown"
+# A frozen runtime authority input (CLI config, executable, dispatch registry,
+# profile routing) changed after a runtime initialized. SSOT pairing with
+# orchestrator/codex_cli_runtime.py `_RUNTIME_DRIFT_KINDS` — edit both
+# together. The run continues; this counts how often the world moves under it.
+_RUNTIME_DRIFT_KEYS = frozenset(
+    {
+        "kind",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_RUNTIME_DRIFT_KINDS = frozenset(
+    {
+        "codex_config",
+        "cli_executable",
+        "skill_dispatcher",
+        "mcp_handler_registry",
+        "skill_dispatch_registry",
+        "profile_routing",
+        "baseline_unavailable",
+    }
+)
+_UNKNOWN_DRIFT_KIND = "unknown"
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -901,6 +926,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _SUBAGENT_DISPATCH_KEYS
     if event == "ac_verify_failed":
         return _AC_VERIFY_FAILED_KEYS
+    if event == "runtime_drift":
+        return _RUNTIME_DRIFT_KEYS
     return None
 
 
@@ -1025,6 +1052,21 @@ def capture_ac_verify_failed(cause: str | None) -> None:
         capture(
             "ac_verify_failed",
             {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
+        )
+    except Exception:
+        pass
+
+
+def capture_runtime_drift(kind: str | None) -> None:
+    """Capture one observed mid-run change of a frozen runtime authority input.
+
+    Folds anything outside the audited ``_RUNTIME_DRIFT_KINDS`` vocabulary to
+    a fixed ``unknown`` literal; never a path, config value, or message.
+    """
+    try:
+        capture(
+            "runtime_drift",
+            {"kind": kind if kind in _RUNTIME_DRIFT_KINDS else _UNKNOWN_DRIFT_KIND},
         )
     except Exception:
         pass
@@ -1283,6 +1325,7 @@ def _reset_for_tests() -> None:
 __all__ = [
     "capture",
     "capture_ac_verify_failed",
+    "capture_runtime_drift",
     "capture_cli_command",
     "capture_job_outcome",
     "capture_mcp_serve_started",

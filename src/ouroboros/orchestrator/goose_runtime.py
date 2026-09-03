@@ -187,7 +187,7 @@ class GooseCliRuntime(CodexCliRuntime):
         Goose does not have an equivalent flag; the base completion path falls
         back to the last streamed assistant/result content.
         """
-        self._assert_cli_executable_identity_unchanged()
+        self._reconcile_cli_executable_identity()
         del output_last_message_path, prompt
 
         session_name = (

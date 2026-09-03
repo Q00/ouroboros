@@ -108,7 +108,8 @@ def test_codex_config_fingerprint_ignores_main_root_trust_for_worktree_cwd(
     )
 
     assert runtime._fingerprint_codex_config_files() == original
-    runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 0
 
 
 def test_codex_config_fingerprint_exempts_first_use_trust_when_config_absent(
@@ -137,7 +138,8 @@ def test_codex_config_fingerprint_exempts_first_use_trust_when_config_absent(
     )
 
     assert runtime._fingerprint_codex_config_files() == original
-    runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 0
 
     config_path.write_text(
         f'model = "gpt-other"\n\n[projects.{json.dumps(project_key)}]\ntrust_level = "trusted"\n',
@@ -178,7 +180,8 @@ def test_codex_config_fingerprint_ignores_first_use_trust_for_other_projects(
     )
 
     assert runtime._fingerprint_codex_config_files() == original
-    runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 0
 
 
 def test_codex_config_fingerprint_tracks_non_trusted_level_for_other_projects(
@@ -205,8 +208,11 @@ def test_codex_config_fingerprint_tracks_non_trusted_level_for_other_projects(
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 @pytest.mark.parametrize(
@@ -244,8 +250,11 @@ def test_codex_config_fingerprint_tracks_existing_current_project_trust_changes(
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
@@ -267,8 +276,11 @@ def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 def test_codex_profile_v2_fingerprint_ignores_comment_only_edits(
@@ -314,8 +326,11 @@ def test_codex_config_fingerprint_tracks_active_rules_and_skills(
     (rules_dir / "ouroboros.md").write_text("rule after\n", encoding="utf-8")
 
     assert runtime._fingerprint_codex_config_files() != original
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 def test_codex_config_fingerprint_ignores_only_app_managed_system_skills(
@@ -342,8 +357,11 @@ def test_codex_config_fingerprint_ignores_only_app_managed_system_skills(
     user_skill.write_text("user after\n", encoding="utf-8")
 
     assert runtime._fingerprint_codex_config_files() != original
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="directory symlinks require Windows privileges")
@@ -373,8 +391,11 @@ def test_codex_config_fingerprint_ignores_system_skills_through_root_symlink(
     user_skill.write_text("user after\n", encoding="utf-8")
 
     assert runtime._fingerprint_codex_config_files() != original
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 def test_codex_config_fingerprint_tracks_instruction_asset_symlink_targets(
@@ -417,8 +438,11 @@ def test_codex_config_fingerprint_tracks_instruction_symlink_target_contents(
     target.write_text("rule after\n", encoding="utf-8")
 
     assert runtime._fingerprint_codex_config_files() != original
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._assert_codex_config_files_unchanged()
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
+    # Re-baselined: the same state is not drift twice.
+    runtime._reconcile_codex_config_files()
+    assert runtime._drift.epoch == 1
 
 
 def test_build_command_rejects_in_place_codex_cli_change(
@@ -440,7 +464,7 @@ def test_build_command_rejects_in_place_codex_cli_change(
     cli_path.chmod(0o755)
 
     with pytest.raises(RuntimeError, match="Codex CLI executable changed"):
-        runtime._build_command("/tmp/last-message")
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 def test_build_command_rejects_cli_content_drift_before_version_probe(
@@ -465,7 +489,7 @@ def test_build_command_rejects_cli_content_drift_before_version_probe(
     cli_path.chmod(0o755)
 
     with pytest.raises(RuntimeError, match="Codex CLI executable changed"):
-        runtime._build_command("/tmp/last-message")
+        runtime._verify_cli_executable_identity_unchanged()
     assert not side_effect.exists()
 
 
@@ -562,7 +586,7 @@ def test_initialization_timeout_blocks_without_claiming_executable_drift(
     runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
 
     with pytest.raises(RuntimeError, match="timed out during runtime initialization") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "executable changed" not in str(excinfo.value)
     # A missing baseline cannot be repaired by comparing it to another missing
@@ -577,7 +601,7 @@ def test_initialization_execution_failure_has_distinct_fail_closed_error(tmp_pat
     runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
 
     with pytest.raises(RuntimeError, match="failed during runtime initialization") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "executable changed" not in str(excinfo.value)
 
@@ -610,7 +634,7 @@ def test_check_time_timeout_is_fail_closed_but_retryable_for_codex_family(
         == runtime._cli_executable_version_identity_snapshot
     )
     with pytest.raises(RuntimeError, match="timed out while verifying") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+        runtime._verify_cli_executable_identity_unchanged()
     assert str(excinfo.value).startswith(display_name)
     assert "executable changed" not in str(excinfo.value)
 
@@ -634,7 +658,7 @@ def test_check_time_execution_failure_is_not_reported_as_drift(
 
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", failed_probe)
     with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
     assert "executable changed" not in str(excinfo.value)
 
 
@@ -655,7 +679,7 @@ def test_in_place_mutation_during_version_probe_is_not_authorized(
 
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", mutate_during_probe)
     with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "failed while verifying" not in str(excinfo.value)
     assert cli_path.stat().st_ino == original_inode
@@ -686,7 +710,7 @@ def test_in_place_aba_during_version_probe_is_not_authorized(
         mutate_and_restore_during_probe,
     )
     with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "failed while verifying" not in str(excinfo.value)
     assert cli_path.stat().st_ino == original_inode
@@ -718,7 +742,7 @@ def test_probe_window_aba_takes_precedence_over_probe_failure(
 
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", mutate_and_fail)
     with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "timed out" not in str(excinfo.value)
     assert "failed while verifying" not in str(excinfo.value)
@@ -754,7 +778,7 @@ def test_atomic_aba_during_version_probe_is_not_authorized(
         replace_and_restore_during_probe,
     )
     with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "failed while verifying" not in str(excinfo.value)
     assert cli_path.stat().st_ino == original_inode
@@ -784,7 +808,7 @@ def test_changed_symlink_target_is_rejected_before_version_execution(
     cli_link.symlink_to(replacement_target.name)
 
     with pytest.raises(RuntimeError, match="executable version changed"):
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
     assert not marker.exists()
 
 
@@ -835,7 +859,7 @@ def test_intermediate_symlink_atomic_aba_during_probe_is_not_authorized(
         swap_and_restore_intermediate_hop,
     )
     with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
     assert "executable changed" not in str(excinfo.value)
     assert intermediate_hop.lstat().st_ino == original_hop_inode
@@ -883,7 +907,7 @@ def test_sibling_churn_during_probe_fails_closed_but_is_retryable(
     assert current.state is codex_cli_runtime_module._CliExecutableVersionState.INDETERMINATE
 
     with pytest.raises(RuntimeError, match="authority became indeterminate") as excinfo:
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
     assert "without claiming executable drift" in str(excinfo.value)
     assert "retry the execution" in str(excinfo.value)
 
@@ -907,7 +931,7 @@ def test_repeated_probe_timeouts_never_converge_to_false_drift(
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", timeout)
     for _ in range(16):
         with pytest.raises(RuntimeError, match="timed out while verifying") as excinfo:
-            runtime._build_command(str(tmp_path / "last-message"))
+            runtime._verify_cli_executable_identity_unchanged()
         assert "executable changed" not in str(excinfo.value)
 
 
@@ -927,7 +951,7 @@ def test_successful_version_change_has_distinct_changed_state(
     runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
 
     with pytest.raises(RuntimeError, match="executable version changed"):
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 @pytest.mark.parametrize("runtime_class", [CodexCliRuntime, CopilotCliRuntime])
@@ -960,7 +984,7 @@ def test_atomic_executable_replacement_with_identical_evidence_is_changed(
         is codex_cli_runtime_module._CliExecutableVersionState.CHANGED
     )
     with pytest.raises(RuntimeError, match="executable version changed"):
-        runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 def test_atomic_symlink_target_replacement_with_identical_evidence_is_changed(
@@ -999,7 +1023,7 @@ def test_atomic_symlink_target_replacement_with_identical_evidence_is_changed(
         is codex_cli_runtime_module._CliExecutableVersionState.CHANGED
     )
     with pytest.raises(RuntimeError, match="executable version changed"):
-        runtime._build_command(str(tmp_path / "last-message"))
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 def test_execution_identity_tracks_launch_symlink_target(
@@ -1051,7 +1075,7 @@ def test_build_command_rejects_bare_cli_that_appears_after_initialization(
     cli_path.chmod(0o755)
 
     with pytest.raises(RuntimeError, match="unresolved at runtime initialization"):
-        runtime._build_command("/tmp/last-message")
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 def test_build_command_rejects_bare_cli_that_remains_unresolved(
@@ -1066,7 +1090,7 @@ def test_build_command_rejects_bare_cli_that_remains_unresolved(
     runtime = CodexCliRuntime(cli_path="missing-codex", cwd="/tmp/project", model="gpt-5")
 
     with pytest.raises(RuntimeError, match="unresolved at runtime initialization"):
-        runtime._build_command("/tmp/last-message")
+        runtime._verify_cli_executable_identity_unchanged()
 
 
 def test_copilot_unresolved_initialization_never_authorizes_later_path_binary(
@@ -1090,7 +1114,7 @@ def test_copilot_unresolved_initialization_never_authorizes_later_path_binary(
     monkeypatch.setenv("PATH", str(hostile_path))
 
     with pytest.raises(RuntimeError, match="failed during runtime initialization"):
-        runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+        runtime._verify_cli_executable_identity_unchanged()
     assert not marker.exists()
 
 
@@ -1129,8 +1153,12 @@ def test_skill_dispatch_registry_fingerprint_tracks_mcp_tool_changes(
     )
 
     assert runtime._fingerprint_skill_dispatch_registry() != original
-    with pytest.raises(RuntimeError, match="skill dispatch registry changed"):
-        runtime._assert_skill_dispatch_registry_unchanged()
+    runtime._reconcile_skill_dispatch_registry()
+    assert runtime._drift.epoch == 1
+    assert (
+        runtime._skill_dispatch_registry_fingerprint
+        == runtime._fingerprint_skill_dispatch_registry()
+    )
 
 
 def test_skill_dispatch_guard_rejects_process_local_dispatcher_replacement(
@@ -1159,8 +1187,8 @@ def test_skill_dispatch_guard_rejects_process_local_dispatcher_replacement(
     runtime._skill_dispatcher = replacement_dispatcher
 
     assert runtime._fingerprint_skill_dispatcher(runtime._skill_dispatcher) != original
-    with pytest.raises(RuntimeError, match="skill dispatcher changed"):
-        runtime._assert_skill_dispatch_registry_unchanged()
+    runtime._reconcile_skill_dispatch_registry()
+    assert runtime._drift.epoch == 1
 
 
 def test_execution_identity_keeps_content_digest_when_version_unavailable(
@@ -1209,8 +1237,8 @@ def test_builtin_mcp_handler_registry_fingerprint_rejects_replacement(
     runtime._builtin_mcp_handlers = {"ouroboros_interview": _ReplacementHandler()}
 
     assert runtime._fingerprint_builtin_mcp_handler_registry() != original
-    with pytest.raises(RuntimeError, match="built-in MCP handler registry changed"):
-        runtime._assert_skill_dispatch_registry_unchanged()
+    runtime._reconcile_skill_dispatch_registry()
+    assert runtime._drift.epoch == 1
 
 
 def test_codex_config_fingerprint_tracks_handle_selectable_embedded_profiles(
@@ -1432,8 +1460,11 @@ def test_handle_llm_profile_change_invalidates_cached_command_fingerprint() -> N
     assert command[command.index("--model") + 1] == "gpt-a"
 
     with patch("ouroboros.providers.profiles.load_config", return_value=second):
-        with pytest.raises(RuntimeError, match="profile routing changed"):
-            runtime._build_command("/tmp/last-message", runtime_handle=handle)
+        command = runtime._build_command("/tmp/last-message", runtime_handle=handle)
+    # Drift is observed, retires existing threads, and the routing now on
+    # disk is honored instead of failing the AC.
+    assert runtime._drift.epoch == 1
+    assert command[command.index("--model") + 1] == "gpt-b"
 
 
 def test_handle_selectable_llm_profile_enters_durable_identity() -> None:
@@ -1515,8 +1546,9 @@ def test_handle_codex_profile_file_change_invalidates_cached_command_fingerprint
     assert command[command.index("--profile") + 1] == "custom"
 
     profile_path.write_text('model_provider = "proxy-b"\n', encoding="utf-8")
-    with pytest.raises(RuntimeError, match="Codex configuration changed"):
-        runtime._build_command("/tmp/last-message", runtime_handle=handle)
+    command = runtime._build_command("/tmp/last-message", runtime_handle=handle)
+    assert runtime._drift.epoch == 1
+    assert command[command.index("--profile") + 1] == "custom"
 
 
 def test_profile_resolution_fingerprint_canonicalizes_duplicate_codex_alias_order(
@@ -2026,17 +2058,19 @@ class TestCodexCliRuntime:
             metadata={"session_role": "implementation"},
         )
 
-        with (
-            patch(
-                "ouroboros.providers.profiles.load_config",
-                return_value=drifted_config,
-            ),
-            pytest.raises(RuntimeError, match="profile routing changed"),
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=drifted_config,
         ):
-            runtime._build_command(
+            command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
             )
+        # The role remap changes both Ouroboros routing and which native
+        # Codex profile file is in force: each is observed, neither is fatal,
+        # and the command follows the routing now on disk.
+        assert runtime._drift.epoch >= 1
+        assert command[command.index("--profile") + 1] == "drifted-frontier"
 
     def test_build_command_does_not_double_prefix_prefixed_runtime_handle_kind(self) -> None:
         """Already-prefixed runtime handle kinds are treated as logical role keys."""
@@ -2231,14 +2265,12 @@ class TestCodexCliRuntime:
         with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
             runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
 
-        with (
-            patch("ouroboros.providers.profiles.load_config", return_value=drifted_config),
-            pytest.raises(RuntimeError, match="profile routing changed"),
-        ):
+        with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
             runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
             )
+        assert runtime._drift.epoch == 1
 
     def test_build_command_allows_first_use_arbitrary_llm_role_from_init_identity(self) -> None:
         """Arbitrary llm_role metadata must be included in the initialization fingerprint."""
@@ -2287,17 +2319,15 @@ class TestCodexCliRuntime:
 
         (codex_home / "deep.config.toml").write_text('model = "gpt-b"\n', encoding="utf-8")
 
-        with (
-            patch(
-                "ouroboros.providers.profiles.load_config",
-                return_value=OuroborosConfig(),
-            ),
-            pytest.raises(RuntimeError, match="Codex configuration changed"),
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=OuroborosConfig(),
         ):
             runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
             )
+        assert runtime._drift.epoch == 1
 
     def test_build_command_omits_profile_flag_when_runtime_profile_unset(self) -> None:
         """Default runtime_profile=None preserves existing command shape (regression)."""
@@ -2578,7 +2608,10 @@ class TestCodexCliRuntime:
         assert message.resume_handle.kind == "level_coordinator"
         assert message.resume_handle.cwd == seeded_handle.cwd
         assert message.resume_handle.approval_mode == "acceptEdits"
-        assert message.resume_handle.metadata == seeded_handle.metadata
+        assert message.resume_handle.metadata == {
+            **seeded_handle.metadata,
+            "ouroboros_runtime_drift_epoch": 0,
+        }
 
     @pytest.mark.parametrize(
         ("event", "expected"),
@@ -4371,4 +4404,92 @@ class TestCodexCliRuntime:
         assert len(messages) == 1
         assert messages[0].type == "result"
         assert messages[0].is_error
-        assert "version attestation failed during runtime initialization" in messages[0].content
+        # The unrepairable attestation is observed (not fatal); the launch
+        # itself then reports the real cause.
+        assert runtime._drift.epoch == 1
+        assert "Codex CLI not found" in messages[0].content
+
+
+# ---------------------------------------------------------------------------
+# Drift is observed, not fatal: the run continues; existing threads retire.
+# ---------------------------------------------------------------------------
+
+
+def test_drift_retires_resume_handles_created_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread created under the old inputs is never resumed after drift."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    handle = runtime._build_runtime_handle("thread-old")
+    assert handle is not None
+    assert handle.metadata["ouroboros_runtime_drift_epoch"] == 0
+    assert runtime._resolve_resume_session_id(handle) == "thread-old"
+
+    config_path.write_text('model = "gpt-other"\n', encoding="utf-8")
+    command = runtime._build_command(
+        "/tmp/last-message", resume_session_id="thread-old", runtime_handle=handle
+    )
+
+    assert runtime._drift.epoch == 1
+    assert "resume" not in command
+    assert runtime._resolve_resume_session_id(handle) is None
+    # A thread started after the drift is stamped with the new epoch and resumes.
+    fresh = runtime._build_runtime_handle("thread-new", handle)
+    assert fresh is not None
+    assert fresh.metadata["ouroboros_runtime_drift_epoch"] == 1
+    assert runtime._resolve_resume_session_id(fresh) == "thread-new"
+
+
+def test_drift_is_reported_to_telemetry_with_closed_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_drift.usage_telemetry.capture_runtime_drift",
+        lambda kind: captured.append(kind),
+    )
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    config_path.write_text('model = "gpt-other"\n', encoding="utf-8")
+    runtime._reconcile_codex_config_files()
+    runtime._reconcile_codex_config_files()
+    runtime._drift.observe("not-a-real-kind", "spoofed")
+
+    assert captured == ["codex_config", "unknown"]
+
+
+def test_cli_upgrade_mid_run_is_observed_and_new_binary_becomes_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd="/tmp/project", model="gpt-5")
+    assert runtime._build_command("/tmp/last-message")
+    original_content = runtime._cli_executable_content_identity_snapshot
+
+    cli_path.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+
+    assert runtime._build_command("/tmp/last-message")
+    assert runtime._drift.epoch == 1
+    # Re-baselined on the upgraded binary: the next command sees no drift.
+    assert runtime._build_command("/tmp/last-message")
+    assert runtime._drift.epoch == 1
+    assert runtime._cli_executable_content_identity_snapshot != original_content
+    assert runtime._cli_executable_content_identity_snapshot == (
+        runtime._cli_executable_content_identity()
+    )
