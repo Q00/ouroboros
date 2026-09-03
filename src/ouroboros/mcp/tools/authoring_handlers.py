@@ -1156,17 +1156,36 @@ class GenerateSeedHandler:
         return MCPToolDefinition(
             name="ouroboros_generate_seed",
             description=(
-                "Generate an immutable Seed from a completed interview session. "
-                "The seed contains structured requirements (goal, constraints, acceptance criteria) "
-                "extracted from the interview conversation. Generation requires ambiguity_score <= 0.2 "
-                "unless force=true is passed to deliberately bypass the gate."
+                "Generate an immutable Seed from a completed interview session, "
+                "OR crystallize one directly from already-settled session context "
+                "with NO interview (pass session_context instead of session_id; "
+                "deterministic — material enters the Seed verbatim, and an "
+                "incomplete submission returns gap questions, not a block). Offer "
+                "that proactively once goal, constraints, and success criteria are "
+                "settled; a Seed is useful even without running it. Interview "
+                "path requires ambiguity_score <= 0.2 unless force=true."
             ),
             parameters=(
                 MCPToolParameter(
                     name="session_id",
                     type=ToolInputType.STRING,
-                    description="Interview session ID to convert to a seed",
-                    required=True,
+                    description=(
+                        "Interview session ID to convert to a seed. Required "
+                        "unless session_context is provided."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="session_context",
+                    type=ToolInputType.OBJECT,
+                    description=(
+                        "Interview-less path: settled material from THIS session. "
+                        "Keys: goal (required), acceptance_criteria (required, "
+                        "verifiable checks), constraints, decisions (become "
+                        "constraints), project_type. Anchored verbatim — supply "
+                        "the user's own settled wording, never your paraphrase."
+                    ),
+                    required=False,
                 ),
                 MCPToolParameter(
                     name="ambiguity_score",
@@ -1203,6 +1222,12 @@ class GenerateSeedHandler:
             ),
         )
 
+    def _handle_session_context_seed(self, ctx: Any) -> Result[MCPToolResult, MCPServerError]:
+        """Interview-less crystallization (RFC D6) — see session_seed_handler."""
+        from ouroboros.mcp.tools.session_seed_handler import handle_session_context_seed
+
+        return handle_session_context_seed(ctx)
+
     async def handle(
         self,
         arguments: dict[str, Any],
@@ -1216,10 +1241,13 @@ class GenerateSeedHandler:
             Result containing generated Seed YAML or error.
         """
         session_id = arguments.get("session_id")
+        session_context = arguments.get("session_context")
+        if session_context is not None and not session_id:
+            return self._handle_session_context_seed(session_context)
         if not session_id:
             return Result.err(
                 MCPToolError(
-                    "session_id is required",
+                    "session_id is required (or pass session_context for the interview-less path)",
                     tool_name="ouroboros_generate_seed",
                 )
             )
@@ -1336,6 +1364,7 @@ class GenerateSeedHandler:
                     interview_state,
                     distillation,
                     ambiguity_score=float(effective_score if effective_score is not None else 0.15),
+                    gate_forced=force,
                 )
                 seed_yaml = yaml.dump(
                     reference_seed.to_dict(),
@@ -1362,6 +1391,7 @@ class GenerateSeedHandler:
                             "interview_id": reference_seed.metadata.interview_id,
                             "ambiguity_score": reference_seed.metadata.ambiguity_score,
                             "force": force,
+                            "gate_forced": force,
                             "requirement_distillation": distillation.model_dump(mode="json"),
                             **client_gate_status,
                         },
@@ -1385,6 +1415,7 @@ class GenerateSeedHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "force": force,
+                    "gate_forced": force,
                     **client_gate_status,
                 },
             )
@@ -1502,7 +1533,6 @@ class GenerateSeedHandler:
                 )
 
             seed = seed_result.value
-
             # Convert seed to YAML
             seed_dict = seed.to_dict()
             seed_yaml = yaml.dump(
@@ -1532,6 +1562,7 @@ class GenerateSeedHandler:
                         "interview_id": seed.metadata.interview_id,
                         "ambiguity_score": seed.metadata.ambiguity_score,
                         "force": force,
+                        "gate_forced": force,
                         "requirement_distillation": (
                             state.requirement_distillation.model_dump(mode="json")
                             if state.requirement_distillation is not None

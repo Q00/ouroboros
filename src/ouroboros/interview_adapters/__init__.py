@@ -30,6 +30,8 @@ from ouroboros.interview_adapters.reference_contrast import (
     build_reference_contrast_question,
     candidates_from_contrast_answer,
     next_unresolved_reference,
+    normalized_question_key,
+    reference_question_anchor,
 )
 from ouroboros.interview_adapters.registry import BuiltinGlossaryRegistry, builtin_registry
 from ouroboros.interview_adapters.triggers import (
@@ -62,5 +64,7 @@ __all__ = [
     "load_builtin_manifest",
     "load_manifest_resource",
     "next_unresolved_reference",
+    "normalized_question_key",
+    "reference_question_anchor",
     "select_glossary_injection",
 ]

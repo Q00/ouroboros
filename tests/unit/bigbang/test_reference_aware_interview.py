@@ -166,3 +166,60 @@ def test_stale_distillation_is_discarded() -> None:
 
     assert state.discard_stale_requirement_distillation()
     assert state.requirement_distillation is None
+
+
+def _asked_state() -> tuple[InterviewState, str]:
+    """State with one reference contrast in ASKED status, as the engine asks it."""
+    state = InterviewState(interview_id="test", initial_context="Build a tool")
+    state.merge_turn_context(_reference_context())
+    state.rounds.append(
+        InterviewRound(round_number=1, question="Base?", user_response="Fast triage.")
+    )
+    question = state.next_adapter_question()
+    assert question is not None
+    return state, question
+
+
+def test_whitespace_drifted_echo_still_resolves_contrast() -> None:
+    # A host that reflows whitespace/case in last_question must not strand the
+    # resolution in ASKED: next_adapter_question never re-asks an ASKED cue, so
+    # a missed match here used to block Seed generation permanently.
+    state, question = _asked_state()
+
+    drifted = "  " + question.replace("\n", "  \n\t").upper() + " \n"
+    state.record_answer(drifted, "Copy the speed.")
+
+    resolution = state.reference_resolutions[0]
+    assert resolution.status.value == "resolved"
+    assert resolution.answer == "Copy the speed."
+    # The engine's original text stays authoritative, not the drifted echo.
+    assert resolution.asked_question == question
+
+
+def test_truncated_echo_resolves_via_reference_anchor() -> None:
+    state, question = _asked_state()
+
+    truncated = question.splitlines()[0]  # host dropped everything after line 1
+    state.record_answer(truncated, "Avoid the command menu.")
+
+    assert state.reference_resolutions[0].status.value == "resolved"
+
+
+def test_unrelated_question_does_not_resolve_contrast() -> None:
+    state, _question = _asked_state()
+
+    state.record_answer("What database should we use?", "Postgres.")
+
+    assert state.reference_resolutions[0].status.value == "asked"
+
+
+def test_stored_question_only_round_resolves_despite_caller_echo_drift() -> None:
+    # MCP transports persist the round question-only with the engine's text and
+    # fill the answer later; the caller's drifted echo used to overwrite that
+    # stored text before matching, defeating the engine's own record.
+    state, question = _asked_state()
+    state.rounds.append(InterviewRound(round_number=2, question=question, user_response=None))
+
+    state.record_answer("Totally rephrased by the host?", "Copy the layout.")
+
+    assert state.reference_resolutions[0].status.value == "resolved"

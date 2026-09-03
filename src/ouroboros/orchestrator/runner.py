@@ -8639,6 +8639,8 @@ class OrchestratorRunner:
                 "project_identity": project_identity,
                 "project_workspace": self._effective_cwd(),
             }
+            if seed.metadata.gate_forced is not None:
+                create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:

@@ -34,6 +34,7 @@ from ouroboros.bigbang.interview import (
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.requirement_distillation import (
+    anchor_promoted_requirements,
     apply_requirement_distillation,
     build_promoted_reference_seed,
     build_requirement_distillation,
@@ -1725,6 +1726,7 @@ class SeedGenerator:
                     state,
                     distillation,
                     ambiguity_score=ambiguity_score.overall_score,
+                    gate_forced=force,
                 )
             )
 
@@ -1744,10 +1746,23 @@ class SeedGenerator:
                 )
             )
         requirements = applied.requirements
+        # Verbatim-anchor backstop (grounded-lateral RFC D6): re-append any
+        # user-committed promoted requirement the LLM extraction dropped or
+        # re-worded. This is the one chokepoint every entry path shares —
+        # interview, auto, and host-context all converge here or on the fully
+        # deterministic builders.
+        requirements, anchored_count = anchor_promoted_requirements(requirements, applied.promotion)
+        if anchored_count:
+            log.info(
+                "seed.generation.anchor_backstop",
+                interview_id=state.interview_id,
+                appended=anchored_count,
+            )
 
         # Create metadata
         metadata = SeedMetadata(
             ambiguity_score=ambiguity_score.overall_score,
+            gate_forced=force,
             interview_id=state.interview_id,
             parent_seed_id=parent_seed.metadata.seed_id if parent_seed else None,
         )
