@@ -123,16 +123,18 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
         else "None specified"
     )
 
-    # Declared success contract (PR-H): when the seed attached a structured
-    # AcceptanceCriterionSpec carrying verify_command / expected_artifacts /
-    # output_assertion, surface it to the judge so it grades against the
-    # declared contract instead of the bare AC wording.  Bare-string ACs (no
-    # contract) render nothing here — identical to today's behavior.
+    # Declared success contract: surface every execution-semantic field to the
+    # judge so it grades the same contract the runtime executes and resumes.
+    # Bare-string ACs render nothing here.
     spec = context.current_ac_spec
     if spec is not None and spec.has_success_contract:
         contract_lines = ["\n## DECLARED SUCCESS CONTRACT"]
         if spec.verify_command:
             contract_lines.append(f"- verify_command: {spec.verify_command}")
+        if spec.verify_cwd:
+            contract_lines.append(f"- verify_cwd: {spec.verify_cwd}")
+        if spec.verify_replay_safe:
+            contract_lines.append("- verify_replay_safe: true")
         if spec.expected_artifacts:
             artifacts = ", ".join(spec.expected_artifacts)
             contract_lines.append(f"- expected_artifacts: {artifacts}")

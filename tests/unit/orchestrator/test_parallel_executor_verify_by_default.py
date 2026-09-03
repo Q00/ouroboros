@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -47,6 +48,10 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 from ouroboros.orchestrator.retry_hints import is_retryable_failure
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verify_command_runner import VerifyRun
+from ouroboros.orchestrator.verify_cwd import (
+    resolve_verify_command_cwd as _resolve_verify_command_cwd,
+)
 from ouroboros.orchestrator.verify_shell import verify_shell_path_from_identity
 
 
@@ -2175,17 +2180,13 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("final_condition", ["before", "after"])
-async def test_final_settlement_replays_stale_command_against_final_workspace(
+async def test_final_settlement_replays_stale_command_and_accepts_final_pass(
     tmp_path: Any,
-    final_condition: str,
 ) -> None:
-    """A sibling's later edit does not discard this AC: its contract is re-judged.
-
-    The verify gate already rejects a command that mutates the workspace, so a
-    passing contract is an observation and may be run once more at settlement.
-    The final verdict follows that replay in both directions.
-    """
+    """A stale digest is the expected shape of every dependency-chained run:
+    downstream siblings legitimately mutate the workspace after an earlier
+    AC's verify passed. Settlement must replay the gate against the settled
+    workspace and accept when the replay passes, instead of failing closed."""
     counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
     target = tmp_path / "condition.txt"
     target.write_text("before", encoding="utf-8")
@@ -2194,15 +2195,19 @@ async def test_final_settlement_replays_stale_command_against_final_workspace(
         f"counter=Path({str(counter)!r}); "
         "n=int(counter.read_text()) if counter.exists() else 0; "
         "counter.write_text(str(n+1)); "
-        "raise SystemExit(0 if Path('condition.txt').read_text() == 'before' else 7)\""
+        'raise SystemExit(0)"'
     )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
+    )
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
-    assert cached.passed is True
-    # A later worker touches the workspace after the command passed.
-    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
-    target.write_text(final_condition, encoding="utf-8")
+    # A downstream sibling changes the workspace after the cached pass.
+    target.write_text("after", encoding="utf-8")
 
     settled = await executor._settle_verify_gate_results(
         seed=seed,
@@ -2219,77 +2224,253 @@ async def test_final_settlement_replays_stale_command_against_final_workspace(
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "2"
-    if final_condition == "before":
-        assert settled[0].success is True
-        assert settled[0].outcome is ACExecutionOutcome.SUCCEEDED
-        assert settled[0].verify_gate_outcome is not None
-        assert settled[0].verify_gate_outcome.passed is True
-    else:
-        assert settled[0].success is False
-        assert settled[0].outcome is ACExecutionOutcome.FAILED
-        assert "verify_command failed on the final workspace" in (settled[0].error or "")
+    assert counter.read_text(encoding="utf-8") == "2"  # cached run + settlement replay
+    assert settled[0].success is True
+    assert settled[0].outcome is ACExecutionOutcome.SUCCEEDED
+    assert settled[0].verify_gate_outcome is not cached
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.passed is True
 
 
 @pytest.mark.asyncio
-async def test_settlement_replay_mutation_invalidates_every_provisional_success(
+async def test_final_settlement_replay_failure_rejects_stale_command(
     tmp_path: Any,
 ) -> None:
-    """A replay that mutates the workspace poisons the whole success set.
-
-    The first run of the command leaves the workspace untouched and passes;
-    the replay (triggered by a sibling edit) writes a side-effect file. That
-    mutation must fold into the settlement-wide state and reject every
-    provisional success — including a contract-less sibling — not just add an
-    individual failure for the replayed AC.
-    """
-    counter = tmp_path.parent / f"settle-mutating-replay-{tmp_path.name}.txt"
+    """When the settled workspace no longer satisfies the contract (a later
+    sibling regressed it), the settlement replay must fail the AC with the
+    replay's own gate verdict."""
+    counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
     command = (
         'python3 -c "from pathlib import Path; '
         f"counter=Path({str(counter)!r}); "
         "n=int(counter.read_text()) if counter.exists() else 0; "
         "counter.write_text(str(n+1)); "
-        "n and Path('replay-side-effect.txt').write_text('mutated'); "
-        'raise SystemExit(0)"'
+        "raise SystemExit(0 if Path('condition.txt').read_text() == 'before' else 7)\""
     )
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(
-        AcceptanceCriterionSpec(description="contract ac", verify_command=command),
-        AcceptanceCriterionSpec(description="plain sibling"),
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
     )
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
-    assert cached.passed is True
-    # A later worker changes the workspace after the command passed.
-    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+    target.write_text("after", encoding="utf-8")
 
     settled = await executor._settle_verify_gate_results(
         seed=seed,
         results=[
             ACExecutionResult(
                 ac_index=0,
-                ac_content="contract ac",
+                ac_content="ac",
                 success=True,
                 outcome=ACExecutionOutcome.SUCCEEDED,
                 verify_gate_outcome=cached,
-            ),
-            ACExecutionResult(
-                ac_index=1,
-                ac_content="plain sibling",
-                success=True,
-                outcome=ACExecutionOutcome.SUCCEEDED,
-            ),
+            )
         ],
         session_id="s",
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "2"
-    assert [result.success for result in settled] == [False, False]
-    assert [result.outcome for result in settled] == [
-        ACExecutionOutcome.FAILED,
-        ACExecutionOutcome.FAILED,
-    ]
-    assert all("mutated the workspace" in (result.error or "") for result in settled)
+    assert counter.read_text(encoding="utf-8") == "2"  # cached run + settlement replay
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert "failed on settlement replay" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replay_run", "expected_reason"),
+    (
+        (
+            VerifyRun(returncode=-1, output="", timed_out=True),
+            "verify_command timed out after 30s",
+        ),
+        (
+            VerifyRun(returncode=-1, output="", start_error="spawn unavailable"),
+            "verify_command could not start: spawn unavailable",
+        ),
+    ),
+)
+async def test_final_settlement_replay_fails_closed_when_command_is_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    replay_run: VerifyRun,
+    expected_reason: str,
+) -> None:
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command="exit 0",
+            verify_replay_safe=True,
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+
+    async def unverifiable_run(*_args: Any, **_kwargs: Any) -> VerifyRun:
+        return replay_run
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.parallel_executor.run_with_shell",
+        unverifiable_run,
+    )
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
+    assert expected_reason in (settled[0].error or "")
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    replayed = next(event for event in emitted if event.type == "execution.verify.replayed")
+    assert replayed.data["passed"] is False
+    assert replayed.data["environment_unverifiable"] is True
+    failed = next(event for event in emitted if event.type == "execution.verify.failed")
+    assert expected_reason in failed.data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_replay_fails_closed_when_shell_is_missing(tmp_path: Any) -> None:
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command="exit 0",
+            verify_replay_safe=True,
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+    executor._verify_shell_identity = None
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert settled[0].verify_gate_outcome is not None
+    assert settled[0].verify_gate_outcome.environment_unverifiable is True
+    assert "unverifiable on settlement replay" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_replay_mutation_invalidates_success_set(
+    tmp_path: Any,
+) -> None:
+    """A settlement replay that mutates the workspace is a mis-scoped verifier;
+    the observation-boundary invariant still fails the complete success set."""
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        "marker = Path('replay-side-effect.txt'); "
+        "marker.write_text('x') if Path('condition.txt').read_text() != 'before' else None\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            verify_replay_safe=True,
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.workspace_mutated is False
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert "mutated the workspace" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_never_replays_without_explicit_safety(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path.parent / f"unsafe-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        'counter.write_text(str(n+1))"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    assert cached.passed is True
+    # A later worker touches the workspace after the command passed.
+    (tmp_path / "sibling.txt").write_text("edited by a later AC", encoding="utf-8")
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert settled[0].success is False
+    assert "does not declare verify_replay_safe" in (settled[0].error or "")
 
 
 @pytest.mark.asyncio
@@ -2779,6 +2960,197 @@ async def test_a_repo_supplied_bash_startup_file_cannot_flip_a_verdict(
     assert outcome.passed is False
 
 
+# --- verify_cwd: where verify_command runs (explicit spec + sole-manifest) ---
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_runs_command_in_explicit_verify_cwd(tmp_path: Any) -> None:
+    (tmp_path / "app").mkdir()
+    command = (
+        "python3 -c \"import pathlib, sys; sys.exit(0 if pathlib.Path.cwd().name == 'app' else 3)\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command, verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_fails_loud_when_verify_cwd_missing(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="exit 0", verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert "verify_cwd does not exist" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_rejects_verify_cwd_symlink_escape(tmp_path: Any) -> None:
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app").symlink_to(outside, target_is_directory=True)
+    executor = _make_executor(working_directory=str(workspace))
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="exit 0", verify_cwd="app")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(workspace))
+
+    assert outcome.passed is False
+    assert "escapes the workspace" in (outcome.reason or "")
+
+
+def test_resolve_verify_cwd_uses_sole_node_manifest_directory(tmp_path: Any) -> None:
+    """Greenfield runs frequently scaffold the app in one subdirectory the
+    seed could not know in advance (incident exec_418f29f31e5c: root
+    ``npx playwright test`` while the config lived in ``app/``)."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npx playwright test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "CI=1 npm test",
+        "env CI=1 npx playwright test",
+        "CI=1 env -i npx playwright test",
+        "env -u HOME npm test",
+        "env --unset=HOME yarn test",
+        "env -- npx playwright test",
+        "env -S 'CI=1 pnpm test'",
+        "env --default-signal npm test",
+        "env --ignore-signal=PIPE yarn test",
+        "env --block-signal=PIPE pnpm test",
+        "env --list-signal-handling npm test",
+    ],
+)
+def test_resolve_verify_cwd_parses_environment_prefixed_node_command(
+    tmp_path: Any,
+    command: str,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command)
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -lc 'npm test'",
+        "sh -c 'npx playwright test'",
+        "/bin/bash -lc 'pnpm test'",
+        "command npm test",
+    ],
+)
+def test_resolve_verify_cwd_parses_shell_wrapped_node_command(
+    tmp_path: Any,
+    command: str,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command)
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env CI=1 bash -lc 'npx playwright test'",
+        "env CI=1 sh -c 'npm test'",
+        "CI=1 bash -lc 'yarn test'",
+        "CI=1 sh -c 'npm test'",
+        "env CI=1 /bin/bash -lc 'pnpm test'",
+        "env -i CI=1 bash -lc 'npm test'",
+        "env -u HOME sh -c 'npx playwright test'",
+        "env -S 'CI=1 bash -lc \"yarn test\"'",
+    ],
+)
+def test_resolve_verify_cwd_parses_environment_prefixed_shell_wrapped_node_command(
+    tmp_path: Any,
+    command: str,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command=command)
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+def test_resolve_verify_cwd_never_guesses_between_manifests(tmp_path: Any) -> None:
+    for name in ("app", "site"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert resolved == str(tmp_path)
+
+
+def test_resolve_verify_cwd_prefers_root_manifest(tmp_path: Any) -> None:
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert resolved == str(tmp_path)
+
+
+def test_resolve_verify_cwd_ignores_non_node_commands_and_node_modules(tmp_path: Any) -> None:
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "package.json").write_text("{}", encoding="utf-8")
+
+    pytest_spec = AcceptanceCriterionSpec(description="ac", verify_command="pytest -q")
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), pytest_spec)
+    assert error is None
+    assert resolved == str(tmp_path)
+
+    node_spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test")
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), node_spec)
+    assert error is None
+    assert Path(resolved) == (tmp_path / "app").resolve()
+
+
+def test_explicit_verify_cwd_wins_over_manifest_detection(tmp_path: Any) -> None:
+    for name in ("app", "site"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "package.json").write_text("{}", encoding="utf-8")
+    spec = AcceptanceCriterionSpec(description="ac", verify_command="npm test", verify_cwd="site")
+
+    resolved, error = _resolve_verify_command_cwd(str(tmp_path), spec)
+
+    assert error is None
+    assert Path(resolved) == (tmp_path / "site").resolve()
+
+
 # ---------------------------------------------------------------------------
 # Rejection-cause vocabulary (verify_cause) — machine-readable failure causes
 # ---------------------------------------------------------------------------
@@ -2884,16 +3256,12 @@ def test_verify_gate_outcome_cause_roundtrips_and_legacy_checkpoints_decode() ->
     assert serialized["cause"] == "exit_nonzero"
     assert _deserialize_verify_gate_outcome(serialized) == original
 
-    # Checkpoints written before `cause` existed omit the key and must still
-    # decode (as unattributed) so cached non-idempotent verify results survive
-    # a version upgrade.
     legacy = dict(serialized)
     del legacy["cause"]
     decoded = _deserialize_verify_gate_outcome(legacy)
     assert decoded is not None
     assert decoded.cause is None
 
-    # A cause outside the closed vocabulary is rejected, not forwarded.
     hostile = dict(serialized)
     hostile["cause"] = "/private/path: boom"
     assert _deserialize_verify_gate_outcome(hostile) is None
@@ -2923,7 +3291,7 @@ async def test_quarantined_outcomes_still_reach_rejection_cause_telemetry(
         session_id="s",
         execution_id="e",
     )
-    assert gated.success is True  # quarantined, not failed
+    assert gated.success is True
     assert captured == ["timeout"]
 
     captured.clear()
@@ -2968,7 +3336,7 @@ async def test_final_settlement_classifies_missing_artifact_not_as_mutation(
     )
     assert passing.passed is True
 
-    target.unlink()  # a sibling deleted the artifact after the atomic gate
+    target.unlink()
 
     results = await executor._settle_verify_gate_results(
         seed=seed,
@@ -3023,7 +3391,7 @@ async def test_coordinator_revalidation_missing_artifact_emits_cause_analytics(
     )
     assert passing.passed is True
 
-    artifact.unlink()  # the coordinator's reconciliation removed the artifact
+    artifact.unlink()
 
     revalidated = await executor._revalidate_results_after_coordinator(
         seed=seed,

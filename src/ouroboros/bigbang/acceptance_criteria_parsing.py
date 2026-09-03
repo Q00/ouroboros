@@ -57,10 +57,9 @@ def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceC
         raise ValueError(f"{field_label} must contain at least one acceptance criterion")
 
     required_keys = {"description", "verify", "artifacts", "expect"}
-    # `exempt` is optional so every seed and prompt written before the
-    # verify-command gate stays valid; it only carries a reason when `verify`
-    # genuinely cannot exist.
-    optional_keys = {"exempt"}
+    # Optional keys preserve older extraction responses while allowing the
+    # generator to author the complete execution contract.
+    optional_keys = {"cwd", "replay_safe", "exempt"}
     criteria: list[AcceptanceCriterionSpec] = []
     for index, entry in enumerate(decoded, start=1):
         if not isinstance(entry, dict):
@@ -75,7 +74,13 @@ def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceC
 
         description = entry["description"]
         verify = entry["verify"]
+        verify_cwd = entry.get("cwd")
+        verify_replay_safe = entry.get("replay_safe", False)
         exempt = entry.get("exempt")
+        if verify_cwd is not None and not isinstance(verify_cwd, str):
+            raise ValueError(f"{field_label} entry {index} cwd must be a string or NONE")
+        if not isinstance(verify_replay_safe, bool):
+            raise ValueError(f"{field_label} entry {index} replay_safe must be a boolean")
         if exempt is not None and not isinstance(exempt, str):
             raise ValueError(f"{field_label} entry {index} exempt must be a string or NONE")
         artifacts = entry["artifacts"]
@@ -108,6 +113,8 @@ def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceC
                 {
                     "description": description,
                     "verify_command": verify,
+                    "verify_cwd": verify_cwd,
+                    "verify_replay_safe": verify_replay_safe,
                     "expected_artifacts": expected_artifacts,
                     "output_assertion": expect,
                     "verify_exemption_reason": exempt,

@@ -293,13 +293,67 @@ def _is_env_assignment(value: str) -> bool:
 
 
 def _strip_env_prefix(parts: list[str]) -> list[str]:
-    """Remove leading env assignment tokens before command recognition."""
+    """Remove supported ``env`` options and assignments before command recognition.
+
+    Options that only alter the child environment are safe to peel. ``--chdir``
+    deliberately remains visible because it changes the command's cwd and must
+    prevent callers from inferring a different working directory.
+    """
+    remaining = list(parts)
     index = 0
-    if parts and parts[0] == "env":
-        index = 1
-    while index < len(parts) and _is_env_assignment(parts[index]):
+    while index < len(remaining) and _is_env_assignment(remaining[index]):
         index += 1
-    return parts[index:]
+    if index < len(remaining) and Path(remaining[index]).name == "env":
+        index += 1
+        while index < len(remaining):
+            token = remaining[index]
+            if token == "--":
+                index += 1
+                break
+            if token in {"-", "-i", "--ignore-environment", "-v", "--debug"}:
+                index += 1
+                continue
+            if token in {"-u", "--unset"}:
+                if index + 1 >= len(remaining):
+                    return remaining[index:]
+                index += 2
+                continue
+            if token.startswith("--unset=") or (token.startswith("-u") and len(token) > 2):
+                index += 1
+                continue
+            if token in {
+                "--default-signal",
+                "--block-signal",
+                "--ignore-signal",
+                "--list-signal-handling",
+            }:
+                index += 1
+                continue
+            if token.startswith(("--default-signal=", "--block-signal=", "--ignore-signal=")):
+                index += 1
+                continue
+            if token in {"-S", "--split-string"}:
+                if index + 1 >= len(remaining):
+                    return remaining[index:]
+                split_value = remaining[index + 1]
+                consumed = 2
+            elif token.startswith("--split-string="):
+                split_value = token.partition("=")[2]
+                consumed = 1
+            elif token.startswith("-S") and len(token) > 2:
+                split_value = token[2:]
+                consumed = 1
+            else:
+                break
+            try:
+                expanded = shlex.split(split_value)
+            except ValueError:
+                return remaining[index:]
+            remaining[index : index + consumed] = expanded
+
+    while index < len(remaining) and _is_env_assignment(remaining[index]):
+        index += 1
+    return remaining[index:]
 
 
 def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:

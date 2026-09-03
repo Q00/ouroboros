@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import os
 
@@ -23,6 +24,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACExecutionCapsuleManifest,
     ACSuccessContract,
     UnmaterializableSuccessContractError,
+    bind_capsule_to_resume_authority,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     build_ac_dispatch_request_digest,
@@ -127,6 +129,29 @@ def _manager_for_events(events: list[BaseEvent], *, nonce: str = "nonce-a"):
     )
 
 
+def _legacy_v2_fingerprint(capsule) -> str:
+    """Reproduce the persisted capsule-v2 identity independently of production code."""
+    legacy_contract = {
+        "verify_command": capsule.success_contract.verify_command,
+        "expected_artifacts": list(capsule.success_contract.expected_artifacts),
+        "output_assertion": capsule.success_contract.output_assertion,
+    }
+    canonical_contract = json.dumps(
+        legacy_contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    contract_digest = "sha256:" + hashlib.sha256(canonical_contract.encode()).hexdigest()
+    manifest = capsule.manifest.to_contract_data()
+    manifest["version"] = 2
+    manifest["success_contract_digest"] = contract_digest
+    for reference in manifest["context_references"]:
+        if reference["kind"] == "gate":
+            reference["content_digest"] = contract_digest
+    canonical_manifest = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return "sha256:" + hashlib.sha256(canonical_manifest.encode()).hexdigest()
+
+
 def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
     capsule = _capsule(tmp_path)
 
@@ -142,6 +167,99 @@ def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
         ACContextReferenceKind.ARTIFACT,
         ACContextReferenceKind.DEPENDENCY,
     ]
+
+
+def test_capsule_v2_manifest_and_paused_authority_survive_upgrade(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    legacy_fingerprint = _legacy_v2_fingerprint(capsule)
+
+    resumed = bind_capsule_to_resume_authority(capsule, legacy_fingerprint)
+    restored_manifest = ACExecutionCapsuleManifest.from_contract_data(
+        resumed.manifest.to_contract_data()
+    )
+
+    assert resumed.version == 2
+    assert resumed.fingerprint == legacy_fingerprint
+    assert restored_manifest.version == 2
+    assert restored_manifest.fingerprint == legacy_fingerprint
+
+
+def test_capsule_v2_resume_rejects_new_execution_semantics(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    legacy_fingerprint = _legacy_v2_fingerprint(capsule)
+
+    with pytest.raises(ValueError, match="fingerprint drifted"):
+        bind_capsule_to_resume_authority(
+            replace(
+                capsule,
+                success_contract=replace(capsule.success_contract, verify_cwd="app"),
+            ),
+            legacy_fingerprint,
+        )
+
+
+@pytest.mark.asyncio
+async def test_capsule_v2_runtime_handle_resumes_after_upgrade(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    legacy_capsule = bind_capsule_to_resume_authority(
+        capsule,
+        _legacy_v2_fingerprint(capsule),
+    )
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-1",
+        retry_attempt=0,
+    )
+    dispatch_id = "a" * 32
+    legacy_handle = RuntimeHandle(
+        backend="codex_cli",
+        native_session_id="paused-v2-session",
+        cwd=str(tmp_path.resolve()),
+        approval_mode="acceptEdits",
+        metadata={
+            **identity.to_metadata(),
+            "ac_capsule_version": 2,
+            "ac_capsule_fingerprint": legacy_capsule.fingerprint,
+            "ac_dispatch_id": dispatch_id,
+            "process_local_resume_nonce": "nonce-a",
+        },
+    )
+    events = [
+        _lifecycle_event(
+            identity,
+            "execution.ac.capsule.compiled",
+            extra={
+                "capsule_fingerprint": legacy_capsule.fingerprint,
+                "capsule_manifest": legacy_capsule.manifest.to_contract_data(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.ac.attempt.dispatched",
+            extra={
+                "ac_dispatch_id": dispatch_id,
+                "capsule_fingerprint": legacy_capsule.fingerprint,
+                "runtime": legacy_handle.to_persisted_dict(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.session.resumed",
+            extra={"runtime": legacy_handle.to_persisted_dict()},
+        ),
+    ]
+
+    restored = await _manager_for_events(events)._load_persisted_ac_runtime_handle(
+        0,
+        execution_context_id="execution-1",
+        retry_attempt=0,
+        expected_capsule_fingerprint=legacy_capsule.fingerprint,
+        expected_process_local_resume_nonce="nonce-a",
+    )
+
+    assert restored is not None
+    assert restored.native_session_id == "paused-v2-session"
+    assert restored.metadata["ac_capsule_fingerprint"] == legacy_capsule.fingerprint
 
 
 def test_capsule_manifest_hashes_free_form_authority(tmp_path) -> None:
@@ -425,6 +543,8 @@ def test_success_contract_preserves_output_assertion_without_command() -> None:
     assert contract.has_success_contract is True
     assert contract.to_contract_data() == {
         "verify_command": None,
+        "verify_cwd": None,
+        "verify_replay_safe": False,
         "expected_artifacts": [],
         "output_assertion": "OK",
     }
@@ -457,6 +577,23 @@ def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None
     )
 
     assert changed.fingerprint != capsule.fingerprint
+
+
+def test_capsule_fingerprint_changes_with_verify_execution_semantics(tmp_path) -> None:
+    capsule = _capsule(tmp_path)
+    changed_cwd = replace(
+        capsule,
+        success_contract=replace(capsule.success_contract, verify_cwd="app"),
+    )
+    changed_replay_safety = replace(
+        capsule,
+        success_contract=replace(capsule.success_contract, verify_replay_safe=True),
+    )
+
+    assert changed_cwd.fingerprint != capsule.fingerprint
+    assert changed_replay_safety.fingerprint != capsule.fingerprint
+    restored = ACSuccessContract.from_contract_data(changed_cwd.success_contract.to_contract_data())
+    assert restored.verify_cwd == "app"
 
 
 def test_capsule_success_contract_override_is_child_local(tmp_path) -> None:

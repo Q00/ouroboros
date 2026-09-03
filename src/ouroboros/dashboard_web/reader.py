@@ -61,6 +61,10 @@ _AC_STATE_EVENT_TYPES = frozenset(
         "execution.session.started",
         "execution.ac.completed",
         "workflow.progress.updated",
+        # Terminal-acceptance flips (final workspace revalidation / acceptance
+        # finalization) change card status after the last progress snapshot.
+        "execution.verify.failed",
+        "execution.ac.acceptance_finalized",
     }
 )
 

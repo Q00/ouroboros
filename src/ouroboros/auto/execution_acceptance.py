@@ -267,6 +267,8 @@ def _identity_signature(criterion: AcceptanceCriterionSpec) -> tuple[object, ...
     """
     return (
         criterion.verify_command,
+        criterion.verify_cwd,
+        criterion.verify_replay_safe,
         criterion.expected_artifacts,
         criterion.output_assertion,
         criterion.verify_exemption_reason,
@@ -536,6 +538,8 @@ def _build_transferred_spec(
         description=description,
         semantic_ac_key=explicit_key,
         verify_command=source.verify_command,
+        verify_cwd=source.verify_cwd,
+        verify_replay_safe=source.verify_replay_safe,
         expected_artifacts=source.expected_artifacts,
         output_assertion=source.output_assertion,
         verify_exemption_reason=source.verify_exemption_reason,
@@ -601,6 +605,8 @@ def _autoresearch_identity_matches(
     """
     return (
         existing.verify_command == candidate.verify_command
+        and existing.verify_cwd == candidate.verify_cwd
+        and existing.verify_replay_safe == candidate.verify_replay_safe
         and existing.expected_artifacts == candidate.expected_artifacts
         and existing.output_assertion == candidate.output_assertion
         and existing.verify_exemption_reason == candidate.verify_exemption_reason

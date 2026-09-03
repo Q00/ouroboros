@@ -276,6 +276,26 @@ def _card(cards: dict[str, dict[str, Any]], node_id: str) -> dict[str, Any]:
     return cards.setdefault(node_id, {"id": node_id, "status": "pending"})
 
 
+def _card_for_ac_index(cards: dict[str, dict[str, Any]], ac_index: Any) -> dict[str, Any] | None:
+    """Resolve a card from the orchestrator's 0-based ``ac_index``.
+
+    Final-acceptance events (``execution.verify.failed``,
+    ``execution.ac.acceptance_finalized``) identify the AC by the 0-based
+    orchestrator index instead of a ``node_id``, while cards carry the 1-based
+    display index under ``ac_index``. Root cards (no ``parent_id``) win over
+    decomposed children that share the same root index.
+    """
+    if isinstance(ac_index, bool) or not isinstance(ac_index, int):
+        return None
+    matches = [card for card in cards.values() if card.get("ac_index") == ac_index + 1]
+    if not matches:
+        return None
+    for card in matches:
+        if not card.get("parent_id"):
+            return card
+    return matches[0]
+
+
 def _upsert_ac_card(
     cards: dict[str, dict[str, Any]],
     terminal: set[str],
@@ -396,6 +416,30 @@ def reduce_board(
                     terminal,
                     node_id,
                     "completed" if payload.get("success") else "failed",
+                    authoritative=True,
+                )
+
+        elif event_type == "execution.verify.failed":
+            # The final workspace revalidation can overturn an AC that already
+            # reached DONE via ac.completed. Without this branch the board and
+            # the CLI verdict diverge (cards stay DONE while the run fails).
+            # Mid-run per-attempt gate failures are followed by a retry and are
+            # not folded here; only the terminal revalidation flip is.
+            if payload.get("final_workspace_revalidation"):
+                card = _card_for_ac_index(cards, payload.get("ac_index"))
+                if card is not None:
+                    _apply_status(card, terminal, card["id"], "failed", authoritative=True)
+
+        elif event_type == "execution.ac.acceptance_finalized":
+            # Terminal acceptance verdict — the durable source of truth the CLI
+            # summary renders from. It always wins over earlier ac.completed.
+            card = _card_for_ac_index(cards, payload.get("root_ac_index"))
+            if card is not None and isinstance(payload.get("accepted"), bool):
+                _apply_status(
+                    card,
+                    terminal,
+                    card["id"],
+                    "completed" if payload["accepted"] else "failed",
                     authoritative=True,
                 )
 

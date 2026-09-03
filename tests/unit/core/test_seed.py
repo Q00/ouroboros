@@ -1268,6 +1268,82 @@ class TestSeedImmutabilityComprehensive:
         assert not hasattr(seed.constraints, "extend")
 
 
+class TestAcceptanceCriterionVerifyCwd:
+    """verify_cwd: the workspace-relative directory verify_command runs in."""
+
+    def test_verify_cwd_accepted_with_verify_command(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npx playwright test",
+            verify_cwd="app",
+        )
+        assert spec.verify_cwd == "app"
+        value = spec.to_seed_value()
+        assert isinstance(value, dict)
+        assert value["verify_cwd"] == "app"
+
+    def test_verify_cwd_requires_verify_command(self) -> None:
+        with pytest.raises(PydanticValidationError, match="verify_cwd requires verify_command"):
+            AcceptanceCriterionSpec(description="tests pass", verify_cwd="app")
+
+    def test_verify_cwd_rejects_workspace_escape(self) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
+            AcceptanceCriterionSpec(
+                description="tests pass",
+                verify_command="npm test",
+                verify_cwd="../outside",
+            )
+
+    def test_verify_cwd_rejects_absolute_path(self) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative"):
+            AcceptanceCriterionSpec(
+                description="tests pass",
+                verify_command="npm test",
+                verify_cwd="/etc",
+            )
+
+    def test_blank_verify_cwd_normalizes_to_none(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="  ",
+        )
+        assert spec.verify_cwd is None
+
+    def test_verify_cwd_round_trips_through_seed_value(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="app",
+        )
+        rebuilt = AcceptanceCriterionSpec.model_validate(spec.to_seed_value())
+        assert rebuilt == spec
+
+    def test_verify_cwd_changes_semantic_identity(self) -> None:
+        app = AcceptanceCriterionSpec(
+            description="tests pass",
+            verify_command="npm test",
+            verify_cwd="app",
+        )
+        site = app.model_copy(update={"verify_cwd": "site", "semantic_ac_key": None})
+
+        assert derive_semantic_ac_key(app) != derive_semantic_ac_key(site)
+
+    def test_verify_replay_safe_round_trips_and_changes_identity(self) -> None:
+        unsafe = AcceptanceCriterionSpec(description="tests pass", verify_command="npm test")
+        safe = unsafe.model_copy(update={"verify_replay_safe": True, "semantic_ac_key": None})
+
+        assert derive_semantic_ac_key(unsafe) != derive_semantic_ac_key(safe)
+        assert AcceptanceCriterionSpec.model_validate(safe.to_seed_value()) == safe
+
+    def test_verify_replay_safe_requires_verify_command(self) -> None:
+        with pytest.raises(
+            PydanticValidationError,
+            match="verify_replay_safe requires verify_command",
+        ):
+            AcceptanceCriterionSpec(description="tests pass", verify_replay_safe=True)
+
+
 class TestAcceptanceCriterionDescriptionRequired:
     """``description`` is the semantic identity of an AC, so it cannot be blank.
 

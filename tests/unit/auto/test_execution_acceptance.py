@@ -1282,6 +1282,36 @@ def test_normalize_execution_acceptance_equivalent_contracts_collapse_once() -> 
     assert baseline_commands == ["uv run train.py"]
 
 
+def test_normalize_execution_acceptance_keeps_distinct_verify_directories() -> None:
+    baseline_canonical = (
+        "The experiment ledger artifact contains a baseline entry written before any edit; "
+        "it includes measured command `/usr/bin/time -l uv run train.py`, inner command, "
+        "exit status, val_bpb, maximum resident set size bytes, and baseline status."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description=baseline_canonical,
+            verify_command="uv run train.py",
+            verify_cwd="app",
+        ),
+        AcceptanceCriterionSpec(
+            description=baseline_canonical,
+            verify_command="uv run train.py",
+            verify_cwd="site",
+        ),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    baseline_specs = [
+        criterion
+        for criterion in normalized.acceptance_criteria
+        if isinstance(criterion, AcceptanceCriterionSpec)
+        and criterion.verify_command == "uv run train.py"
+    ]
+
+    assert [criterion.verify_cwd for criterion in baseline_specs] == ["app", "site"]
+
+
 def test_normalize_execution_acceptance_transfer_keeps_canonical_sequence() -> None:
     """Blocker regression: a transferred contract never reorders the canonical block.
 

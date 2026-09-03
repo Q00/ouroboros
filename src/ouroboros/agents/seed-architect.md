@@ -51,15 +51,22 @@ Example: ["Python >= 3.12", "No external database", "Must work offline"]
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
 Format: exactly one non-empty, single-line JSON array. Every object contains
-exactly `description`, `verify`, `artifacts`, and `expect`. `artifacts` is a JSON
-array of paths or the string `NONE`; the other contract fields are strings.
-Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","artifacts":"NONE","expect":"NONE"}]`
-Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
+exactly `description`, `verify`, `cwd`, `replay_safe`, `artifacts`, and `expect`.
+`cwd` is a workspace-relative directory or `NONE`; `replay_safe` is a boolean;
+`artifacts` is a JSON array of paths or the string `NONE`; the other contract
+fields are strings.
+Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","cwd":"NONE","replay_safe":true,"artifacts":"NONE","expect":"NONE"}]`
+Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","cwd":"NONE","replay_safe":false,"artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
+`cwd` / `verify_cwd` and `replay_safe` / `verify_replay_safe` semantics:
+- Use `cwd` only when the command must run from a known workspace-relative subdirectory; otherwise write `NONE`.
+- Set `replay_safe` to `true` only when executing the command again is side-effect-free or idempotent. Local test, lint, type-check, build, and file-inspection commands are normally replay-safe. Deployment, migration, transaction, notification, upload, and remote-trigger commands are not.
+- A command without `replay_safe: true` is never re-executed during final settlement; stale evidence fails closed.
+
 
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
@@ -115,7 +122,7 @@ Provide your analysis in this exact structure. In particular,
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "cwd": "NONE", "replay_safe": true, "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
@@ -136,5 +143,5 @@ For brownfield projects, ensure context references and patterns are extracted fr
 Few-shot examples:
 
 ```
-ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","artifacts":["README.md"],"expect":"NONE"}]
+ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","cwd":"NONE","replay_safe":true,"artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","cwd":"NONE","replay_safe":true,"artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","cwd":"NONE","replay_safe":false,"artifacts":["README.md"],"expect":"NONE"}]
 ```

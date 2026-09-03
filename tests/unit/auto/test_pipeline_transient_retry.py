@@ -245,7 +245,7 @@ async def test_seed_qa_gate_recovers_after_one_transient_error_result(tmp_path) 
 async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.08,))
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (10.0,))
     calls = 0
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
@@ -268,7 +268,7 @@ async def test_seed_qa_retry_backoff_cannot_outlive_pipeline_deadline(
     started = time.monotonic()
     result, _, _ = await pipeline._run_seed_qa_gate(state, ledger, _build_seed(), review=None)
 
-    assert time.monotonic() - started < 0.08
+    assert time.monotonic() - started < 1.0
     assert calls == 1
     assert result is not None
     assert result.status == "blocked"

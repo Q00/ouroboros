@@ -259,6 +259,8 @@ class GradeGate:
                 try:
                     validate_ac_success_contract_values(
                         verify_command=criterion_spec.verify_command,
+                        verify_cwd=criterion_spec.verify_cwd,
+                        verify_replay_safe=criterion_spec.verify_replay_safe,
                         expected_artifacts=criterion_spec.expected_artifacts,
                         output_assertion=criterion_spec.output_assertion,
                     )

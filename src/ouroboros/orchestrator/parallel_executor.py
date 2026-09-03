@@ -90,6 +90,7 @@ from ouroboros.orchestrator import (
 )
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
+    bind_capsule_to_resume_authority,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     build_ac_dispatch_request_digest,
@@ -419,6 +420,7 @@ from ouroboros.orchestrator.verifier import (
     verifier_operational_failure_verdict,
 )
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
@@ -1784,6 +1786,7 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -5287,15 +5290,9 @@ class ParallelACExecutor:
         execution_id: str,
         coordinator_revalidated: bool = False,
     ) -> list[ACExecutionResult]:
-        """Fail closed when final shared-workspace evidence is no longer valid.
-
-        Verify gates run as each AC completes, while later ACs can still touch
-        the same workspace.  Before terminal acceptance, re-check every
-        successful contract's artifact leg and cached workspace identity. A
-        stale command result is rejected rather than replayed because an
-        unrestricted shell command may have effects outside the workspace.
-        Invalidate the complete success set when any verify command was
-        observed mutating the workspace.
+        """Bind terminal acceptance to the settled shared workspace.
+        Replay stale command evidence only for verify_replay_safe contracts;
+        any mutating verifier invalidates all provisional successes.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -5321,10 +5318,6 @@ class ParallelACExecutor:
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         settled: list[ACExecutionResult] = []
-        # (reason, outcome, verify_cause): every settlement branch names its
-        # own machine-readable cause at classification time — a shared
-        # fallback guess here would misreport e.g. an unavailable digest as
-        # concurrent workspace mutation. `None` folds to `unknown` downstream.
         individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None, str | None]] = {}
 
         for result in results:
@@ -5334,16 +5327,10 @@ class ParallelACExecutor:
 
             spec = successful_contracts.get(result.ac_index)
             if spec is None:
-                # A mutating final verifier invalidates all successes, including
-                # description-only ACs.  Defer the replacement until every
-                # final verifier has been inspected.
                 settled.append(result)
                 continue
 
             if verify_mutated_workspace:
-                # Once one final verifier has changed (or made unreadable) the
-                # workspace, do not execute any additional arbitrary commands.
-                # The complete success set will be invalidated below.
                 settled.append(result)
                 continue
 
@@ -5368,8 +5355,7 @@ class ParallelACExecutor:
 
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
             final_digest = self._workspace_content_digest(
-                cwd,
-                expected_artifacts=spec.expected_artifacts,
+                cwd, expected_artifacts=spec.expected_artifacts
             )
             if final_digest is None:
                 individual_failures[result.ac_index] = (
@@ -5390,9 +5376,6 @@ class ParallelACExecutor:
 
             if spec.verify_command and not outcome.environment_unverifiable:
                 if coordinator_revalidated:
-                    # Coordinator revalidation deliberately refuses to replay
-                    # arbitrary shell contracts.  A command-bearing success
-                    # that survived that boundary is therefore not admissible.
                     individual_failures[result.ac_index] = (
                         "Final acceptance rejected because coordinator revalidation "
                         "did not replay verify_command.",
@@ -5413,37 +5396,62 @@ class ParallelACExecutor:
                     continue
 
                 if cached_digest != final_digest:
-                    # A later worker changed the workspace after this command
-                    # passed. verify_command is an observation contract (a mutating
-                    # one is rejected by the gate), so judge the final workspace once.
-                    replayed = await _invoke_execution_authority_entry(
-                        self, _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE, spec=spec, cwd=cwd
+                    if not spec.verify_replay_safe:
+                        individual_failures[result.ac_index] = (
+                            "Final acceptance rejected because verify_command evidence "
+                            "is stale and the contract does not declare verify_replay_safe.",
+                            outcome,
+                            "workspace_mutated",
+                        )
+                        settled.append(result)
+                        continue
+                    replay_outcome = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                        spec=spec,
+                        cwd=cwd,
                     )
-                    if replayed.workspace_mutated:
-                        # The replay itself changed the workspace (or made its
-                        # digest unreadable): every provisional success is now
-                        # stale. Fold it into the settlement-wide mutation
-                        # state so no further command runs and the complete
-                        # success set is invalidated below.
+                    await self._safe_emit_event(
+                        BaseEvent(
+                            type="execution.verify.replayed",
+                            aggregate_type="execution",
+                            aggregate_id=execution_id or session_id,
+                            data={
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "ac_index": result.ac_index,
+                                "verify_command": spec.verify_command,
+                                "passed": bool(replay_outcome.passed),
+                                "reason": replay_outcome.reason,
+                                "environment_unverifiable": bool(
+                                    replay_outcome.environment_unverifiable
+                                ),
+                                "final_workspace_revalidation": True,
+                            },
+                        )
+                    )
+                    if replay_outcome.workspace_mutated:
                         verify_mutated_workspace = True
                         settled.append(result)
                         continue
-                    if not replayed.passed:
-                        individual_failures[result.ac_index] = (
-                            "Final acceptance rejected because verify_command failed on "
-                            f"the final workspace: {replayed.reason}",
-                            replayed,
-                            replayed.cause or "workspace_mutated",
+                    if not replay_outcome.passed:
+                        replay_failure = (
+                            "Final workspace verify gate was unverifiable on settlement replay"
+                            if replay_outcome.environment_unverifiable
+                            else "Final workspace verify gate failed on settlement replay"
                         )
-                    result = replace(result, verify_gate_outcome=replayed)
+                        individual_failures[result.ac_index] = (
+                            f"{replay_failure}: {replay_outcome.reason}",
+                            replay_outcome,
+                            replay_outcome.cause or "workspace_mutated",
+                        )
+                        settled.append(result)
+                        continue
+                    result = replace(result, verify_gate_outcome=replay_outcome)
 
             settled.append(result)
 
         if verify_mutated_workspace:
-            # A verifier is an observation boundary, not another writer.  If
-            # any final verifier changed the shared workspace (or its digest
-            # became unreadable), every success observed before or after that
-            # command is stale.  Fail closed for the complete finalization set.
             mutation_reason = (
                 "Final acceptance rejected because a verify_command mutated the "
                 "workspace or its digest could not be revalidated."
@@ -5501,6 +5509,7 @@ class ParallelACExecutor:
                     error=reason,
                     final_message=reason,
                     outcome=ACExecutionOutcome.FAILED,
+                    verify_gate_outcome=outcome,
                     atomic_verifier_verdict=VerifierVerdict(
                         passed=False,
                         reasons=(reason,),
@@ -8081,11 +8090,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 outcome=ACExecutionOutcome.INVALID,
             )
-        if (
-            expected_resume_capsule_fingerprint is not None
-            and capsule.fingerprint != expected_resume_capsule_fingerprint
-        ):
-            raise RuntimeError("paused AC capsule fingerprint drifted")
+        if expected_resume_capsule_fingerprint is not None:
+            try:
+                capsule = bind_capsule_to_resume_authority(
+                    capsule,
+                    expected_resume_capsule_fingerprint,
+                )
+            except ValueError as exc:
+                raise RuntimeError("paused AC capsule fingerprint drifted") from exc
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -9810,12 +9822,24 @@ Respond with either ATOMIC or the structured JSON object only.
                 environment_unverifiable=True,
                 cause="environment_unverifiable",
             )
-        run = await run_with_shell(
-            (verify_shell_path, "-c", command),
-            cwd=cwd,
-            env=verify_env,
-            timeout_seconds=self._verify_command_timeout_seconds,
-        )
+        command_cwd = bind_verify_command_cwd(cwd, spec)
+        if command_cwd.error is not None:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=command_cwd.error,
+                output_tail="",
+                workspace_digest=workspace_before,
+            )
+        try:
+            run = await run_with_shell(
+                (verify_shell_path, "-c", command),
+                cwd=command_cwd.cwd,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
+                cwd_capability=command_cwd.capability,
+            )
+        finally:
+            command_cwd.close()
 
         if run.start_error is not None:
             return _VerifyGateOutcome(

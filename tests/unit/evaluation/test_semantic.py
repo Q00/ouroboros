@@ -116,6 +116,8 @@ class TestBuildEvaluationPrompt:
             current_ac_spec=AcceptanceCriterionSpec(
                 description="CLI prints the version",
                 verify_command="mytool --version",
+                verify_cwd="app",
+                verify_replay_safe=True,
                 expected_artifacts=("mytool",),
                 output_assertion="stdout equals 1.2.3",
             ),
@@ -124,6 +126,8 @@ class TestBuildEvaluationPrompt:
 
         assert "DECLARED SUCCESS CONTRACT" in prompt
         assert "verify_command: mytool --version" in prompt
+        assert "verify_cwd: app" in prompt
+        assert "verify_replay_safe: true" in prompt
         assert "expected_artifacts: mytool" in prompt
         assert "output_assertion: stdout equals 1.2.3" in prompt
         assert "The AC passes ONLY if the artifact demonstrates the declared contract" in prompt

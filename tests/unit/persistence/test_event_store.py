@@ -1294,6 +1294,7 @@ class TestEventStoreAppend:
             {"terminal_status": ""},
             {"terminal_status": "paused"},
             {"disposition": "rejected"},
+            {"outcome": "failed"},
         ],
     )
     async def test_malformed_final_acceptance_is_rejected(

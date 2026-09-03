@@ -2032,8 +2032,10 @@ Please try again. Extract requirements from this interview:
 You MUST respond with ONLY the following format, one field per line, no other text:
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
-ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `cwd`, `replay_safe`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA cwd rule: `cwd` must be a portable workspace-relative directory for `verify`, or `NONE` to run from the workspace root.
+ACCEPTANCE_CRITERIA replay rule: `replay_safe` is a JSON boolean. Set it true only for side-effect-free or idempotent commands that may safely run again against the settled workspace. Local tests, lint, type checks, builds, and file inspection normally qualify; deployments, migrations, transactions, notifications, uploads, and remote triggers do not. A command without this grant is never replayed at settlement.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
@@ -2042,7 +2044,7 @@ CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<co
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "cwd": "<workspace-relative directory or NONE>", "replay_safe": <true only when safe to execute again>, "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
@@ -2146,8 +2148,10 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
-ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain `description`, `verify`, `cwd`, `replay_safe`, `artifacts`, and `expect`, plus `exempt` only when `verify` is NONE (see the exempt rule); no other keys, no aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA cwd rule: `cwd` must be a portable workspace-relative directory for `verify`, or `NONE` to run from the workspace root.
+ACCEPTANCE_CRITERIA replay rule: `replay_safe` is a JSON boolean. Set it true only for side-effect-free or idempotent commands that may safely run again against the settled workspace. Local tests, lint, type checks, builds, and file inspection normally qualify; deployments, migrations, transactions, notifications, uploads, and remote triggers do not. A command without this grant is never replayed at settlement.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 ACCEPTANCE_CRITERIA exempt rule: prefer a real `verify` command for every criterion — a criterion without one can only be judged from the worker's own account of its work. Use `verify: NONE` only when no command could decide the outcome, and then add `"exempt": "<why no command can decide this>"`. Omit `exempt` (or set it to NONE) whenever `verify` is a command.
@@ -2156,7 +2160,7 @@ CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<co
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "cwd": "<workspace-relative directory or NONE>", "replay_safe": <true only when safe to execute again>, "artifacts": ["<path>"], "expect": "<literal output or NONE>", "exempt": "<why no command can decide this, only when verify is NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
