@@ -489,12 +489,14 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 ## 내부 구조
 
 <details>
-<summary><strong>18개 패키지 · 166개 모듈 · 95개 테스트 파일 · Python 3.12+</strong></summary>
+<summary><strong>저장소에서 직접 확인하는 소스·테스트 인벤토리 · Python 3.12+</strong></summary>
+
+정확한 파일 수는 현재 체크아웃을 기준으로 `git ls-files ':(glob)src/ouroboros/**/*.py'`와 `git ls-files ':(glob)tests/**/test_*.py'`에서 확인합니다. Hatch-VCS가 빌드할 때 생성하는 `src/ouroboros/_version.py`는 tracked 소스 인벤토리에 포함되지 않습니다.
 
 ```text
 src/ouroboros/
 ├── bigbang/        Interview, 모호성 점수 산정, brownfield 탐색
-├── routing/        PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
+├── router/         PAL Router — 3단계 비용 최적화 (1x / 10x / 30x)
 ├── execution/      (deprecated — 로직이 orchestrator/ 및 mcp/tools/로 이동됨)
 ├── evaluation/     Mechanical → Semantic → Multi-Model Consensus
 ├── evolution/      Wonder / Reflect 순환, 수렴 감지

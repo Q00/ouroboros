@@ -468,7 +468,7 @@ Nine highlighted agents below, with 12 more specialized agents available (21 tot
 ```
 src/ouroboros/
 +-- bigbang/        Interview, ambiguity scoring, brownfield explorer
-+-- routing/        PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
++-- router/         PAL Router -- 3-tier cost optimization (1x / 10x / 30x)
 +-- execution/      (deprecated — logic moved to orchestrator/ and mcp/tools/)
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect cycle, convergence detection
@@ -491,7 +491,7 @@ src/ouroboros/
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
 - **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Goose, Kiro, Copilot, and Pi; same workflow spec, different execution engines
+- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for every canonical backend returned by `runtime_backend_choices()`, including GJC, Antigravity, Grok, and Zcode; same workflow spec, different execution engines
 
 See [Architecture](./docs/architecture.md) for the full design document.
 

@@ -541,27 +541,50 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 
 ### Shipped adapters
 
-- **`ClaudeAgentAdapter`** (`backend="claude"`) — Wraps Claude Agent SDK / Claude Code CLI with streaming, retry, and session resumption. Module: `src/ouroboros/orchestrator/adapter.py`
-- **`CodexCliRuntime`** (`backend="codex"`) — Drives the OpenAI Codex CLI as a session-oriented runtime with NDJSON event parsing. Module: `src/ouroboros/orchestrator/codex_cli_runtime.py`
-- **`OpenCodeRuntime`** (`backend="opencode"`) — Drives the OpenCode CLI with multi-provider support. Module: `src/ouroboros/orchestrator/opencode_runtime.py`
-- **`HermesRuntime`** (`backend="hermes"`) — Drives the Hermes Agent for local or hosted models. Module: `src/ouroboros/orchestrator/hermes_runtime.py`
-- **`GeminiCliRuntime`** (`backend="gemini"`) — Drives the Google Gemini CLI in stream-json mode. Module: `src/ouroboros/orchestrator/gemini_cli_runtime.py`
-- **`KiroAdapter`** (`backend="kiro"`) — Drives the Kiro CLI in headless mode. Module: `src/ouroboros/orchestrator/kiro_adapter.py`
-- **`CopilotCliLLMAdapter`** (`backend="copilot"`) — Drives the GitHub Copilot CLI via `copilot -p`, with live model discovery (queries `https://api.githubcopilot.com/models` at setup) and automatic hyphen-to-dotted model name mapping for cross-runtime config compatibility. Module: `src/ouroboros/providers/copilot_cli_adapter.py`
-- **`PiRuntime`** (`backend="pi"`) — Drives the Pi CLI in documented JSON mode with skill dispatch, session resumption, and JSONL event normalization. Module: `src/ouroboros/orchestrator/pi_runtime.py`
-- **`PiLLMAdapter`** (`backend="pi"`) — Exposes the Pi CLI for LLM-only flows such as interview, ambiguity scoring, seed extraction, and structured JSON responses. Structured `response_format` calls are soft-enforced with prompt instructions plus adapter-side extraction/validation because Pi has no native `--output-schema` flag. Module: `src/ouroboros/providers/pi_llm_adapter.py`
+The canonical backend names, registered aliases, concrete adapters, and source
+modules are listed below. The two `_mcp` entries are internal leader-driven
+worker transports; the remaining entries are user-selectable runtimes.
 
-> Each runtime has different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
+| Backend | Adapter / transport | Registered aliases | Module |
+|---------|---------------------|--------------------|--------|
+| `claude` | `ClaudeAgentAdapter` | `claude_code` | `src/ouroboros/orchestrator/adapter.py` |
+| `codex` | `CodexCliRuntime` | `codex_cli` | `src/ouroboros/orchestrator/codex_cli_runtime.py` |
+| `codex_mcp` | `LeaderDrivenWorkerRuntime` over `codex mcp-server` | `codex_mcp_server` | `src/ouroboros/orchestrator/codex_mcp_runtime.py` |
+| `claude_mcp` | `LeaderDrivenWorkerRuntime` over `claude -p --resume` | `claude_worker` | `src/ouroboros/orchestrator/claude_worker_runtime.py` |
+| `copilot` | `CopilotCliRuntime` | `copilot_cli` | `src/ouroboros/orchestrator/copilot_cli_runtime.py` |
+| `gemini` | `GeminiCLIRuntime` | `gemini_cli` | `src/ouroboros/orchestrator/gemini_cli_runtime.py` |
+| `zcode` | `ZcodeCLIRuntime` | `zcode_cli` | `src/ouroboros/orchestrator/zcode_cli_runtime.py` |
+| `hermes` | `HermesCliRuntime` | `hermes_cli` | `src/ouroboros/orchestrator/hermes_runtime.py` |
+| `kiro` | `KiroAgentAdapter` | `kiro_cli` | `src/ouroboros/orchestrator/kiro_adapter.py` |
+| `opencode` | `OpenCodeRuntime` | `opencode_cli` | `src/ouroboros/orchestrator/opencode_runtime.py` |
+| `goose` | `GooseCliRuntime` | `goose_cli` | `src/ouroboros/orchestrator/goose_runtime.py` |
+| `pi` | `PiRuntime` | `pi_cli` | `src/ouroboros/orchestrator/pi_runtime.py` |
+| `gjc` | `GjcRuntime` | `gajae-code`, `gajae_code` | `src/ouroboros/orchestrator/gjc_runtime.py` |
+| `antigravity` | `AntigravityCLIRuntime` | `agy` | `src/ouroboros/orchestrator/antigravity_cli_runtime.py` |
+| `grok` | `GrokCliRuntime` | `grok_cli`, `grok_build` | `src/ouroboros/orchestrator/grok_cli_runtime.py` |
+| `host` | Host-dispatch runtime bridge | `host_dispatch` | `src/ouroboros/orchestrator/host_dispatch.py` |
+
+> Each runtime has different tool sets, permission models, and streaming
+> semantics. Ouroboros normalizes these differences at the adapter boundary,
+> but feature parity is not guaranteed across runtimes.
 
 ### Runtime factory
 
-`create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py` resolves the backend name and returns the appropriate adapter. The backend can be set via:
+`create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py`
+resolves canonical names and aliases from
+`src/ouroboros/backends/capabilities.py`, then dispatches through
+`src/ouroboros/backends/factory_registry.py`. Runtime selection uses this order:
 
-1. `OUROBOROS_AGENT_RUNTIME` environment variable
-2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
-3. Explicit `backend=` parameter
+1. Explicit `backend=` parameter
+2. `OUROBOROS_AGENT_RUNTIME` environment variable
+3. Legacy `OUROBOROS_RUNTIME` environment variable
+4. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
+5. Default `claude` runtime
 
-Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`, `opencode` / `opencode_cli`, `hermes` / `hermes_cli`, `gemini` / `gemini_cli`, `kiro` / `kiro_cli`, `copilot` / `copilot_cli`, `pi` / `pi_cli`.
+The public CLI additionally maps `claude-sdk` and `claude_sdk` to `claude`, and
+`claude-cli` to the internal `claude_mcp` transport. Those package-profile
+spellings are defined in `src/ouroboros/package_profiles.py`; all other aliases
+are the registered aliases in the table above.
 
 For API details, see the source in `src/ouroboros/orchestrator/adapter.py`. For contributing a new runtime adapter, see [Contributing](contributing/).
 
