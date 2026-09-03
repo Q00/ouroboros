@@ -123,3 +123,70 @@ def test_nested_product_evidence_directory_remains_workspace_visible(tmp_path: P
     after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
 
     assert before != after
+
+
+def test_git_ignored_build_output_does_not_invalidate_workspace_digest(tmp_path: Path) -> None:
+    """Build trees the project itself declared non-source are not evidence.
+
+    ``target/``, ``dist/``, coverage data and similar ignore-rule paths are
+    refreshed by ordinary test commands; treating that as a workspace
+    mutation rejected every verify_command that ran a real build.
+    """
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("target/\n*.coverage\n", encoding="utf-8")
+    _git(tmp_path, "add", ".gitignore")
+    _git(tmp_path, "commit", "-m", "ignore build output")
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "debug.bin").write_bytes(b"\x00\x01")
+    (tmp_path / "run.coverage").write_text("data\n", encoding="utf-8")
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before == after
+
+
+def test_untracked_source_file_still_invalidates_workspace_digest(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("target/\n", encoding="utf-8")
+    _git(tmp_path, "add", ".gitignore")
+    _git(tmp_path, "commit", "-m", "ignore build output")
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    (tmp_path / "new_module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before != after
+
+
+def test_declared_artifact_under_ignored_path_remains_observable(tmp_path: Path) -> None:
+    """An expected artifact is evidence even when an ignore rule covers it."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    _git(tmp_path, "add", ".gitignore")
+    _git(tmp_path, "commit", "-m", "ignore dist")
+    (tmp_path / "dist").mkdir()
+    report = tmp_path / "dist" / "report.md"
+    report.write_text("v1\n", encoding="utf-8")
+    before = ParallelACExecutor._workspace_content_digest(
+        str(tmp_path), expected_artifacts=("dist/report.md",)
+    )
+
+    report.write_text("v2\n", encoding="utf-8")
+    after = ParallelACExecutor._workspace_content_digest(
+        str(tmp_path), expected_artifacts=("dist/report.md",)
+    )
+
+    assert before != after
+
+
+def test_digest_outside_git_ignores_nothing_by_ignore_rules(tmp_path: Path) -> None:
+    """Without Git to prove the ignore set, every path stays observable."""
+    (tmp_path / ".gitignore").write_text("target/\n", encoding="utf-8")
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "out.bin").write_bytes(b"x")
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before != after
