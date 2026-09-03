@@ -1158,6 +1158,44 @@ class TestSeed:
         with pytest.raises(PydanticValidationError):
             Seed.from_dict(seed_dict)
 
+    @pytest.mark.parametrize(
+        "malformed_key",
+        [
+            "ac_a123456789abcde",
+            "ac_a123456789abcdef0",
+            "ac_a123456789abcdeg",
+        ],
+    )
+    def test_v104_migration_rejects_malformed_hash_shaped_keys(
+        self,
+        malformed_key: str,
+    ) -> None:
+        seed_dict: dict[str, Any] = {
+            "goal": "Reconcile a campaign",
+            "acceptance_criteria": [
+                {
+                    "description": "A deterministic receipt is written",
+                    "semantic_ac_key": malformed_key,
+                },
+            ],
+            "ontology_schema": {
+                "name": "Receipt",
+                "description": "A reconciliation receipt",
+                "fields": [
+                    {"name": "manifest_id", "type": "string", "required": True},
+                ],
+            },
+            "metadata": {
+                "version": "1.0.4",
+                "generation_mode": "revised_after_qa",
+            },
+        }
+
+        with pytest.raises(PydanticValidationError):
+            Seed.from_dict(seed_dict)
+        with pytest.raises(PydanticValidationError):
+            Seed.model_validate(seed_dict)
+
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
         """Seed can roundtrip through dict serialization."""
         seed_dict = full_seed.to_dict()

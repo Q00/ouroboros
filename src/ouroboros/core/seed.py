@@ -378,6 +378,7 @@ regression test.
 _LEGACY_V104_VERSION = "1.0.4"
 _LEGACY_V104_GENERATION_MODE = "revised_after_qa"
 _LEGACY_V104_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-z][a-z0-9_]*$")
+_MALFORMED_HASH_SHAPED_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-z0-9]{15,}$")
 _CANONICAL_SEMANTIC_AC_KEY_RE = re.compile(r"^ac_[a-f0-9]{16}$")
 
 
@@ -797,6 +798,7 @@ def _migrate_legacy_v104_seed_dict(data: dict[str, Any]) -> dict[str, Any]:
                     isinstance(semantic_ac_key, str)
                     and _LEGACY_V104_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
                     and not _CANONICAL_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
+                    and not _MALFORMED_HASH_SHAPED_SEMANTIC_AC_KEY_RE.fullmatch(semantic_ac_key)
                 ):
                     item = {**item, "semantic_ac_key": None}
                     criteria_changed = True
