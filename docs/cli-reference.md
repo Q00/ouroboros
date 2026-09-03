@@ -988,6 +988,14 @@ ouroboros status project [PROJECT_DIR] [--workspace PATH] [--limit N] [--json]
 | `--limit N` | Complete-run safety cap (default `100`); an undersized limit fails instead of truncating |
 | `--json` | Emit deterministic ProjectRecord JSON identical to the MCP structured result |
 
+The project record also includes ambiguity-gate provenance for the Seeds in
+the recorded project runs: `gated_seed_count` (normal gate passes),
+`forced_seed_count` (`force=True`), `unknown_seed_count` (legacy or otherwise
+unrecorded decisions), and `override_rate`. The rate is
+`forced_seed_count / (forced_seed_count + gated_seed_count)`; it is `null` in
+JSON and shown as `n/a` when there are no known decisions. Unknown entries do
+not contribute to the denominator.
+
 The command performs no writes or schema creation. Identity conflicts,
 projection failures, and undersized limits return exit code `1` with no partial
 record; malformed CLI limits or workspace values return exit code `64`.

@@ -384,6 +384,9 @@ class SeedMetadata(BaseModel, frozen=True):
         version: Schema version for forward compatibility.
         created_at: When this seed was generated.
         ambiguity_score: The ambiguity score at generation time.
+        gate_forced: Whether Gen-1 generation bypassed the ambiguity gate with
+            ``force=True``. ``None`` means the historical or non-Gen-1 path
+            did not record a gate decision.
         interview_id: Reference to the source interview.
         generation_mode: Provenance label for how the Seed was synthesized.
             ``"normal"`` is the legacy ledger-complete path; degraded recovery
@@ -419,6 +422,7 @@ class SeedMetadata(BaseModel, frozen=True):
     version: str = Field(default="1.0.0")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    gate_forced: bool | None = Field(default=None)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)
     generation_mode: str = Field(default=_DEFAULT_GENERATION_MODE, min_length=1)
@@ -463,13 +467,14 @@ class SeedMetadata(BaseModel, frozen=True):
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Serialize additively: omit ``decision_provenance`` when empty.
+        """Serialize additively: omit unset provenance fields.
 
-        Keeps legacy Seed JSON byte-identical after a round-trip (the histogram
-        is only present for ledger-synthesized seeds) while still emitting it
-        whenever an auto ledger populated it.
+        Keeps legacy Seed JSON byte-identical after a round-trip while still
+        emitting gate and ledger provenance whenever it is known.
         """
         data = handler(self)
+        if self.gate_forced is None:
+            data.pop("gate_forced", None)
         if not self.decision_provenance:
             data.pop("decision_provenance", None)
         return data

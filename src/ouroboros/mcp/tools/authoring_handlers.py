@@ -1364,6 +1364,7 @@ class GenerateSeedHandler:
                     interview_state,
                     distillation,
                     ambiguity_score=float(effective_score if effective_score is not None else 0.15),
+                    gate_forced=force,
                 )
                 seed_yaml = yaml.dump(
                     reference_seed.to_dict(),
@@ -1390,6 +1391,7 @@ class GenerateSeedHandler:
                             "interview_id": reference_seed.metadata.interview_id,
                             "ambiguity_score": reference_seed.metadata.ambiguity_score,
                             "force": force,
+                            "gate_forced": force,
                             "requirement_distillation": distillation.model_dump(mode="json"),
                             **client_gate_status,
                         },
@@ -1413,6 +1415,7 @@ class GenerateSeedHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "force": force,
+                    "gate_forced": force,
                     **client_gate_status,
                 },
             )
@@ -1530,7 +1533,6 @@ class GenerateSeedHandler:
                 )
 
             seed = seed_result.value
-
             # Convert seed to YAML
             seed_dict = seed.to_dict()
             seed_yaml = yaml.dump(
@@ -1560,6 +1562,7 @@ class GenerateSeedHandler:
                         "interview_id": seed.metadata.interview_id,
                         "ambiguity_score": seed.metadata.ambiguity_score,
                         "force": force,
+                        "gate_forced": force,
                         "requirement_distillation": (
                             state.requirement_distillation.model_dump(mode="json")
                             if state.requirement_distillation is not None

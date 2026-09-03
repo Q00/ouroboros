@@ -270,6 +270,14 @@ def test_promoted_reference_seed_preserves_literal_pipe_in_constraint() -> None:
 
     assert seed.constraints == ("The CLI must accept only --lang ko|en as the language flag.",)
 
+    forced_seed = build_promoted_reference_seed(
+        state,
+        distillation,
+        ambiguity_score=0.1,
+        gate_forced=True,
+    )
+    assert forced_seed.metadata.gate_forced is True
+
 
 def test_promoted_reference_seed_preserves_literal_pipe_in_acceptance_criterion() -> None:
     state = _reference_state(

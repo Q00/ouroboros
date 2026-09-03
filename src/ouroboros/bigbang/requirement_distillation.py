@@ -433,8 +433,13 @@ def build_promoted_reference_seed(
     distillation: RequirementDistillation,
     *,
     ambiguity_score: float,
+    gate_forced: bool | None = None,
 ) -> Seed:
-    """Build a Seed without exposing reference-aware sessions to LLM extraction."""
+    """Build a Seed without exposing reference-aware sessions to LLM extraction.
+
+    ``gate_forced`` is supplied by the Gen-1 caller so this fast path carries
+    the same ambiguity-gate provenance as the regular extraction path.
+    """
     applied = apply_requirement_distillation({}, distillation)
     readiness = seed_readiness_details(
         applied.promotion,
@@ -483,6 +488,7 @@ def build_promoted_reference_seed(
         brownfield_context=brownfield_context,
         metadata=SeedMetadata(
             ambiguity_score=ambiguity_score,
+            gate_forced=gate_forced,
             interview_id=state.interview_id,
         ),
     )

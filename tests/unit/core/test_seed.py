@@ -75,6 +75,20 @@ class TestSeedMetadata:
 
         assert metadata.ambiguity_score == 0.18
 
+    def test_metadata_gate_forced_defaults_to_unknown(self) -> None:
+        """Seeds without gate provenance remain explicitly unknown."""
+        metadata = SeedMetadata(ambiguity_score=0.18)
+
+        assert metadata.gate_forced is None
+        assert "gate_forced" not in metadata.model_dump(mode="json")
+
+    @pytest.mark.parametrize("gate_forced", [True, False])
+    def test_metadata_serializes_gate_forced(self, gate_forced: bool) -> None:
+        """Known gate decisions survive Seed metadata serialization."""
+        metadata = SeedMetadata(ambiguity_score=0.18, gate_forced=gate_forced)
+
+        assert metadata.model_dump(mode="json")["gate_forced"] is gate_forced
+
     def test_metadata_optional_interview_id(self) -> None:
         """SeedMetadata interview_id is optional."""
         metadata = SeedMetadata(ambiguity_score=0.15)

@@ -1726,6 +1726,7 @@ class SeedGenerator:
                     state,
                     distillation,
                     ambiguity_score=ambiguity_score.overall_score,
+                    gate_forced=force,
                 )
             )
 
@@ -1761,6 +1762,7 @@ class SeedGenerator:
         # Create metadata
         metadata = SeedMetadata(
             ambiguity_score=ambiguity_score.overall_score,
+            gate_forced=force,
             interview_id=state.interview_id,
             parent_seed_id=parent_seed.metadata.seed_id if parent_seed else None,
         )

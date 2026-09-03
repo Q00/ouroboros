@@ -66,6 +66,17 @@ class TestSessionEvents:
             key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
         } == identity.to_event_data()
 
+    def test_create_session_started_event_adds_gate_provenance(self) -> None:
+        event = create_session_started_event(
+            session_id="sess_123",
+            execution_id="exec_456",
+            seed_id="seed_789",
+            seed_goal="Build a project map",
+            gate_forced=True,
+        )
+
+        assert event.data["gate_forced"] is True
+
     def test_create_policy_capabilities_evaluated_event_batches_decisions(self) -> None:
         """Batched policy events should preserve per-capability decisions."""
         graph = build_capability_graph(assemble_session_tool_catalog(["Read", "Edit"]))

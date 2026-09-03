@@ -818,6 +818,7 @@ class SessionRepository:
         seed_goal: str | None = None,
         runtime_backend: str | None = None,
         llm_backend: str | None = None,
+        gate_forced: bool | None = None,
         execution_contract: Mapping[str, Any] | None = None,
         acceptance_root_indices: Iterable[int] | None = None,
         project_identity: ProjectIdentity | None = None,
@@ -835,6 +836,8 @@ class SessionRepository:
                 so observers (the live dashboard) can tag the run's provider even for
                 simple, non-decomposed runs that emit no per-worker session events.
             llm_backend: Resolved LLM backend, persisted alongside for the same reason.
+            gate_forced: Whether the Seed bypassed the ambiguity gate. ``None``
+                preserves the legacy event shape when the decision is unknown.
             execution_contract: Resolved immutable run inputs needed for safe
                 resume and proof-cohort attribution. The same payload is also
                 written to the initial progress checkpoint by the runner.
@@ -879,6 +882,8 @@ class SessionRepository:
             event_data["runtime_backend"] = runtime_backend
         if llm_backend:
             event_data["llm_backend"] = llm_backend
+        if gate_forced is not None:
+            event_data["gate_forced"] = gate_forced
         if project_identity is not None:
             event_data.update(project_identity.to_event_data())
         if execution_contract_snapshot is not None:
@@ -1355,6 +1360,7 @@ class SessionRepository:
                     "seed_goal",
                     "runtime_backend",
                     "llm_backend",
+                    "gate_forced",
                     "project_id",
                     "project_root",
                     "workspace_path",
