@@ -30,6 +30,13 @@ CODEX_SKILL_NAMESPACE = "ouroboros-"
 _SKILL_CAPABILITY_GUIDE_MARKER = "<!-- ouroboros:skill-capability-guide -->"
 _RULE_NAMESPACE = Path(CODEX_RULE_FILENAME).stem
 _RULE_SUFFIX = Path(CODEX_RULE_FILENAME).suffix
+# Errnos that mean "this kernel or filesystem does not implement the no-replace
+# rename flag" rather than "the rename failed". ``ENOSYS`` is a kernel older than
+# renameat2 (< 3.15); ``EINVAL`` and ``EOPNOTSUPP`` are filesystems whose rename
+# implementation rejects the flag — NFS does this, as do some FUSE and overlay
+# mounts. Nothing else may be swallowed: ``EEXIST`` in particular is the
+# no-replace guarantee doing its job and must reach the caller.
+_RENAME_FLAG_UNSUPPORTED_ERRNOS = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})
 
 
 def _render_codex_rules(source: str) -> str:
@@ -398,6 +405,116 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
     )
 
 
+def _release_directory_reservation(reservation_fd: int, target_path: Path) -> None:
+    """Remove a failed publication's reservation, and nothing else.
+
+    A writer may remove or rename the reservation and put their own directory at
+    the same path before publication fails. Descriptor liveness alone cannot
+    prove pathname ownership: a renamed reservation remains linked. Cleanup
+    therefore requires both a live descriptor and a current target pathname
+    with the same device/inode identity. A removed reservation reports zero
+    links locally (or ``ESTALE`` on NFS), while a renamed reservation and its
+    replacement have different identities because the original inode is still
+    live. Anything that leaves ownership unproven is treated as not ours and
+    left alone.
+    """
+    try:
+        reservation_stat = os.fstat(reservation_fd)
+        target_stat = os.stat(target_path, follow_symlinks=False)
+    except OSError:
+        return
+    if reservation_stat.st_nlink <= 0:
+        return
+    if (reservation_stat.st_dev, reservation_stat.st_ino) != (
+        target_stat.st_dev,
+        target_stat.st_ino,
+    ):
+        return
+    try:
+        os.rmdir(target_path)
+    except OSError:
+        pass
+
+
+def _rename_noreplace_fallback(source_path: Path, target_path: Path) -> None:
+    """Rename without replacing where no atomic no-replace primitive is available.
+
+    Callers treat a ``FileExistsError`` as "another writer owns this name" and
+    anything else as a failed commit, so publication must never consume a name it
+    did not reserve.
+
+    Files publish with ``os.link``, which fails with ``EEXIST`` on an occupied
+    target: fully atomic, no weaker than ``RENAME_NOREPLACE``.
+
+    Directories cannot be hard-linked. ``os.mkdir`` reserves the name atomically —
+    it fails with ``EEXIST`` rather than replacing — and POSIX ``rename`` then
+    consumes that reservation. Failure cleanup removes the pathname only while
+    the live reservation descriptor and the current target still identify the
+    same directory, so a writer who removed or renamed the reservation and took
+    the name over is left alone.
+
+    One gap on the success path is not closable here: a writer who removes the
+    reservation and recreates an empty directory at the same path before the
+    rename has it replaced. ``mkdir`` returns no handle, so the reservation
+    cannot be pinned at creation, and comparing inodes does not help because a
+    recreated directory routinely reuses the same inode number. The exposure is
+    bounded to an empty directory: a racing writer with any content in it makes
+    the rename fail with ``ENOTEMPTY`` and keeps their tree. Closing it fully
+    needs ``RENAME_NOREPLACE``, which by definition this branch does not have.
+
+    Descriptor failures are held to the same contract. Failing to pin the
+    reservation removes it — inside the same bounded window, never a non-empty
+    replacement — so a failed publication does not leave the final name occupied
+    for the next replay. Failing to release the descriptor after the rename
+    changes nothing: the rename already committed, so the close is housekeeping
+    and must not turn a live generation into a reported failure.
+    """
+    if source_path.is_dir() and not source_path.is_symlink():
+        os.mkdir(target_path)
+        try:
+            reservation = os.open(target_path, os.O_RDONLY | os.O_DIRECTORY)
+        except BaseException:
+            # Leaving an unpinned reservation at the final name would make every
+            # later replay see a collision that never resolves, with the previous
+            # generation still hidden in its backup sibling. Removing it is
+            # exposed to the mkdir-to-open window described above and to nothing
+            # else: rmdir refuses a non-empty directory, so a racing writer who
+            # put anything there keeps it.
+            try:
+                os.rmdir(target_path)
+            except OSError:
+                pass
+            raise
+        try:
+            # POSIX rename removes an empty destination directory, so this only
+            # consumes the reservation made above. A writer that filled it in
+            # the meantime makes the rename fail instead of losing their tree.
+            os.rename(source_path, target_path)
+        except BaseException:
+            _release_directory_reservation(reservation, target_path)
+            raise
+        finally:
+            # The rename is the commit boundary, so releasing the descriptor is
+            # housekeeping. Letting it raise would report an already-published
+            # directory as a failed commit, and the rollback would then delete
+            # the live generation and strand the previous one in its backup.
+            try:
+                os.close(reservation)
+            except OSError:
+                pass
+        return
+
+    os.link(source_path, target_path, follow_symlinks=False)
+    # The link published the target, so this is the commit boundary. Dropping the
+    # staging name is cleanup: reporting its failure would tell the caller the
+    # commit failed, and the rollback would then delete the generation that is
+    # already live and strand the previous one in its backup sibling.
+    try:
+        source_path.unlink()
+    except OSError:
+        pass
+
+
 def _rename_noreplace(source_path: Path, target_path: Path) -> None:
     """Atomically rename without replacing a target created by another writer."""
     if os.name == "nt":
@@ -426,15 +543,14 @@ def _rename_noreplace(source_path: Path, target_path: Path) -> None:
             ctypes.c_uint,
         )
         rename_exclusive.restype = ctypes.c_int
-        if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) != 0:
+        if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) == 0:
+            return
+        if ctypes.get_errno() not in _RENAME_FLAG_UNSUPPORTED_ERRNOS:
             _raise_rename_error(source_path, target_path)
-        return
+        # The kernel or the filesystem rejected RENAME_NOREPLACE itself, so no
+        # rename was attempted. Degrade instead of failing the install.
 
-    if source_path.is_dir() and not source_path.is_symlink():
-        msg = f"Atomic no-replace directory rename is unavailable on {sys.platform}"
-        raise OSError(errno.ENOTSUP, msg, str(target_path))
-    os.link(source_path, target_path, follow_symlinks=False)
-    source_path.unlink()
+    _rename_noreplace_fallback(source_path, target_path)
 
 
 def _artifact_fingerprint(path: Path) -> str:
@@ -741,6 +857,14 @@ def _restore_displaced_concurrent_generation(target_path: Path, displaced_path: 
         raise OSError(msg) from restore_conflict
 
 
+def _remove_empty_directory(path: Path) -> bool:
+    try:
+        os.rmdir(path)
+    except OSError:
+        return False
+    return True
+
+
 def _acquire_rollback_generation(
     target_path: Path,
     *,
@@ -786,6 +910,7 @@ def _commit_staged_artifact(
     backup_path: Path | None = None
     prepared_generation = False
     staged_generation_active = False
+    staged_path_was_directory = staging_path.is_dir() and not staging_path.is_symlink()
     try:
         if _installed_artifact_exists(target_path):
             backup_path = _acquire_rollback_generation(
@@ -803,6 +928,15 @@ def _commit_staged_artifact(
             prepared_generation = True
         _rename_noreplace(staging_path, target_path)
         staged_generation_active = True
+        if _installed_artifact_exists(staging_path):
+            # A fallback publication that could not drop its staging name leaves
+            # a hard link aliasing the generation now live at the target. The
+            # commit already succeeded, so this is only tidy-up — but the alias
+            # must not survive, or refreshes accumulate pinned old inodes.
+            try:
+                _remove_installed_artifact(staging_path)
+            except OSError:
+                pass
 
         if transaction is not None:
             transaction.record_install(
@@ -835,8 +969,12 @@ def _commit_staged_artifact(
                 except BaseException:
                     pass
             elif _installed_artifact_exists(target_path):
-                msg = f"Managed Codex artifact changed during rollback: {target_path}"
-                raise OSError(msg) from commit_error
+                if staged_path_was_directory and _remove_empty_directory(target_path):
+                    _rename_noreplace(backup_path, target_path)
+                    _record_current_generation(target_path, on_generation)
+                else:
+                    msg = f"Managed Codex artifact changed during rollback: {target_path}"
+                    raise OSError(msg) from commit_error
             else:
                 _rename_noreplace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
