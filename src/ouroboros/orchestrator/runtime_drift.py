@@ -61,9 +61,36 @@ class RuntimeDriftLedger:
         )
         usage_telemetry.capture_runtime_drift(kind if kind in RUNTIME_DRIFT_KINDS else "unknown")
 
-    def stamp(self, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Return handle metadata carrying the current epoch."""
-        return {**(metadata or {}), DRIFT_EPOCH_METADATA_KEY: self.epoch}
+    def stamp(
+        self, metadata: dict[str, Any] | None = None, *, epoch: int | None = None
+    ) -> dict[str, Any]:
+        """Return handle metadata carrying ``epoch`` (default: the current one).
+
+        A streaming invocation passes the epoch it was admitted under, so a
+        thread it creates is attributed to the inputs it actually launched on
+        even if a concurrent invocation observed drift meanwhile.
+        """
+        return {
+            **(metadata or {}),
+            DRIFT_EPOCH_METADATA_KEY: self.epoch if epoch is None else epoch,
+        }
+
+    def retire_resume(
+        self, resume_session_id: str | None, runtime_handle: RuntimeHandle | None
+    ) -> str | None:
+        """Drop a resume target whose thread predates the last observed drift.
+
+        Command builders call this after *every* reconcile check, including the
+        routing resolution: any of them may advance the epoch on this call.
+        """
+        if resume_session_id is None or not self.handle_predates_drift(runtime_handle):
+            return resume_session_id
+        log.info(
+            "codex_cli_runtime.resume_dropped_after_drift",
+            drift_epoch=self.epoch,
+            runtime_backend=self._runtime_backend,
+        )
+        return None
 
     def handle_predates_drift(self, runtime_handle: RuntimeHandle | None) -> bool:
         """Return True when the handle's thread was created before a drift."""

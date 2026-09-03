@@ -189,7 +189,7 @@ class GooseCliRuntime(CodexCliRuntime):
         """
         self._reconcile_cli_executable_identity()
         requested_resume_session_id = resume_session_id
-        resume_session_id = self._retire_resume_after_drift(resume_session_id, runtime_handle)
+        resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
         del output_last_message_path, prompt
 
         # A retired resume target must not leak back in as the ``-n`` name:
@@ -248,6 +248,8 @@ class GooseCliRuntime(CodexCliRuntime):
         self,
         session_id: str | None,
         current_handle: RuntimeHandle | None = None,
+        *,
+        drift_epoch: int | None = None,
     ) -> RuntimeHandle | None:
         """Build a handle that preserves Ouroboros's generated Goose session name.
 
@@ -259,7 +261,7 @@ class GooseCliRuntime(CodexCliRuntime):
         if generated_session_name:
             session_id = f"ouroboros-{uuid4().hex[:12]}"
 
-        handle = super()._build_runtime_handle(session_id, current_handle)
+        handle = super()._build_runtime_handle(session_id, current_handle, drift_epoch=drift_epoch)
         if handle is None:
             return None
 
@@ -408,7 +410,13 @@ class GooseCliRuntime(CodexCliRuntime):
         if session_id is None and current_handle is not None:
             session_id = self._derive_session_name(current_handle)
         event_handle = (
-            self._build_runtime_handle(session_id, current_handle) if session_id else current_handle
+            self._build_runtime_handle(
+                session_id,
+                current_handle,
+                drift_epoch=item_scope.admitted_drift_epoch if item_scope is not None else None,
+            )
+            if session_id
+            else current_handle
         )
         if (
             event_handle is not None

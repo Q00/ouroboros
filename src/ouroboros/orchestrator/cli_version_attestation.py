@@ -397,6 +397,14 @@ def verify_cli_executable_identity_unchanged(
     )
 
 
+_UNAVAILABLE_ATTESTATION_MARKERS = ("without claiming executable drift", "was not captured")
+
+
+def is_unavailable_attestation_error(message: str) -> bool:
+    """True when a verification error reports missing evidence, not a changed binary."""
+    return any(marker in message for marker in _UNAVAILABLE_ATTESTATION_MARKERS)
+
+
 def require_unchanged_cli_version_attestation(
     display_name: str,
     initialized: CliExecutableVersionAttestation | None,

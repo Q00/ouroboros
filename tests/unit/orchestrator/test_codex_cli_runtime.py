@@ -4489,6 +4489,7 @@ def test_unloadable_config_mid_run_keeps_frozen_routing_instead_of_default(
         llm_role_profiles={
             "agent_runtime": "standard",
             "agent_runtime_implementation": "standard",
+            "agent_runtime_qa": "standard",
         },
     )
     with patch("ouroboros.providers.profiles.load_config", return_value=config):
@@ -4515,12 +4516,20 @@ def test_unloadable_config_mid_run_keeps_frozen_routing_instead_of_default(
         role_command = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
         role_again = runtime._build_command("/tmp/out.txt", runtime_handle=handle)
         default_command = runtime._build_command("/tmp/out.txt")
+        # A selector first used *during* the unloadable interval has no warmed
+        # routing to serve; it gets the frozen role default, not the
+        # resolver's unprofiled fallback.
+        cold_handle = RuntimeHandle(
+            backend="codex_cli", kind="qa_session", metadata={"session_role": "qa"}
+        )
+        cold_command = runtime._build_command("/tmp/out.txt", runtime_handle=cold_handle)
 
-    # Observed once as an unavailable baseline, never as adopted routing.
-    assert captured == ["baseline_unavailable"]
+    # Observed once per selector as an unavailable baseline, never as adopted routing.
+    assert captured == ["baseline_unavailable", "baseline_unavailable"]
     assert role_command[role_command.index("--profile") + 1] == "ouroboros-standard"
     assert role_again == role_command
     assert default_command[default_command.index("--profile") + 1] == "ouroboros-standard"
+    assert cold_command[cold_command.index("--profile") + 1] == "ouroboros-standard"
     assert runtime._resolved_fallback_profile == "ouroboros-standard"
 
     # Once the config loads again, valid routing is adopted as before.
@@ -4538,9 +4547,145 @@ def test_unloadable_config_mid_run_keeps_frozen_routing_instead_of_default(
     # (The remap also changes which native Codex profile is in force, so a
     # ``codex_config`` observation may follow; the unavailable state itself
     # is not reported again.)
-    assert captured[:2] == ["baseline_unavailable", "profile_routing"]
-    assert captured.count("baseline_unavailable") == 1
+    assert captured[:3] == ["baseline_unavailable", "baseline_unavailable", "profile_routing"]
+    assert captured.count("baseline_unavailable") == 2
     assert role_command[role_command.index("--profile") + 1] == "drifted-frontier"
+
+
+def test_routing_drift_observed_by_the_last_reconcile_still_retires_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resume decision is sealed after *every* reconcile in one command build.
+
+    Reviewer probe: routing is unchanged at the first check and changed by the
+    time ``_resolve_runtime_codex_config`` re-checks it. The command must carry
+    neither the old thread nor a mix of generations.
+    """
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    config_a = OuroborosConfig(
+        llm_profiles={"a": {"providers": {"codex": {"profile": "profile-a"}}}},
+        llm_role_profiles={"agent_runtime_implementation": "a"},
+    )
+    config_b = OuroborosConfig(
+        llm_profiles={"b": {"providers": {"codex": {"profile": "profile-b"}}}},
+        llm_role_profiles={"agent_runtime_implementation": "b"},
+    )
+    live = {"config": config_a}
+    with patch("ouroboros.providers.profiles.load_config", side_effect=lambda: live["config"]):
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        handle = runtime._build_runtime_handle(
+            "thread-old",
+            RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                metadata={"session_role": "implementation"},
+            ),
+        )
+        assert handle is not None
+        first = runtime._build_command(
+            "/tmp/out.txt", resume_session_id="thread-old", runtime_handle=handle
+        )
+        assert first[first.index("--profile") + 1] == "profile-a"
+        assert "thread-old" in first
+
+        # Flip routing between the first profile check and the routing
+        # resolution inside the same ``_build_command`` call.
+        original = runtime._reconcile_codex_config_files
+
+        def flip_then_reconcile(runtime_handle: RuntimeHandle | None = None) -> None:
+            live["config"] = config_b
+            original(runtime_handle)
+
+        monkeypatch.setattr(runtime, "_reconcile_codex_config_files", flip_then_reconcile)
+        command = runtime._build_command(
+            "/tmp/out.txt", resume_session_id="thread-old", runtime_handle=handle
+        )
+
+    assert runtime._drift.epoch >= 1
+    assert command[command.index("--profile") + 1] == "profile-b"
+    assert "resume" not in command
+    assert "thread-old" not in command
+
+
+def test_handles_are_stamped_with_the_invocation_admitted_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread launched at epoch 0 stays epoch 0 even if drift is observed mid-stream.
+
+    Reviewer probe: invocation A builds its command at epoch 0, a concurrent
+    invocation B observes drift, then A's ``thread.started`` arrives. A's
+    thread was created under the old inputs and must not resume.
+    """
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    scope_a = codex_cli_runtime_module._CodexItemCorrelationScope()
+    assert runtime._build_command("/tmp/out.txt")
+    scope_a.admitted_drift_epoch = runtime._drift.epoch  # what the stream loop records
+    assert scope_a.admitted_drift_epoch == 0
+
+    runtime._drift.observe("codex_config", "observed by a concurrent invocation")
+    assert runtime._drift.epoch == 1
+
+    started = runtime._convert_event(
+        {"type": "thread.started", "thread_id": "thread-a"}, None, item_scope=scope_a
+    )
+    handle_a = started[0].resume_handle
+    assert handle_a is not None
+    assert handle_a.metadata["ouroboros_runtime_drift_epoch"] == 0
+    assert runtime._resolve_resume_session_id(handle_a) is None
+
+    # An invocation admitted after the drift is attributed to the new epoch.
+    scope_b = codex_cli_runtime_module._CodexItemCorrelationScope()
+    scope_b.admitted_drift_epoch = runtime._drift.epoch
+    handle_b = runtime._convert_event(
+        {"type": "thread.started", "thread_id": "thread-b"}, None, item_scope=scope_b
+    )[0].resume_handle
+    assert handle_b is not None
+    assert handle_b.metadata["ouroboros_runtime_drift_epoch"] == 1
+    assert runtime._resolve_resume_session_id(handle_b) == "thread-b"
+
+
+def test_unchanged_unavailable_attestation_is_reported_once_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that keeps timing out does not advance the epoch on every command."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd="/tmp/project", model="gpt-5")
+    assert runtime._build_command("/tmp/out.txt")
+    assert runtime._drift.epoch == 0
+
+    captured: list[str | None] = []
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_drift.usage_telemetry.capture_runtime_drift",
+        lambda kind: captured.append(kind),
+    )
+    timed_out = codex_cli_runtime_module._CliExecutableVersionAttestation(
+        state=codex_cli_runtime_module._CliExecutableVersionState.TIMED_OUT
+    )
+    with patch.object(runtime, "_cli_executable_version_attestation", return_value=timed_out):
+        for _ in range(3):
+            assert runtime._build_command("/tmp/out.txt")
+
+    # Unavailable evidence, not a changed binary: one observation, then idempotent.
+    assert captured == ["baseline_unavailable"]
+    assert runtime._drift.epoch == 1
+
+    # The probe is retried on every command, so once it succeeds again the
+    # runtime re-attests and stops carrying the unavailable state.
+    assert runtime._build_command("/tmp/out.txt")
+    assert runtime._build_command("/tmp/out.txt")
+    assert runtime._cli_attestation_unavailable_detail is None
+    assert runtime._drift.epoch == 1
+    assert captured == ["baseline_unavailable"]
 
 
 def test_cli_upgrade_mid_run_is_observed_and_new_binary_becomes_baseline(
