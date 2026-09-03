@@ -723,6 +723,47 @@ class TestCapture:
         assert props["failure_reason_code"] == "validation"
         assert "secret" not in json.dumps(sent[0])
 
+    def test_failed_run_forwards_closed_failure_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "validation",
+                "failure_cause": "verify_workspace_mutated",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "validation"
+        assert props["failure_cause"] == "verify_workspace_mutated"
+
+    def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={"failure_cause": "verify_command: pytest /Users/private/project"},
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_cause"] == "unknown"
+        assert "private" not in json.dumps(sent[0])
+
+    def test_successful_outcome_carries_no_failure_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="completed",
+            result_meta={"failure_cause": "verify_exit_nonzero"},
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert "failure_cause" not in sent[0]["properties"]
+        assert "failure_reason_code" not in sent[0]["properties"]
+
     def test_never_raises_when_post_fails(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:

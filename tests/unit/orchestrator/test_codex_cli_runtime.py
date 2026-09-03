@@ -146,78 +146,46 @@ def test_codex_config_fingerprint_exempts_first_use_trust_when_config_absent(
     assert runtime._fingerprint_codex_config_files() != original
 
 
-def test_ordinary_checkout_does_not_mint_a_main_root_exempt_key(
+def test_codex_config_fingerprint_ignores_first_use_trust_for_other_projects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``.git`` DIRECTORY ancestor is the main repo itself, not a linked worktree."""
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-    subdir = repo / "src"
-    subdir.mkdir()
-    repo_key = str(repo.resolve(strict=False))
+    """A concurrent session's first-use trust entry is not this runtime's drift.
+
+    Observed live: two ``ooo run`` sessions (or one run plus the user running
+    ``codex`` in another terminal) each record ``projects.<own-root>.trust_level``
+    on first use; treating the other's entry as drift failed every AC after
+    the first, instantly, in both sessions.
+    """
+    project_dir = tmp_path / "project"
+    other_dir = tmp_path / "other"
+    project_dir.mkdir()
+    other_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
+    other_project_key = str(other_dir.resolve(strict=False))
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
-    (codex_home / "config.toml").write_text('model = "gpt-test"\n', encoding="utf-8")
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    runtime = CodexCliRuntime(cli_path="codex", cwd=str(subdir.resolve(strict=False)))
-
-    assert runtime._git_main_repository_root(str(subdir)) is None
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
     original = runtime._codex_config_fingerprint
-    (codex_home / "config.toml").write_text(
-        f'model = "gpt-test"\n\n[projects.{json.dumps(repo_key)}]\ntrust_level = "trusted"\n',
+
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(other_project_key)}]\n'
+        'trust_level = "trusted"\n',
         encoding="utf-8",
     )
-    assert runtime._fingerprint_codex_config_files() != original
+
+    assert runtime._fingerprint_codex_config_files() == original
+    runtime._assert_codex_config_files_unchanged()
 
 
-def test_malformed_gitdir_layouts_do_not_resolve_a_main_root(
-    tmp_path: Path,
-) -> None:
-    """Only an existing ``<main>/.git/worktrees/<name>`` target is recognized."""
-    main_repo = tmp_path / "main-repo"
-    (main_repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
-    (main_repo / ".git" / "not-worktrees" / "wt").mkdir(parents=True)
-    runtime = CodexCliRuntime(cli_path="codex", cwd=str(tmp_path))
-
-    def worktree_with_gitdir(name: str, target: Path) -> str:
-        worktree = tmp_path / name
-        worktree.mkdir()
-        (worktree / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
-        return str(worktree)
-
-    # Grandparent named .git but not the worktrees layout.
-    assert (
-        runtime._git_main_repository_root(
-            worktree_with_gitdir("wt-not", main_repo / ".git" / "not-worktrees" / "wt")
-        )
-        is None
-    )
-    # Correct shape but nonexistent target.
-    assert (
-        runtime._git_main_repository_root(
-            worktree_with_gitdir("wt-absent", main_repo / ".git" / "worktrees" / "absent")
-        )
-        is None
-    )
-    # Submodule-style gitdir (.git/modules/<name>).
-    (main_repo / ".git" / "modules" / "sub").mkdir(parents=True)
-    assert (
-        runtime._git_main_repository_root(
-            worktree_with_gitdir("wt-module", main_repo / ".git" / "modules" / "sub")
-        )
-        is None
-    )
-    # The valid layout still resolves.
-    assert runtime._git_main_repository_root(
-        worktree_with_gitdir("wt-ok", main_repo / ".git" / "worktrees" / "wt")
-    ) == str(main_repo.resolve(strict=False))
-
-
-def test_codex_config_fingerprint_tracks_other_project_trust(
+def test_codex_config_fingerprint_tracks_non_trusted_level_for_other_projects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Only the automatic ``trusted`` entry is exempt; anything else is drift."""
     project_dir = tmp_path / "project"
     other_dir = tmp_path / "other"
     project_dir.mkdir()
@@ -233,7 +201,7 @@ def test_codex_config_fingerprint_tracks_other_project_trust(
 
     config_path.write_text(
         f'model = "gpt-test"\n\n[projects.{json.dumps(other_project_key)}]\n'
-        'trust_level = "trusted"\n',
+        'trust_level = "untrusted"\n',
         encoding="utf-8",
     )
 

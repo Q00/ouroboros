@@ -34,7 +34,11 @@ import urllib.request
 import uuid
 
 from ouroboros import __version__
-from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.failure_taxonomy import (
+    RUN_FAILURE_CAUSES,
+    UNKNOWN_RUN_FAILURE_CAUSE,
+    classify_failure,
+)
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
@@ -269,6 +273,7 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "terminal_status",
         "verified",
         "failure_reason_code",
+        "failure_cause",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -1118,6 +1123,14 @@ def capture_job_outcome(
         }
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
+            # The fine-grained run cause (SSOT: orchestrator/run_failure_cause.py)
+            # is producer-owned but folded to the closed vocabulary here anyway
+            # so a replayed or spoofed value is counted, never forwarded.
+            raw_cause = meta.get("failure_cause")
+            if isinstance(raw_cause, str):
+                properties["failure_cause"] = (
+                    raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
+                )
         capture("workflow_outcome", properties)
     except Exception:
         pass

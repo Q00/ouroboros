@@ -56,6 +56,7 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
+from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -2090,6 +2091,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                if synchronous and session_status in {
+                    SessionStatus.FAILED,
+                    SessionStatus.CANCELLED,
+                }:
+                    failure_meta = await derive_run_failure_meta(
+                        event_store,
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                        session_status=session_status,
+                    )
+                    meta.update(failure_meta)
+                    message += f"Failure Cause: {failure_meta['failure_cause']}\n"
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)

@@ -89,7 +89,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
 Notes:
@@ -129,6 +129,16 @@ Notes:
 - `error_type` is only an audited exception class name, never a message or
   traceback. `failure_reason_code` is one of `config`, `auth`, `timeout`,
   `model`, `tool`, `validation`, `cancelled`, or `unknown`.
+- `failure_cause` on a failed/cancelled `run` names which structural branch
+  failed the run, derived only from the executor's durable machine-readable
+  evidence (never prose, commands, paths, or output). Closed enum:
+  `verify_<cause>` (the `ac_verify_failed` cause that rejected the run at
+  final settlement or exhausted an AC's retries), `worker_evidence_missing`,
+  `worker_fabrication_suspected`, `worker_blocked`, `worker_failed` (an AC was
+  judged not done and no retry budget or route remained), `dependency_blocked`
+  (every judged AC was blocked upstream), `runtime_error` (the orchestrator
+  raised an audited exception class), `cancelled`, or `unknown`. Anything else
+  folds to `unknown` before serialization.
 - `command` values come only from static built-in command/tool/job registries.
 - `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
   anonymous ID, UTC day, event, and retained dimensions. Job-derived
