@@ -233,6 +233,34 @@ class TestCreateDefaultConfig:
         assert (config_dir / "data").exists()
         assert (config_dir / "logs").exists()
 
+    def test_create_default_config_persists_env_telemetry_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh config must persist an active process-level telemetry opt-out."""
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+        config_dir = tmp_path / ".ouroboros"
+
+        config_path, _ = create_default_config(config_dir)
+
+        with config_path.open(encoding="utf-8") as handle:
+            config_dict = yaml.safe_load(handle)
+        assert config_dict["telemetry"]["enabled"] is False
+
+    def test_create_default_config_keeps_telemetry_on_without_env_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent process opt-out, a fresh config keeps the default-on contract."""
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        config_dir = tmp_path / ".ouroboros"
+
+        config_path, _ = create_default_config(config_dir)
+
+        with config_path.open(encoding="utf-8") as handle:
+            config_dict = yaml.safe_load(handle)
+        assert config_dict["telemetry"]["enabled"] is True
+
 
 class TestLoadConfig:
     """Test load_config function."""

@@ -1374,9 +1374,13 @@ class TestCodexDoctor:
         assert rendered is not None
         parsed = tomllib.loads(rendered)
         entry = parsed["mcp_servers"]["ouroboros"]
-        assert entry["env"] == {
-            "OUROBOROS_AGENT_RUNTIME": "codex",
-            "OUROBOROS_LLM_BACKEND": "codex",
+        assert entry["env"]["OUROBOROS_AGENT_RUNTIME"] == "codex"
+        assert entry["env"]["OUROBOROS_LLM_BACKEND"] == "codex"
+        assert set(entry["env"]) <= {
+            "OUROBOROS_AGENT_RUNTIME",
+            "OUROBOROS_LLM_BACKEND",
+            "DO_NOT_TRACK",
+            "OUROBOROS_TELEMETRY",
         }
         (codex_dir / "config.toml").write_text(rendered, encoding="utf-8")
         assert _check_auto_dispatch_surface(codex_dir) == []

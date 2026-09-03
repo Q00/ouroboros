@@ -61,6 +61,7 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_opt_out import with_process_telemetry_opt_out
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
@@ -341,7 +342,7 @@ def create_default_config(
             )
 
     # Create config.yaml
-    default_config = get_default_config()
+    default_config = with_process_telemetry_opt_out(get_default_config())
     config_dict = _model_to_yaml_dict(default_config)
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(

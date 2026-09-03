@@ -114,6 +114,7 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_opt_out import telemetry_opt_out_environ
 
 __all__ = [
     # Models
@@ -200,6 +201,7 @@ __all__ = [
     "get_runtime_profile",
     "get_semantic_model",
     "get_telemetry_enabled",
+    "telemetry_opt_out_environ",
     "get_usage_limit_pause_seconds",
     "MAX_USAGE_LIMIT_PAUSE_SECONDS",
     "get_wonder_model",

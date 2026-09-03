@@ -342,6 +342,116 @@ class TestCodexSetup:
             '"ouroboros", "mcp", "serve"]' in contents
         )
 
+    def test_register_codex_mcp_server_inherits_telemetry_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh Codex MCP env must carry the setup process telemetry opt-out."""
+        monkeypatch.setenv("DO_NOT_TRACK", "true")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "off")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+        env = parsed["mcp_servers"]["ouroboros"]["env"]
+        assert env["OUROBOROS_AGENT_RUNTIME"] == "codex"
+        assert env["OUROBOROS_LLM_BACKEND"] == "codex"
+        assert env["DO_NOT_TRACK"] == "1"
+        assert env["OUROBOROS_TELEMETRY"] == "0"
+
+    def test_register_codex_mcp_server_refreshes_managed_entry_with_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setup-owned Codex MCP env should pick up a later process opt-out."""
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "# Ouroboros MCP hookup for Codex CLI.",
+                    "# Keep Ouroboros runtime settings and per-role model overrides in",
+                    "# ~/.ouroboros/config.yaml (for example: clarification.default_model,",
+                    "# llm.qa_model, evaluation.semantic_model, consensus.*).",
+                    "# This file is only for the Codex MCP/env registration block.",
+                    "",
+                    "[mcp_servers.ouroboros]",
+                    'command = "/usr/local/bin/uvx"',
+                    'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
+                    '"ouroboros", "mcp", "serve"]',
+                    "",
+                    "[mcp_servers.ouroboros.env]",
+                    'OUROBOROS_AGENT_RUNTIME = "codex"',
+                    'OUROBOROS_LLM_BACKEND = "codex"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=False),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        env = tomllib.loads(codex_config.read_text(encoding="utf-8"))["mcp_servers"]["ouroboros"][
+            "env"
+        ]
+        assert env["DO_NOT_TRACK"] == "1"
+        assert "OUROBOROS_TELEMETRY" not in env
+
+    def test_register_codex_mcp_server_preserves_custom_env_without_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User-owned MCP env must not be rewritten to inject telemetry opt-out."""
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        selected = tmp_path / "bin" / "ouroboros"
+        selected.parent.mkdir()
+        selected.touch()
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(str(selected))}\n"
+            'args = ["mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "claude"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n'
+        )
+        codex_config.write_text(original, encoding="utf-8")
+
+        def which(command: str) -> str | None:
+            return str(selected) if command in {"ouroboros", str(selected)} else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.is_native_windows", return_value=False),
+            patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.setup._render_codex_mcp_section",
+                return_value='[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = []\n',
+            ),
+        ):
+            assert setup_cmd._register_codex_mcp_server()
+
+        assert codex_config.read_text(encoding="utf-8") == original
+
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
     ) -> None:
@@ -9847,7 +9957,8 @@ class TestHostRuntimeSetup:
                     'command = "ouroboros"\n'
                     'args = ["mcp", "serve", "--runtime", "codex", '
                     '"--llm-backend", "codex"]'
-                )
+                ),
+                env_lines=('OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "codex"'),
             ),
             encoding="utf-8",
         )

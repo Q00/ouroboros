@@ -38,6 +38,10 @@ import yaml
 
 from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_mcp_telemetry import MCP_SECTION_TEMPLATE as _CODEX_MCP_SECTION_TEMPLATE
+from ouroboros.cli.codex_mcp_telemetry import base_env as _codex_mcp_base_env
+from ouroboros.cli.codex_mcp_telemetry import env_is_setup_owned as _codex_mcp_env_is_setup_owned
+from ouroboros.cli.codex_mcp_telemetry import render_env_lines as _render_codex_mcp_env_lines
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
@@ -423,19 +427,6 @@ def _detect_runtimes() -> dict[str, str | None]:
     return runtimes
 
 
-_CODEX_MCP_SECTION_TEMPLATE = """# Ouroboros MCP hookup for Codex CLI.
-# Keep Ouroboros runtime settings and per-role model overrides in
-# ~/.ouroboros/config.yaml (for example: clarification.default_model,
-# llm.qa_model, evaluation.semantic_model, consensus.*).
-# This file is only for the Codex MCP/env registration block.
-
-[mcp_servers.ouroboros]
-{command_lines}
-
-[mcp_servers.ouroboros.env]
-OUROBOROS_AGENT_RUNTIME = "codex"
-OUROBOROS_LLM_BACKEND = "codex"
-"""
 _CODEX_MCP_COMMENT_LINES = (
     "# Ouroboros MCP hookup for Codex CLI.",
     "# Keep Ouroboros runtime settings and per-role model overrides in",
@@ -708,7 +699,10 @@ def _render_codex_mcp_section() -> str | None:
             "args = [" + ", ".join(_toml_string(arg) for arg in args) + "]",
         )
     )
-    return _CODEX_MCP_SECTION_TEMPLATE.format(command_lines=command_lines)
+    return _CODEX_MCP_SECTION_TEMPLATE.format(
+        command_lines=command_lines,
+        env_lines=_render_codex_mcp_env_lines(_CODEX_MANAGED_MCP_ENV, _toml_string),
+    )
 
 
 def _has_managed_codex_mcp_comment(raw: str) -> bool:
@@ -742,7 +736,9 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     env = entry.get("env")
-    if env is not None and env != _CODEX_MANAGED_MCP_ENV and env != _CODEX_HOST_MCP_ENV:
+    if env is not None and not _codex_mcp_env_is_setup_owned(
+        env, managed_env=_CODEX_MANAGED_MCP_ENV, host_env=_CODEX_HOST_MCP_ENV
+    ):
         return False
     if set(entry) - {"command", "args", "env"}:
         return False
@@ -753,9 +749,10 @@ def _is_setup_managed_codex_mcp_entry(
         args_tuple = tuple(str(arg) for arg in args)
         if has_managed_comment:
             return args_tuple in _CODEX_LEGACY_DIRECT_MCP_ARGS
+        base_env = _codex_mcp_base_env(env) if isinstance(env, dict) else env
         return (
             args_tuple == _CODEX_DIRECT_MCP_BASE_ARGS
-            and env == _CODEX_MANAGED_MCP_ENV
+            and base_env == _CODEX_MANAGED_MCP_ENV
             and _command_matches_path_program(command, "ouroboros")
         )
     if not has_managed_comment:
