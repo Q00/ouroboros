@@ -352,10 +352,13 @@ class TestRuntimeHandle:
             assert handle.backend == expected
 
         # Exercise Grok's inherited Codex handle builder against the real method.
+        from ouroboros.orchestrator.runtime_drift import RuntimeDriftLedger
+
         stub = SimpleNamespace(
             _runtime_handle_backend="grok_cli",
             _cwd="/tmp/project",
             _permission_mode=None,
+            _drift=RuntimeDriftLedger(runtime_backend="grok"),
         )
         built = GrokCliRuntime._build_runtime_handle(stub, "sess_123")
         assert built is not None

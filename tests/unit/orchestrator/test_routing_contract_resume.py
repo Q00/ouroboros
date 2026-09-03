@@ -2408,7 +2408,10 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     runtime_cls: type[CodexCliRuntime],
     tmp_path: Path,
 ) -> None:
-    """Every portable Codex-family runtime must guard command-time binary drift."""
+    """Every portable Codex-family runtime observes command-time binary drift.
+
+    Detection is shared; the response is observe + re-attest, not a failed AC.
+    """
     cli = tmp_path / "runtime-cli"
     cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     cli.chmod(0o755)
@@ -2417,10 +2420,9 @@ def test_trusted_codex_family_runtime_rejects_executable_content_drift(
     cli.write_text("#!/bin/sh\necho changed\nexit 0\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="CLI executable changed"):
-        runtime._build_command(
-            str(tmp_path / "last-message.txt"),
-            prompt="hello",
-        )
+        runtime._verify_cli_executable_identity_unchanged()
+    assert runtime._build_command(str(tmp_path / "last-message.txt"), prompt="hello")
+    assert runtime._drift.epoch == 1
 
 
 def test_zcode_runtime_is_not_trusted_as_portable_identity() -> None:
@@ -2475,8 +2477,10 @@ def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
     expected_effort = "xhigh" if original_provider_effort else "high"
     assert f"model_reasoning_effort={expected_effort}" in original_command
     with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
-        with pytest.raises(RuntimeError, match="profile routing changed"):
-            runtime._build_command("/tmp/output", runtime_handle=handle)
+        drifted_command = runtime._build_command("/tmp/output", runtime_handle=handle)
+    # Observed, not fatal: threads retire and the drifted effort is honored.
+    assert runtime._drift.epoch >= 1
+    assert "model_reasoning_effort=low" in drifted_command
 
 
 def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:

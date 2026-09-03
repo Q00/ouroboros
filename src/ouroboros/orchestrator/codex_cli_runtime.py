@@ -54,11 +54,12 @@ from ouroboros.orchestrator.cli_version_attestation import (
     CliExecutableVersionAttestation,
     CliExecutableVersionState,
     compare_cli_executable_version_attestations,
+    is_unavailable_attestation_error,
     probe_cli_executable_version_attestation,
     read_cli_executable_content_identity,
     read_cli_executable_filesystem_identity,
     read_cli_executable_resolution_chain_identity,
-    require_unchanged_cli_version_attestation,
+    verify_cli_executable_identity_unchanged,
 )
 from ouroboros.orchestrator.codex_instruction_assets import (
     update_codex_instruction_asset_fingerprint,
@@ -69,6 +70,7 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
     clear_attested_codex_child_environment,
     codex_cli_runtime_attestation,
 )
+from ouroboros.orchestrator.runtime_drift import DRIFT_EPOCH_UNKNOWN, RuntimeDriftLedger
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
@@ -256,6 +258,8 @@ class _CodexItemCorrelationScope:
     unkeyed_started_nonces: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     completed_item_keys: set[str] = field(default_factory=set)
     current_thread_id: str | None = None
+    # Drift epoch this invocation was admitted under (set after command build).
+    admitted_drift_epoch: int | None = None
     _nonce_seq: int = 0
 
     def allocate_nonce(self) -> str:
@@ -328,20 +332,7 @@ class CodexCliRuntime:
             "goose",
             "grok",
         }
-        self._cli_executable_path_identity = (
-            self._cli_executable_identity() if snapshots_cli_execution_identity else None
-        )
-        self._cli_executable_content_identity_snapshot = (
-            self._cli_executable_content_identity() if snapshots_cli_execution_identity else None
-        )
-        self._cli_executable_version_attestation_snapshot = (
-            self._cli_executable_version_attestation() if snapshots_cli_execution_identity else None
-        )
-        self._cli_executable_version_identity_snapshot = (
-            self._cli_executable_version_attestation_snapshot.identity
-            if self._cli_executable_version_attestation_snapshot is not None
-            else None
-        )
+        self._snapshot_cli_executable_identity(enabled=snapshots_cli_execution_identity)
         # Freeze the role-default model/profile once per runtime. Without this,
         # every ``codex exec`` call re-reads mutable profile config, so a long
         # run (or its resume) can silently switch models while the persisted
@@ -368,6 +359,9 @@ class CodexCliRuntime:
             )
             self._runtime_handle_profile_fingerprints: dict[str, str] = {}
             self._runtime_handle_codex_config_fingerprints: dict[str, str] = {}
+            self._runtime_handle_resolved_routing: dict[
+                str, tuple[str | None, str | None, str | None]
+            ] = {}
         else:
             # Subclasses reuse the process/session machinery but implement
             # their own model/config semantics. Do not make their construction
@@ -383,6 +377,10 @@ class CodexCliRuntime:
             self._builtin_mcp_handler_registry_fingerprint = None
             self._runtime_handle_profile_fingerprints = {}
             self._runtime_handle_codex_config_fingerprints = {}
+            self._runtime_handle_resolved_routing = {}
+        # Drift of frozen authority inputs is observed, not fatal (runtime_drift.py).
+        self._drift = RuntimeDriftLedger(runtime_backend=self._runtime_backend)
+        self._cli_attestation_unavailable_detail: str | None = None
         # Item-lifecycle correlation state (#1690): item ids whose
         # ``item.started`` was already projected as a tool start, so the
         # matching ``item.completed`` never duplicates the start. Id-less
@@ -681,6 +679,13 @@ class CodexCliRuntime:
         runtime_handle: RuntimeHandle | None = None,
     ) -> str:
         """Hash only Ouroboros profile fields that can alter a Codex command."""
+        return self._observe_profile_resolution_config(runtime_handle)[0]
+
+    def _observe_profile_resolution_config(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> tuple[str, bool]:
+        """Return (fingerprint, loadable); an unloadable config is never adopted as routing."""
         from ouroboros.providers import profiles as profile_module
 
         try:
@@ -688,7 +693,10 @@ class CodexCliRuntime:
         except Exception as exc:
             # Role resolution also falls back when config loading fails. Keep
             # that state stable without persisting path-rich error messages.
-            return self._hash_json_payload({"version": 1, "load_error": type(exc).__name__})
+            return (
+                self._hash_json_payload({"version": 1, "load_error": type(exc).__name__}),
+                False,
+            )
 
         relevant_role_profiles: dict[str, str] = {}
         relevant_profile_names: set[str] = set()
@@ -758,12 +766,15 @@ class CodexCliRuntime:
                 profile_contract["reasoning_effort"] = profile.reasoning_effort
             profiles[name] = profile_contract
 
-        return self._hash_json_payload(
-            {
-                "version": 1,
-                "llm_profiles": profiles,
-                "llm_role_profiles": dict(sorted(relevant_role_profiles.items())),
-            }
+        return (
+            self._hash_json_payload(
+                {
+                    "version": 1,
+                    "llm_profiles": profiles,
+                    "llm_role_profiles": dict(sorted(relevant_role_profiles.items())),
+                }
+            ),
+            True,
         )
 
     @staticmethod
@@ -1025,10 +1036,25 @@ class CodexCliRuntime:
         selector = self.resume_handle_execution_identity_contract(runtime_handle)
         return self._hash_json_payload(selector)
 
-    def _assert_codex_config_files_unchanged(
+    def _rebaseline_fingerprint(
+        self, attribute: str, current: str | None, *, kind: str, detail: str
+    ) -> None:
+        """Adopt ``current`` as the frozen baseline, observing drift if it moved."""
+        baseline = getattr(self, attribute)
+        if baseline is None:
+            if current is not None:
+                self._drift.observe("baseline_unavailable", f"{detail} was unavailable")
+                setattr(self, attribute, current)
+            return
+        if current != baseline:
+            self._drift.observe(kind, f"{detail} changed after initialization")
+            setattr(self, attribute, current)
+
+    def _reconcile_codex_config_files(
         self,
         runtime_handle: RuntimeHandle | None = None,
     ) -> None:
+        """Re-baseline on Codex config drift instead of failing the AC."""
         if self._runtime_backend != "codex":
             return
         key = self._runtime_handle_fingerprint_key(runtime_handle)
@@ -1042,58 +1068,60 @@ class CodexCliRuntime:
                 return
         elif current == self._codex_config_fingerprint:
             return
-        raise RuntimeError(
-            "Codex configuration changed after runtime initialization; "
-            "start a new execution session"
+        self._drift.observe("codex_config", "Codex configuration changed after initialization")
+        self._codex_project_trust_baseline = self._read_codex_project_trust_levels()
+        self._codex_config_fingerprint = self._fingerprint_codex_config_files()
+        self._runtime_handle_codex_config_fingerprints = {}
+        if key is not None:
+            self._runtime_handle_codex_config_fingerprints[key] = (
+                self._fingerprint_codex_config_files(runtime_handle)
+            )
+
+    def _reconcile_cli_executable_identity(self) -> None:
+        """Re-attest on drift; unchanged unavailable evidence is reported once."""
+        try:
+            self._verify_cli_executable_identity_unchanged()
+        except RuntimeError as exc:
+            detail = str(exc)
+            unavailable = is_unavailable_attestation_error(detail)
+            # Unavailable evidence is one state however its message is
+            # phrased (check-time vs. re-snapshotted init-time wording).
+            if not (unavailable and self._cli_attestation_unavailable_detail is not None):
+                self._drift.observe(
+                    "baseline_unavailable" if unavailable else "cli_executable", detail
+                )
+            self._cli_attestation_unavailable_detail = detail if unavailable else None
+            self._snapshot_cli_executable_identity(enabled=True)
+        else:
+            self._cli_attestation_unavailable_detail = None
+
+    def _snapshot_cli_executable_identity(self, *, enabled: bool) -> None:
+        """Freeze (or re-freeze) the executable's path, content, and version identity."""
+        self._cli_executable_path_identity = self._cli_executable_identity() if enabled else None
+        self._cli_executable_content_identity_snapshot = (
+            self._cli_executable_content_identity() if enabled else None
+        )
+        self._cli_executable_version_attestation_snapshot = (
+            self._cli_executable_version_attestation() if enabled else None
+        )
+        self._cli_executable_version_identity_snapshot = (
+            self._cli_executable_version_attestation_snapshot.identity
+            if self._cli_executable_version_attestation_snapshot is not None
+            else None
         )
 
-    def _assert_cli_executable_identity_unchanged(self) -> None:
-        """Fail closed on drift or unavailable version-attestation evidence.
-
-        Initialization and check-time probe failures both block execution, but
-        use errors distinct from verified drift.  A caller may retry a
-        check-time transient failure on the same runtime; an initialization
-        failure has no trustworthy baseline and requires a new runtime.
-        """
-        if self._cli_executable_path_identity is None:
-            cli_path = str(self._cli_path)
-            cli_candidate = Path(cli_path).expanduser()
-            if not cli_candidate.is_absolute():
-                if self._runtime_backend == "codex":
-                    raise RuntimeError(
-                        "Codex CLI executable was unresolved at runtime initialization; "
-                        "start a new execution session"
-                    )
-            elif cli_candidate.exists():
-                raise RuntimeError(
-                    f"{self._display_name} executable appeared after runtime initialization; "
-                    "start a new execution session"
-                )
-            require_unchanged_cli_version_attestation(
-                self._display_name,
-                self._cli_executable_version_attestation_snapshot,
-                self._cli_executable_version_attestation,
-            )
-            return
-        if self._cli_executable_identity() != self._cli_executable_path_identity:
-            raise RuntimeError(
-                f"{self._display_name} executable changed after runtime initialization; "
-                "start a new execution session"
-            )
-        if (
-            self._cli_executable_content_identity()
-            != self._cli_executable_content_identity_snapshot
-        ):
-            raise RuntimeError(
-                f"{self._display_name} executable changed after runtime initialization; "
-                "start a new execution session"
-            )
-        require_unchanged_cli_version_attestation(
-            self._display_name,
-            self._cli_executable_version_attestation_snapshot,
-            lambda: self._cli_executable_version_attestation(
-                self._cli_executable_version_attestation_snapshot
-            ),
+    def _verify_cli_executable_identity_unchanged(self) -> None:
+        """Raise on drift or unavailable version-attestation evidence."""
+        verify_cli_executable_identity_unchanged(
+            display_name=self._display_name,
+            cli_path=str(self._cli_path),
+            codex_native=self._runtime_backend == "codex",
+            path_identity_snapshot=self._cli_executable_path_identity,
+            content_identity_snapshot=self._cli_executable_content_identity_snapshot,
+            version_attestation_snapshot=self._cli_executable_version_attestation_snapshot,
+            current_path_identity=self._cli_executable_identity,
+            current_content_identity=self._cli_executable_content_identity,
+            current_version_attestation=self._cli_executable_version_attestation,
         )
 
     def _fingerprint_skill_dispatch_registry(self) -> str | None:
@@ -1144,17 +1172,13 @@ class CodexCliRuntime:
             }
         )
 
-    def _assert_skill_dispatcher_unchanged(self) -> None:
-        """Fail closed if process-local skill dispatch authority was replaced."""
-        if self._runtime_backend != "codex":
-            return
-        if (
-            self._fingerprint_skill_dispatcher(self._skill_dispatcher)
-            != self._skill_dispatcher_identity
-        ):
-            raise RuntimeError(
-                "Codex skill dispatcher changed after runtime initialization; "
-                "start a new execution session"
+    def _reconcile_skill_dispatcher(self) -> None:
+        if self._runtime_backend == "codex":
+            self._rebaseline_fingerprint(
+                "_skill_dispatcher_identity",
+                self._fingerprint_skill_dispatcher(self._skill_dispatcher),
+                kind="skill_dispatcher",
+                detail="skill dispatcher",
             )
 
     def _handler_source_digest(self, handler: Any) -> str | None:
@@ -1200,51 +1224,38 @@ class CodexCliRuntime:
             )
         return self._hash_json_payload(payload)
 
-    def _assert_builtin_mcp_handler_registry_unchanged(self) -> None:
-        """Fail closed if built-in MCP handler authority changes mid-run."""
-        if self._runtime_backend != "codex":
-            return
-        if self._builtin_mcp_handler_registry_fingerprint is None:
-            raise RuntimeError(
-                "Codex built-in MCP handler registry was unavailable at runtime initialization; "
-                "start a new execution session"
-            )
-        if (
-            self._fingerprint_builtin_mcp_handler_registry()
-            != self._builtin_mcp_handler_registry_fingerprint
-        ):
-            raise RuntimeError(
-                "Codex built-in MCP handler registry changed after runtime initialization; "
-                "start a new execution session"
+    def _reconcile_builtin_mcp_handler_registry(self) -> None:
+        if self._runtime_backend == "codex":
+            self._rebaseline_fingerprint(
+                "_builtin_mcp_handler_registry_fingerprint",
+                self._fingerprint_builtin_mcp_handler_registry(),
+                kind="mcp_handler_registry",
+                detail="built-in MCP handler registry",
             )
 
-    def _assert_skill_dispatch_registry_unchanged(self) -> None:
-        """Fail closed if packaged skill dispatch authority changes mid-run."""
+    def _reconcile_skill_dispatch_registry(self) -> None:
         if self._runtime_backend != "codex":
             return
-        self._assert_skill_dispatcher_unchanged()
-        self._assert_builtin_mcp_handler_registry_unchanged()
-        if self._skill_dispatch_registry_fingerprint is None:
-            raise RuntimeError(
-                "Codex skill dispatch registry was unavailable at runtime initialization; "
-                "start a new execution session"
-            )
-        if self._fingerprint_skill_dispatch_registry() != self._skill_dispatch_registry_fingerprint:
-            raise RuntimeError(
-                "Codex skill dispatch registry changed after runtime initialization; "
-                "start a new execution session"
-            )
+        self._reconcile_skill_dispatcher()
+        self._reconcile_builtin_mcp_handler_registry()
+        self._rebaseline_fingerprint(
+            "_skill_dispatch_registry_fingerprint",
+            self._fingerprint_skill_dispatch_registry(),
+            kind="skill_dispatch_registry",
+            detail="skill dispatch registry",
+        )
 
-    def _assert_profile_resolution_config_unchanged(
+    def _reconcile_profile_resolution_config(
         self,
         runtime_handle: RuntimeHandle | None = None,
-    ) -> None:
+    ) -> bool:
+        """Re-baseline on valid routing drift; unloadable config keeps frozen routing."""
         if self._runtime_backend != "codex":
-            return
+            return True
         key = self._runtime_handle_fingerprint_key(runtime_handle)
         if runtime_handle is not None and key is None:
-            return
-        current = self._fingerprint_profile_resolution_config(
+            return True
+        current, loadable = self._observe_profile_resolution_config(
             runtime_handle if key is not None else None
         )
         if key is not None:
@@ -1253,13 +1264,35 @@ class CodexCliRuntime:
                 previous = self._profile_resolution_fingerprint
                 self._runtime_handle_profile_fingerprints[key] = previous
             if current == previous:
-                return
+                return loadable
         elif current == self._profile_resolution_fingerprint:
-            return
-        raise RuntimeError(
-            "Ouroboros Codex profile routing changed after runtime initialization; "
-            "start a new execution session"
+            return loadable
+        if not loadable:
+            self._drift.observe(
+                "baseline_unavailable",
+                "Ouroboros config became unloadable after initialization; "
+                "keeping the frozen profile routing",
+            )
+            # Reported once; resolved routing deliberately untouched.
+            if key is not None:
+                self._runtime_handle_profile_fingerprints[key] = current
+            else:
+                self._profile_resolution_fingerprint = current
+            return False
+        self._drift.observe(
+            "profile_routing", "Ouroboros Codex profile routing changed after initialization"
         )
+        (
+            self._resolved_fallback_model,
+            self._resolved_fallback_profile,
+            self._resolved_fallback_reasoning_effort,
+        ) = self._resolve_runtime_codex_config_uncached(None)
+        self._profile_resolution_fingerprint = self._fingerprint_profile_resolution_config()
+        self._runtime_handle_profile_fingerprints = {}
+        self._runtime_handle_resolved_routing = {}
+        if key is not None:
+            self._runtime_handle_profile_fingerprints[key] = current
+        return True
 
     def execution_identity_contract(
         self,
@@ -1461,17 +1494,20 @@ class CodexCliRuntime:
         )
         return resolved.config.model, resolved.backend_profile, resolved.config.reasoning_effort
 
+    def _frozen_fallback_routing(self) -> tuple[str | None, str | None, str | None]:
+        return (
+            self._resolved_fallback_model,
+            self._resolved_fallback_profile,
+            self._resolved_fallback_reasoning_effort,
+        )
+
     def _resolve_runtime_codex_config(
         self,
         runtime_handle: RuntimeHandle | None,
     ) -> tuple[str | None, str | None, str | None]:
         """Return frozen defaults unless the handle selects an explicit role/profile."""
         if runtime_handle is None:
-            return (
-                self._resolved_fallback_model,
-                self._resolved_fallback_profile,
-                self._resolved_fallback_reasoning_effort,
-            )
+            return self._frozen_fallback_routing()
 
         metadata = runtime_handle.metadata
         has_explicit_selection = any(
@@ -1486,20 +1522,30 @@ class CodexCliRuntime:
         )
         normalized_kind = (runtime_handle.kind or "").strip().lower().replace("-", "_")
         if not has_explicit_selection and normalized_kind in {"", _RUNTIME_PROFILE_ROLE_PREFIX}:
-            return (
-                self._resolved_fallback_model,
-                self._resolved_fallback_profile,
-                self._resolved_fallback_reasoning_effort,
-            )
-        self._assert_profile_resolution_config_unchanged(runtime_handle)
-        return self._resolve_runtime_codex_config_uncached(runtime_handle)
+            return self._frozen_fallback_routing()
+        loadable = self._reconcile_profile_resolution_config(runtime_handle)
+        key = self._runtime_handle_fingerprint_key(runtime_handle)
+        # Native ``codex_profile`` needs no Ouroboros config; otherwise unloadable
+        # config serves the last valid routing, else the frozen role default.
+        if (
+            not loadable
+            and key is not None
+            and not self._codex_profile_from_metadata(runtime_handle)
+        ):
+            return self._runtime_handle_resolved_routing.get(key, self._frozen_fallback_routing())
+        routing = self._resolve_runtime_codex_config_uncached(runtime_handle)
+        if loadable and key is not None:
+            self._runtime_handle_resolved_routing[key] = routing
+        return routing
 
     def _build_runtime_handle(
         self,
         session_id: str | None,
         current_handle: RuntimeHandle | None = None,
+        *,
+        drift_epoch: int | None = None,
     ) -> RuntimeHandle | None:
-        """Build a backend-neutral runtime handle for a Codex thread."""
+        """Build a runtime handle stamped with ``drift_epoch`` (default: current)."""
         if not session_id:
             return None
 
@@ -1512,7 +1558,7 @@ class CodexCliRuntime:
                 cwd=current_handle.cwd or self._cwd,
                 approval_mode=current_handle.approval_mode or self._permission_mode,
                 updated_at=datetime.now(UTC).isoformat(),
-                metadata=dict(current_handle.metadata),
+                metadata=self._drift.stamp(current_handle.metadata, epoch=drift_epoch),
             )
 
         # current_handle is guaranteed None here (early return above).
@@ -1523,6 +1569,7 @@ class CodexCliRuntime:
             cwd=self._cwd,
             approval_mode=self._permission_mode,
             updated_at=datetime.now(UTC).isoformat(),
+            metadata=self._drift.stamp(epoch=drift_epoch),
         )
 
     def _compose_prompt(
@@ -1908,7 +1955,7 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
     ) -> tuple[AgentMessage, ...] | None:
         """Attempt deterministic skill dispatch before invoking Codex."""
-        self._assert_skill_dispatch_registry_unchanged()
+        self._reconcile_skill_dispatch_registry()
         dispatch_result = resolve_skill_dispatch(
             ResolveRequest(
                 prompt=prompt,
@@ -2031,9 +2078,9 @@ class CodexCliRuntime:
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         if runtime_handle is not None:
-            self._assert_profile_resolution_config_unchanged(runtime_handle)
-        self._assert_codex_config_files_unchanged(runtime_handle)
-        self._assert_cli_executable_identity_unchanged()
+            self._reconcile_profile_resolution_config(runtime_handle)
+        self._reconcile_codex_config_files(runtime_handle)
+        self._reconcile_cli_executable_identity()
         command = [self._cli_path, "exec"]
 
         normalized_model = self._normalize_model(model or self._model)
@@ -2047,6 +2094,7 @@ class CodexCliRuntime:
         runtime_model, runtime_profile, runtime_effort = self._resolve_runtime_codex_config(
             runtime_handle
         )
+        resume_session_id = self._drift.retire_resume(resume_session_id, runtime_handle)
 
         # Codex accepts one active --profile. The backend runtime profile is
         # the worker-isolation boundary, so it owns that singular flag when
@@ -2117,7 +2165,7 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
     ) -> str | None:
         """Resolve the backend-native session id used for CLI resume."""
-        if current_handle is None:
+        if current_handle is None or self._drift.handle_predates_drift(current_handle):
             return None
         return current_handle.native_session_id
 
@@ -3328,7 +3376,9 @@ class CodexCliRuntime:
                 scope.clear()
                 scope.current_thread_id = new_thread
             if isinstance(thread_id, str):
-                handle = self._build_runtime_handle(thread_id, current_handle)
+                handle = self._build_runtime_handle(
+                    thread_id, current_handle, drift_epoch=scope.admitted_drift_epoch
+                )
                 return [
                     AgentMessage(
                         type="system",
@@ -3615,7 +3665,10 @@ class CodexCliRuntime:
                 ),
             )
 
-        current_handle = resume_handle or self._build_runtime_handle(resume_session_id)
+        # Bare session id: admission history unknown (see DRIFT_EPOCH_UNKNOWN).
+        current_handle = resume_handle or self._build_runtime_handle(
+            resume_session_id, drift_epoch=DRIFT_EPOCH_UNKNOWN
+        )
         intercepted_messages = await self._maybe_dispatch_skill_intercept(prompt, current_handle)
         if intercepted_messages is not None:
             for message in intercepted_messages:
@@ -3652,6 +3705,10 @@ class CodexCliRuntime:
             if model is not None:
                 build_kwargs["model"] = model
             command = self._build_command(**build_kwargs)
+            stream_item_scope.admitted_drift_epoch = self._drift.epoch
+            # A resume retired inside the build was never attempted; do not
+            # report an early failure as a resume-bootstrap failure.
+            attempted_resume_session_id = self._resolve_resume_session_id(current_handle)
         except Exception as e:
             yield AgentMessage(
                 type="result",
@@ -3787,6 +3844,7 @@ class CodexCliRuntime:
                         current_handle = self._build_runtime_handle(
                             event_session_id,
                             current_handle,
+                            drift_epoch=stream_item_scope.admitted_drift_epoch,
                         )
                         current_handle = self._bind_runtime_handle_controls(
                             current_handle,
