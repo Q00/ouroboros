@@ -99,7 +99,14 @@ def build_assertion_safe_retry_hint(
         if outcome.reason:
             observations.append("Harness verification failed: " + outcome.reason)
         if outcome.workspace_mutated:
-            observations.append("The workspace changed while harness verification was running.")
+            observations.append(
+                "verify_command itself created, modified, or deleted workspace files. "
+                "Verification must only observe. If your tests or the program under "
+                "test write state (fixtures, JSON stores, logs, generated data), make "
+                "them write to a temporary directory instead of the workspace. "
+                "Bytecode caches and Git-ignored outputs are already exempt, so "
+                "disabling them changes nothing."
+            )
         if observations:
             sections.append(
                 "### Harness observations\n"
