@@ -2369,7 +2369,6 @@ class InterviewHandler:
         # Use injected or create interview engine
         # max_turns=1: MCP is a pure question generator. No tool use needed.
         # Main session handles codebase exploration and answering.
-        #
         # ``allowed_tools=[]`` is paired with ``max_turns=1``: any tool-use
         # block emitted by the model would consume the only allowed turn
         # and the SDK then raises ``Reached maximum number of turns (1)``
@@ -2379,7 +2378,6 @@ class InterviewHandler:
         # agentic explorer, and matches ``PMInterviewHandler._get_engine``
         # which closes the envelope the same way (``pm_handler.py``).
         # See: https://github.com/Q00/ouroboros/issues/765
-        #
         # ``strict_mcp_config=True`` is opt-in here — and ONLY here — so the
         # subprocess spawned for question generation cannot rediscover the
         # plugin-provided ouroboros MCP server when this handler runs as a
@@ -2418,7 +2416,6 @@ class InterviewHandler:
         # itself is config-only (state lives on disk via state_dir), so
         # cloning the config fields into a fresh per-call engine is both
         # correct and concurrency-safe.
-        #
         # Test fakes that do NOT subclass InterviewEngine are passed through
         # unchanged: they cannot leak under concurrency because they are not
         # shared across production requests, and tests inject them to observe
