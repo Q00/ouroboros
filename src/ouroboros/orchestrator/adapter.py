@@ -632,9 +632,21 @@ class RuntimeHandle:
 
         OpenCode runtime sessions persist only the reconnectable session handle
         plus AC ownership metadata so stored events remain minimal and resume-safe.
+
+        Interview calibration is session-local and never persisted on any
+        runtime — the raw evidence is redacted from the serialized form.
         """
+        from ouroboros.orchestrator.interview_session import (
+            INTERVIEW_CALIBRATION_METADATA_KEY,
+        )
+
         if self.backend != "opencode":
-            return self.to_dict()
+            base = self.to_dict()
+            # Strip calibration — it is session-local and must not be persisted.
+            base_metadata = base.get("metadata")
+            if isinstance(base_metadata, dict):
+                base_metadata.pop(INTERVIEW_CALIBRATION_METADATA_KEY, None)
+            return base
 
         metadata = {
             key: value

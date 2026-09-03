@@ -1036,11 +1036,15 @@ class TestResolvePackagedCodexAssets:
             assert assets.rules_path.is_file()
             assert "setup" in {skill.skill_name for skill in assets.skills}
             assert "run" in {skill.skill_name for skill in assets.skills}
+            assert "idk" in {skill.skill_name for skill in assets.skills}
             assert assets.managed_relative_install_paths[0] == Path("rules") / CODEX_RULE_FILENAME
             assert Path("skills") / f"{CODEX_SKILL_NAMESPACE}setup" in (
                 assets.managed_relative_install_paths
             )
             assert Path("skills") / f"{CODEX_SKILL_NAMESPACE}run" in (
+                assets.managed_relative_install_paths
+            )
+            assert Path("skills") / f"{CODEX_SKILL_NAMESPACE}idk" in (
                 assets.managed_relative_install_paths
             )
 

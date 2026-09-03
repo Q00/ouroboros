@@ -57,6 +57,7 @@ from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
+from ouroboros.interview_calibration import normalize_interview_calibration
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import (
@@ -68,6 +69,10 @@ from ouroboros.mcp.tools.advisory_dispatch import (
 from ouroboros.mcp.tools.interview_advisory import (
     _attach_question_assist_requests,
     _milestone_for_score,
+)
+from ouroboros.mcp.tools.interview_calibration import (
+    handle_interview_calibration_turn,
+    interview_calibration_parameters,
 )
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
@@ -125,6 +130,40 @@ REQUIRED_CLIENT_GATES: tuple[str, ...] = (
 )
 _REQUIRE_CLIENT_GATES_ENV = "OUROBOROS_REQUIRE_CLIENT_GATES"
 _NORMALIZED_TURN_CONTEXT_KEY = "_normalized_interview_turn_context"
+
+
+def _engine_supports_calibration(engine: Any) -> bool:
+    """Return whether *engine* accepts the ``language_calibration`` keyword.
+
+    The check uses signature inspection so that injected/custom/fake engines
+    that implement only the established ``ask_next_question(state)`` contract
+    are never passed the unsupported keyword.
+    """
+    import inspect
+
+    method = getattr(engine, "ask_next_question", None)
+    if method is None:
+        return False
+    try:
+        sig = inspect.signature(method)
+    except (ValueError, TypeError):
+        return False
+    return "language_calibration" in sig.parameters
+
+
+async def _ask_next_question(
+    engine: Any,
+    state: Any,
+    calibration: Any | None,
+) -> Any:
+    """Call *engine.ask_next_question* with optional calibration support.
+
+    If the engine supports the ``language_calibration`` keyword it is
+    forwarded; otherwise the call uses the established one-argument form.
+    """
+    if calibration is not None and _engine_supports_calibration(engine):
+        return await engine.ask_next_question(state, language_calibration=calibration)
+    return await engine.ask_next_question(state)
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -2052,6 +2091,7 @@ class InterviewHandler:
                     required=False,
                     items={"type": "object"},
                 ),
+                *interview_calibration_parameters(),
             ),
         )
 
@@ -2084,6 +2124,7 @@ class InterviewHandler:
         arguments = dict(arguments)
         arguments[_NORMALIZED_TURN_CONTEXT_KEY] = turn_context
 
+        calibration_input = arguments.get("calibration_input")
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
@@ -2101,7 +2142,9 @@ class InterviewHandler:
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
-        if initial_context:
+        if isinstance(calibration_input, str) and calibration_input.strip():
+            action = "calibrate"
+        elif initial_context:
             action = "start"
         elif answer:
             action = "answer"
@@ -2109,7 +2152,7 @@ class InterviewHandler:
             action = "resume"
 
         # Reject invalid combos early — applies to both plugin and subprocess paths.
-        if action != "start" and not session_id:
+        if action not in {"start", "calibrate"} and not session_id:
             return Result.err(
                 MCPToolError(
                     "Must provide initial_context to start or session_id to resume",
@@ -2146,6 +2189,13 @@ class InterviewHandler:
                         tool_name="ouroboros_interview",
                     )
                 )
+
+        if action == "calibrate":
+            return await handle_interview_calibration_turn(
+                self,
+                calibration_input.strip(),
+                session_id=session_id,
+            )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -2330,6 +2380,9 @@ class InterviewHandler:
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            language_calibration=normalize_interview_calibration(
+                arguments.get("interview_calibration")
+            ),
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2363,28 +2416,8 @@ class InterviewHandler:
 
     def _create_interview_engine(self) -> tuple[Any, Any]:
         """Construct the in-process interview engine and its LLM adapter."""
-        # Use injected or create interview engine
-        # max_turns=1: MCP is a pure question generator. No tool use needed.
-        # Main session handles codebase exploration and answering.
-        #
-        # ``allowed_tools=[]`` is paired with ``max_turns=1``: any tool-use
-        # block emitted by the model would consume the only allowed turn
-        # and the SDK then raises ``Reached maximum number of turns (1)``
-        # before a final text response can stream.  The read-only policy
-        # envelope (``_interview_allowed_tools``) is intentionally bypassed
-        # here — interview is a single-shot question generator, not an
-        # agentic explorer, and matches ``PMInterviewHandler._get_engine``
-        # which closes the envelope the same way (``pm_handler.py``).
-        # See: https://github.com/Q00/ouroboros/issues/765
-        #
-        # ``strict_mcp_config=True`` is opt-in here — and ONLY here — so the
-        # subprocess spawned for question generation cannot rediscover the
-        # plugin-provided ouroboros MCP server when this handler runs as a
-        # child of Claude Code's MCP host (where ``mcp__plugin_ouroboros_*``
-        # tools are auto-registered).  Without this, the subprocess
-        # recurses on ``ouroboros_interview`` and exits at ``--max-turns 1``.
-        # CLI interview entrypoints (``ooo init`` / ``ooo pm``) do NOT pass
-        # this flag, so they keep plugin/project ``.mcp.json`` servers.
+        # One sealed turn makes MCP a pure question generator and prevents a
+        # child runtime from rediscovering this MCP server recursively (#765).
         backend = _handler_llm_backend(self.llm_backend, "interview")
         llm_adapter = self.llm_adapter or create_llm_adapter(
             backend=backend,
@@ -2395,43 +2428,14 @@ class InterviewHandler:
             ),
             strict_mcp_config=True,
         )
-        # A sealed no-tools envelope must pair with the tool-less prompt
-        # variant: the full socratic-interviewer prompt advertises tool use,
-        # and a subprocess whose catalog is emptied (``--tools ""``) has
-        # nothing to answer that temptation with — tool-happy models then
-        # emit phantom tool calls that burn the single turn (#1537). Only
-        # applies when this handler constructed the sealed adapter itself;
-        # injected adapters (tests, custom wiring) keep the caller's mode.
+        # Pair a sealed catalog with the tool-less prompt; injected adapters
+        # retain the caller's prompt mode (#1537).
         suppress_question_tool_cues = self.suppress_tool_use_prompt_cues or (
             self.llm_adapter is None
             and backend_supports_tool_envelope(resolve_llm_backend(backend))
         )
-        # Build a per-call InterviewEngine when a real engine is supplied, to
-        # avoid mutating shared engine state in place. Mutating a shared
-        # engine's llm_adapter and suppress_tool_use_prompt_cues is race-prone:
-        # under concurrent MCP requests, request A's `finally` restoration can
-        # clobber request B's in-flight adapter and leave the shared engine
-        # pointing at the wrong adapter or stale prompt mode. InterviewEngine
-        # itself is config-only (state lives on disk via state_dir), so
-        # cloning the config fields into a fresh per-call engine is both
-        # correct and concurrency-safe.
-        #
-        # Test fakes that do NOT subclass InterviewEngine are passed through
-        # unchanged: they cannot leak under concurrency because they are not
-        # shared across production requests, and tests inject them to observe
-        # the question-generation flow.
-        # NOTE: ``isinstance(..., InterviewEngine)`` must NOT be reached when
-        # ``InterviewEngine`` has been monkey-patched in tests to a non-type
-        # (e.g. ``patch("authoring_handlers.InterviewEngine", return_value=...)``
-        # replaces the name with a MagicMock instance). The previous short-
-        # circuit only guarded the left operand: once ``template`` was non-None,
-        # ``isinstance(template, InterviewEngine)`` still ran and raised
-        # ``TypeError: isinstance() arg 2 must be a type``, turning a supported
-        # dependency-injection / test-harness path into a hard failure.
-        # Add an ``isinstance(InterviewEngine, type)`` guard so the clone arm
-        # is only taken when the bound name is still a real class, and any
-        # patched non-type value falls through to the ``elif template is not
-        # None`` passthrough branch.
+        # Clone real shared engines per call for concurrency safety. Test fakes
+        # and monkey-patched non-types pass through unchanged.
         template = self.interview_engine
         if (
             template is not None
@@ -2466,6 +2470,7 @@ class InterviewHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
+        calibration = normalize_interview_calibration(arguments.get("interview_calibration"))
         _interview_id: str | None = None  # Track for error event emission
         question_generation_duration_ms: float | None = None
         advisory_build_duration_ms: float | None = None
@@ -2514,7 +2519,7 @@ class InterviewHandler:
                 live_score = None
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(state)
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if question_result.is_err:
@@ -2811,6 +2816,7 @@ class InterviewHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         turn_started_at = time.perf_counter()
         engine, llm_adapter = self._create_interview_engine()
+        calibration = normalize_interview_calibration(arguments.get("interview_calibration"))
         _interview_id: str | None = None
         ambiguity_scoring_duration_ms: float | None = None
         question_generation_duration_ms: float | None = None
@@ -3172,7 +3178,10 @@ class InterviewHandler:
                 question_generation_started_at = time.perf_counter()
                 question_result: Any = None
                 try:
-                    turn_result = await planner.plan(state)
+                    turn_result = await planner.plan(
+                        state,
+                        language_calibration=calibration,
+                    )
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if turn_result.is_err:
@@ -3237,14 +3246,14 @@ class InterviewHandler:
                     )
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(state)
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             else:
                 live_score = None
                 question_generation_started_at = time.perf_counter()
                 try:
-                    question_result = await engine.ask_next_question(state)
+                    question_result = await _ask_next_question(engine, state, calibration)
                 finally:
                     question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
@@ -3295,6 +3304,7 @@ class InterviewHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
+        calibration = normalize_interview_calibration(arguments.get("interview_calibration"))
         _interview_id: str | None = None
         question_generation_duration_ms: float | None = None
         advisory_build_duration_ms: float | None = None
@@ -3420,7 +3430,7 @@ class InterviewHandler:
             live_score = _load_state_ambiguity_score(state)
             question_generation_started_at = time.perf_counter()
             try:
-                question_result = await engine.ask_next_question(state)
+                question_result = await _ask_next_question(engine, state, calibration)
             finally:
                 question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(

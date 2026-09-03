@@ -16,6 +16,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo` (bare, no subcommand) | Read `skills/welcome/SKILL.md` and follow it |
 | `ooo auto ...` | Read `skills/auto/SKILL.md` and follow it |
 | `ooo interview ...` | Read `skills/interview/SKILL.md` and follow it |
+| `ooo idk ...` | Read `skills/idk/SKILL.md` and follow it |
 | `ooo seed` | Read `skills/seed/SKILL.md` and follow it |
 | `ooo run` | Read `skills/run/SKILL.md` and follow it |
 | `ooo evaluate` or `ooo eval` | Read `skills/evaluate/SKILL.md` and follow it |
@@ -131,6 +132,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo` | — |
 | `ooo auto` | MCP: `ouroboros_start_auto` |
 | `ooo interview` | `ouroboros:socratic-interviewer` |
+| `ooo idk` | MCP: `ouroboros_interview` calibration control turn |
 | `ooo seed` | `ouroboros:seed-architect` |
 | `ooo run` | MCP required |
 | `ooo evolve` | MCP: `evolve_step` |

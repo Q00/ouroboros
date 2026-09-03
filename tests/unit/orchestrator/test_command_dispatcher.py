@@ -391,6 +391,106 @@ class TestCodexCommandDispatcher:
         )
 
     @pytest.mark.asyncio
+    async def test_interview_idk_answer_sequence_preserves_pending_turn_and_calibration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An idk control turn must not consume the pending interview answer slot."""
+        interview = self._make_intercept(
+            tmp_path,
+            "interview",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"initial_context": "Design payment failure handling"},
+            prompt="ooo interview Design payment failure handling",
+            first_argument="Design payment failure handling",
+        )
+        idk = self._make_intercept(
+            tmp_path,
+            "idk",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"calibration_input": "I do not know idempotency; I built REST APIs"},
+            prompt="ooo idk I do not know idempotency; I built REST APIs",
+            first_argument="I do not know idempotency; I built REST APIs",
+        )
+        answer = self._make_intercept(
+            tmp_path,
+            "interview",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"initial_context": "Retry once"},
+            prompt="ooo interview Retry once",
+            first_argument="Retry once",
+        )
+        calibration = {
+            "level": "foundational",
+            "confidence": "high",
+            "evidence": "I do not know idempotency; I built REST APIs",
+            "unknown_terms": [],
+        }
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            side_effect=(
+                Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT, text="Should retries duplicate a charge?"
+                            ),
+                        ),
+                        meta={"session_id": "interview-123"},
+                    )
+                ),
+                Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT, text="Same question, in plain language"
+                            ),
+                        ),
+                        meta={
+                            "session_id": "interview-123",
+                            "interview_calibration": calibration,
+                            "pending_question": "Should retries duplicate a charge?",
+                            "pending_question_preserved": True,
+                        },
+                    )
+                ),
+                Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Next question"),),
+                        meta={"session_id": "interview-123"},
+                    )
+                ),
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="codex")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            started = await dispatcher(interview, None)
+            assert started is not None
+            calibrated = await dispatcher(idk, started[-1].resume_handle)
+            assert calibrated is not None
+            completed_turn = await dispatcher(answer, calibrated[-1].resume_handle)
+
+        assert completed_turn is not None
+        calls = fake_server.call_tool.await_args_list
+        calibration_args = calls[1].args[1]
+        assert calibration_args["session_id"] == "interview-123"
+        assert "answer" not in calibration_args
+        assert calibration_args["calibration_input"].startswith("I do not know")
+        answer_args = calls[2].args[1]
+        assert answer_args == {
+            "session_id": "interview-123",
+            "answer": "Retry once",
+            "interview_calibration": calibration,
+        }
+        assert (
+            calibrated[-1].resume_handle.metadata["ouroboros_interview_calibration"] == calibration
+        )
+
+    @pytest.mark.asyncio
     async def test_dispatch_returns_recoverable_messages_when_call_tool_fails(
         self,
         tmp_path: Path,

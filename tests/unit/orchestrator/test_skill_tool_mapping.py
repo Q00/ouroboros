@@ -184,9 +184,18 @@ def test_packaged_skill_frontmatter_exposes_tool_specific_context_keys() -> None
     }
 
     assert {skill: by_skill[skill].context_keys for skill in expected} == expected
-    assert skill_frontmatter_context_keys_by_tool(mappings) == {
+    # skill_frontmatter_context_keys_by_tool merges ALL skills pointing at a tool.
+    # The `idk` skill maps `calibration_input` → `ouroboros_interview`, so it appears first
+    # (alphabetic skill-discovery order: idk < interview).
+    expected_by_tool = {
         by_skill[skill].mcp_tool: context_keys for skill, context_keys in expected.items()
     }
+    expected_by_tool["ouroboros_interview"] = (
+        "calibration_input",
+        "initial_context",
+        "cwd",
+    )
+    assert skill_frontmatter_context_keys_by_tool(mappings) == expected_by_tool
 
 
 def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
@@ -309,6 +318,7 @@ def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage(
         "frugality_assurance",
     )
     assert context_keys_by_tool["ouroboros_interview"] == (
+        "calibration_input",
         "initial_context",
         "cwd",
         "confused_terms",

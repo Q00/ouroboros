@@ -32,6 +32,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 |---------|---------|------|
 | `ooo` | Welcome + quick start | Plugin |
 | `ooo interview` | Socratic requirement clarification | Plugin |
+| `ooo idk` | Calibrate interview explanations to your topic knowledge | Plugin |
 | `ooo seed` | Generate validated seed spec | Plugin |
 | `ooo run` | Execute seed workflow | MCP |
 | `ooo evaluate` | 3-stage verification | MCP |
@@ -65,6 +66,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | Phrase | Triggers |
 |--------|----------|
 | "interview me", "clarify requirements", "socratic interview" | `ooo interview` |
+| "I don't know this term", "explain at my level" | `ooo idk` |
 | "crystallize", "generate seed", "create seed", "freeze requirements" | `ooo seed` |
 | "ouroboros run", "execute seed", "run seed", "run workflow" | `ooo run` |
 | "evaluate this", "3-stage check", "verify execution" | `ooo evaluate` |
@@ -99,6 +101,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 |-------|---------|------|
 | `/ouroboros:welcome` | First-touch welcome experience | Plugin |
 | `/ouroboros:interview` | Socratic requirement clarification | Plugin |
+| `/ouroboros:idk` | Calibrate interview explanations to your topic knowledge | Plugin |
 | `/ouroboros:seed` | Generate validated seed spec | Plugin |
 | `/ouroboros:ouroboros-run` | Execute seed workflow | MCP |
 | `/ouroboros:evaluate` | 3-stage verification | MCP |

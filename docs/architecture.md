@@ -27,7 +27,7 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 │  │     REGISTRY        │     │                     │     │      LAYER           │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Skills      │──┼─────┼─▶│   Seed Spec    │──┼─────┼─▶│   TUI Dashboard │  │                 │
-│  │  │   (22)        │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
+│  │  │   (23)        │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
 │  │  └───────────────┘  │     │  └───────────────┘  │     │  └───────────────┘  │                 │
 │  │                     │     │                     │     │                     │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
@@ -60,7 +60,7 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ### 1. Skills & Agents Registry
 **Auto-discovery of bundled skills and agents that ship with Ouroboros core**
-- Skills: 22 core workflow skills (auto, brownfield, cancel, config, evaluate, evolve, help, interview, ooo, pm, publish, qa, ralph, resume-session, run, seed, setup, status, tutorial, unstuck, update, welcome)
+- Skills: 23 core workflow skills (auto, brownfield, cancel, config, evaluate, evolve, help, idk, interview, ooo, pm, publish, qa, ralph, resume-session, run, seed, setup, status, tutorial, unstuck, update, welcome)
 - Agents: 21 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)

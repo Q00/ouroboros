@@ -69,6 +69,15 @@ from ouroboros.orchestrator.frugality_runtime_attestation import (
     clear_attested_codex_child_environment,
     codex_cli_runtime_attestation,
 )
+from ouroboros.orchestrator.interview_session import (
+    INTERVIEW_CALIBRATION_METADATA_KEY as _INTERVIEW_CALIBRATION_METADATA_KEY,
+)
+from ouroboros.orchestrator.interview_session import (
+    INTERVIEW_SESSION_METADATA_KEY as _INTERVIEW_SESSION_METADATA_KEY,
+)
+from ouroboros.orchestrator.interview_session import (
+    build_interview_tool_arguments,
+)
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
@@ -167,8 +176,6 @@ def _normalized_usage(obj: object) -> dict[str, int | float] | None:
         result[key] = value
     return result or None
 
-
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # Effort levels Codex's ``model_reasoning_effort`` config key accepts. Used to
@@ -1684,21 +1691,7 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
         """Build the MCP argument payload for an intercepted skill."""
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        return build_interview_tool_arguments(intercept, current_handle)
 
     def _build_resume_handle(
         self,
@@ -1711,8 +1704,11 @@ class CodexCliRuntime:
             return current_handle
 
         session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            if session_id is not None:
+        calibration = tool_result.meta.get("interview_calibration")
+        valid_session_id = isinstance(session_id, str) and bool(session_id.strip())
+        valid_calibration = isinstance(calibration, Mapping)
+        if not valid_session_id and not valid_calibration:
+            if session_id is not None and not valid_session_id:
                 log.warning(
                     "codex_cli_runtime.resume_handle.invalid_session_id",
                     session_id_type=type(session_id).__name__,
@@ -1721,7 +1717,10 @@ class CodexCliRuntime:
             return current_handle
 
         metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
+        if valid_session_id:
+            metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
+        if valid_calibration:
+            metadata[_INTERVIEW_CALIBRATION_METADATA_KEY] = dict(calibration)
         updated_at = datetime.now(UTC).isoformat()
 
         if current_handle is not None:

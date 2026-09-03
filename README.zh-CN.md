@@ -373,6 +373,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
 | `ooo setup`          | `ouroboros setup`                                                 | 注册运行时并配置项目（一次性）                                |
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
+| `ooo idk`            | *(经由 skill)*                                                    | 按用户对当前主题的理解调整访谈表述难度                        |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |
 | `ooo seed`           | *(由 interview 生成)*                                             | 凝结为不可变规约                                              |
 | `ooo run`            | `ouroboros run seed.yaml`                                         | 用 Double Diamond 分解执行                                    |

@@ -4,8 +4,9 @@ Use Ouroboros commands when the user is asking to clarify requirements, generate
 
 ## CRITICAL: MCP Tool Routing
 
-When the user types `ooo <command>`, you MUST call the corresponding MCP tool.
-Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP tool.
+When the user types an MCP-backed `ooo <command>`, you MUST call the
+corresponding MCP tool. Session-native skills are the explicit exception:
+load and follow their installed `SKILL.md` instead of inventing an MCP call.
 
 | User Input | MCP Tool to Call |
 |-----------|-----------------|
@@ -19,6 +20,10 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo evolve ...` | `ouroboros_evolve_step` |
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
+
+`ooo idk ...` routes to `ouroboros_interview` as a session-local calibration
+control turn. Preserve the pending question, do not treat the calibration text
+as its answer, and do not persist a user profile.
 
 If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
