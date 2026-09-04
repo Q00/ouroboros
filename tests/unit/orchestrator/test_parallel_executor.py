@@ -8123,7 +8123,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_present"] is False
         assert evidence_event.data["typed_evidence_valid"] is False
         assert evidence_event.data["verifier_ran"] is False
-        assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
+        assert (
+            "no JSON object and no fenced evidence block"
+            in evidence_event.data["typed_evidence_error"]
+        )
 
     @pytest.mark.asyncio
     async def test_fat_harness_atomic_prompt_requests_json_evidence_without_task_complete(
