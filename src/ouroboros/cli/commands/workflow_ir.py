@@ -77,7 +77,7 @@ def _normalize_seed_payload(raw: dict[str, Any]) -> dict[str, Any]:
 def _normalize_criterion(item: Any) -> str | dict[str, Any]:
     if isinstance(item, dict):
         if isinstance(item.get("criterion"), str):
-            return item["criterion"]
+            return item
         if isinstance(item.get("description"), str) or isinstance(item.get("content"), str):
             return item
     if isinstance(item, str):
