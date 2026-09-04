@@ -16,6 +16,13 @@
         "--llm-backend",
         "claude_code"
       ]
+    },
+    "knos": {
+      "command": "python",
+      "args": [
+        "-m",
+        "knos.mcp"
+      ]
     }
   }
 }
