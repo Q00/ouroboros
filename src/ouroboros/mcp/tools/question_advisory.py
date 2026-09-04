@@ -40,7 +40,10 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_task,
 )
 from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
-from ouroboros.mcp.tools.recent_findings import recent_findings_by_lane
+from ouroboros.mcp.tools.recent_findings import (
+    interview_baseline_by_lane,
+    recent_findings_by_lane,
+)
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
     _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
@@ -221,23 +224,54 @@ def _lane_instructions(
                     raw_lane.get("answer_contract"),
                 ),
             )
-        return (
-            "Inspect the local repository for facts that directly answer or "
-            "constrain the question. Use exact file/config evidence. Do not "
-            "make product decisions. If the code does not answer it, say so.",
+        research_subject = str(request.get("research_subject") or "").strip()
+        baseline_note = (
+            " Build a bounded reusable baseline for the research subject as well as "
+            "answering the visible question. Cover repository shape, manifests, "
+            "existing architecture, and ownership boundaries with exact evidence."
+            if research_subject
+            else ""
+        )
+        extra = (
             "## Code Investigation Request\n```json\n"
             + _bounded_json(
                 request.get("code_investigation_request"),
                 _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
             )
-            + "\n```",
+            + "\n```"
+        )
+        if research_subject:
+            extra += "\n\n## Research Subject\n" + _truncate_head(
+                research_subject, _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS
+            )
+        return (
+            "Inspect the local repository for facts that directly answer or "
+            "constrain the question. Use exact file/config evidence. Do not "
+            "make product decisions. If the code does not answer it, say so." + baseline_note,
+            extra,
         )
     if lane_id == "web_context":
+        research_subject = str(request.get("research_subject") or "").strip()
+        answer_contract = raw_lane.get("answer_contract")
+        extra = (
+            "## Research Subject\n"
+            + _truncate_head(
+                research_subject or str(request.get("question") or ""),
+                _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS,
+            )
+            + "\n\n## Web Reference Contract\n```json\n"
+            + _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
+            + "\n```"
+        )
         return (
-            "Decide whether current external knowledge is needed. If yes, "
-            "research the minimum necessary current facts and cite sources. "
-            "If no current web facts are needed, return that no-op finding.",
-            "Use web research only when the answer depends on current external facts.",
+            "Run bounded reference reconnaissance for the Research Subject now. "
+            "Issue real web searches even when the visible interview question is a "
+            "product decision. Prefer primary and official sources, fetch promising "
+            "results when available, and satisfy the closed web reference contract. "
+            "Do not return generic advice or claim research is unnecessary. If web "
+            "tools are unavailable, return no fabricated output; the host must mark "
+            "this lane undispatched.",
+            extra,
         )
     if lane_id == "ambiguity_contrarian":
         return (
@@ -562,6 +596,8 @@ def build_question_advisory_request(
     repository_roster: list[dict[str, str]] | None = None,
     last_question: str | None = None,
     recent_findings: Mapping[str, list[dict[str, Any]]] | None = None,
+    research_subject: str | None = None,
+    baseline_findings: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the per-question advisory request for one tool's question turn.
 
@@ -600,6 +636,12 @@ def build_question_advisory_request(
         request["code_investigation_request"] = dict(code_investigation_request)
     if repository_roster is not None:
         request["repository_roster"] = repository_roster
+    if research_subject:
+        request["research_subject"] = research_subject
+    if baseline_findings:
+        request["baseline_findings"] = {
+            lane_id: dict(reference) for lane_id, reference in baseline_findings.items()
+        }
     # Attached only when there is something to attach. A project with nothing
     # recent carries no key, and a child is not handed a block that says nothing
     # has been found here -- that is a sentence it would have to reason about.
@@ -624,27 +666,19 @@ def attach_question_advisory(
     code_investigation_request: Mapping[str, Any] | None = None,
     repository_roster: list[dict[str, str]] | None = None,
     last_question: str | None = None,
+    research_subject: str | None = None,
     dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
     runtime_backend: str | None = None,
     opencode_mode: str | None = None,
     fanout_registry: FanoutRegistry | None = None,
     findings_store: Any | None = None,
 ) -> None:
-    """Attach the advisory fan-out to a turn that shows a question to the user.
+    """Attach factual research only when this turn has an uncached factual lane.
 
-    Called wherever a question becomes visible, which is the rule rather than a
-    list of call sites: a question the user can see with no lanes attached is a
-    decision made without the evidence, and nothing downstream can tell that
-    apart from a decision made with it.
-
-    A build failure leaves the turn otherwise intact. The question is what the
-    user needs; losing the lanes costs them evidence, while raising here would
-    cost them the question.
-
-    ``findings_store`` is the store this project's completed fan-outs were
-    published into, taken from the side that publishes rather than rebuilt here.
-    A caller without one still gets its lanes, and they investigate the way they
-    always did.
+    Start and cache-miss turns emit bounded code/web payloads. A complete
+    same-session baseline emits only scoped artifact references, leaving the
+    ordinary question free of subagent dispatch noise. Milestone and closure
+    reviews are separate contracts and are not changed here.
     """
     if not question:
         return
@@ -658,6 +692,12 @@ def attach_question_advisory(
         code_investigation_request=code_investigation_request,
         repository_roster=repository_roster,
         last_question=last_question,
+        research_subject=research_subject,
+        baseline_findings=(
+            interview_baseline_by_lane(findings_store, session_id=session_id)
+            if tool_name == "ouroboros_interview" and phase != "start"
+            else None
+        ),
         recent_findings=recent_findings_by_lane(
             findings_store,
             lanes=_declared_lanes(_tool_advisory_catalog(tool_name)),
@@ -665,6 +705,13 @@ def attach_question_advisory(
     )
     try:
         payloads = build_question_advisory_subagents(request)
+        cached_lanes = set(request.get("baseline_findings") or {})
+        if cached_lanes:
+            payloads = [
+                payload
+                for payload in payloads
+                if payload.context.get("lane_id") not in cached_lanes
+            ]
     except ValueError as exc:
         log.warning(
             "mcp.tool.question_advisory.build_failed",
@@ -674,13 +721,19 @@ def attach_question_advisory(
         )
         return
 
+    if request.get("baseline_findings"):
+        meta["question_advisory_cached_lanes"] = request["baseline_findings"]
+    if code_investigation_request is not None:
+        meta["code_investigation_request"] = dict(code_investigation_request)
+    if not payloads:
+        meta["question_advisory_preserve_content"] = True
+        return
+
     meta["question_advisory_recommended"] = True
     meta["question_advisory_request"] = request
     meta["question_advisory_contract_id"] = request["contract_id"]
     meta["question_advisory_subagents"] = [payload.to_dict() for payload in payloads]
     meta["question_advisory_preserve_content"] = True
-    if code_investigation_request is not None:
-        meta["code_investigation_request"] = dict(code_investigation_request)
 
     contract = build_runtime_subagent_orchestration_contract(
         runtime_backend or "unknown",
@@ -712,6 +765,7 @@ def attach_question_advisory(
             if repository_roster is not None
             else None
         ),
+        phase=phase,
     )
     record_subagent_dispatch_emitted(
         fanout_kind="question_advisory",

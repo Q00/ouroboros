@@ -12,8 +12,10 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 import pytest
@@ -43,6 +45,7 @@ from ouroboros.mcp.tools.subagent import (
     submit_fanout_results,
 )
 from ouroboros.orchestrator.capabilities import (
+    interview_web_reference_answer_contract,
     stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
@@ -234,6 +237,70 @@ def test_registry_register_and_load_round_trip(tmp_path: Any) -> None:
     assert isinstance(loaded, FanoutRecord)
     assert loaded.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL
     assert loaded.expected_keys == ("researcher", "contrarian")
+
+
+def test_registry_register_refuses_symlinked_directory(tmp_path: Any) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_registry = tmp_path / "fanout"
+    try:
+        linked_registry.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not supported on this platform")
+
+    registry = FanoutRegistry(linked_registry)
+
+    assert (
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="sess-symlink",
+            correlation_key="corr-symlink",
+            expected_keys=["code_context"],
+            synthesizer_input={"question": "Can publication escape?"},
+            fanout_id="fanout_symlinked_registry",
+        )
+        is None
+    )
+    assert not (outside / "fanout_symlinked_registry.json").exists()
+
+
+def test_registry_register_refuses_replaced_directory_after_commit(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.core import owner_only
+
+    registry_path = tmp_path / "fanout"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    detached = tmp_path / "detached-fanout"
+    real_fsync_directory_fd = owner_only._fsync_directory_fd
+
+    def replace_registry_path(directory_fd: int) -> bool:
+        result = real_fsync_directory_fd(directory_fd)
+        registry_path.rename(detached)
+        try:
+            registry_path.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        return result
+
+    monkeypatch.setattr(owner_only, "_fsync_directory_fd", replace_registry_path)
+    registry = FanoutRegistry(registry_path)
+
+    assert (
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="sess-raced",
+            correlation_key="corr-raced",
+            expected_keys=["code_context"],
+            synthesizer_input={"question": "Can publication race?"},
+            fanout_id="fanout_replaced_registry",
+        )
+        is None
+    )
+    assert not (outside / "fanout_replaced_registry.json").exists()
+    shutil.rmtree(detached)
 
 
 def test_registry_load_unknown_returns_none(tmp_path: Any) -> None:
@@ -508,29 +575,80 @@ def _emitted_advisory_contract(
     return fanout_id, correlation_key, lane_keys, meta
 
 
-def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
-    """Return one contract-satisfying output per emitted lane.
+def _current_verified_at() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-    Only ``data_context`` carries an answer contract, and it is satisfied here
-    with its no-op answer — the response a child gives when the question's
-    honest answer is not a measurement. Every other lane completes on the
-    generic advisory shape, so a plain string stands in for its advice.
-    """
-    identity = ""
-    for payload in meta["question_advisory_subagents"]:
-        context = payload.get("context") or {}
-        if context.get("lane_id") == "data_context":
-            identity = str(context.get("question_identity") or "")
-    outputs: dict[str, Any] = {key: f"{key}-advice" for key in lane_keys}
-    if "data_context" in outputs:
-        outputs["data_context"] = {
+
+def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
+    """Return one contract-satisfying factual output per emitted lane."""
+    identity = str(meta["question_advisory_request"]["question_identity"])
+    outputs: dict[str, Any] = {key: f"{key}-facts" for key in lane_keys}
+    if "web_context" in outputs:
+        verified_at = _current_verified_at()
+        outputs["web_context"] = {
             "question_identity": identity,
-            "lane_id": "data_context",
-            "data_needed": False,
-            "read_requests": [],
-            "no_evidence_reason": "not_a_measurement",
+            "lane_id": "web_context",
+            "status": "references_found",
+            "search_queries": ["subscription billing UX official guidance"],
+            "references": [
+                {
+                    "title": "Stripe Billing documentation",
+                    "url": "https://docs.stripe.com/billing",
+                    "source_type": "official",
+                    "relevance": "Primary implementation and lifecycle reference.",
+                    "verified_at": verified_at,
+                },
+                {
+                    "title": "W3C Web Payments overview",
+                    "url": "https://www.w3.org/Payments/WG/",
+                    "source_type": "standard",
+                    "relevance": "Standards context for web payment experiences.",
+                    "verified_at": verified_at,
+                },
+            ],
         }
     return outputs
+
+
+def _web_source_evidence(output: Mapping[str, Any]) -> dict[str, Any]:
+    """Return parent-runtime search/fetch evidence matching a web lane output."""
+    queries = list(output["search_queries"])
+    references = list(output.get("references") or ())
+    return {
+        "attested_by": "parent_runtime",
+        "search_queries": queries,
+        "search_attempts": [
+            {
+                "query": query,
+                "outcome": "results_found",
+                "result_urls": [reference["url"] for reference in references],
+            }
+            for query in queries
+        ],
+        "fetched_sources": [
+            {
+                "url": reference["url"],
+                "http_status": 200,
+                "source_type": reference["source_type"],
+                "verified_at": reference["verified_at"],
+            }
+            for reference in references
+        ],
+    }
+
+
+def _advisory_result_entries(
+    outputs: Mapping[str, Any],
+    lane_keys: list[str],
+) -> list[dict[str, Any]]:
+    """Build submission entries, keeping host evidence outside child content."""
+    entries: list[dict[str, Any]] = []
+    for key in lane_keys:
+        entry = {"key": key, "content": outputs[key]}
+        if key == "web_context":
+            entry["source_evidence"] = _web_source_evidence(outputs[key])
+        entries.append(entry)
+    return entries
 
 
 def _required_advisory_lanes() -> list[str]:
@@ -567,7 +685,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": key, "content": outputs[key]} for key in lane_keys],
+            "results": _advisory_result_entries(outputs, lane_keys),
         }
     )
     assert submit_result.is_ok, submit_result
@@ -584,26 +702,462 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
     assert out["contract_violations"] == {}
+    assert out["provenance"] == {
+        "session_id": session_id,
+        "phase": "answer",
+        "question_identity": str(meta["question_advisory_request"]["question_identity"]),
+    }
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
     assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
+    assert out["source_evidence"] == {"web_context": _web_source_evidence(outputs["web_context"])}
+
+
+def test_generic_web_noop_is_rejected_by_reference_contract(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-noop"
+    fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
+    assert lane_keys == ["code_context", "web_context"]
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {"key": "web_context", "content": "external research is unnecessary"},
+        ],
+    )
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert "web_context" in outcome["contract_violations"]
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "attempt_outcome"),
+    [
+        ("no_relevant_results", "no_results"),
+        ("search_failed_after_attempts", "search_failed"),
+    ],
+)
+def test_authoritative_negative_search_completes_web_lane(
+    tmp_path: Any, failure_reason: str, attempt_outcome: str
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = f"sess-web-{attempt_outcome}"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    assert lane_keys == ["code_context", "web_context"]
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    web = {
+        "question_identity": question_identity,
+        "lane_id": "web_context",
+        "status": "no_reliable_reference",
+        "search_queries": [query],
+        "failure_reason": failure_reason,
+    }
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": web,
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": attempt_outcome, "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
+
+
+def test_low_quality_web_result_accepts_mixed_search_outcomes(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-low-quality-mixed"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    assert lane_keys == ["code_context", "web_context"]
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    queries = ["official billing API", "billing API discussion"]
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": queries,
+                    "failure_reason": "only_low_quality_results",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": queries,
+                    "search_attempts": [
+                        {"query": queries[0], "outcome": "no_results", "result_urls": []},
+                        {
+                            "query": queries[1],
+                            "outcome": "results_found",
+                            "result_urls": ["https://example.com/unreliable-discussion"],
+                        },
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
+
+
+def test_low_quality_web_result_requires_result_bearing_attempt(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-low-quality-empty"
+    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": [query],
+                    "failure_reason": "only_low_quality_results",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": "no_results", "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/search_attempts: only_low_quality_results requires "
+        "at least one result-bearing search attempt"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verified_at", "expected_fragment"),
+    [
+        (
+            lambda: (
+                (datetime.now(UTC) - timedelta(days=8))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "is older than 7 days",
+        ),
+        (
+            lambda: (
+                (datetime.now(UTC) + timedelta(minutes=5))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "is future-dated relative to submission",
+        ),
+        (
+            lambda: "2026-99-99T99:99:99Z",
+            "is not a valid ISO 8601 timestamp",
+        ),
+    ],
+)
+def test_web_references_reject_implausible_verification_times(
+    tmp_path: Any,
+    verified_at: Any,
+    expected_fragment: str,
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = f"sess-web-time-{expected_fragment}"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    timestamp = verified_at()
+    for reference in outputs["web_context"]["references"]:
+        reference["verified_at"] = timestamp
+    evidence = _web_source_evidence(outputs["web_context"])
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": outputs["code_context"]},
+            {
+                "key": "web_context",
+                "content": outputs["web_context"],
+                "source_evidence": evidence,
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["web_context"]
+    assert any(expected_fragment in violation for violation in violations)
+    assert any(violation.startswith("references/0/verified_at") for violation in violations)
+    assert any(
+        violation.startswith("source_evidence/fetched_sources/0/verified_at")
+        for violation in violations
+    )
+
+
+def test_negative_web_lane_rejects_unattested_query_failure(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-failed-search"
+    fanout_id, correlation_key, _lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    question_identity = str(meta["question_advisory_request"]["question_identity"])
+    query = "official billing API"
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": "code facts"},
+            {
+                "key": "web_context",
+                "content": {
+                    "question_identity": question_identity,
+                    "lane_id": "web_context",
+                    "status": "no_reliable_reference",
+                    "search_queries": [query],
+                    "failure_reason": "search_failed_after_attempts",
+                },
+                "source_evidence": {
+                    "attested_by": "parent_runtime",
+                    "search_queries": [query],
+                    "search_attempts": [
+                        {"query": query, "outcome": "no_results", "result_urls": []}
+                    ],
+                    "fetched_sources": [],
+                },
+            },
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert "web_context" in outcome["contract_violations"]
+
+
+def test_schema_valid_web_references_without_host_evidence_are_rejected(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-unattested"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[{"key": key, "content": outputs[key]} for key in lane_keys],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/output is not a JSON object"
+    ]
+
+
+def test_web_reference_urls_must_be_distinct_even_when_objects_differ(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-duplicate-url"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    web = outputs["web_context"]
+    source_evidence = _web_source_evidence(web)
+    duplicate_url = web["references"][0]["url"]
+    web["references"][1] = {
+        **web["references"][1],
+        "url": duplicate_url,
+        "title": "Different title for the same fetched source",
+        "relevance": "Different relevance text cannot make the URL distinct.",
+    }
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {
+                "key": key,
+                "content": outputs[key],
+                **({"source_evidence": source_evidence} if key == "web_context" else {}),
+            }
+            for key in lane_keys
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["web_context"]
+    assert "references/1/url: duplicates an earlier reference URL" in violations
+
+
+def test_every_submitted_web_query_requires_parent_result_evidence(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-web-query-coverage"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    web = outputs["web_context"]
+    web["search_queries"] = ["official billing API", "billing security standard"]
+    evidence = _web_source_evidence(web)
+    evidence["search_attempts"] = [
+        {
+            "query": web["search_queries"][0],
+            "outcome": "results_found",
+            "result_urls": [reference["url"] for reference in web["references"]],
+        }
+    ]
+
+    outcome = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+        results=[
+            {"key": "code_context", "content": outputs["code_context"]},
+            {"key": "web_context", "content": web, "source_evidence": evidence},
+        ],
+    )
+
+    assert outcome["status"] == "partial"
+    assert outcome["missing_required_keys"] == ["web_context"]
+    assert outcome["contract_violations"]["web_context"] == [
+        "source_evidence/search_attempts: no attempt attests query 'billing security standard'"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_start_fanout_artifact_reduces_follow_up_to_delta_lanes(tmp_path: Any) -> None:
+    """Exercise producer -> submit -> SQLite -> follow-up cache lookup end to end."""
+    registry = FanoutRegistry(tmp_path / "fanout")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ArtifactStore.for_project(workspace)
+    store.initialize()
+    disposable = DisposableMemory(artifact_store=store)
+    submit = SubmitFanoutResultsHandler(
+        fanout_registry=registry,
+        disposable_memory=disposable,
+    )
+    session_id = "sess-baseline-smoke"
+    start_meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        start_meta,
+        session_id=session_id,
+        question="Who is the first user?",
+        phase="start",
+        score=None,
+        research_subject="Add subscription billing to this service",
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+        findings_store=store,
+    )
+    start_keys = [
+        _resolve_correlated_key(payload, start_meta["question_advisory_result_correlation_key"])
+        for payload in start_meta["question_advisory_subagents"]
+    ]
+    assert start_keys == ["code_context", "web_context"]
+    outputs = _advisory_lane_outputs(start_meta, start_keys)
+
+    submitted = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": start_meta["question_advisory_fanout_id"],
+            "correlation_key": start_meta["question_advisory_result_correlation_key"],
+            "results": _advisory_result_entries(outputs, start_keys),
+        }
+    )
+    assert submitted.is_ok
+    contract_id = submitted.unwrap().meta["contract_id"]
+    published = disposable.fetch(contract_id).body
+    assert published["provenance"]["session_id"] == session_id
+    assert published["provenance"]["phase"] == "start"
+
+    follow_up: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        follow_up,
+        session_id=session_id,
+        question="What should happen when payment fails?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+        findings_store=store,
+    )
+
+    assert set(follow_up["question_advisory_cached_lanes"]) == {
+        "code_context",
+        "web_context",
+    }
+    assert {
+        reference["contract_id"]
+        for reference in follow_up["question_advisory_cached_lanes"].values()
+    } == {contract_id}
+    fetch = FetchArtifactHandler(disposable_memory=disposable)
+    for lane_id, reference in follow_up["question_advisory_cached_lanes"].items():
+        fetched = await fetch.handle(
+            {
+                "contract_id": reference["contract_id"],
+                "lane_id": reference["lane_id"],
+            }
+        )
+        assert fetched.is_ok
+        fetched_body = fetched.unwrap().meta
+        assert fetched_body["lane_id"] == lane_id
+        assert fetched_body["body"] == outputs[lane_id]
+    assert "question_advisory_subagents" not in follow_up
+    assert "question_advisory_fanout_id" not in follow_up
+    assert "question_advisory_host_action" not in follow_up
 
 
 @pytest.mark.asyncio
 async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
     tmp_path: Any,
 ) -> None:
-    """A subset submission reports the REQUIRED lanes still outstanding.
-
-    Optional lanes are not listed as missing here: their absence does not block
-    completion, so naming them would tell the host to chase output it was never
-    obliged to produce.
-    """
+    """One factual result remains partial until the other required lane arrives."""
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-partial"
     fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
-    assert len(lane_keys) > 1, "partial-set case needs multiple advisory lanes"
-    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
+    assert lane_keys == ["code_context", "web_context"]
+    first = lane_keys[0]
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -611,15 +1165,15 @@ async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": optional_first, "content": f"{optional_first}-advice"}],
+            "results": [{"key": first, "content": f"{first}-facts"}],
         }
     )
     assert submit_result.is_ok, submit_result
     out = submit_result.unwrap().meta
     assert out["status"] == "partial"
-    assert out["missing_required_keys"] == _required_advisory_lanes()
-    assert out["missing_keys"] == out["missing_required_keys"]
-    assert out["received_keys"] == [optional_first]
+    assert out["missing_required_keys"] == ["web_context"]
+    assert out["missing_keys"] == ["web_context"]
+    assert out["received_keys"] == [first]
 
 
 @pytest.mark.asyncio
@@ -660,10 +1214,10 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
         assert result.is_ok, result
         return result.unwrap().meta
 
-    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
-    partial = await reply([{"key": optional_first, "content": f"{optional_first}-advice"}])
+    first = lane_keys[0]
+    partial = await reply([{"key": first, "content": f"{first}-facts"}])
     invalid = await reply([{"key": lane_keys[0]}])
-    complete = await reply([{"key": key, "content": outputs[key]} for key in lane_keys])
+    complete = await reply(_advisory_result_entries(outputs, lane_keys))
 
     # What the skills key on: present on the completed reply, absent everywhere
     # else. Both directions, so neither drifts without this failing.
@@ -674,7 +1228,7 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     # And the incomplete replies keep saying why, which is the other half of
     # what the skills act on.
     assert partial["status"] == "partial"
-    assert partial["missing_required_keys"]
+    assert partial["missing_required_keys"] == ["web_context"]
     assert invalid["status"] == "invalid_result_entry"
     assert "status" not in complete
 
@@ -695,6 +1249,38 @@ async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
     assert "dispatch_subagents_if_supported" in skill
     assert "process_payloads_sequentially" in skill
     assert "host action selects the execution strategy" in skill
+
+
+def test_interview_skill_surfaces_match_on_snapshot_contract() -> None:
+    marker = "**Factual research snapshot**"
+    end = "   **Milestone lateral-review dispatch**"
+    skill = Path("skills/interview/SKILL.md").read_text(encoding="utf-8")
+    start = skill.index(marker)
+    stop = skill.index(end, start)
+    section = skill[start:stop]
+
+    assert "code_context" in section
+    assert "web_context" in section
+    assert "complete cache hit" in section
+    assert "no `question_advisory_subagents`" in section
+
+
+def test_documented_interview_source_evidence_matches_public_schema() -> None:
+    skill = Path("skills/interview/SKILL.md").read_text(encoding="utf-8")
+    json_start = skill.index("   ```json", skill.index("**Factual research snapshot**"))
+    json_body_start = skill.index("\n", json_start) + 1
+    json_end = skill.index("\n   ```", json_body_start)
+    documented = json.loads(skill[json_body_start:json_end])
+    schema = interview_web_reference_answer_contract()["source_evidence_schema"]
+
+    assert (
+        list(
+            fanout_module._validate_against_contract(documented, {"response_model_schema": schema})
+        )
+        == []
+    )
+    assert "search_results" not in documented
+    assert documented["search_attempts"][0]["outcome"] == "results_found"
 
 
 @pytest.mark.asyncio
@@ -727,9 +1313,10 @@ async def test_a_completed_reply_does_not_mean_every_required_lane_ran(tmp_path:
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [
-                {"key": key, "content": outputs[key]} for key in lane_keys if key != excused
-            ]
+            "results": _advisory_result_entries(
+                outputs,
+                [key for key in lane_keys if key != excused],
+            )
             + [{"key": excused, "undispatched": True}],
         }
     )

@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import re
@@ -166,6 +167,8 @@ class PreparedFanoutSynthesis:
     fanout_id: str
     provided: dict[str, Any]
     completion_report: dict[str, Any]
+
+    source_evidence: dict[str, Any]
 
 
 class FanoutRegistry:
@@ -750,18 +753,16 @@ def prepare_fanout_results(
     * Otherwise → route to the revived synthesizer for the record ``kind`` and
       return its structured outcome under ``status="complete"``, reporting any
       ``missing_optional_keys``, ``undispatched_keys`` and ``contract_violations``.
-
     A result entry of ``{"key": ..., "undispatched": true}`` declares a lane the
     host could not spawn at all. It is excluded from the completion gate but
     reported, which is the difference between a consultation that concluded with
     nothing to say and one that never happened. It travels in ``results`` rather
     than a separate argument so the host reports every lane it was asked to
-    spawn through one list, whatever became of it. Exactly that shape, though:
-    an ``undispatched`` that is not the literal ``true``, or one arriving with
-    ``content``, returns ``status="invalid_result_entry"`` rather than being
-    read for what it might have meant. So does a lane reported twice: two
-    entries for one lane are two statements about it, and choosing between
-    them by list position is not a reading this can defend.
+    spawn through one list, whatever became of it. ``web_context`` may carry
+    parent-runtime ``source_evidence`` beside ``content``; no other lane may.
+    An ``undispatched`` that is not the literal ``true``, arrives with content or
+    evidence, or a lane reported twice returns ``status="invalid_result_entry"``
+    rather than being ranked or interpreted.
     """
     record = registry.load(fanout_id)
     if record is None:
@@ -800,6 +801,7 @@ def prepare_fanout_results(
         }
 
     provided: dict[str, Any] = {}
+    source_evidence: dict[str, Any] = {}
     declared: set[str] = set()
     invalid: list[str] = []
     for index, result in enumerate(results):
@@ -841,7 +843,11 @@ def prepare_fanout_results(
         # an entry claiming both that its child never ran and what it returned
         # is refused with it: those are opposite reports of the same lane.
         if "undispatched" in result:
-            if result["undispatched"] is not True or "content" in result:
+            if (
+                result["undispatched"] is not True
+                or "content" in result
+                or "source_evidence" in result
+            ):
                 invalid.append(str(key))
                 continue
             declared.add(str(key))
@@ -854,6 +860,12 @@ def prepare_fanout_results(
             invalid.append(str(key))
             continue
         provided[str(key)] = result["content"]
+        if "source_evidence" in result:
+            if str(key) != "web_context":
+                invalid.append(str(key))
+                provided.pop(str(key), None)
+                continue
+            source_evidence[str(key)] = result["source_evidence"]
 
     # Every bad entry at once. Reporting the first would make a host with three
     # malformed entries send three submissions to learn three facts, which is
@@ -864,9 +876,9 @@ def prepare_fanout_results(
             "fanout_id": fanout_id,
             "kind": record.kind,
             "error": (
-                'each result must be either {"key": <lane>, "content": ...} '
-                'or exactly {"key": <lane>, "undispatched": true}, '
-                "and each lane may appear once."
+                'each result must be {"key": <lane>, "content": ...}, with '
+                '"source_evidence" allowed only for web_context, or exactly '
+                '{"key": <lane>, "undispatched": true}; each lane may appear once.'
             ),
             "invalid_keys": invalid,
         }
@@ -884,9 +896,10 @@ def prepare_fanout_results(
         key for key in record.expected_keys if key in declared and key not in provided
     )
 
-    contract_violations = _contract_violations(record, provided)
+    contract_violations = _contract_violations(record, provided, source_evidence)
     for key in contract_violations:
         provided.pop(key, None)
+        source_evidence.pop(key, None)
 
     missing_required = [
         key for key in record.gating_keys() if key not in provided and key not in undispatched
@@ -939,6 +952,7 @@ def prepare_fanout_results(
         fanout_id=fanout_id,
         provided=provided,
         completion_report=completion_report,
+        source_evidence=source_evidence,
     )
 
 
@@ -1014,6 +1028,11 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             if lane_id in provided
         ]
         outcome = _fanout_identity_synthesis(aggregated)
+        evidence = {
+            lane_id: prepared.source_evidence[lane_id]
+            for lane_id in lane_ids
+            if lane_id in prepared.source_evidence and lane_id in provided
+        }
         return {
             "status": "complete",
             "fanout_id": fanout_id,
@@ -1024,6 +1043,7 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
                 "phase": str(record.synthesizer_input.get("phase") or ""),
                 "question_identity": record.question_identity,
             },
+            **({"source_evidence": evidence} if evidence else {}),
             "result": outcome,
             **completion_report,
         }
@@ -1071,19 +1091,15 @@ def submit_fanout_results(
 def _contract_violations(
     record: FanoutRecord,
     provided: Mapping[str, Any],
+    source_evidence: Mapping[str, Any],
 ) -> dict[str, list[str]]:
     """Return ``lane_id -> violations`` for contracted lanes that broke theirs.
 
-    Driven by what was submitted, not by the contract map. Iterating the map
-    made a lane's absence from it into silence: the loop never visited that
-    lane, so "no contract" produced the same result as "checked and fine" --
-    and the provenance check below rides here too, so a lane skipped this way
-    lost its question binding as well as its schema.
-
-    Now every submitted lane is visited and asked whether it is contracted. A
-    lane the code declares uncontracted (``code_context``, ``web_context``)
-    passes through, which is what those lanes are; a lane the code declares
-    contracted is checked, and there is no third answer for it to fall into.
+    Contracted child output is checked against the canonical lane schema. The
+    web lane additionally requires a separate parent-runtime attestation: child
+    prose cannot prove that its URLs were searched or fetched, so that evidence
+    travels beside ``content`` in the submission envelope and is checked before
+    the output can be aggregated or published.
     """
     if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
         return {}
@@ -1094,13 +1110,178 @@ def _contract_violations(
     for lane_id, output in provided.items():
         if lane_id not in contracts:
             continue
-        errors = _validate_against_contract(output, contracts[lane_id])
+        contract = contracts[lane_id]
+        errors = _validate_against_contract(output, contract)
         errors.extend(_provenance_violations(record, output))
         errors.extend(_roster_violations(record, output))
         errors.extend(_aggregate_violations(output))
+        if lane_id == "web_context":
+            errors.extend(
+                _web_source_evidence_violations(
+                    output,
+                    source_evidence.get(lane_id),
+                    contract,
+                )
+            )
         if errors:
             violations[lane_id] = errors
     return violations
+
+
+_WEB_VERIFICATION_MAX_AGE = timedelta(days=7)
+
+
+def _verification_timestamp_violations(
+    value: Any,
+    path: str,
+    now: datetime,
+) -> list[str]:
+    """Reject source checks that are stale or dated after this submission."""
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return [f"{path}: is not a valid ISO 8601 timestamp"]
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return []
+    verified_at = parsed.astimezone(UTC)
+    if verified_at > now:
+        return [f"{path}: is future-dated relative to submission"]
+    if now - verified_at > _WEB_VERIFICATION_MAX_AGE:
+        return [f"{path}: is older than {_WEB_VERIFICATION_MAX_AGE.days} days"]
+    return []
+
+
+def _web_source_evidence_violations(
+    output: Any,
+    evidence: Any,
+    contract: Mapping[str, Any],
+) -> list[str]:
+    """Require host-attested search attempts, result correlation, and successful fetches."""
+    schema = contract.get("source_evidence_schema")
+    if not isinstance(schema, Mapping):
+        return ["source_evidence/<contract>: schema is missing or is not an object"]
+    errors = [
+        f"source_evidence/{error}"
+        for error in _validate_against_contract(
+            evidence,
+            {"response_model_schema": schema},
+        )
+    ]
+    if errors or not isinstance(output, Mapping) or not isinstance(evidence, Mapping):
+        return errors
+    verification_now = datetime.now(UTC)
+    references = output.get("references")
+    if isinstance(references, list):
+        for index, reference in enumerate(references):
+            if isinstance(reference, Mapping):
+                errors.extend(
+                    _verification_timestamp_violations(
+                        reference.get("verified_at"),
+                        f"references/{index}/verified_at",
+                        verification_now,
+                    )
+                )
+    fetched_sources = evidence.get("fetched_sources")
+    if isinstance(fetched_sources, list):
+        for index, source in enumerate(fetched_sources):
+            if isinstance(source, Mapping):
+                errors.extend(
+                    _verification_timestamp_violations(
+                        source.get("verified_at"),
+                        f"source_evidence/fetched_sources/{index}/verified_at",
+                        verification_now,
+                    )
+                )
+
+    queries = output.get("search_queries")
+    attested_queries = evidence.get("search_queries")
+    if queries != attested_queries:
+        errors.append("source_evidence/search_queries: does not match child output")
+
+    raw_attempts = evidence.get("search_attempts")
+    search_attempts = raw_attempts if isinstance(raw_attempts, list) else []
+    query_set = set(queries) if isinstance(queries, list) else set()
+    attempts_by_query: dict[str, Mapping[str, Any]] = {}
+    result_urls: set[str] = set()
+    for index, item in enumerate(search_attempts):
+        if not isinstance(item, Mapping):
+            continue
+        query = item.get("query")
+        if query not in query_set:
+            errors.append(f"source_evidence/search_attempts/{index}/query: was not submitted")
+            continue
+        query_key = str(query)
+        if query_key in attempts_by_query:
+            errors.append(
+                f"source_evidence/search_attempts/{index}/query: duplicate attempt for {query_key!r}"
+            )
+            continue
+        attempts_by_query[query_key] = item
+        urls = item.get("result_urls")
+        if isinstance(urls, list):
+            result_urls.update(str(url) for url in urls if url)
+    for query in sorted(query_set - attempts_by_query.keys()):
+        errors.append(f"source_evidence/search_attempts: no attempt attests query {query!r}")
+
+    if output.get("status") == "no_reliable_reference":
+        failure_reason = output.get("failure_reason")
+        expected_outcome = {
+            "no_relevant_results": "no_results",
+            "search_failed_after_attempts": "search_failed",
+        }.get(failure_reason)
+        if failure_reason == "only_low_quality_results":
+            outcomes = {attempt.get("outcome") for attempt in attempts_by_query.values()}
+            if "results_found" not in outcomes:
+                errors.append(
+                    "source_evidence/search_attempts: only_low_quality_results requires "
+                    "at least one result-bearing search attempt"
+                )
+            unexpected = outcomes - {"results_found", "no_results"}
+            if unexpected:
+                errors.append(
+                    "source_evidence/search_attempts: only_low_quality_results cannot "
+                    f"contain outcomes {sorted(str(item) for item in unexpected)!r}"
+                )
+        elif expected_outcome is not None:
+            for query, attempt in attempts_by_query.items():
+                if attempt.get("outcome") != expected_outcome:
+                    errors.append(
+                        "source_evidence/search_attempts: "
+                        f"query {query!r} does not attest {failure_reason!r}"
+                    )
+
+    raw_fetched = evidence.get("fetched_sources")
+    fetched = raw_fetched if isinstance(raw_fetched, list) else []
+    fetched_by_url = {
+        str(item.get("url")): item
+        for item in fetched
+        if isinstance(item, Mapping) and item.get("url")
+    }
+    if output.get("status") == "references_found":
+        references = output.get("references")
+        if isinstance(references, list):
+            seen_reference_urls: set[str] = set()
+            for index, reference in enumerate(references):
+                if not isinstance(reference, Mapping):
+                    continue
+                url = str(reference.get("url") or "")
+                if url in seen_reference_urls:
+                    errors.append(f"references/{index}/url: duplicates an earlier reference URL")
+                else:
+                    seen_reference_urls.add(url)
+                if url not in result_urls:
+                    errors.append(f"references/{index}/url: absent from attested search results")
+                fetched_reference = fetched_by_url.get(url)
+                if fetched_reference is None:
+                    errors.append(f"references/{index}/url: was not fetched by parent runtime")
+                    continue
+                if fetched_reference.get("source_type") != reference.get("source_type"):
+                    errors.append(f"references/{index}/source_type: differs from fetched source")
+                if fetched_reference.get("verified_at") != reference.get("verified_at"):
+                    errors.append(f"references/{index}/verified_at: differs from fetched source")
+    return errors
 
 
 def _aggregate_violations(output: Any) -> list[str]:

@@ -457,10 +457,11 @@
 
       <article class="panel">
         <div class="tag accent">Plugin mode</div>
-        <h2>Child interviewer가 보조</h2>
+        <h2>Child interviewer도 factual snapshot을 재사용</h2>
         <p>
           plugin mode에서는 실제 질문이 child interview session 안에서 생성된다.
-          그래서 child prompt 자체에 Question-first Advisory Fanout 지침을 넣어 질문 뒤에 compact helper를 만들게 했다.
+          child prompt는 최초 <code>code_context</code>와 source-backed <code>web_context</code>만 수집하고,
+          이후 일반 질문에서는 저장된 factual snapshot을 재사용하도록 안내한다.
         </p>
       </article>
     </section>
@@ -468,8 +469,8 @@
     <section aria-label="why it matters">
       <div class="note">
         <strong>한 줄 요약:</strong>
-        기존 인터뷰는 질문을 잘 만드는 쪽에 집중했다면, 새 인터뷰는 질문을 받은 사람이 더 잘 답할 수 있게 주변 맥락을 병렬로 찾아주는 구조다.
-        사람의 기억, 코드 맥락 부족, 최신 정보 부족, 모호한 표현을 subagent들이 보완하고, 메인 세션은 그 결과를 사용자가 결정하기 쉬운 형태로 정리한다.
+        최초 factual research만 병렬로 수집하고 일반 질문은 저장된 근거를 재사용한다.
+        milestone과 closure 검문만 독립적으로 다시 실행한다.
       </div>
     </section>
   </main>

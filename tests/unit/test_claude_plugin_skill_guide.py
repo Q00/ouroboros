@@ -13,23 +13,23 @@ def test_claude_plugin_ships_rendered_skill_capability_guide() -> None:
     assert guide_path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("claude")
 
 
-def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> None:
+def test_claude_plugin_interview_skill_includes_bounded_review_dispatch() -> None:
     skill_path = Path("skills") / "interview" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
-    assert "question_advisory_subagents` is present you MUST process every" in skill_text
-    assert 'dispatch_mode="host_decides"' in skill_text
-    assert "Task/Agent" in skill_text
-    assert "one native" in skill_text
-    assert "dispatch_subagents_if_supported" in skill_text
-    assert "process_payloads_sequentially" in skill_text
-    assert "host action selects the execution strategy" in skill_text
-    assert "Never reconstruct" in skill_text and "prompts from prose" in skill_text
-    assert "`run_lateral_review`" in skill_text
+    assert "**Factual research snapshot**" in skill_text
+    assert "code_context" in skill_text and "web_context" in skill_text
+    assert "complete cache hit" in skill_text
+    assert "no `question_advisory_subagents`" in skill_text
+    assert "Do not add data, contrarian, simplifier, or architecture subagents" in skill_text
+    assert "Ordinary turns do not trigger lateral review" in skill_text
     assert "**Milestone lateral-review dispatch**" in skill_text
     assert "meta.lateral_review_tool_args" in skill_text
     assert "required lightweight subagent review" in skill_text
-    assert "Main-session direct-answer assistance" in skill_text
+    assert "Seed-ready Acceptance Guard" in skill_text
+    assert "apply the canonical Seed" in skill_text
+    assert "Closer criteria" in skill_text
+    assert "Main-session direct-answer assistance" not in skill_text
 
 
 def test_claude_plugin_unstuck_skill_includes_host_capability_contract() -> None:
