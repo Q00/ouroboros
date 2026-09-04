@@ -21,13 +21,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import plistlib
 from typing import Any
 
 import pytest
 
+from ouroboros.core.filesystem_capability import open_nofollow_directory_chain
 from ouroboros.orchestrator.adapter import ParamSupport
+import ouroboros.orchestrator.zcode_cli_runtime as zcode_cli_runtime_module
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
 _FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "zcode"
@@ -114,6 +117,724 @@ def test_convert_event_tool_summary_to_assistant(runtime: ZcodeCLIRuntime) -> No
     assert msgs[0].content.startswith("Created")
     assert msgs[0].data.get("eventCount") == 51
     assert msgs[0].data.get("usage", {}).get("modelRequestCount") == 2
+
+
+def _rollout_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ZcodeCLIRuntime, dict[str, Any], Path]:
+    """Create an exact-bound Zcode rollout receipt fixture under a fake HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session_id = "sess_12345678-1234-1234-1234-123456789abc"
+    event = {
+        "sessionId": session_id,
+        "traceId": "trace-test-1",
+        "turnId": "turn-test-1",
+        "response": "Final answer",
+    }
+    rollout = tmp_path / ".zcode" / "cli" / "rollout"
+    rollout.mkdir(parents=True)
+    path = rollout / f"model-io-{session_id}.jsonl"
+    record = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messages": [
+                {"role": "user", "content": "current turn"},
+                {
+                    "role": "assistant",
+                    "toolCalls": [
+                        {"id": "call-1", "name": "Bash", "input": {"command": "printf ok"}}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "toolCallId": "call-1",
+                    "toolName": "Bash",
+                    "content": "ok",
+                    "isError": False,
+                },
+            ]
+        },
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs"), event, path
+
+
+def test_convert_event_loads_exact_rollout_receipts_and_preserves_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, _ = _rollout_fixture(tmp_path, monkeypatch)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
+    assert messages[0].tool_name == "Bash"
+    assert messages[1].data["exit_code"] == 0
+    assert messages[-1].content == "Final answer"
+
+
+def test_rollout_cumulative_messages_deduplicate_exact_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    # 0.16.1 request.messages is cumulative across model-io records; the
+    # second snapshot repeats the prior call/result and adds a new pair.
+    record["request"]["messages"] += [
+        *record["request"]["messages"][1:],
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+def test_rollout_delta_snapshot_is_reconstructed_before_receipt_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"].update({"messagesKind": "full", "messageOffset": 0, "messageCount": 3})
+    delta = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messagesKind": "delta",
+            "messageOffset": 3,
+            "messageCount": 5,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+                },
+                {
+                    "role": "tool",
+                    "toolCallId": "call-2",
+                    "toolName": "Read",
+                    "content": "x",
+                    "isError": False,
+                },
+            ],
+        },
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(delta) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+@pytest.mark.parametrize("message_offset", [2, 4, True, "3"])
+def test_rollout_delta_snapshot_with_invalid_offset_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message_offset: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"].update({"messagesKind": "full", "messageOffset": 0})
+    delta = {
+        **{key: event[key] for key in ("sessionId", "traceId", "turnId")},
+        "request": {
+            "messagesKind": "delta",
+            "messageOffset": message_offset,
+            "messages": [],
+        },
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(delta) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_conflicting_duplicate_call_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"].insert(
+        1, {"role": "assistant", "toolCalls": [{"id": "call-1", "name": "Write", "input": {}}]}
+    )
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_conflicting_exact_identity_records_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"][1]["toolCalls"][0] = {
+        "id": "call-1",
+        "name": "Write",
+        "input": {"path": "different"},
+    }
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_cumulative_prefix_preserves_json_type_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"]["messages"][2]["isError"] = 0
+    second = json.loads(path.read_text(encoding="utf-8"))
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_cumulative_prefix_accepts_deep_non_tool_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    nested: dict[str, Any] = {}
+    current = nested
+    for index in range(101):
+        child: dict[str, Any] = {}
+        current[f"level-{index}"] = child
+        current = child
+    first["request"]["messages"][0]["content"] = nested
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+def test_rollout_full_snapshot_may_drop_ephemeral_cache_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    first = json.loads(path.read_text(encoding="utf-8"))
+    first["request"]["messages"][0]["cacheControl"] = {"type": "ephemeral"}
+    second = json.loads(json.dumps(first))
+    second["request"]["messages"][0].pop("cacheControl")
+    second["request"]["messages"] += [
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"file_path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == [
+        "tool",
+        "tool_result",
+        "tool",
+        "tool_result",
+        "assistant",
+    ]
+
+
+def test_rollout_exact_turn_superseded_by_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    newer = json.loads(json.dumps(matched))
+    newer["turnId"] = "turn-newer"
+    path.write_text(json.dumps(matched) + "\n" + json.dumps(newer) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_replayed_exact_identity_after_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    other = json.loads(json.dumps(matched))
+    other["turnId"] = "turn-newer"
+    replayed_match = json.loads(json.dumps(matched))
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (matched, other, replayed_match)) + "\n",
+        encoding="utf-8",
+    )
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_replayed_target_after_newer_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    matched = json.loads(path.read_text(encoding="utf-8"))
+    newer = json.loads(json.dumps(matched))
+    newer["turnId"] = "turn-newer"
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (newer, matched)) + "\n",
+        encoding="utf-8",
+    )
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sessionId", "sess_12345678-1234-1234-1234-123456789abd"),
+        ("sessionId", None),
+        ("sessionId", 7),
+        ("traceId", None),
+        ("traceId", 7),
+        ("traceId", ""),
+        ("turnId", None),
+        ("turnId", 7),
+        ("turnId", ""),
+    ],
+)
+def test_rollout_foreign_or_malformed_history_record_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    valid = json.loads(path.read_text(encoding="utf-8"))
+    invalid = json.loads(json.dumps(valid))
+    invalid[field] = value
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (valid, invalid)) + "\n", encoding="utf-8"
+    )
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize("mode", [0o660, 0o602])
+def test_rollout_group_or_world_writable_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.chmod(mode)
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_loads_without_getuid_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, _ = _rollout_fixture(tmp_path, monkeypatch)
+    monkeypatch.delattr(os, "getuid", raising=False)
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
+
+
+def test_rollout_non_uuid_session_id_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    malformed = "sess_------------------------------------"
+    malformed_path = path.with_name(f"model-io-{malformed}.jsonl")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    event["sessionId"] = malformed
+    record["sessionId"] = malformed
+    malformed_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_excludes_receipts_before_current_turn_user_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    old_pair = record["request"]["messages"]
+    record["request"]["messages"] = [
+        {"role": "user", "content": "old turn"},
+        *old_pair,
+        {"role": "assistant", "content": "old final"},
+        {"role": "user", "content": "current turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [{"id": "call-2", "name": "Read", "input": {"path": "x"}}],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "call-2",
+            "toolName": "Read",
+            "content": "x",
+            "isError": False,
+        },
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.tool_name for message in messages[:-1]] == ["Read", "Read"]
+
+
+def test_rollout_rejects_exact_replayed_tool_ids_across_user_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    old_pair = record["request"]["messages"][1:]
+    record["request"]["messages"] = [
+        {"role": "user", "content": "old turn"},
+        *old_pair,
+        {"role": "assistant", "content": "old final"},
+        {"role": "user", "content": "current turn"},
+        *old_pair,
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_current_no_tool_turn_does_not_replay_prior_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "prior-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        {
+            "role": "tool",
+            "toolCallId": "prior-call",
+            "content": "passed",
+            "isError": False,
+        },
+        {"role": "assistant", "content": "prior turn done"},
+        {"role": "user", "content": "current no-tool turn"},
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+def test_rollout_malformed_tool_calls_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["toolCalls"] = {"not": "a list"}
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_malformed_tool_calls_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {"role": "assistant", "toolCalls": {"not": "a list"}},
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize("role", ["system", "developer", "tool", "user"])
+def test_rollout_tool_calls_on_non_assistant_role_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["role"] = role
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+def test_rollout_deeply_nested_tool_input_fails_closed_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    nested: dict[str, Any] = {}
+    current = nested
+    for index in range(2_000):
+        child: dict[str, Any] = {}
+        current[f"level-{index}"] = child
+        current = child
+    record["request"]["messages"][1]["toolCalls"][0]["input"] = nested
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+@pytest.mark.parametrize(
+    "tool_input", [{"value": float("nan")}, {"value": float("inf")}, {"value": float("-inf")}]
+)
+def test_rollout_non_finite_tool_input_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_input: dict[str, float]
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][1]["toolCalls"][0]["input"] = tool_input
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    converted = runtime._convert_event(event, None)
+
+    assert [message.type for message in converted] == ["assistant"]
+
+
+@pytest.mark.parametrize("mutation", ["unmatched", "missing_error"])
+def test_rollout_invalid_tool_result_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    prior_result = {
+        "role": "tool",
+        "toolCallId": "prior-call",
+        "toolName": "Bash",
+        "content": "passed",
+        "isError": False,
+    }
+    if mutation == "unmatched":
+        prior_result["toolCallId"] = "missing-call"
+    else:
+        prior_result.pop("isError")
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "prior-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        prior_result,
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+def test_rollout_dangling_tool_call_in_prior_turn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"] = [
+        {"role": "user", "content": "prior turn"},
+        {
+            "role": "assistant",
+            "toolCalls": [
+                {"id": "dangling-call", "name": "Bash", "input": {"command": "pytest prior.py"}}
+            ],
+        },
+        {"role": "user", "content": "current turn"},
+        *record["request"]["messages"][1:],
+    ]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert [message.type for message in runtime._convert_event(event, None)] == ["assistant"]
+
+
+@pytest.mark.parametrize("variant", ["trace", "turn"])
+def test_rollout_identifier_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["request"]["messages"][0]["unused"] = variant
+    record[f"{variant}Id"] = "different"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_malformed_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.write_text("{not-json}\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_deeply_nested_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.write_text("[" * 2_000 + "null" + "]" * 2_000 + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_over_limit_integer_json_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record_text = path.read_text(encoding="utf-8").strip()
+    path.write_text(
+        record_text[:-1] + ',"oversized":' + ("9" * 5_000) + "}\n",
+        encoding="utf-8",
+    )
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is unavailable on this platform")
+def test_rollout_fifo_fails_closed_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    path.unlink()
+    os.mkfifo(path)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_symlink_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    target = path.with_suffix(".target")
+    target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.unlink()
+    path.symlink_to(target)
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_symlinked_parent_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    real_zcode = tmp_path / "real-zcode"
+    path.parents[2].rename(real_zcode)
+    (tmp_path / ".zcode").symlink_to(real_zcode, target_is_directory=True)
+
+    messages = runtime._convert_event(event, None)
+
+    assert [message.type for message in messages] == ["assistant"]
+
+
+def test_rollout_parent_replacement_cannot_redirect_leaf_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    displaced_zcode = tmp_path / "displaced-zcode"
+    attacker_zcode = tmp_path / "attacker-zcode"
+    attacker_rollout = attacker_zcode / "cli" / "rollout"
+    attacker_rollout.mkdir(parents=True)
+    attacker_record = json.loads(path.read_text(encoding="utf-8"))
+    attacker_record["request"]["messages"][2]["content"] = "attacker"
+    (attacker_rollout / path.name).write_text(
+        json.dumps(attacker_record) + "\n",
+        encoding="utf-8",
+    )
+
+    replaced = False
+
+    def replacing_chain(target: str | os.PathLike[str]):
+        nonlocal replaced
+        chain = open_nofollow_directory_chain(target)
+        if not replaced:
+            replaced = True
+            path.parents[2].rename(displaced_zcode)
+            (tmp_path / ".zcode").symlink_to(attacker_zcode, target_is_directory=True)
+        return chain
+
+    monkeypatch.setattr(
+        zcode_cli_runtime_module,
+        "open_nofollow_directory_chain",
+        replacing_chain,
+    )
+
+    messages = runtime._convert_event(event, None)
+
+    assert replaced is True
+    assert [message.type for message in messages] == ["tool", "tool_result", "assistant"]
+    assert messages[1].content == "ok"
+
+
+def test_rollout_oversized_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    with path.open("ab") as stream:
+        stream.write(b"x" * (16 * 1024 * 1024))
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
+
+
+@pytest.mark.parametrize("mutation", ["unmatched", "name", "missing_error"])
+def test_rollout_invalid_tool_pair_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    runtime, event, path = _rollout_fixture(tmp_path, monkeypatch)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    result = record["request"]["messages"][2]
+    if mutation == "unmatched":
+        result["toolCallId"] = "call-missing"
+    elif mutation == "name":
+        result["toolName"] = "Write"
+    else:
+        result.pop("isError")
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    messages = runtime._convert_event(event, None)
+    assert [message.type for message in messages] == ["assistant"]
 
 
 @pytest.mark.parametrize(
