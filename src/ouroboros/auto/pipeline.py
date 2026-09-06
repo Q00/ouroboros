@@ -25,6 +25,13 @@ from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
+from ouroboros.auto.grade_gate_terminals import (
+    SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
+    SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
+    degraded_seed_safety_blocker,
+    grade_meets_required,
+    seed_review_gate_blocker,
+)
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.handoff_contract import (
     IDEMPOTENCY_KEY_FIELD,
@@ -1153,31 +1160,18 @@ class AutoPipeline:
             # Normal (non-degraded) Seeds skip this branch and fall through to
             # the existing grade-gate / may_run checks unchanged.
             if bool(getattr(seed.metadata, "degraded", False)):
-                if review.grade_result.blockers:
-                    blocker_codes = ", ".join(
-                        finding.code for finding in review.grade_result.blockers
-                    )
-                    blocker = (
-                        "Degraded seed retains hard safety blockers; "
-                        f"unsafe/destructive markers must be resolved before run: {blocker_codes}"
-                    )
-                    state.mark_blocked(blocker, tool_name="grade_gate")
+                if terminal := degraded_seed_safety_blocker(review):
+                    blocker, code = terminal
+                    state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
                     self._save(state)
                     return self._result(state, ledger, review=review, blocker=blocker)
                 return await self._emit_partial_product_terminal(state, ledger, seed, review)
 
-            if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
-                blocker = (
-                    f"Seed grade {review.grade_result.grade.value} did not meet "
-                    f"required grade {state.required_grade}"
-                )
-                state.mark_blocked(blocker, tool_name="grade_gate")
-                self._save(state)
-                return self._result(state, ledger, review=review, blocker=blocker)
-
-            if not review.may_run and not (self.skip_run or state.skip_run):
-                blocker = "Seed review did not clear the Seed for execution"
-                state.mark_blocked(blocker, tool_name="grade_gate")
+            if terminal := seed_review_gate_blocker(
+                state, review, skip_run=self.skip_run or state.skip_run
+            ):
+                blocker, code = terminal
+                state.mark_blocked(blocker, tool_name="grade_gate", error_code=code)
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
 
@@ -1252,10 +1246,11 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            if not _grade_meets_required(state.last_grade, state.required_grade):
+            if not grade_meets_required(state.last_grade, state.required_grade):
                 state.mark_blocked(
                     f"Cannot start execution without a persisted grade meeting {state.required_grade}",
                     tool_name="grade_gate",
+                    error_code=SEED_GRADE_BELOW_REQUIRED_STOP_REASON_CODE,
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -1299,6 +1294,7 @@ class AutoPipeline:
                 state.mark_blocked(
                     "Seed review did not clear the Seed for execution",
                     tool_name="grade_gate",
+                    error_code=SEED_REVIEW_WITHHELD_RUN_STOP_REASON_CODE,
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)
@@ -2076,9 +2072,14 @@ class AutoPipeline:
             state.last_qa_differences = _safe_seed_qa_evidence(qa_result.differences)
             state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
-                review_blocker = self._seed_review_gate_blocker(state, current_review)
-                if review_blocker is not None:
-                    state.mark_blocked(review_blocker, tool_name="grade_gate")
+                review_gate = seed_review_gate_blocker(
+                    state, current_review, skip_run=self.skip_run or state.skip_run
+                )
+                if review_gate is not None:
+                    review_blocker, review_code = review_gate
+                    state.mark_blocked(
+                        review_blocker, tool_name="grade_gate", error_code=review_code
+                    )
                     self._save(state)
                     return (
                         self._result(state, ledger, review=current_review, blocker=review_blocker),
@@ -2184,9 +2185,12 @@ class AutoPipeline:
             return self._result(state, ledger, review=review, blocker=blocker), seed, review
 
         # Gates first, event second — see the module docstring for why.
-        review_blocker = self._seed_review_gate_blocker(state, review)
-        if review_blocker is not None:
-            state.mark_blocked(review_blocker, tool_name="grade_gate")
+        review_gate = seed_review_gate_blocker(
+            state, review, skip_run=self.skip_run or state.skip_run
+        )
+        if review_gate is not None:
+            review_blocker, review_code = review_gate
+            state.mark_blocked(review_blocker, tool_name="grade_gate", error_code=review_code)
             self._save(state)
             return stop(review_blocker)
         if self._enforce_deadline(state):
@@ -2286,21 +2290,6 @@ class AutoPipeline:
             qa_result=qa_result,
             attempt=attempt,
         )
-
-    def _seed_review_gate_blocker(
-        self, state: AutoPipelineState, review: SeedReview | None
-    ) -> str | None:
-        """Return the deterministic review blocker that must still gate Seed QA pass paths."""
-        if review is None:
-            return None
-        if not _grade_meets_required(review.grade_result.grade.value, state.required_grade):
-            return (
-                f"Seed grade {review.grade_result.grade.value} did not meet "
-                f"required grade {state.required_grade}"
-            )
-        if not review.may_run and not (self.skip_run or state.skip_run):
-            return "Seed review did not clear the Seed for execution"
-        return None
 
     def _can_redispatch_recovery_plan(plan: AutoRecoveryPlan) -> bool:
         """Return True when a persisted plan is safe to consume automatically."""
@@ -2769,13 +2758,6 @@ def _mark_unknown_run_handoff(
         status = state.run_handoff_status
     state.run_handoff_status = status
     state.run_handoff_guidance = unknown_handoff_guidance(status)
-
-
-def _grade_meets_required(actual: str | None, required: str) -> bool:
-    rank = {"A": 0, "B": 1, "C": 2}
-    if actual not in rank or required not in rank:
-        return False
-    return rank[actual] <= rank[required]
 
 
 def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:

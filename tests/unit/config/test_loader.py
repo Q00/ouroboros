@@ -1817,6 +1817,88 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="pi") == "default"
             assert get_assertion_extraction_model(backend="pi") == "default"
 
+    def test_omp_backend_uses_default_model_sentinel(self) -> None:
+        """Backend-aware defaults avoid cross-provider model names for OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
+    def test_omp_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Existing default configs should remain usable after switching to OMP."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="omp") == "default"
+            assert get_qa_model(backend="omp") == "default"
+            assert get_wonder_model(backend="omp") == "default"
+            assert get_reflect_model(backend="omp") == "default"
+            assert get_semantic_model(backend="omp") == "default"
+            assert get_assertion_extraction_model(backend="omp") == "default"
+
+    def test_resolve_omp_cli_path_skips_stale_candidate_for_path(self) -> None:
+        """PR #2299 round 5: the canonical resolver owns validated omp precedence."""
+        from ouroboros.config._omp_cli import resolve_omp_cli_path
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/bin/omp" if name == "omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", side_effect=ConfigError("no config")),
+            patch("shutil.which", side_effect=fake_which),
+        ):
+            assert resolve_omp_cli_path() == "/usr/bin/omp"
+
+        def fake_which_configured(name: str) -> str | None:
+            return "/opt/omp/bin/omp" if name == "/opt/omp/bin/omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/opt/omp/bin/omp"}),
+            patch("shutil.which", side_effect=fake_which_configured),
+        ):
+            assert resolve_omp_cli_path() == "/opt/omp/bin/omp"
+
+    def test_resolve_omp_cli_path_falls_back_from_stale_env_to_configured(self) -> None:
+        """PR #2299 round 6: a stale env candidate must not mask a runnable configured CLI."""
+        from ouroboros.config._omp_cli import resolve_omp_cli_path
+        from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
+
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(omp_cli_path="/opt/omp/bin/omp"))
+
+        def fake_which(name: str) -> str | None:
+            return "/opt/omp/bin/omp" if name == "/opt/omp/bin/omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", return_value=config),
+            patch("shutil.which", side_effect=fake_which),
+        ):
+            assert resolve_omp_cli_path() == "/opt/omp/bin/omp"
+
+        # Both higher-priority sources stale: fall through to PATH.
+        def fake_which_path(name: str) -> str | None:
+            return "/usr/bin/omp" if name == "omp" else None
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_OMP_CLI_PATH": "/missing/env/omp"}),
+            patch("ouroboros.config._omp_cli.load_config", return_value=config),
+            patch("shutil.which", side_effect=fake_which_path),
+        ):
+            assert resolve_omp_cli_path() == "/usr/bin/omp"
+
     def test_gjc_backend_uses_default_model_sentinel(self) -> None:
         """Backend-aware defaults avoid cross-provider model names for GJC."""
         with (

@@ -25,6 +25,9 @@ from typing import Any
 
 import pytest
 
+from ouroboros.auto.grade_gate_terminals import (
+    DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE,
+)
 from ouroboros.auto.grading import GradeGate
 from ouroboros.auto.ledger import (
     LedgerEntry,
@@ -344,6 +347,18 @@ async def test_degraded_seed_with_safety_blocker_still_terminates(tmp_path) -> N
     # The safety blocker terminates — we must NOT see a partial product
     # terminal here, even though the Seed is degraded.
     assert result.partial_product is False
+    # The terminal is machine-readable, not just prose: a consumer routing on
+    # ``stop_reason_code`` has to be able to tell this safety stop from the
+    # partial-product success terminal above, which carries ``None``. Dropping
+    # ``error_code=`` at the ``mark_blocked`` call site is a silent regression
+    # to ``None`` that every other assertion in this test survives.
+    assert result.stop_reason_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+    assert state.last_error_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
+    assert result.blocker is not None
+    # And it survives the round trip: an operator resuming this session reads
+    # the persisted record, not the in-memory object the pipeline mutated.
+    reloaded = AutoStore(tmp_path).load(state.auto_session_id)
+    assert reloaded.last_error_code == DEGRADED_SEED_SAFETY_BLOCKERS_STOP_REASON_CODE
     # ``auto.product.partial_emitted`` MUST NOT be emitted when the pipeline
     # blocks on a safety marker.
     partial_events = [

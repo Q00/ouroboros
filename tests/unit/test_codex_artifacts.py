@@ -1,5 +1,7 @@
 """Unit tests for packaged Codex artifact installation."""
 
+import ctypes
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -336,6 +338,479 @@ class TestInstallCodexRules:
         assert installed_content.count(_SKILL_CAPABILITY_GUIDE_MARKER) == 1
         assert "## stale generated guide" not in installed_content
         assert "## Ouroboros Skill Capability Guide: Codex" in installed_content
+
+
+class TestRenameNoReplaceOnFilesystemsWithoutTheFlag:
+    """Setup must still install when the kernel or filesystem rejects RENAME_NOREPLACE.
+
+    NFS answers ``renameat2(..., RENAME_NOREPLACE)`` with ``EINVAL`` and renames
+    nothing, so a home directory on NFS fails every Codex artifact install — and
+    the rollback, which renames the same way, leaves the previous generation
+    deleted. These tests pin the requirement: an unsupported flag degrades to the
+    portable path, and the no-replace guarantee itself still holds.
+    """
+
+    @staticmethod
+    def _force_renameat2_errno(
+        monkeypatch: pytest.MonkeyPatch,
+        error_number: int,
+    ) -> list[int]:
+        """Make ``renameat2`` fail with ``error_number`` without renaming anything."""
+        calls: list[int] = []
+
+        class _FailingRenameat2:
+            argtypes: object = None
+            restype: object = None
+
+            def __call__(self, *_args: object) -> int:
+                calls.append(error_number)
+                ctypes.set_errno(error_number)
+                return -1
+
+        class _FakeLibc:
+            renameat2 = _FailingRenameat2()
+
+        monkeypatch.setattr(codex_artifacts.os, "name", "posix")
+        monkeypatch.setattr(codex_artifacts.sys, "platform", "linux")
+        monkeypatch.setattr(codex_artifacts.ctypes, "CDLL", lambda *_a, **_kw: _FakeLibc())
+        return calls
+
+    def test_installs_file_artifact_when_the_flag_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A rules file must install on a filesystem without RENAME_NOREPLACE."""
+        calls = self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_path = install_codex_rules(codex_dir=tmp_path / ".codex")
+
+        assert calls, "the rejected renameat2 path was never exercised"
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+
+    def test_installs_directory_artifact_when_the_flag_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Skills install as directories, which the hard-link fallback cannot handle."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        skill_dir = source_skills_dir / "run"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: run\n---\n", encoding="utf-8")
+        calls = self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_paths = install_codex_skills(
+            codex_dir=tmp_path / ".codex",
+            skills_dir=source_skills_dir,
+        )
+
+        assert calls, "the rejected renameat2 path was never exercised"
+        assert installed_paths == (tmp_path / ".codex" / "skills" / f"{CODEX_SKILL_NAMESPACE}run",)
+        assert installed_paths[0].joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "---\nname: run\n---\n"
+        )
+
+    def test_refresh_over_an_existing_generation_keeps_the_rule_installed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed commit used to strand the previous rule in a hidden backup sibling."""
+        codex_dir = tmp_path / ".codex"
+        rules_dir = codex_dir / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / CODEX_RULE_FILENAME).write_text("previous generation", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        installed_path = install_codex_rules(codex_dir=codex_dir)
+
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+        assert [entry.name for entry in rules_dir.iterdir()] == [CODEX_RULE_FILENAME]
+
+    @pytest.mark.parametrize("error_number", [errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP])
+    def test_fallback_still_refuses_an_occupied_file_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error_number: int,
+    ) -> None:
+        """Degrading the primitive must not degrade the no-replace guarantee."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        target_path.write_text("another writer", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, error_number)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert target_path.read_text(encoding="utf-8") == "another writer"
+        assert source_path.read_text(encoding="utf-8") == "staged"
+
+    def test_fallback_still_refuses_an_occupied_directory_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty directory target would be silently replaced by a bare ``os.rename``."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        target_path.mkdir()
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert list(target_path.iterdir()) == []
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_directory_commit_admits_an_occupied_name_only_through_the_reservation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Admission is the ``mkdir`` reservation, never an existence check.
+
+        POSIX ``rename`` removes an empty destination directory, so a writer that
+        holds the target would lose it silently if publication were admitted by a
+        check. The reservation refuses the name instead, even when every earlier
+        check reports it free.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        target_path.mkdir()  # the racing writer, invisible to any earlier check
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        monkeypatch.setattr(codex_artifacts.os.path, "lexists", lambda _path: False)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert list(target_path.iterdir()) == []
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_directory_commit_leaves_no_reservation_when_publication_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed publication must not leave the reserved name occupied."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        def _refuse_rename(*_args: object, **_kwargs: object) -> None:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+
+        monkeypatch.setattr(codex_artifacts.os, "rename", _refuse_rename)
+
+        with pytest.raises(OSError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert not target_path.exists()
+
+    def test_refresh_failed_directory_publication_restores_previous_generation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_skills_dir = tmp_path / "packaged-skills"
+        skill_dir = source_skills_dir / "run"
+        skill_dir.mkdir(parents=True)
+        skill_dir.joinpath("SKILL.md").write_text("fresh skill", encoding="utf-8")
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_stat = os.stat
+        stat_failures_remaining = 1
+
+        def _fail_first_target_stat(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            *args: object,
+            **kwargs: object,
+        ) -> os.stat_result:
+            nonlocal stat_failures_remaining
+            if (
+                Path(os.fsdecode(path)) == target_path
+                and kwargs.get("follow_symlinks") is False
+                and not target_path.joinpath("SKILL.md").exists()
+                and stat_failures_remaining
+            ):
+                stat_failures_remaining -= 1
+                raise OSError(errno.ESTALE, os.strerror(errno.ESTALE))
+            return real_stat(path, *args, **kwargs)
+
+        real_rename = os.rename
+
+        def _refuse_staged_directory_publication(
+            source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        ) -> None:
+            if (
+                Path(os.fsdecode(source)).name.endswith(".tmp")
+                and Path(os.fsdecode(destination)) == target_path
+            ):
+                raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+            real_rename(source, destination)
+
+        monkeypatch.setattr(codex_artifacts.os, "stat", _fail_first_target_stat)
+        monkeypatch.setattr(codex_artifacts.os, "rename", _refuse_staged_directory_publication)
+
+        with pytest.raises(OSError, match=os.strerror(errno.EXDEV)):
+            install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "installed skill"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+
+    def test_failed_staging_cleanup_does_not_report_a_failed_commit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Linking publishes the target, so later cleanup cannot fail the commit.
+
+        Raising after the link made the caller roll back a generation that was
+        already live, leaving the previous one stranded in its backup sibling.
+        """
+        codex_dir = tmp_path / ".codex"
+        rules_dir = codex_dir / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / CODEX_RULE_FILENAME).write_text("previous generation", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        real_unlink = Path.unlink
+        refused: list[Path] = []
+
+        def _refuse_first_staging_unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if not refused and self.name.startswith(".") and self.name.endswith(".tmp"):
+                refused.append(self)
+                raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(self))
+            real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "unlink", _refuse_first_staging_unlink)
+
+        installed_path = install_codex_rules(codex_dir=codex_dir)
+
+        assert refused, "the staging cleanup failure was never exercised"
+        assert installed_path.read_text(encoding="utf-8") == load_packaged_codex_rules()
+        # No stranded previous generation, and no staging hard link left aliasing
+        # the live rule.
+        assert [entry.name for entry in rules_dir.iterdir()] == [CODEX_RULE_FILENAME]
+
+    def test_failed_publication_never_removes_a_reservation_taken_over(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup must prove ownership: a failed publication is not a licence to delete.
+
+        A writer that removes the reservation and puts their own directory at the
+        same path keeps it, even though publication fails afterwards.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        def _take_over_the_reservation_then_fail(*_args: object, **_kwargs: object) -> None:
+            os.rmdir(target_path)
+            target_path.mkdir()  # a different writer now owns this pathname
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+
+        monkeypatch.setattr(codex_artifacts.os, "rename", _take_over_the_reservation_then_fail)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EXDEV
+        assert target_path.is_dir(), "cleanup deleted a directory it did not reserve"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_failed_publication_never_removes_a_renamed_reservation_replacement(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live descriptor does not prove that the target still names its directory."""
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        held_reservation_path = tmp_path / "held-reservation"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_rename = os.rename
+
+        def _rename_reservation_away_then_fail(*_args: object, **_kwargs: object) -> None:
+            real_rename(target_path, held_reservation_path)
+            target_path.mkdir()  # a different writer now owns this pathname
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        monkeypatch.setattr(
+            codex_artifacts.os,
+            "rename",
+            _rename_reservation_away_then_fail,
+        )
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EIO
+        assert target_path.is_dir(), "cleanup deleted a directory it did not reserve"
+        assert held_reservation_path.is_dir(), "the original reservation was not preserved"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_directory_commit_never_destroys_a_racing_writer_with_content(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The reservation window cannot cost another writer their tree.
+
+        Publication consumes the reserved name with a POSIX rename, which refuses
+        a destination that is not empty. This bounds the residual reservation race
+        documented on ``_rename_noreplace_fallback``: a racing writer that put
+        anything in the path keeps it.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+
+        real_mkdir = os.mkdir
+
+        def _fill_the_reservation(path: object, *args: object, **kwargs: object) -> None:
+            real_mkdir(path, *args, **kwargs)  # type: ignore[arg-type]
+            Path(str(path)).joinpath("operator.txt").write_text("theirs", encoding="utf-8")
+
+        monkeypatch.setattr(codex_artifacts.os, "mkdir", _fill_the_reservation)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.ENOTEMPTY
+        assert target_path.joinpath("operator.txt").read_text(encoding="utf-8") == "theirs"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_unpinnable_reservation_does_not_occupy_the_final_name(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reservation that cannot be pinned must not survive the failure.
+
+        Leaving it at the final name makes every later replay see a collision
+        that never resolves, with the previous generation still hidden in its
+        backup sibling — the failure mode this whole fallback exists to remove.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_open = os.open
+
+        def _refuse_to_pin_the_reservation(path: object, *args: object, **kwargs: object) -> int:
+            if (
+                isinstance(path, str | bytes | os.PathLike)
+                and Path(os.fsdecode(path)) == target_path
+            ):
+                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(codex_artifacts.os, "open", _refuse_to_pin_the_reservation)
+
+        with pytest.raises(OSError) as publication_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert publication_error.value.errno == errno.EMFILE
+        assert not target_path.exists(), "an unpinned reservation was left at the final name"
+        assert source_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+
+    def test_release_failure_after_the_rename_keeps_the_publication_committed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The rename commits, so releasing the descriptor cannot fail the commit.
+
+        Reporting the release as a failed publication would send the caller into
+        a rollback that deletes the generation already live and strands the
+        previous one in its backup sibling.
+        """
+        source_path = tmp_path / "source"
+        target_path = tmp_path / "target"
+        source_path.mkdir()
+        (source_path / "SKILL.md").write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EINVAL)
+        real_open = os.open
+        real_close = os.close
+        reservations: list[int] = []
+
+        def _record_the_reservation(path: object, *args: object, **kwargs: object) -> int:
+            descriptor = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+            if (
+                isinstance(path, str | bytes | os.PathLike)
+                and Path(os.fsdecode(path)) == target_path
+            ):
+                reservations.append(descriptor)
+            return descriptor
+
+        def _refuse_to_release_the_reservation(descriptor: int) -> None:
+            real_close(descriptor)
+            if descriptor in reservations:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        monkeypatch.setattr(codex_artifacts.os, "open", _record_the_reservation)
+        monkeypatch.setattr(codex_artifacts.os, "close", _refuse_to_release_the_reservation)
+
+        codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert reservations, "the directory branch did not pin a reservation"
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "staged"
+        assert not source_path.exists()
+
+    def test_existing_target_reported_by_renameat2_is_not_degraded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``EEXIST`` is the guarantee working, not a missing capability."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EEXIST)
+
+        with pytest.raises(FileExistsError):
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert not target_path.exists()
+
+    def test_unrelated_rename_failure_still_propagates(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only capability errnos may fall through to the portable path."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("staged", encoding="utf-8")
+        self._force_renameat2_errno(monkeypatch, errno.EACCES)
+
+        with pytest.raises(OSError) as rename_error:
+            codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert rename_error.value.errno == errno.EACCES
+        assert not target_path.exists()
 
 
 class TestLoadPackagedCodexSkills:

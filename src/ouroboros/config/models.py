@@ -140,6 +140,7 @@ class LLMConfig(BaseModel, frozen=True):
         "hermes",
         "goose",
         "pi",
+        "omp",
         "ourocode",
         "dsh",
         "gjc",
@@ -493,6 +494,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "goose_cli",
         "pi",
         "pi_cli",
+        "omp",
+        "omp_cli",
         "gjc",
         "gjc_cli",
         "antigravity",
@@ -668,6 +671,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "copilot",
         "goose",
         "pi",
+        "omp",
         "gjc",
         "antigravity",
         "grok",
@@ -711,6 +715,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     kiro_cli_path: str | None = None
     goose_cli_path: str | None = None
     pi_cli_path: str | None = None
+    omp_cli_path: str | None = None
     gjc_cli_path: str | None = None
     antigravity_cli_path: str | None = None
     grok_cli_path: str | None = None
@@ -745,6 +750,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "kiro_cli_path",
         "goose_cli_path",
         "pi_cli_path",
+        "omp_cli_path",
         "gjc_cli_path",
         "antigravity_cli_path",
         "grok_cli_path",

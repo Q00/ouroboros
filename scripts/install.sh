@@ -4,7 +4,7 @@
 #
 # Runtime selection (first match wins):
 #   1. OUROBOROS_INSTALL_RUNTIME env var
-#      (claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|all)
+#      (claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|omp|all)
 #   2. Existing ~/.ouroboros/config.yaml runtime — preserved on upgrade
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
@@ -994,7 +994,7 @@ _print_python_install_remediation() {
 }
 
 # 2. Detect runtimes
-_step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Goose, Kiro, Copilot, Pi, and GJC are supported."
+_step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Goose, Kiro, Copilot, Pi, GJC, and OMP are supported."
 EXTRAS=""
 RUNTIME=""
 HAS_CODEX=false
@@ -1006,6 +1006,7 @@ HAS_GOOSE=false
 HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
+HAS_OMP=false
 HAS_GJC=false
 HAS_DSH=false
 DSH_PLUGIN_SPEC="github:Q00/ouroboros#main&path:integrations/dsh-plugin"
@@ -1049,6 +1050,10 @@ if command -v gjc &>/dev/null; then
   _ok "GJC found: $(which gjc)"
   HAS_GJC=true
 fi
+if command -v omp &>/dev/null; then
+  _ok "OMP found: $(which omp)"
+  HAS_OMP=true
+fi
 if command -v dsh &>/dev/null; then
   _ok "DeepSeek Harness found: $(which dsh)"
   HAS_DSH=true
@@ -1065,6 +1070,7 @@ RUNTIME_COUNT=0
 [ "$HAS_COPILOT" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_PI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_GJC" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_OMP" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
@@ -1087,11 +1093,12 @@ _runtime_to_extras() {
     copilot) EXTRAS="[mcp,tui]"; RUNTIME="copilot" ;;
     pi)      EXTRAS="[mcp,tui]"; RUNTIME="pi" ;;
     gjc)     EXTRAS="[mcp,tui]"; RUNTIME="gjc" ;;
+    omp)     EXTRAS="[mcp,tui]"; RUNTIME="omp" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
     "")      EXTRAS="[mcp,tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
-      _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
+      _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, omp, all"
       exit 1
       ;;
   esac
@@ -1104,7 +1111,7 @@ EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
-supported = {'claude', 'claude_mcp', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc'}
+supported = {'claude', 'claude_mcp', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc', 'omp'}
 try:
     lines = open(os.environ['EXISTING_CONFIG']).read().splitlines()
     in_orchestrator = False
@@ -1150,7 +1157,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
-    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 11 "OMP" "Oh My Pi (omp) CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 12 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
     case "${choice:-1}" in
@@ -1163,7 +1171,8 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
       8) _runtime_to_extras "copilot" ;;
       9) _runtime_to_extras "pi" ;;
       10) _runtime_to_extras "gjc" ;;
-      11) _runtime_to_extras "all" ;;
+      11) _runtime_to_extras "omp" ;;
+      12) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
@@ -1191,6 +1200,8 @@ elif [ "$HAS_PI" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "pi"
 elif [ "$HAS_GJC" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "gjc"
+elif [ "$HAS_OMP" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "omp"
 else
   # No runtime CLI on PATH yet — first install. Always prompt when interactive
   # so the user picks deliberately rather than silently defaulting to claude.
@@ -1207,7 +1218,8 @@ else
     _choice 8 "Copilot" "GitHub Copilot integration + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 9 "Pi" "Pi CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
     _choice 10 "GJC" "GJC CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
-    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 11 "OMP" "Oh My Pi (omp) CLI bridge + MCP 2 (${PACKAGE_NAME}[mcp,tui])"
+    _choice 12 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _choice 0 "MCP 2 default" "Install MCP 2 + settings GUI; choose a compatible backend later"
     _prompt "Select [1]: "
     read -r choice
@@ -1222,14 +1234,15 @@ else
       8) _runtime_to_extras "copilot" ;;
       9) _runtime_to_extras "pi" ;;
       10) _runtime_to_extras "gjc" ;;
-      11) _runtime_to_extras "all" ;;
+      11) _runtime_to_extras "omp" ;;
+      12) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
     # Pipe mode (curl | bash): install the MCP v2 + settings GUI default profile.
     _blank
     _warn "No runtime detected in non-interactive mode; installing MCP v2 + settings GUI."
-    _info "Pick an MCP v2-compatible backend afterwards with: ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+    _info "Pick an MCP v2-compatible backend afterwards with: ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|omp>"
     _runtime_to_extras ""
   fi
 fi
@@ -1521,7 +1534,7 @@ _info 'Or from the terminal: ouroboros init start "your idea here"'
 if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
-_info "Switch backend later: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+_info "Switch backend later: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|omp>"
 _say "${BOLD}Model settings — use your default model or configure one directly${RESET}"
 _info 'Inside your AI agent: > ooo config   (opens in your browser)'
 _info 'From this terminal:  ouroboros config   (full-screen TUI)'

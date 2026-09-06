@@ -26,6 +26,34 @@ class FailureReasonCode(StrEnum):
     UNKNOWN = "unknown"
 
 
+# Closed run-level failure causes for ``workflow_outcome.failure_cause``
+# (command=run). Produced by orchestrator/run_failure_cause.py from durable
+# executor evidence; anything outside this set folds to ``unknown`` at the
+# telemetry boundary. ``verify_*`` mirrors the verify gate's cause vocabulary
+# (orchestrator/verify_gate_outcome.py) — edit both together.
+RUN_FAILURE_CAUSES = frozenset(
+    {
+        "verify_invalid_contract",
+        "verify_artifacts_missing",
+        "verify_artifacts_missing_found_elsewhere",
+        "verify_environment_unverifiable",
+        "verify_timeout",
+        "verify_exit_nonzero",
+        "verify_output_assertion_unmatched",
+        "verify_workspace_mutated",
+        "worker_evidence_missing",
+        "worker_fabrication_suspected",
+        "worker_blocked",
+        "worker_failed",
+        "dependency_blocked",
+        "runtime_error",
+        "cancelled",
+        "unknown",
+    }
+)
+UNKNOWN_RUN_FAILURE_CAUSE = "unknown"
+
+
 class RecoveryAction(StrEnum):
     """The single recommended user action after a failed workflow."""
 

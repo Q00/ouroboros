@@ -1097,3 +1097,120 @@ async def test_sequential_dispatch_survives_html_close_in_user_context() -> None
         ctx = persona_payload["context"]
         assert ctx["problem_context"] == adversarial_context
         assert ctx["current_approach"] == "looked for `-->` in the source"
+
+
+# --- Decision mode (grounded-lateral RFC D2) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_decision_mode_defaults_to_full_persona_fanout() -> None:
+    """mode='decision' with no persona selection is a debate by construction."""
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+
+    result = await handler.handle(
+        {
+            "problem_context": "Postgres vs SQLite for a single-node tool",
+            "current_approach": "undecided",
+            "mode": "decision",
+        }
+    )
+
+    assert result.is_ok, result
+    meta = result.unwrap().meta
+    assert meta is not None
+    assert meta["mode"] == "decision"
+    assert meta["persona_count"] == 5
+    contract = meta["synthesis_contract"]
+    assert any("recommendation" in item for item in contract["converge_to"])
+    assert any("flip_conditions" in item for item in contract["converge_to"])
+    # Persona payloads carry the decision task block, not the unstuck one.
+    prompts = [p["prompt"] for p in meta["payloads"]]
+    assert all("Flip condition" in prompt for prompt in prompts)
+    assert all("steelman" in prompt for prompt in prompts)
+
+
+@pytest.mark.asyncio
+async def test_unstuck_mode_is_unchanged_by_default() -> None:
+    """Omitting mode keeps the historical unstuck contract byte-compatible."""
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+
+    result = await handler.handle(
+        {
+            "problem_context": "stuck on X",
+            "current_approach": "tried Y",
+            "personas": ["hacker", "contrarian"],
+        }
+    )
+
+    assert result.is_ok, result
+    meta = result.unwrap().meta
+    assert meta is not None
+    assert meta["mode"] == "unstuck"
+    assert "synthesis_contract" not in meta
+    prompts = [p["prompt"] for p in meta["payloads"]]
+    assert all("A concrete alternative plan" in prompt for prompt in prompts)
+    assert all("Flip condition" not in prompt for prompt in prompts)
+
+
+@pytest.mark.asyncio
+async def test_invalid_mode_is_rejected() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+
+    result = await handler.handle(
+        {
+            "problem_context": "p",
+            "current_approach": "a",
+            "mode": "vibes",
+        }
+    )
+
+    assert result.is_err
+    assert "Invalid mode" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_research_flag_adds_evidence_contract_to_payloads() -> None:
+    """Deep tier: personas are asked for fetched-source evidence, fail-safe."""
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+
+    result = await handler.handle(
+        {
+            "problem_context": "choose an auth library",
+            "current_approach": "undecided",
+            "mode": "decision",
+            "research": True,
+        }
+    )
+
+    assert result.is_ok, result
+    meta = result.unwrap().meta
+    assert meta is not None
+    prompts = [p["prompt"] for p in meta["payloads"]]
+    assert all("external_sources" in prompt for prompt in prompts)
+    assert all("never invent" in prompt.lower() for prompt in prompts)
+    # The no-web degradation is spelled out — a toolless runtime must not fail.
+    assert all("do not fabricate sources" in prompt for prompt in prompts)
+    contexts = [p["context"] for p in meta["payloads"]]
+    assert all(ctx["mode"] == "decision" and ctx["research"] is True for ctx in contexts)
+
+
+@pytest.mark.asyncio
+async def test_decision_single_persona_inline_appends_convergence_contract() -> None:
+    handler = LateralThinkHandler(agent_runtime_backend="subprocess")
+
+    result = await handler.handle(
+        {
+            "problem_context": "REST vs GraphQL for the public API",
+            "current_approach": "leaning REST",
+            "persona": "contrarian",
+            "mode": "decision",
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    text = payload.content[0].text
+    assert "Decision output contract" in text
+    assert payload.meta is not None
+    assert payload.meta["mode"] == "decision"
+    assert "synthesis_contract" in payload.meta

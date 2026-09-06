@@ -441,7 +441,9 @@ from ouroboros.orchestrator.verify_shell import (
     verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
+    is_git_ignored_path,
     is_untracked_top_level_evidence_path,
+    load_ignored_workspace_paths,
     load_tracked_workspace_paths,
 )
 
@@ -2755,6 +2757,10 @@ class ParallelACExecutor:
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        # AC worker tasks currently executing against the shared workspace.
+        # The verify gate reads this to tell "my verify_command wrote" apart
+        # from "a sibling worker wrote while my command ran".
+        self._inflight_ac_workers = 0
         if isinstance(verify_shell_identity, _AutoVerifyShell):
             verify_shell = resolve_verify_shell()
             self._verify_shell_identity = (
@@ -3670,6 +3676,7 @@ class ParallelACExecutor:
                 _observe_batch_provider if cancel_on_recoverable_pause else None
             )
             provider_effect_tokens = provider_effects.bind(idx)
+            self._inflight_ac_workers += 1
             with anyio.CancelScope() as sibling_scope:
                 sibling_cancel_scopes[idx] = sibling_scope
                 try:
@@ -3767,6 +3774,7 @@ class ParallelACExecutor:
                         raise
                     batch_results[idx] = e
                 finally:
+                    self._inflight_ac_workers -= 1
                     admission_sequence.finished(idx, admission_token)
                     sibling_cancel_scopes.pop(idx, None)
                     _PROVIDER_OBSERVATION_SINK.reset(observation_sink_token)
@@ -4819,9 +4827,8 @@ class ParallelACExecutor:
         ) or (post_coordinator_revalidation_required and not post_coordinator_revalidated)
         if needs_post_coordinator_revalidation:
             # The coordinator may have edited files after a worker's verify
-            # gate passed.  Reconcile every success contract against the
-            # settled workspace; arbitrary verify_command contracts are not
-            # replayed because no deterministic external-effect boundary exists.
+            # gate passed.  Re-check artifact legs against the settled
+            # workspace now and mark command legs for the settlement replay.
             all_results = await self._revalidate_results_after_coordinator(
                 seed=seed,
                 results=all_results,
@@ -4948,7 +4955,6 @@ class ParallelACExecutor:
             results=all_results,
             session_id=session_id,
             execution_id=execution_id,
-            coordinator_revalidated=post_coordinator_revalidated,
         )
         settled_by_index = {result.ac_index: result for result in all_results}
         stage_results = [
@@ -5028,10 +5034,12 @@ class ParallelACExecutor:
     ) -> str | None:
         """Hash acceptance-relevant workspace state for mutation checks.
 
-        Runtime/cache paths are excluded unless they overlap an explicitly
-        declared expected artifact. Bytecode suffix exclusions apply only to
-        regular files: same-named directories and symlinks remain observable.
-        Read failures return ``None`` so the caller fails closed instead of
+        Runtime/cache paths and Git-ignored paths (build outputs, coverage
+        data, lockfile-adjacent caches — whatever the project itself declared
+        as non-source) are excluded unless they overlap an explicitly declared
+        expected artifact. Bytecode suffix exclusions apply only to regular
+        files: same-named directories and symlinks remain observable. Read
+        failures return ``None`` so the caller fails closed instead of
         trusting evidence it could not compare.
         """
         try:
@@ -5060,6 +5068,7 @@ class ParallelACExecutor:
                 )
 
             tracked_paths = load_tracked_workspace_paths(root)
+            ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
@@ -5072,6 +5081,7 @@ class ParallelACExecutor:
                         tracked_paths=tracked_paths,
                         is_directory=path.is_dir() and not path.is_symlink(),
                     )
+                    or is_git_ignored_path(relative, ignored_paths=ignored_paths)
                     or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
@@ -5124,15 +5134,20 @@ class ParallelACExecutor:
     ) -> list[ACExecutionResult]:
         """Bind successful ACs to the workspace settled by the coordinator.
 
-        A cached command result is intentionally not replayed here.  The
-        coordinator is an effectful writer and can invalidate a previously
-        passing command after the worker-level gate, while an unrestricted
-        shell replay could duplicate external effects.  Command-bearing ACs
-        therefore fail closed; artifact-only contracts are checked against the
-        settled workspace and description-only ACs fail closed because no
-        independent post-mutation contract exists.
+        The coordinator is an effectful writer and can invalidate a previously
+        passing contract after the worker-level gate.  Artifact legs are
+        re-checked here against the settled workspace.  Command legs are not
+        run here: the coordinator has already drained, so final settlement —
+        which runs immediately after this boundary — replays every affected
+        ``verify_command`` once on the quiescent workspace, where a mutating
+        command is still attributable and rejected.  Description-only ACs
+        carry no deterministic contract and keep their worker verdict; the
+        evaluate stage judges them semantically, as it does at settlement.
         """
         from ouroboros.events.base import BaseEvent
+
+        if not self._run_verify_commands:
+            return results
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         revalidated: list[ACExecutionResult] = []
@@ -5149,78 +5164,8 @@ class ParallelACExecutor:
                 if 0 <= result.ac_index < len(seed.acceptance_criteria)
                 else None
             )
-            has_contract = isinstance(spec, AcceptanceCriterionSpec) and spec.has_success_contract
-            if not self._run_verify_commands or not has_contract:
-                reason = (
-                    "Final workspace changed during coordinator reconciliation; "
-                    "the AC has no deterministic post-coordinator success contract."
-                )
-                await self._safe_emit_event(
-                    BaseEvent(
-                        type="execution.verify.failed",
-                        aggregate_type="execution",
-                        aggregate_id=execution_id or session_id,
-                        data={
-                            "session_id": session_id,
-                            "execution_id": execution_id,
-                            "ac_index": result.ac_index,
-                            "reason": reason,
-                            "failure_class": "evidence_missing",
-                            "final_workspace_revalidation": True,
-                            "verify_cause": "workspace_mutated",
-                        },
-                    )
-                )
-                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
-                revalidated.append(
-                    replace(
-                        result,
-                        success=False,
-                        error=reason,
-                        final_message=reason,
-                        outcome=ACExecutionOutcome.FAILED,
-                    )
-                )
-                continue
-
-            if spec.verify_command:
-                # A verify command is an arbitrary shell contract and may have
-                # external effects that the workspace digest cannot observe.
-                # Never replay it after a coordinator mutation; fail closed at
-                # this boundary instead of executing an effectful command twice.
-                reason = (
-                    "Final acceptance rejected because the coordinator changed the "
-                    "workspace and replaying verify_command is not permitted."
-                )
-                await self._safe_emit_event(
-                    BaseEvent(
-                        type="execution.verify.failed",
-                        aggregate_type="execution",
-                        aggregate_id=execution_id or session_id,
-                        data={
-                            "session_id": session_id,
-                            "execution_id": execution_id,
-                            "ac_index": result.ac_index,
-                            "verify_command": spec.verify_command,
-                            "expected_artifacts": list(spec.expected_artifacts),
-                            "reason": reason,
-                            "failure_class": "evidence_missing",
-                            "final_workspace_revalidation": True,
-                            "verify_replay_blocked": True,
-                            "verify_cause": "workspace_mutated",
-                        },
-                    )
-                )
-                usage_telemetry.capture_ac_verify_failed(cause="workspace_mutated")
-                revalidated.append(
-                    replace(
-                        result,
-                        success=False,
-                        error=reason,
-                        final_message=reason,
-                        outcome=ACExecutionOutcome.FAILED,
-                    )
-                )
+            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.has_success_contract:
+                revalidated.append(result)
                 continue
 
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
@@ -5261,6 +5206,28 @@ class ParallelACExecutor:
                 )
                 continue
 
+            if spec.verify_command:
+                # The cached pass was observed before the coordinator wrote.
+                # Keep its evidence but require settlement to replay the
+                # command on the settled workspace before acceptance.
+                cached = result.verify_gate_outcome
+                outcome = (
+                    replace(cached, replay_required=True)
+                    if isinstance(cached, _VerifyGateOutcome)
+                    else _VerifyGateOutcome(
+                        passed=True,
+                        reason=None,
+                        output_tail="",
+                        workspace_digest=self._workspace_content_digest(
+                            cwd,
+                            expected_artifacts=spec.expected_artifacts,
+                        ),
+                        replay_required=True,
+                    )
+                )
+                revalidated.append(replace(result, verify_gate_outcome=outcome))
+                continue
+
             revalidated.append(
                 replace(
                     result,
@@ -5285,15 +5252,15 @@ class ParallelACExecutor:
         results: list[ACExecutionResult],
         session_id: str,
         execution_id: str,
-        coordinator_revalidated: bool = False,
     ) -> list[ACExecutionResult]:
         """Fail closed when final shared-workspace evidence is no longer valid.
 
         Verify gates run as each AC completes, while later ACs can still touch
         the same workspace.  Before terminal acceptance, re-check every
         successful contract's artifact leg and cached workspace identity. A
-        stale command result is rejected rather than replayed because an
-        unrestricted shell command may have effects outside the workspace.
+        stale command result — the workspace moved on after it passed, or the
+        gate deferred a mutation verdict it could not attribute while siblings
+        were writing — is replayed once here, on the quiescent workspace.
         Invalidate the complete success set when any verify command was
         observed mutating the workspace.
         """
@@ -5389,19 +5356,6 @@ class ParallelACExecutor:
                 continue
 
             if spec.verify_command and not outcome.environment_unverifiable:
-                if coordinator_revalidated:
-                    # Coordinator revalidation deliberately refuses to replay
-                    # arbitrary shell contracts.  A command-bearing success
-                    # that survived that boundary is therefore not admissible.
-                    individual_failures[result.ac_index] = (
-                        "Final acceptance rejected because coordinator revalidation "
-                        "did not replay verify_command.",
-                        outcome,
-                        "workspace_mutated",
-                    )
-                    settled.append(result)
-                    continue
-
                 cached_digest = outcome.workspace_digest
                 if cached_digest is None:
                     individual_failures[result.ac_index] = (
@@ -5412,10 +5366,12 @@ class ParallelACExecutor:
                     settled.append(result)
                     continue
 
-                if cached_digest != final_digest:
+                if cached_digest != final_digest or outcome.replay_required:
                     # A later worker changed the workspace after this command
-                    # passed. verify_command is an observation contract (a mutating
-                    # one is rejected by the gate), so judge the final workspace once.
+                    # passed, or the gate could not attribute a change it saw
+                    # while siblings were writing. verify_command is an
+                    # observation contract (a mutating one is rejected by the
+                    # gate), so judge the final, quiescent workspace once.
                     replayed = await _invoke_execution_authority_entry(
                         self, _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE, spec=spec, cwd=cwd
                     )
@@ -9773,14 +9729,36 @@ Respond with either ATOMIC or the structured JSON object only.
                 workspace_digest=workspace_digest(),
             )
         workspace_before = workspace_digest()
+        # Sibling AC workers share this cwd and keep writing while the command
+        # runs. Sample once, up front: a sibling that finishes mid-command is
+        # still a concurrent writer for the digest window that already opened.
+        siblings_active = self._sibling_workers_active()
+        replay_required = False
 
         def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
+            nonlocal replay_required
             workspace_after = workspace_digest()
-            if (
-                workspace_before is None
-                or workspace_after is None
-                or workspace_before != workspace_after
-            ):
+            if workspace_before is None or workspace_after is None:
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason=(
+                        "verify_command mutated the workspace or its digest could not be "
+                        "revalidated"
+                    ),
+                    output_tail=output_tail,
+                    workspace_mutated=True,
+                    workspace_digest=workspace_after,
+                    cause="workspace_mutated",
+                )
+            if workspace_before != workspace_after:
+                if siblings_active:
+                    # A concurrent sibling may own this change; the command's
+                    # own footprint is indistinguishable from it here. Judge
+                    # the exit code now and let final settlement replay the
+                    # command on the quiescent workspace, where a mutation is
+                    # attributable and still rejected.
+                    replay_required = True
+                    return None
                 return _VerifyGateOutcome(
                     passed=False,
                     reason=(
@@ -9852,6 +9830,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
                 cause="exit_nonzero",
+                replay_required=replay_required,
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -9860,13 +9839,25 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
                 cause="output_assertion_unmatched",
+                replay_required=replay_required,
             )
         return _VerifyGateOutcome(
             passed=True,
             reason=None,
             output_tail=tail,
             workspace_digest=workspace_digest(),
+            replay_required=replay_required,
         )
+
+    def _sibling_workers_active(self) -> bool:
+        """Return True when another AC worker task shares the workspace right now.
+
+        The gate runs inside the worker it judges, so one in-flight worker is
+        the caller itself. Settlement and coordinator revalidation run after
+        every batch has drained (zero in flight), where a digest change is
+        attributable to the command alone.
+        """
+        return self._inflight_ac_workers > 1
 
     async def _apply_verify_gate(
         self,

@@ -93,6 +93,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     GOOSE = "goose"
     KIRO = "kiro"
     PI = "pi"
+    OMP = "omp"
     ZCODE = "zcode"
     DSH = "dsh"
 

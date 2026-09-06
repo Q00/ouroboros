@@ -70,6 +70,7 @@ _BACKEND_VENDOR: dict[str, str] = {
     "kiro": "kiro",
     "goose": "goose",
     "pi": "pi",
+    "omp": "omp",
     "gjc": "gjc",
 }
 

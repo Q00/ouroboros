@@ -64,21 +64,34 @@ _ELSEWHERE_SCAN_IGNORED_DIRECTORIES = frozenset(
 def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     """Inspect at most one key beyond a finite durable-contract schema."""
 
+    return _mapping_has_bounded_keys(value, required=expected, optional=frozenset())
+
+
+def _mapping_has_bounded_keys(
+    value: object, *, required: frozenset[str], optional: frozenset[str]
+) -> bool:
+    """Inspect at most one key beyond a finite durable-contract schema.
+
+    Every ``required`` key must be present; ``optional`` keys may be absent
+    (checkpoints written before a field existed) but nothing else may appear.
+    """
+
     if not isinstance(value, Mapping):
         return False
     try:
         iterator = iter(value)
     except Exception:
         return False
+    allowed = required | optional
     seen: set[str] = set()
-    for index in range(len(expected) + 1):
+    for index in range(len(allowed) + 1):
         try:
             key = next(iterator)
         except StopIteration:
-            return len(seen) == len(expected)
+            return required <= seen
         except Exception:
             return False
-        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
+        if index >= len(allowed) or type(key) is not str or key not in allowed or key in seen:
             return False
         seen.add(key)
     return False
@@ -100,6 +113,12 @@ class _VerifyGateOutcome:
     environment_unverifiable: bool = False
     # One of _VERIFY_GATE_CAUSES when passed is False; None when passed.
     cause: str | None = None
+    # True when the workspace changed during the verify window while sibling
+    # AC workers were still writing to the same shared cwd. The change cannot
+    # be attributed to the command, so the gate judged the exit code only and
+    # deferred the mutation verdict: final settlement MUST replay this
+    # command on the quiescent workspace before the AC is accepted.
+    replay_required: bool = False
 
 
 def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
@@ -114,6 +133,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         or any(not isinstance(item, str) for item in outcome.missing_artifacts)
         or not isinstance(outcome.workspace_mutated, bool)
         or not isinstance(outcome.environment_unverifiable, bool)
+        or not isinstance(outcome.replay_required, bool)
         or (
             outcome.workspace_digest is not None
             and (
@@ -134,6 +154,7 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
         "workspace_digest": outcome.workspace_digest,
         "environment_unverifiable": outcome.environment_unverifiable,
         "cause": outcome.cause,
+        "replay_required": outcome.replay_required,
     }
 
 
@@ -151,13 +172,13 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     )
     # Checkpoints written before the quarantine flag existed stay readable:
     # re-running a non-idempotent verify_command is worse than defaulting one
-    # boolean that only ever suppressed a pass. The same applies to `cause`,
-    # added later still — every historical key combination stays decodable.
-    quarantine_keys = legacy_keys | {"environment_unverifiable"}
-    if not (
-        _mapping_has_exact_keys(value, quarantine_keys | {"cause"})
-        or _mapping_has_exact_keys(value, quarantine_keys)
-        or _mapping_has_exact_keys(value, legacy_keys)
+    # boolean that only ever suppressed a pass. The same applies to `cause`
+    # and `replay_required`, added later still — every historical key
+    # combination stays decodable.
+    if not _mapping_has_bounded_keys(
+        value,
+        required=legacy_keys,
+        optional=frozenset({"environment_unverifiable", "cause", "replay_required"}),
     ):
         return None
     assert isinstance(value, Mapping)
@@ -172,6 +193,11 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
         return None
     cause = value.get("cause")
     if cause is not None and cause not in _VERIFY_GATE_CAUSES:
+        return None
+    # Checkpoints written before deferral existed carry no pending replay:
+    # their gate either rejected the mutation outright or never observed one.
+    replay_required = value.get("replay_required", False)
+    if not isinstance(replay_required, bool):
         return None
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
@@ -199,6 +225,7 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
         workspace_digest=workspace_digest,
         environment_unverifiable=environment_unverifiable,
         cause=cause,
+        replay_required=replay_required,
     )
 
 
@@ -315,4 +342,5 @@ def _revalidate_cached_verify_gate_outcome(
         workspace_digest=outcome.workspace_digest,
         environment_unverifiable=outcome.environment_unverifiable,
         cause=_missing_artifacts_cause(missing_artifacts, cwd),
+        replay_required=outcome.replay_required,
     )

@@ -550,6 +550,8 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 - **`CopilotCliLLMAdapter`** (`backend="copilot"`) — Drives the GitHub Copilot CLI via `copilot -p`, with live model discovery (queries `https://api.githubcopilot.com/models` at setup) and automatic hyphen-to-dotted model name mapping for cross-runtime config compatibility. Module: `src/ouroboros/providers/copilot_cli_adapter.py`
 - **`PiRuntime`** (`backend="pi"`) — Drives the Pi CLI in documented JSON mode with skill dispatch, session resumption, and JSONL event normalization. Module: `src/ouroboros/orchestrator/pi_runtime.py`
 - **`PiLLMAdapter`** (`backend="pi"`) — Exposes the Pi CLI for LLM-only flows such as interview, ambiguity scoring, seed extraction, and structured JSON responses. Structured `response_format` calls are soft-enforced with prompt instructions plus adapter-side extraction/validation because Pi has no native `--output-schema` flag. Module: `src/ouroboros/providers/pi_llm_adapter.py`
+- **`OmpRuntime`** (`backend="omp"`) — Drives the OMP ("Oh My Pi") CLI in documented JSON mode with skill dispatch, session resumption (`--resume`), and JSONL event normalization; OMP speaks the same event protocol as Pi. Module: `src/ouroboros/orchestrator/omp_runtime.py`
+- **`OmpLLMAdapter`** (`backend="omp"`) — Exposes the OMP CLI for LLM-only flows such as interview, ambiguity scoring, seed extraction, and structured JSON responses. Structured `response_format` calls are soft-enforced with prompt instructions plus adapter-side extraction/validation because OMP has no native `--output-schema` flag. Module: `src/ouroboros/providers/omp_llm_adapter.py`
 
 > Each runtime has different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
 
@@ -561,7 +563,7 @@ The orchestrator never inspects backend-specific internals — each adapter maps
 2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
 3. Explicit `backend=` parameter
 
-Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`, `opencode` / `opencode_cli`, `hermes` / `hermes_cli`, `gemini` / `gemini_cli`, `kiro` / `kiro_cli`, `copilot` / `copilot_cli`, `pi` / `pi_cli`.
+Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`, `opencode` / `opencode_cli`, `hermes` / `hermes_cli`, `gemini` / `gemini_cli`, `kiro` / `kiro_cli`, `copilot` / `copilot_cli`, `pi` / `pi_cli`, `omp` / `omp_cli`.
 
 For API details, see the source in `src/ouroboros/orchestrator/adapter.py`. For contributing a new runtime adapter, see [Contributing](contributing/).
 
@@ -606,4 +608,4 @@ For environment variables, `config.yaml` schema, and all configuration options, 
 ---
 
 > For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
-> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi CLI](runtime-guides/pi.md) references.
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), [Pi CLI](runtime-guides/pi.md), and [OMP CLI](runtime-guides/omp.md) references.

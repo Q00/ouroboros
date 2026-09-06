@@ -424,6 +424,13 @@ reconstruction failures, and limits below the complete matching population fail
 the request without returning a partial record. Project status is attribution
 only: it cannot authorize execution, alter evidence, or declare acceptance.
 
+The returned `ProjectRecord` includes ambiguity-gate statistics for the Seeds
+associated with the project's recorded runs: `gated_seed_count`,
+`forced_seed_count`, `unknown_seed_count`, and `override_rate`. The rate is
+`forced_seed_count / (forced_seed_count + gated_seed_count)`; it is `null` when
+there are no known decisions, and unknown/legacy entries are excluded from the
+denominator.
+
 ### `ouroboros_brownfield` Scan Boundaries
 
 The brownfield MCP tool registers existing codebases for PM/interview context.

@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
@@ -3020,6 +3021,40 @@ class TestOrchestratorRunner:
                 project_identity=resolve_project_identity(runner._adapter.working_directory),
                 project_workspace=runner._effective_cwd(),
             )
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_persists_seed_metadata_gate_forced(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A generated Seed loaded from YAML carries gate provenance to its event."""
+        serialized_seed = sample_seed.model_copy(
+            update={"metadata": sample_seed.metadata.model_copy(update={"gate_forced": True})}
+        )
+        loaded_seed = Seed.from_dict(yaml.safe_load(yaml.safe_dump(serialized_seed.to_dict())))
+        tracker = SessionTracker.create(
+            "exec_yaml_gate",
+            loaded_seed.metadata.seed_id,
+            session_id="orch_yaml_gate",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                loaded_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+            assert create_session.await_args.kwargs["gate_forced"] is True
         finally:
             runner._retire_process_local_authority(
                 session_id=tracker.session_id,

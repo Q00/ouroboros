@@ -352,6 +352,7 @@ class TestSeedGeneratorAmbiguityGating:
 
             assert result.is_ok
             assert isinstance(result.value, Seed)
+            assert result.value.metadata.gate_forced is False
 
     @pytest.mark.asyncio
     async def test_generate_requires_summary_for_large_initial_context(self) -> None:
@@ -415,6 +416,7 @@ class TestSeedGeneratorAmbiguityGating:
             assert isinstance(result.value, Seed)
             # Provenance: forced seeds carry the real (high) score, not a fabricated one.
             assert result.value.metadata.ambiguity_score == 0.5
+            assert result.value.metadata.gate_forced is True
 
     @pytest.mark.asyncio
     async def test_generate_with_force_bypasses_just_above_threshold(self) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
@@ -16,6 +18,35 @@ from ouroboros.interview_adapters.models import (
     ReferenceCue,
     ReferenceResolutionStatus,
 )
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def normalized_question_key(text: str | None) -> str:
+    """Collapse a question to a deterministic comparison key.
+
+    Transports echo the asked question back (``last_question``) after their own
+    rendering, so byte equality between the stored ``asked_question`` and the
+    echoed copy is not a real invariant: whitespace reflow, trailing newlines,
+    or case drift from a host re-render must not change which question this is.
+    Whitespace-collapse + casefold only — no similarity scoring, so two
+    genuinely different questions can never collide.
+    """
+    if not text:
+        return ""
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip().casefold()
+
+
+def reference_question_anchor(cue: ReferenceCue) -> str:
+    """Return the normalized anchor every contrast question for ``cue`` starts with.
+
+    ``build_reference_contrast_question`` deterministically prefixes the
+    question with ``Reference `<label>```, so a host that truncated or
+    reformatted the echoed question still carries this anchor when it is
+    echoing *this* cue's question. Used as a containment fallback after
+    normalized equality fails.
+    """
+    return normalized_question_key(f"Reference `{cue.label}`")
 
 
 def build_reference_contrast_question(cue: ReferenceCue) -> str:
@@ -84,4 +115,6 @@ __all__ = [
     "build_reference_contrast_question",
     "candidates_from_contrast_answer",
     "next_unresolved_reference",
+    "normalized_question_key",
+    "reference_question_anchor",
 ]

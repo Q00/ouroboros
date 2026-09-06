@@ -163,6 +163,12 @@ def format_project_status_text(record: ProjectRecord) -> str:
         f"Root: {_json_string(record.project_root)}",
         f"Workspace: {_json_string(workspace)}",
         f"Runs: {record.run_count}",
+        "",
+        "Ambiguity gate:",
+        f"  Gated Seeds: {record.gated_seed_count}",
+        f"  Forced Seeds: {record.forced_seed_count}",
+        f"  Unknown Seeds: {record.unknown_seed_count}",
+        f"  Override rate: {_format_override_rate(record.override_rate)}",
     ]
     if record.runs:
         lines.extend(("", "Run history:"))
@@ -180,6 +186,10 @@ def format_project_status_text(record: ProjectRecord) -> str:
 
 def _json_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _format_override_rate(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1%}"
 
 
 def _tool_error(message: str) -> Result[MCPToolResult, MCPServerError]:

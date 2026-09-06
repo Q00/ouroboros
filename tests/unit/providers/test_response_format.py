@@ -169,6 +169,7 @@ class TestMalformedSchemaNoLongerCrashes:
         ("module_name", "class_name"),
         [
             pytest.param("pi_llm_adapter", "PiLLMAdapter", id="pi"),
+            pytest.param("omp_llm_adapter", "OmpLLMAdapter", id="omp"),
             pytest.param("gjc_llm_adapter", "GjcLLMAdapter", id="gjc"),
             pytest.param("ourocode_llm_adapter", "OurocodeLLMAdapter", id="ourocode"),
             pytest.param("goose_cli_adapter", "GooseCliLLMAdapter", id="goose"),
@@ -221,6 +222,7 @@ class TestUnresolvableReferenceIsReported:
         ("module_name", "class_name"),
         [
             pytest.param("pi_llm_adapter", "PiLLMAdapter", id="pi"),
+            pytest.param("omp_llm_adapter", "OmpLLMAdapter", id="omp"),
             pytest.param("gjc_llm_adapter", "GjcLLMAdapter", id="gjc"),
             pytest.param("ourocode_llm_adapter", "OurocodeLLMAdapter", id="ourocode"),
             pytest.param("goose_cli_adapter", "GooseCliLLMAdapter", id="goose"),

@@ -24,6 +24,7 @@ from ouroboros.project_map import (
     ProjectRecord,
     ProjectRunLimitError,
     ProjectRunSummary,
+    _gate_counts,
 )
 
 
@@ -61,6 +62,7 @@ async def _create_current_session(
     seed_id: str,
     status: SessionStatus = SessionStatus.RUNNING,
     workspace_path: str | None = None,
+    gate_forced: bool | None = None,
 ) -> None:
     scoped = ProjectIdentity(
         project_id=project.project_id,
@@ -77,6 +79,7 @@ async def _create_current_session(
         seed_goal=f"goal for {session_id}",
         runtime_backend="codex_cli",
         llm_backend="openai",
+        gate_forced=gate_forced,
         execution_contract=_contract(scoped),
         project_identity=scoped,
         project_workspace=str(actual_workspace),
@@ -115,6 +118,38 @@ def _legacy_start(
     )
 
 
+def _summary_for_gate_count(seed_id: str, gate_forced: bool | None) -> ProjectRunSummary:
+    return ProjectRunSummary.model_construct(
+        project_id="project-id",
+        project_root="project-root",
+        workspace_path="workspace",
+        identity_source="session_start",
+        session_id=f"session-{seed_id}-{gate_forced}",
+        execution_id=f"execution-{seed_id}-{gate_forced}",
+        seed_id=seed_id,
+        seed_goal=None,
+        gate_forced=gate_forced,
+        runtime_backend=None,
+        llm_backend=None,
+        status=SessionStatus.RUNNING,
+        started_at=datetime.now(UTC),
+        source_start_event_id=f"event-{seed_id}-{gate_forced}",
+    )
+
+
+def test_gate_counts_deduplicates_seed_ids_and_preserves_conflicts() -> None:
+    runs = [
+        _summary_for_gate_count("forced-seed", True),
+        _summary_for_gate_count("forced-seed", True),
+        _summary_for_gate_count("gated-seed", False),
+        _summary_for_gate_count("unknown-seed", None),
+        _summary_for_gate_count("conflicting-seed", True),
+        _summary_for_gate_count("conflicting-seed", False),
+    ]
+
+    assert _gate_counts(runs) == (1, 1, 2, 0.5)
+
+
 @pytest.mark.asyncio
 async def test_build_reuses_session_repository_status_and_is_read_only(
     event_store: EventStore,
@@ -148,6 +183,130 @@ async def test_build_reuses_session_repository_status_and_is_read_only(
         reconstructed = await SessionRepository(event_store).reconstruct_session(run.session_id)
         assert reconstructed.is_ok
         assert run.status is reconstructed.value.status
+
+
+@pytest.mark.asyncio
+async def test_build_reports_ambiguity_gate_statistics(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="gated",
+        execution_id="execution-gated",
+        seed_id="seed-gated",
+        gate_forced=False,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="forced",
+        execution_id="execution-forced",
+        seed_id="seed-forced",
+        gate_forced=True,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="unknown",
+        execution_id="execution-unknown",
+        seed_id="seed-unknown",
+    )
+
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.gated_seed_count == 1
+    assert record.forced_seed_count == 1
+    assert record.unknown_seed_count == 1
+    assert record.override_rate == 0.5
+    assert {run.session_id: run.gate_forced for run in record.runs} == {
+        "gated": False,
+        "forced": True,
+        "unknown": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_counts_each_seed_once_across_repeated_runs(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="forced-first",
+        execution_id="execution-first",
+        seed_id="same-seed",
+        gate_forced=True,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="forced-second",
+        execution_id="execution-second",
+        seed_id="same-seed",
+        gate_forced=True,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="gated-once",
+        execution_id="execution-gated",
+        seed_id="another-seed",
+        gate_forced=False,
+    )
+
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.run_count == 3
+    assert record.forced_seed_count == 1
+    assert record.gated_seed_count == 1
+    assert record.unknown_seed_count == 0
+    assert record.override_rate == 0.5
+
+
+@pytest.mark.asyncio
+async def test_build_marks_conflicting_seed_decisions_unknown(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="conflict-forced",
+        execution_id="execution-conflict-forced",
+        seed_id="conflicting-seed",
+        gate_forced=True,
+    )
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="conflict-gated",
+        execution_id="execution-conflict-gated",
+        seed_id="conflicting-seed",
+        gate_forced=False,
+    )
+
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.forced_seed_count == 0
+    assert record.gated_seed_count == 0
+    assert record.unknown_seed_count == 1
+    assert record.override_rate is None
+
+
+@pytest.mark.asyncio
+async def test_build_returns_unknown_rate_when_no_gate_decisions(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.gated_seed_count == 0
+    assert record.forced_seed_count == 0
+    assert record.unknown_seed_count == 0
+    assert record.override_rate is None
 
 
 @pytest.mark.asyncio
