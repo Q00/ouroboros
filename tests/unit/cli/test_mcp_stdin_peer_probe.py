@@ -121,7 +121,8 @@ class TestMakeStdinPeerProbe:
             late_writer.start()
             assert reader.readline() == "second\n"
         finally:
-            late_writer.join()
+            if late_writer.is_alive():  # join() raises if start() was never reached
+                late_writer.join()
             os.close(private_fd)
             ours.close()
             theirs.close()
