@@ -76,8 +76,12 @@ def _normalize_seed_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_criterion(item: Any) -> str | dict[str, Any]:
     if isinstance(item, dict):
+        # Hand the mapping through intact: Seed's own validator aliases
+        # ``criterion``/``content`` to ``description`` and keeps sibling keys
+        # such as ``semantic_ac_key``. Reducing to the bare string here threw
+        # the persisted AC identity away before Seed ever saw it (#2338).
         if isinstance(item.get("criterion"), str):
-            return item["criterion"]
+            return item
         if isinstance(item.get("description"), str) or isinstance(item.get("content"), str):
             return item
     if isinstance(item, str):
