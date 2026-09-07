@@ -330,23 +330,30 @@ class LateralThinkHandler(BridgeAwareMixin):
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                dispatch_record = stamp_decision_meta(
+                    {
+                        "status": "delegated_to_subagent",
+                        "dispatch_mode": "plugin",
+                        "persona_count": len(payloads),
+                    },
+                    mode,
+                )
+                stamp_lateral_persona_fanout(
+                    dispatch_record,
+                    self.fanout_registry,
+                    session_id=str(arguments.get("session_id") or ""),
+                    payloads=payloads,
+                )
                 record_subagent_dispatch_emitted(
                     fanout_kind="lateral_persona_panel",
                     payload_count=len(payloads),
                     dispatch_mode=dispatch,
                     worker_backend=self.agent_runtime_backend,
-                    fanout_reentry_available=False,
+                    fanout_reentry_available="fanout_id" in dispatch_record,
                 )
                 return build_multi_subagent_result(
                     payloads,
-                    response_shape=stamp_decision_meta(
-                        {
-                            "status": "delegated_to_subagent",
-                            "dispatch_mode": "plugin",
-                            "persona_count": len(payloads),
-                        },
-                        mode,
-                    ),
+                    response_shape=dispatch_record,
                 )
 
             # --- Inline/sequential fallback: concatenate persona prompts ---
@@ -595,6 +602,10 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
                 response_text += DECISION_INLINE_CONTRACT_TEXT
+            if research:
+                from ouroboros.mcp.tools.lateral_decision import build_lateral_research_block
+
+                response_text += build_lateral_research_block(True)
 
             single_meta = stamp_decision_meta(
                 {
@@ -604,6 +615,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                 },
                 mode,
             )
+            if research:
+                single_meta["research"] = True
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),
