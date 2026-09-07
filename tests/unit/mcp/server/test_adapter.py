@@ -4983,7 +4983,7 @@ async def test_server_shutdown_stops_before_dependents_when_control_bus_refuses_
     async def stubborn(_event: BaseEvent) -> None:
         started.set()
         try:
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             await release.wait()
 
