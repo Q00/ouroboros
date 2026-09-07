@@ -466,6 +466,14 @@ class InputValidator:
         "current_approach",
         "problem_context",
         "acceptance_criterion",
+        # The interview-less seed path (RFC D6) takes the session's settled
+        # goal / acceptance_criteria / constraints / decisions as one object.
+        # Every leaf is verbatim prose that lands in the Seed YAML -- the same
+        # bytes ``seed_content`` later carries back in, already exempt. A
+        # verifiable AC is very often a shell chain (``ruff check && pytest``),
+        # so scanning it here rejected the exact input the tool asks for while
+        # protecting nothing: no leaf of ``session_context`` reaches a shell.
+        "session_context",
         "message",
         "content",
         "desc",
