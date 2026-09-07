@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,6 +49,62 @@ def _entered_client(*, enter_error: Exception | None = None, exit_error: Excepti
 
 
 class TestLifecycle:
+    @pytest.mark.parametrize(
+        ("owns_http_client", "exit_fails", "http_close_fails"),
+        [
+            pytest.param(False, False, False, id="stdio"),
+            pytest.param(False, True, False, id="stdio-exit-error"),
+            pytest.param(True, False, False, id="http"),
+            pytest.param(True, True, False, id="http-exit-error"),
+            pytest.param(True, False, True, id="http-close-error"),
+            pytest.param(True, True, True, id="http-both-close-errors"),
+        ],
+    )
+    async def test_cancelled_enter_cleans_resources_and_preserves_cancellation(
+        self, owns_http_client: bool, exit_fails: bool, http_close_fails: bool
+    ) -> None:
+        entered = asyncio.Event()
+        client = _entered_client(
+            exit_error=RuntimeError("client exit boom") if exit_fails else None
+        )
+
+        async def suspended_enter() -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        client.__aenter__.side_effect = suspended_enter
+        http_client = AsyncMock() if owns_http_client else None
+        if http_client is not None and http_close_fails:
+            http_client.aclose.side_effect = OSError("socket close boom")
+        adapter = MCPClientAdapter(max_retries=3)
+        transport = TransportType.HTTP if owns_http_client else TransportType.STDIO
+        with patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            return_value=SDKClientResources(client, http_client),
+        ) as factory:
+            task = asyncio.create_task(adapter.connect(_config(transport)))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                task.cancel("connection cancelled")
+                with pytest.raises(asyncio.CancelledError, match="connection cancelled"):
+                    await asyncio.wait_for(task, timeout=2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+        factory.assert_called_once()
+        client.__aenter__.assert_awaited_once()
+        client.__aexit__.assert_awaited_once_with(None, None, None)
+        if http_client is not None:
+            http_client.aclose.assert_awaited_once()
+        assert not adapter.is_connected
+        assert adapter._http_client is None
+        assert adapter.server_info is None
+        assert adapter.server_snapshot is None
+        assert adapter.protocol_version is None
+
     async def test_failed_enter_closes_client_and_owned_http_client(self) -> None:
         client = _entered_client(enter_error=ConnectionError("discover failed"))
         http_client = AsyncMock()
