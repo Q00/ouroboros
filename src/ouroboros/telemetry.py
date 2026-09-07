@@ -249,6 +249,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "service",
         "status",
         "error_type",
+        "origin",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -256,6 +257,12 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "ci",
     }
 )
+# ``origin`` exists for exactly one question -- is the interview-less Seed
+# path (``ouroboros_generate_seed`` with ``session_context``) being used, and
+# does it produce a Seed or bounce back gap questions? It is stamped only on
+# ``command=seed`` rows and only from this closed set; any other value or
+# command drops it before the properties dict is built.
+_SEED_ORIGINS = frozenset({"interview", "session_context", "session_context_gap"})
 _COMMAND_RUN_CLI_KEYS = frozenset(
     {
         "command",
@@ -947,6 +954,7 @@ def _daily_insert_id(
         properties.get("transport"),
         properties.get("phase"),
         properties.get("fanout_kind"),
+        properties.get("origin"),
     )
     material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
     return hashlib.sha256(material.encode()).hexdigest()
@@ -1009,8 +1017,13 @@ def capture_tool_call(
     error_type: str | None = None,
     blocked: bool = False,
     registered: bool = True,
+    origin: str | None = None,
 ) -> None:
-    """Capture service activity plus retained lifecycle/failure commands."""
+    """Capture service activity plus retained lifecycle/failure commands.
+
+    ``origin`` is honoured only for ``command=seed`` and only when it is one
+    of ``_SEED_ORIGINS``; every other combination is dropped silently.
+    """
     del duration_ms
     try:
         if not registered:
@@ -1027,15 +1040,16 @@ def capture_tool_call(
             status = "accepted" if ok else "rejected"
         else:
             status = "succeeded" if ok else "failed"
-        capture(
-            "command_run",
-            {
-                "command": command or name.removeprefix("ouroboros_"),
-                "service": "mcp",
-                "status": status,
-                "error_type": error_type,
-            },
-        )
+        command_value = command or name.removeprefix("ouroboros_")
+        properties: dict[str, Any] = {
+            "command": command_value,
+            "service": "mcp",
+            "status": status,
+            "error_type": error_type,
+        }
+        if command_value == "seed" and origin in _SEED_ORIGINS:
+            properties["origin"] = origin
+        capture("command_run", properties)
     except Exception:
         pass
 

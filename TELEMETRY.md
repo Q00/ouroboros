@@ -87,7 +87,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
-| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
 | `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`unknown`), runtime_backend, app_version, os, ci |
@@ -104,6 +104,13 @@ Notes:
   removed. `mcp_serve_started` is the top of the activation funnel ("MCP
   attached"), distinct from `service_active` ("made a tool request").
 
+- `origin` on a `command=seed` row names which entrance produced the row:
+  `interview` (a completed interview session), `session_context` (the
+  interview-less path crystallized a Seed from session-settled material), or
+  `session_context_gap` (the interview-less path returned gap questions
+  instead of a Seed). It answers one adoption question — is the
+  interview-less path used, and does it close — and carries none of the
+  goal, criteria, or question text. Any other value is dropped.
 - `cause` on `ac_verify_failed` names which structural branch of the
   deterministic verify gate rejected the attempt — e.g.
   `artifacts_missing_found_elsewhere` means the expected artifact exists in
