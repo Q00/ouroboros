@@ -60,6 +60,7 @@ try:
         ACSharedRuntimeResource,
         DependencyAnalysisError,
         DependencyAnalyzer,
+        DependencyCycleError,
         DependencyGraph,
         ExecutionPlanningError,
         ExecutionStage,
@@ -72,6 +73,7 @@ except ModuleNotFoundError:  # pragma: no cover - compatibility for partial inst
     ACSharedRuntimeResource = None
     DependencyAnalysisError = None
     DependencyAnalyzer = None
+    DependencyCycleError = None
     DependencyGraph = None
     ExecutionPlanningError = None
     ExecutionStage = None
@@ -207,6 +209,7 @@ __all__ = [
     "ACSharedRuntimeResource",
     "DependencyAnalyzer",
     "DependencyAnalysisError",
+    "DependencyCycleError",
     "DependencyGraph",
     "ExecutionPlanningError",
     "ExecutionStage",
