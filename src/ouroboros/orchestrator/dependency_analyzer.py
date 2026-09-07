@@ -231,6 +231,10 @@ class ExecutionPlanningError(Exception):
     """Raised when dependency analysis cannot produce safe execution stages."""
 
 
+class DependencyCycleError(DependencyAnalysisError, ExecutionPlanningError):
+    """A cyclic graph cannot be scheduled or replaced by an independent fallback."""
+
+
 DEPENDENCY_ANALYSIS_PROMPT = """Analyze the following acceptance criteria and determine their dependencies.
 
 Acceptance Criteria:
@@ -389,7 +393,7 @@ class DependencyAnalyzer:
         self,
         acceptance_criteria: Sequence[AcceptanceCriterionInput] | Sequence[ACDependencySpec],
     ) -> Result[DependencyGraph, DependencyAnalysisError]:
-        """Analyze AC dependencies and return a graph with execution levels."""
+        """Return execution levels, or a cycle error without discarding dependency edges."""
         specs = self._normalize_specs(acceptance_criteria)
         count = len(specs)
 
@@ -424,7 +428,10 @@ class DependencyAnalyzer:
             method = "structured_only"
 
         nodes = self._build_nodes(specs, dependencies, serialization_reasons)
-        levels = _apply_serial_only_constraints(_compute_execution_levels(nodes), nodes)
+        try:
+            levels = _apply_serial_only_constraints(_compute_execution_levels(nodes), nodes)
+        except DependencyCycleError as exc:
+            return Result.err(exc)
         graph = DependencyGraph(nodes=nodes, execution_levels=levels)
 
         log.info(
@@ -675,7 +682,9 @@ def _compute_execution_levels(
                 "dependency_analyzer.circular_dependency_detected",
                 remaining=sorted(remaining),
             )
-            ready = tuple(sorted(remaining))
+            raise DependencyCycleError(
+                f"Circular AC dependencies detected; blocked AC indices: {sorted(remaining)}"
+            )
 
         levels.append(ready)
         for node_index in ready:
@@ -894,6 +903,7 @@ __all__ = [
     "ACSharedRuntimeResource",
     "DependencyAnalysisError",
     "DependencyAnalyzer",
+    "DependencyCycleError",
     "DependencyGraph",
     "ExecutionPlanningError",
     "ExecutionStage",

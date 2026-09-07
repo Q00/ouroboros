@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from typing import Any
 
 import pytest
@@ -15,7 +16,9 @@ from ouroboros.orchestrator.dependency_analyzer import (
     ACDependencySpec,
     ACNode,
     ACSharedRuntimeResource,
+    DependencyAnalysisError,
     DependencyAnalyzer,
+    DependencyCycleError,
     DependencyGraph,
     ExecutionPlanningError,
     ExecutionStage,
@@ -36,6 +39,7 @@ class StubLLMAdapter:
     def __init__(self, content: str | None = None, error: ProviderError | None = None) -> None:
         self._content = content
         self._error = error
+        self.call_count = 0
 
     def frugality_prepare_completion(
         self,
@@ -67,6 +71,7 @@ class StubLLMAdapter:
     async def complete(
         self, messages: list[Any], config: Any
     ) -> Result[CompletionResponse, ProviderError]:
+        self.call_count += 1
         if self._error is not None:
             return Result.err(self._error)
 
@@ -400,6 +405,185 @@ class TestDependencyAnalyzer:
         graph = result.value
         assert graph.execution_levels == ((7,),)
         assert graph.to_runtime_execution_plan().execution_levels == ((7,),)
+
+
+class TestDependencyCycles:
+    """A cycle is an analysis failure, never an executable parallel batch."""
+
+    @pytest.mark.parametrize(
+        "provider_mode", ["none", "empty-response", "failure", "malformed-json"]
+    )
+    async def test_analyze_rejects_structured_cycles_including_provider_fallback(
+        self, provider_mode: str
+    ) -> None:
+        specs = (
+            ACDependencySpec(
+                index=0,
+                content="Criterion A",
+                metadata={"id": "a"},
+                prerequisites=("b",),
+            ),
+            ACDependencySpec(
+                index=1,
+                content="Criterion B",
+                metadata={"id": "b"},
+                prerequisites=("a",),
+            ),
+        )
+        adapter = (
+            None
+            if provider_mode == "none"
+            else StubLLMAdapter(
+                "{invalid json"
+                if provider_mode == "malformed-json"
+                else _empty_dependency_response(2),
+                error=(
+                    ProviderError("provider unavailable", provider="test")
+                    if provider_mode == "failure"
+                    else None
+                ),
+            )
+        )
+
+        result = await DependencyAnalyzer(adapter, model="test-model").analyze(specs)
+
+        assert result.is_err
+        assert isinstance(result.error, DependencyAnalysisError)
+        assert isinstance(result.error, ExecutionPlanningError)
+        assert isinstance(result.error, DependencyCycleError)
+        assert "blocked AC indices: [0, 1]" in str(result.error)
+        if adapter is not None:
+            assert adapter.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("dependencies", "blocked_indices"),
+        [
+            pytest.param(((1,), (0,)), [0, 1], id="mutual-dependency"),
+            pytest.param(
+                ((4,), (0,), (1, 4), (0, 1, 4), (1, 2, 3)),
+                [0, 1, 2, 3, 4],
+                id="five-node-cycle",
+            ),
+            pytest.param(
+                ((), (2,), (1,), (2,)),
+                [1, 2, 3],
+                id="cycle-and-blocked-descendant-after-ready-prefix",
+            ),
+        ],
+    )
+    async def test_analyze_rejects_inferred_cycles_without_retrying(
+        self,
+        dependencies: tuple[tuple[int, ...], ...],
+        blocked_indices: list[int],
+    ) -> None:
+        adapter = StubLLMAdapter(
+            json.dumps(
+                {
+                    "dependencies": [
+                        {"ac_index": index, "depends_on": edges}
+                        for index, edges in enumerate(dependencies)
+                    ]
+                }
+            )
+        )
+        analyzer = DependencyAnalyzer(llm_adapter=adapter, model="test-model")
+
+        result = await analyzer.analyze(tuple(f"Criterion {i}" for i in range(len(dependencies))))
+
+        assert result.is_err
+        assert isinstance(result.error, DependencyAnalysisError)
+        assert isinstance(result.error, ExecutionPlanningError)
+        assert isinstance(result.error, DependencyCycleError)
+        assert str(result.error) == (
+            f"Circular AC dependencies detected; blocked AC indices: {blocked_indices}"
+        )
+        assert adapter.call_count == 1
+
+    async def test_analyze_rejects_cycle_created_by_merging_structured_and_inferred_edges(
+        self,
+    ) -> None:
+        specs = (
+            ACDependencySpec(index=0, content="Create foundation", metadata={"id": "base"}),
+            ACDependencySpec(index=1, content="Extend foundation", prerequisites=("base",)),
+        )
+        adapter = StubLLMAdapter(
+            '{"dependencies": [{"ac_index": 0, "depends_on": [1]}, '
+            '{"ac_index": 1, "depends_on": []}]}'
+        )
+
+        result = await DependencyAnalyzer(adapter, model="test-model").analyze(specs)
+
+        assert result.is_err
+        assert isinstance(result.error, DependencyAnalysisError)
+        assert isinstance(result.error, ExecutionPlanningError)
+        assert isinstance(result.error, DependencyCycleError)
+        assert "blocked AC indices: [0, 1]" in str(result.error)
+        assert adapter.call_count == 1
+        assert specs[1].prerequisites == ("base",)
+
+    async def test_analyze_preserves_valid_structured_and_inferred_edges(self) -> None:
+        specs = (
+            ACDependencySpec(index=0, content="Create foundation", metadata={"id": "base"}),
+            ACDependencySpec(index=1, content="Extend foundation", prerequisites=("base",)),
+            ACDependencySpec(index=2, content="Integrate extension"),
+        )
+        adapter = StubLLMAdapter(
+            '{"dependencies": [{"ac_index": 0, "depends_on": []}, '
+            '{"ac_index": 1, "depends_on": []}, {"ac_index": 2, "depends_on": [1]}]}'
+        )
+
+        result = await DependencyAnalyzer(adapter, model="test-model").analyze(specs)
+
+        assert result.is_ok
+        graph = result.value
+        assert graph.get_dependencies(0) == ()
+        assert graph.get_dependencies(1) == (0,)
+        assert graph.get_dependencies(2) == (1,)
+        assert graph.to_runtime_execution_plan().execution_levels == ((0,), (1,), (2,))
+        assert adapter.call_count == 1
+
+    @pytest.mark.parametrize("levels", [(), ((0, 1),), ((0,), (1,))])
+    def test_planner_rejects_cycles_with_missing_or_supplied_levels(
+        self, levels: tuple[tuple[int, ...], ...]
+    ) -> None:
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Criterion A", depends_on=(1,)),
+                ACNode(index=1, content="Criterion B", depends_on=(0,)),
+            ),
+            execution_levels=levels,
+        )
+
+        with pytest.raises(ExecutionPlanningError, match="Circular AC dependencies") as failure:
+            graph.to_runtime_execution_plan()
+
+        assert isinstance(failure.value, DependencyAnalysisError)
+        assert isinstance(failure.value, DependencyCycleError)
+        assert "blocked AC indices: [0, 1]" in str(failure.value)
+
+    def test_planner_rejects_normalized_single_node_self_loop(self) -> None:
+        graph = DependencyGraph(nodes=(ACNode(index=0, content="Criterion A", depends_on=(0,)),))
+
+        with pytest.raises(ExecutionPlanningError, match="Circular AC dependencies") as failure:
+            graph.to_execution_plan()
+
+        assert isinstance(failure.value, DependencyCycleError)
+        assert "blocked AC indices: [0]" in str(failure.value)
+
+    def test_planner_reports_blocked_sparse_indices_not_only_cycle_members(self) -> None:
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=2, content="Independent criterion"),
+                ACNode(index=4, content="Criterion A", depends_on=(7,)),
+                ACNode(index=7, content="Criterion B", depends_on=(4,)),
+                ACNode(index=9, content="Blocked descendant", depends_on=(7,)),
+            )
+        )
+
+        with pytest.raises(ExecutionPlanningError, match="Circular AC dependencies") as failure:
+            graph.to_execution_plan()
+
+        assert "blocked AC indices: [4, 7, 9]" in str(failure.value)
 
 
 class TestHybridExecutionPlanner:
