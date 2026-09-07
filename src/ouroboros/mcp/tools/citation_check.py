@@ -130,8 +130,12 @@ def audit_citations(
     deadline = time.monotonic() + total_budget_seconds
     checked = 0
     for url in urls:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https") or len(url) > _MAX_URL_LEN:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            valid_url = parsed.scheme in ("http", "https") and bool(parsed.netloc)
+        except (TypeError, ValueError):
+            valid_url = False
+        if not valid_url or len(url) > _MAX_URL_LEN:
             verdicts[url] = INVALID
             continue
         if checked >= max_urls or time.monotonic() >= deadline:

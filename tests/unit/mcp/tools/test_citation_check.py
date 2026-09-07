@@ -93,3 +93,12 @@ def test_fetcher_exception_degrades_to_unreachable() -> None:
     audit = audit_citations([_EVIDENCE], fetch=fetch)
     assert audit is not None
     assert set(audit["urls"].values()) == {UNREACHABLE}
+
+
+def test_malformed_url_is_invalid_and_does_not_raise() -> None:
+    audit = audit_citations(
+        ['```json\n{"external_sources": ["https://[invalid"]}\n```'],
+        fetch=lambda _url, _timeout: True,
+    )
+    assert audit is not None
+    assert audit["urls"]["https://[invalid"] == INVALID
