@@ -587,15 +587,21 @@ def _make_stdin_peer_probe(stdin_fd: int = 0) -> Callable[[], bool] | None:
         with contextlib.suppress(OSError):
             os.close(wire_fd)
         return None
-    try:
-        wire.setblocking(False)
-    except OSError:
+    # Never setblocking(False) here: O_NONBLOCK lives on the open file
+    # description that the duplicate *shares* with fd 0, so flipping it on
+    # the dup also flips the wire the MCP SDK reads. A blocking readline on
+    # an idle socket then returns "" (EOF) and the server exits ~5 ms after
+    # `initialize` under every socketpair-stdin client — Node/libuv spawns,
+    # i.e. Claude Code (#2337). MSG_DONTWAIT makes only this peek
+    # non-blocking, per call, without touching shared descriptor state.
+    dontwait = getattr(socket, "MSG_DONTWAIT", None)
+    if dontwait is None:
         wire.close()
         return None
 
     def _peer_is_dead() -> bool:
         try:
-            data = wire.recv(1, socket.MSG_PEEK)
+            data = wire.recv(1, socket.MSG_PEEK | dontwait)
         except BlockingIOError:
             return False  # live peer, nothing queued
         except OSError:
