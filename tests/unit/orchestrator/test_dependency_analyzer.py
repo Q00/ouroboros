@@ -521,6 +521,37 @@ class TestDependencyCycles:
         assert adapter.call_count == 1
         assert specs[1].prerequisites == ("base",)
 
+    async def test_analyze_rejects_structured_single_node_self_loop(self) -> None:
+        specs = (
+            ACDependencySpec(
+                index=0,
+                content="Criterion A",
+                metadata={"id": "a"},
+                prerequisites=("a",),
+            ),
+        )
+
+        result = await DependencyAnalyzer().analyze(specs)
+
+        assert result.is_err
+        assert isinstance(result.error, DependencyCycleError)
+        assert "blocked AC indices: [0]" in str(result.error)
+
+    async def test_analyze_rejects_inferred_single_node_self_loop(self) -> None:
+        adapter = StubLLMAdapter(
+            '{"dependencies": [{"ac_index": 0, "depends_on": [0]}, '
+            '{"ac_index": 1, "depends_on": []}]}'
+        )
+
+        result = await DependencyAnalyzer(adapter, model="test-model").analyze(
+            ("Criterion A", "Criterion B")
+        )
+
+        assert result.is_err
+        assert isinstance(result.error, DependencyCycleError)
+        assert "blocked AC indices: [0]" in str(result.error)
+        assert adapter.call_count == 1
+
     async def test_analyze_preserves_valid_structured_and_inferred_edges(self) -> None:
         specs = (
             ACDependencySpec(index=0, content="Create foundation", metadata={"id": "base"}),

@@ -399,17 +399,15 @@ class DependencyAnalyzer:
 
         log.info("dependency_analyzer.analysis.started", ac_count=count)
 
-        if count <= 1:
-            nodes = tuple(ACNode(index=spec.index, content=spec.content) for spec in specs)
-            levels = ((specs[0].index,),) if specs else ()
-            return Result.ok(DependencyGraph(nodes=nodes, execution_levels=levels))
+        if count == 0:
+            return Result.ok(DependencyGraph(nodes=(), execution_levels=()))
 
         structured_dependencies, serialization_reasons = self._analyze_structured_dependencies(
             specs
         )
 
         dependencies = {index: set(values) for index, values in structured_dependencies.items()}
-        if self._llm is not None:
+        if self._llm is not None and count > 1:
             try:
                 llm_dependencies = await self._analyze_with_llm(
                     tuple(spec.content for spec in specs)
@@ -476,7 +474,7 @@ class DependencyAnalyzer:
         for spec in specs:
             for raw_reference in spec.prerequisites:
                 resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                if resolved is None or resolved == spec.index:
+                if resolved is None:
                     continue
                 dependencies[spec.index].add(resolved)
                 reasons[spec.index].append(f"prerequisite AC {resolved + 1}")
@@ -485,7 +483,7 @@ class DependencyAnalyzer:
                 raw_value = spec.metadata.get(metadata_key)
                 for raw_reference in _coerce_reference_list(raw_value):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(f"metadata dependency on AC {resolved + 1}")
@@ -493,14 +491,14 @@ class DependencyAnalyzer:
             for context_name, context in _iter_dependency_contexts(spec):
                 for raw_reference in _collect_context_dependency_references(context):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(f"{context_name} dependency on AC {resolved + 1}")
 
                 for raw_reference in _collect_context_shared_prerequisites(context):
                     resolved = self._resolve_reference(raw_reference, key_to_index, len(specs))
-                    if resolved is None or resolved == spec.index:
+                    if resolved is None:
                         continue
                     dependencies[spec.index].add(resolved)
                     reasons[spec.index].append(
@@ -591,9 +589,7 @@ class DependencyAnalyzer:
             ac_index = item.get("ac_index", 0)
             raw_dependencies = item.get("depends_on", [])
             valid_dependencies = [
-                dep
-                for dep in raw_dependencies
-                if isinstance(dep, int) and 0 <= dep < len(criteria) and dep != ac_index
+                dep for dep in raw_dependencies if isinstance(dep, int) and 0 <= dep < len(criteria)
             ]
             dependencies[ac_index] = valid_dependencies
 
