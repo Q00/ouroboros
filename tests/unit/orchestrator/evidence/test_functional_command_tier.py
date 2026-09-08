@@ -429,7 +429,7 @@ def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> N
         }
     )
 
-    def verdict(extra: tuple[AgentMessage, ...], evidence=evidence):
+    def verdict(extra: tuple[AgentMessage, ...], evidence=evidence, contract: bool = True):
         return _verify_atomic_evidence_against_runtime_messages(
             messages=(start, result, *extra, AgentMessage(type="result", content="done")),
             typed_evidence=evidence,
@@ -437,11 +437,16 @@ def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> N
             execution_profile=load_profile("code"),
             task_cwd=str(tmp_path),
             adapter_working_directory=str(tmp_path),
-            has_success_contract=True,
+            has_success_contract=contract,
             verify_gate_active=True,
         )
 
     assert verdict((_observation_message(),)).passed is True
+    # A prose AC has no hidden verify gate to make the mislabel harmless: a
+    # stale workspace file must not prove this run touched it.
+    prose = verdict((_observation_message(),), contract=False)
+    assert prose.passed is False
+    assert any("files_touched" in reason for reason in prose.reasons)
     # No witness, a mutated witness, or a truncated witness: still rejected.
     for extra in (
         (),

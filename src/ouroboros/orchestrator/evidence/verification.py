@@ -153,15 +153,19 @@ def _verify_atomic_evidence_against_runtime_messages(
                     continue
                 # A dependent AC often finds its files already built by a
                 # sibling, verifies them, and lists them as "touched". The
-                # harness's own snapshot diff is the witness that the leaf
-                # mutated nothing; when it says so, the verify gate is active,
-                # and the named path is a real workspace file, the claim is a
-                # mislabelled verification, not invented work. The file must
-                # exist: a ghost path stays unsupported, and any observed
-                # mutation withdraws the waiver so a leaf that wrote something
-                # else cannot launder an unrelated claim through it.
+                # claim is literally false, so it is admitted only where it is
+                # harmless: the AC carries a success contract whose hidden
+                # verify gate is the behavioural authority (a leaf that did
+                # nothing still has to pass it), the harness's own snapshot
+                # diff witnessed zero mutation, and the named path is a real
+                # workspace file. A prose AC keeps the rejection -- there a
+                # stale file must not prove this run touched it. A ghost path
+                # stays unsupported, and any observed mutation withdraws the
+                # waiver so a leaf that wrote something else cannot launder an
+                # unrelated claim through it.
                 if (
-                    verify_gate_active
+                    has_success_contract
+                    and verify_gate_active
                     and observations_confirm_unmutated_workspace(support_messages)
                     and _claimed_file_exists_in_workspace(value, task_cwd=workspace_cwd)
                 ):
