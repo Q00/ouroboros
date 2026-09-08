@@ -112,13 +112,13 @@ def _verify_atomic_evidence_against_runtime_messages(
         if not values:
             if field_name in required_fields:
                 # A pure-verification run may honestly have nothing to touch:
-                # when the AC's hidden verify gate stays the behavioral
-                # authority and the harness's own snapshot diff witnessed zero
-                # workspace mutation, an empty files_touched is corroborated
-                # truth, not withheld evidence.
+                # when the verify gate is active and the harness's own
+                # snapshot diff witnessed zero workspace mutation, an empty
+                # files_touched is corroborated truth, not withheld evidence.
+                # Whether the AC also carries a success contract does not
+                # change what the snapshot proved, so it is not a condition.
                 if (
                     field_name == "files_touched"
-                    and has_success_contract
                     and verify_gate_active
                     and observations_confirm_unmutated_workspace(support_messages)
                 ):
@@ -158,19 +158,18 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
-                # Functional-verification tier: only when a hidden verify gate
-                # stays the behavioral authority for this AC, a non-test claim
-                # that IS a transcript-backed successful execution of an
-                # artifact this run produced is honest evidence, not
-                # fabrication.
-                if (
-                    has_success_contract
-                    and verify_gate_active
-                    and _functional_command_supports_test_claim(
-                        value=value,
-                        messages=support_messages,
-                        task_cwd=workspace_cwd,
-                    )
+                # Functional-verification tier: while the verify gate is
+                # active, a non-test claim that IS a transcript-backed,
+                # zero-exit execution of a real workspace artifact is honest
+                # evidence, not fabrication. The tier used to require a
+                # success contract on the AC as well; a prose AC is exactly
+                # where transcript-backed functional evidence is the only
+                # behavioural evidence there is, so that condition kept the
+                # tier away from the ACs that needed it.
+                if verify_gate_active and _functional_command_supports_test_claim(
+                    value=value,
+                    messages=support_messages,
+                    task_cwd=workspace_cwd,
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(

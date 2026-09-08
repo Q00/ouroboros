@@ -19,7 +19,6 @@ from ouroboros.orchestrator.evidence.claims import (
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.harness_observation import (
     observation_from_message,
-    observations_confirm_unmutated_workspace,
 )
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
@@ -496,13 +495,17 @@ def _functional_command_supports_test_claim(
         _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
         for invoked in invoked_files
     ):
-        # The invoked artifact must be this run's own work — unless the
-        # harness witnessed a pure-verification run (zero mutation, zero
-        # deletion, complete snapshots), where the cited artifact must still
-        # be a real workspace file: existence now proves existence throughout
-        # the leaf's window, so a ghost path in a comment stays rejected.
-        if not observations_confirm_unmutated_workspace(messages):
-            return False
+        # A ``tests_passed`` claim asserts that a behaviour was checked, not
+        # that this leaf authored the artifact it checked. A dependent AC
+        # routinely verifies a sibling's artifact (the leaf that adds the
+        # unknown-command test edits only the test file and then runs
+        # ``python3 habit_tracker.py unknown-command``); requiring the
+        # invoked file to be this run's own mutation rejected 43 of 90
+        # transcript-backed, zero-exit claims on the 2026-09 bench. Authorship
+        # stays a ``files_touched`` question. What this tier still requires
+        # of the artifact is that it is a real regular file in the workspace
+        # at verification time, so a ghost path in a comment stays rejected;
+        # without a workspace to check against nothing can vouch for it.
         if not any(
             _invoked_file_is_existing_workspace_file(invoked, task_cwd=task_cwd)
             for invoked in invoked_files
