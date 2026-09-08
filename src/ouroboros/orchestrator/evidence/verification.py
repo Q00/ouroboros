@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.claims import (
@@ -10,6 +12,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_command_claim,
     _runtime_messages_support_file_claim,
     _runtime_support_messages_for_field,
+    _workspace_relative_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import (
@@ -148,6 +151,21 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
+                # A dependent AC often finds its files already built by a
+                # sibling, verifies them, and lists them as "touched". The
+                # harness's own snapshot diff is the witness that the leaf
+                # mutated nothing; when it says so, the verify gate is active,
+                # and the named path is a real workspace file, the claim is a
+                # mislabelled verification, not invented work. The file must
+                # exist: a ghost path stays unsupported, and any observed
+                # mutation withdraws the waiver so a leaf that wrote something
+                # else cannot launder an unrelated claim through it.
+                if (
+                    verify_gate_active
+                    and observations_confirm_unmutated_workspace(support_messages)
+                    and _claimed_file_exists_in_workspace(value, task_cwd=workspace_cwd)
+                ):
+                    continue
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if field_name == "tests_passed":
@@ -204,3 +222,17 @@ def _verify_atomic_evidence_against_runtime_messages(
         )
 
     return VerifierVerdict(passed=True)
+
+
+def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bool:
+    """Return True when a ``files_touched`` value names an existing regular file
+    inside the workspace. Without a workspace nothing can vouch for it."""
+    if task_cwd is None:
+        return False
+    relative = _workspace_relative_file_claim(value, task_cwd=task_cwd)
+    if relative is None:
+        return False
+    try:
+        return (Path(task_cwd).resolve() / relative).is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False

@@ -384,3 +384,77 @@ def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness(tm
     without_witness = verdict(())
     assert without_witness.passed is False
     assert any("files_touched" in reason for reason in without_witness.reasons)
+
+
+def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> None:
+    """Frozen from bench run orch_777fb6248525 / AC 4 (2026-09-08).
+
+    A sibling AC had already written ``habit_tracker.py`` and
+    ``test_habit_tracker.py``; this leaf only ran ``python -m pytest -q``
+    (4 passed, exit 0) and listed both files as ``files_touched``. main rejected
+    the run's last AC as FABRICATION_SUSPECTED twice and the run ended 3/4.
+    The harness snapshot diff witnessed zero mutation, so the claim is a
+    mislabelled verification of real workspace files.
+    """
+    (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "test_habit_tracker.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    command = "python -m pytest -q"
+    start = AgentMessage(
+        type="assistant",
+        content="Calling tool: Bash",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "/bin/zsh -lc " + shlex.quote(command)},
+            "tool_call_id": "item_3",
+        },
+    )
+    result = AgentMessage(
+        type="tool_result",
+        content="....                                    [100%]\n4 passed in 0.05s",
+        data={
+            "tool_call_id": "item_3",
+            "exit_code": 0,
+            "tool_result": {
+                "is_error": False,
+                "text_content": "....                                    [100%]\n4 passed in 0.05s",
+                "meta": {"tool_call_id": "item_3", "exit_status": 0},
+            },
+        },
+    )
+    evidence = EvidenceRecord(
+        data={
+            "files_touched": ["habit_tracker.py", "test_habit_tracker.py"],
+            "commands_run": [command],
+            "tests_passed": [command],
+        }
+    )
+
+    def verdict(extra: tuple[AgentMessage, ...], evidence=evidence):
+        return _verify_atomic_evidence_against_runtime_messages(
+            messages=(start, result, *extra, AgentMessage(type="result", content="done")),
+            typed_evidence=evidence,
+            ac_content="test_habit_tracker.py covers add, list, done and the suite passes",
+            execution_profile=load_profile("code"),
+            task_cwd=str(tmp_path),
+            adapter_working_directory=str(tmp_path),
+            has_success_contract=True,
+            verify_gate_active=True,
+        )
+
+    assert verdict((_observation_message(),)).passed is True
+    # No witness, a mutated witness, or a truncated witness: still rejected.
+    for extra in (
+        (),
+        (_observation_message(changed=("habits.json",)),),
+        (_observation_message(truncated=True),),
+    ):
+        v = verdict(extra)
+        assert v.passed is False
+        assert any("files_touched" in reason for reason in v.reasons)
+    # A ghost path stays rejected even with a clean witness.
+    ghost = EvidenceRecord(
+        data={"files_touched": ["ghost.py"], "commands_run": [command], "tests_passed": [command]}
+    )
+    v = verdict((_observation_message(),), evidence=ghost)
+    assert v.passed is False
+    assert any("ghost.py" in reason for reason in v.reasons)
