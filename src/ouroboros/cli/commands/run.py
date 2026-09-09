@@ -642,14 +642,19 @@ async def _record_cli_run_outcome(
             return
         result_meta: dict[str, Any] = {"success": terminal_status == "completed"}
         if terminal_status != "completed" and session_id is not None:
-            result_meta.update(
-                await derive_run_failure_meta(
-                    event_store,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    session_status=session_status,
+            # The cause is enrichment; the outcome must land without it
+            # (``failure_reason_code=unknown``) rather than be dropped.
+            try:
+                result_meta.update(
+                    await derive_run_failure_meta(
+                        event_store,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        session_status=session_status,
+                    )
                 )
-            )
+            except Exception:
+                pass
         usage_telemetry.capture_job_outcome(
             f"{execution_id}:{uuid4().hex}",
             "run",

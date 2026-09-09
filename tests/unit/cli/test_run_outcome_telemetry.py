@@ -224,7 +224,8 @@ async def test_each_invocation_gets_its_own_outcome_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failure_meta_errors_never_break_the_command() -> None:
+async def test_failure_meta_errors_still_count_the_failed_run() -> None:
+    """A broken cause lookup degrades to ``unknown``; it must not drop the outcome."""
     with (
         patch("ouroboros.telemetry.capture_job_outcome") as capture,
         patch(
@@ -241,7 +242,9 @@ async def test_failure_meta_errors_never_break_the_command() -> None:
             session_id="sess-local",
         )
 
-    capture.assert_not_called()
+    capture.assert_called_once_with(
+        ANY, "run", terminal_status="failed", result_meta={"success": False}
+    )
 
 
 @pytest.mark.parametrize(
