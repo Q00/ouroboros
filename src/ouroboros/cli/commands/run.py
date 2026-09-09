@@ -16,7 +16,10 @@ import yaml
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.core.types import Result
     from ouroboros.mcp.client.manager import MCPClientManager
+    from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.event_store import EventStore
 
 from ouroboros import telemetry as usage_telemetry
 from ouroboros.cli.formatters import console
@@ -588,6 +591,75 @@ async def _initialize_mcp_manager(
     return manager
 
 
+_CLI_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _record_cli_run_outcome(
+    result: "Result[Any, Any]",
+    *,
+    event_store: "EventStore",
+    session_repo: "SessionRepository",
+    execution_id: str | None,
+    session_id: str | None,
+) -> None:
+    """Emit one durable ``workflow_outcome`` for a terminal ``ooo run``.
+
+    Mirrors what an MCP ``execute_seed`` job records so the CLI entrypoint is
+    measured by the same rule: the terminal status comes from the
+    reconstructed session (``completed``/``failed``/``cancelled``), falling
+    back to the runner's success flag; a ``paused`` run is not terminal and
+    emits nothing (its resume will). A non-success outcome carries the closed
+    ``failure_cause`` derived from durable executor evidence, never prose. The
+    outcome id is fresh per invocation because ``--resume`` reuses the
+    execution id and each attempt is its own outcome. Never raises.
+    """
+    from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
+    from ouroboros.orchestrator.session import SessionStatus
+
+    try:
+        session_status: SessionStatus | None = None
+        if result.is_ok:
+            res = result.value
+            execution_id = res.execution_id or execution_id
+            session_id = res.session_id or session_id
+            terminal_status = "completed" if res.success else "failed"
+            if not res.success and res.summary.get("cancelled") is True:
+                terminal_status = "cancelled"
+            if session_id is not None:
+                try:
+                    reconstructed = await session_repo.reconstruct_session(session_id)
+                    if reconstructed.is_ok:
+                        session_status = reconstructed.value.status
+                except Exception:
+                    session_status = None
+            if session_status is SessionStatus.PAUSED:
+                return
+            if session_status is not None and session_status.value in _CLI_RUN_TERMINAL_STATUSES:
+                terminal_status = session_status.value
+        else:
+            terminal_status = "failed"
+        if not execution_id:
+            return
+        result_meta: dict[str, Any] = {"success": terminal_status == "completed"}
+        if terminal_status != "completed" and session_id is not None:
+            result_meta.update(
+                await derive_run_failure_meta(
+                    event_store,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    session_status=session_status,
+                )
+            )
+        usage_telemetry.capture_job_outcome(
+            f"{execution_id}:{uuid4().hex}",
+            "run",
+            terminal_status=terminal_status,
+            result_meta=result_meta,
+        )
+    except Exception:
+        pass
+
+
 async def _run_orchestrator(
     seed_file: Path,
     resume_session: str | None = None,
@@ -805,16 +877,19 @@ async def _run_orchestrator(
             result = await runner.execute_seed(**execute_kwargs)
 
         # Handle result
+        # CLI runs use the same durable funnel as MCP jobs so fleet
+        # success-rate measurements include the primary user entrypoint.
+        # Recorded before either branch can raise ``typer.Exit`` so a failed
+        # run is counted exactly like a successful one.
+        await _record_cli_run_outcome(
+            result,
+            event_store=event_store,
+            session_repo=session_repo,
+            execution_id=execution_id,
+            session_id=session_id_for_run,
+        )
         if result.is_ok:
             res = result.value
-            # CLI runs use the same durable funnel as MCP jobs so fleet
-            # success-rate measurements include the primary user entrypoint.
-            usage_telemetry.capture_job_outcome(
-                res.execution_id,
-                "run",
-                terminal_status="completed" if res.success else "failed",
-                result_meta={"success": res.success},
-            )
             if res.success:
                 print_success("Execution completed successfully!")
                 print_info(f"Session ID: {res.session_id}")
@@ -872,6 +947,12 @@ async def _run_orchestrator(
             if debug:
                 print_info("Disconnecting MCP servers...")
             await mcp_manager.disconnect_all()
+        # The telemetry worker is a daemon thread: a ``typer.Exit`` raised
+        # right after the outcome was queued would end the process before the
+        # event is posted, so failed runs would be dropped while successful
+        # ones (which keep going through QA) survive. The run is over, so a
+        # bounded wait here blocks no command (see ``telemetry.flush``).
+        usage_telemetry.flush()
 
 
 @app.command()
