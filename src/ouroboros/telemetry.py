@@ -385,6 +385,7 @@ _RUNTIME_DRIFT_KINDS = frozenset(
         "skill_dispatch_registry",
         "profile_routing",
         "baseline_unavailable",
+        "attestation_timeout",
     }
 )
 _UNKNOWN_DRIFT_KIND = "unknown"
