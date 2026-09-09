@@ -9,6 +9,7 @@ from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_has_conflicting_tool_call_ids,
+    _runtime_message_has_following_success,
     _runtime_message_has_success_evidence,
     _runtime_message_is_tool_completion,
     _runtime_message_supports_command_claim,
@@ -31,6 +32,76 @@ from ouroboros.orchestrator.evidence.shell_parsing import (
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
 )
+
+
+def _runtime_messages_have_completed_command_for_test_claim(
+    *, value: str, messages: tuple[AgentMessage, ...]
+) -> bool:
+    """Diagnose a command-valued test claim without approving its result.
+
+    A correlated zero-exit command is related runtime work, but need not have
+    run any tests. This runner-neutral fallback is only for classifying an
+    already rejected claim as an evidence-form mismatch. It does not parse
+    output or infer test names, and requires a distinct, ID-linked completion.
+    """
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
+            continue
+        call_id = _runtime_message_tool_call_id(message)
+        if call_id is None or not _runtime_message_supports_command_claim(value, message):
+            continue
+        # Unlike inline success, following-success requires unique starts and
+        # completions and rejects contradictory correlation aliases.
+        if not _runtime_message_has_following_success(messages, index):
+            continue
+        completions = [
+            candidate
+            for candidate in messages
+            if _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+        ]
+        # Also reject reused IDs with a completion preceding this start.
+        if len(completions) != 1:
+            continue
+        completion = completions[0]
+        exit_code = completion.data.get("exit_code")
+        if type(exit_code) is not int or exit_code != 0:
+            continue
+        pair = [message, completion]
+        if _test_chunk_has_structured_failure(pair):
+            continue
+        if any(_completed_command_has_invalid_status(item) for item in pair):
+            continue
+        return True
+    return False
+
+
+def _completed_command_has_invalid_status(message: AgentMessage) -> bool:
+    """Veto malformed markers and nested exits in the diagnostic-only path."""
+    containers = [message.data]
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        containers.append(tool_result)
+    for container in containers:
+        if container.get("is_error_invalid") is True:
+            return True
+        if "exit_code" in container and (
+            type(container["exit_code"]) is not int or container["exit_code"] != 0
+        ):
+            return True
+        for key in ("status", "runtime_event_type"):
+            if key in container and not isinstance(container[key], str):
+                return True
+        if str(container.get("status", "")).strip().lower() in {"failed", "error"}:
+            return True
+        if (
+            str(container.get("runtime_event_type", ""))
+            .strip()
+            .lower()
+            .endswith((".failed", ".error"))
+        ):
+            return True
+    return False
 
 
 def _runtime_messages_have_masked_test_command_for_test_claim(
