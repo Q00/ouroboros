@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.mcp.client.manager import MCPClientManager
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.logging_setup import configure_cli_logging
@@ -806,6 +807,14 @@ async def _run_orchestrator(
         # Handle result
         if result.is_ok:
             res = result.value
+            # CLI runs use the same durable funnel as MCP jobs so fleet
+            # success-rate measurements include the primary user entrypoint.
+            usage_telemetry.capture_job_outcome(
+                res.execution_id,
+                "run",
+                terminal_status="completed" if res.success else "failed",
+                result_meta={"success": res.success},
+            )
             if res.success:
                 print_success("Execution completed successfully!")
                 print_info(f"Session ID: {res.session_id}")
