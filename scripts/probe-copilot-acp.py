@@ -4,9 +4,10 @@
 Run from the checkout:
     python3 scripts/probe-copilot-acp.py --workspace . --log .acp-artifacts/probe.ndjson
 
-Only local read/search tools are exposed. Permission requests fail closed unless
-they are read/search operations within the selected workspace. Raw logs contain
-prompt and tool output: keep them private and do not commit them.
+By default only local read/search tools are exposed. An optional --allow-command
+grants exactly that shell command, once per matching request, for progress probes.
+Other permission requests fail closed. Raw logs contain prompt and tool output:
+keep them private and do not commit them.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any, TextIO
+from uuid import uuid4
 
 
 class Probe:
@@ -51,11 +53,23 @@ class Probe:
     def permission_outcome(self, params: dict[str, Any]) -> dict[str, Any]:
         outcome: dict[str, Any] = {"outcome": "cancelled"}
         tool = params.get("toolCall", {})
-        if tool.get("kind") not in {"read", "search"}:
+        kind = tool.get("kind")
+        if kind == "execute":
+            raw = tool.get("rawInput", {})
+            commands = raw.get("commands", [raw.get("command")])
+            if (
+                raw.get("command") not in self.args.allow_command
+                or not isinstance(commands, list)
+                or not commands
+                or any(command not in self.args.allow_command for command in commands)
+            ):
+                return {"outcome": outcome}
+        elif kind not in {"read", "search"}:
             return {"outcome": outcome}
         for location in tool.get("locations", []):
-            path = Path(location.get("path", "")).resolve()
-            if not path.is_relative_to(self.workspace):
+            path = Path(location.get("path", ""))
+            path = path if path.is_absolute() else self.workspace / path
+            if not path.resolve().is_relative_to(self.workspace):
                 return {"outcome": outcome}
         for option in params.get("options", []):
             if option.get("kind") == "allow_once":
@@ -131,7 +145,8 @@ class Probe:
             "--no-auto-update",
             "--disable-builtin-mcps",
             "--no-remote-export",
-            f"--available-tools={self.args.tools}",
+            # Empty is unrestricted in CLI 1.0.83; use a nonmatching allow-list.
+            f"--available-tools={self.args.tools or f'ouroboros_no_tools_{uuid4().hex}'}",
             "--add-dir",
             str(self.workspace),
         ]
@@ -206,6 +221,12 @@ def main() -> None:
     parser.add_argument("--log", default=".acp-artifacts/probe.ndjson")
     parser.add_argument("--model")
     parser.add_argument("--tools", default="glob,grep,view")
+    parser.add_argument(
+        "--allow-command",
+        action="append",
+        default=[],
+        help="Explicitly permit this exact shell command for a progress probe (repeatable)",
+    )
     parser.add_argument("--timeout", type=float, default=240)
     parser.add_argument(
         "--ignore-github-token",
