@@ -23,6 +23,7 @@ Usage:
     api_key = credentials.providers["openai"].api_key
 """
 
+from ouroboros.config.copilot import get_copilot_acp_fallback, get_copilot_transport
 from ouroboros.config.loader import (
     MAX_USAGE_LIMIT_PAUSE_SECONDS,
     config_exists,
@@ -177,6 +178,8 @@ __all__ = [
     "get_mechanical_detector_model",
     "get_codex_cli_path",
     "get_copilot_cli_path",
+    "get_copilot_transport",
+    "get_copilot_acp_fallback",
     "get_antigravity_cli_path",
     "get_gemini_cli_path",
     "get_gjc_cli_path",

@@ -708,6 +708,8 @@ class OrchestratorConfig(BaseModel, frozen=True):
     cli_path: str | None = None
     codex_cli_path: str | None = None
     copilot_cli_path: str | None = None
+    copilot_transport: Literal["cli", "acp"] = "cli"
+    copilot_acp_fallback: bool = True
     opencode_cli_path: str | None = None
     opencode_stdout_idle_timeout_seconds: float | None = Field(default=None, gt=0.0)
     hermes_cli_path: str | None = None
