@@ -14,6 +14,7 @@ from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.mcp import job_manager as job_manager_module
+from ouroboros.mcp.errors import JobWorkError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools import job_handlers as job_handlers_module
 from ouroboros.mcp.tools import job_wait_guard as job_wait_guard_module
@@ -160,6 +161,53 @@ class TestJobManager:
             rendered, _ = await _render_job_snapshot_inner(terminal, store)
             assert "### Recovery" in rendered
             assert "**Recommended action**: inspect_logs" in rendered
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_job_work_error_meta_reaches_failed_terminal_and_outcome(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        async def rejected_before_launch() -> MCPToolResult:
+            raise JobWorkError(
+                "Task workspace error: Cannot start task worktree from a dirty checkout",
+                result_meta={
+                    "failure_cause": "launch_workspace_unavailable",
+                    "failure_reason_code": "config",
+                },
+            )
+
+        try:
+            with patch(
+                "ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_job_outcome"
+            ) as capture:
+                started = await manager.start_job(
+                    job_type="execute_seed",
+                    initial_message="queued",
+                    runner=rejected_before_launch(),
+                )
+                terminal = await _wait_for_job_status(manager, started.job_id, JobStatus.FAILED)
+
+            capture.assert_called_once_with(
+                started.job_id,
+                "execute_seed",
+                terminal_status="failed",
+                result_meta={
+                    "failure_cause": "launch_workspace_unavailable",
+                    "failure_reason_code": "config",
+                    "recovery_action": "setup",
+                    "next_step": "Run setup, then retry the workflow.",
+                },
+            )
+            assert terminal.error == (
+                "Task workspace error: Cannot start task worktree from a dirty checkout"
+            )
+            assert terminal.message == (
+                "Job failed: Task workspace error: Cannot start task worktree from a dirty checkout"
+            )
+            assert terminal.result_meta["failure_cause"] == "launch_workspace_unavailable"
+            assert terminal.result_meta["failure_reason_code"] == "config"
         finally:
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -1572,9 +1620,27 @@ class TestJobManager:
                     },
                 )
             )
+            await store.append(
+                BaseEvent(
+                    type="execution.ac.recovery_exhausted",
+                    aggregate_type="execution",
+                    aggregate_id="exec_default_failed",
+                    data={
+                        "execution_id": "exec_default_failed",
+                        "session_id": "orch_default_failed",
+                        "root_ac_index": 0,
+                        "last_failure_class": "FABRICATION_SUSPECTED",
+                    },
+                )
+            )
 
-            with patch.object(
-                job_manager_module, "persisted_process_owner_alive", return_value=False
+            with (
+                patch.object(
+                    job_manager_module, "persisted_process_owner_alive", return_value=False
+                ),
+                patch(
+                    "ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_job_outcome"
+                ) as capture,
             ):
                 snapshot = await manager.get_snapshot("job_default_failed")
 
@@ -1582,6 +1648,15 @@ class TestJobManager:
             assert "Linked execution failed" in (snapshot.error or "")
             assert "Verifier rejected unsupported evidence claims" in (snapshot.error or "")
             assert snapshot.result_meta["failed_from_linked_execution_failure"] is True
+            # The recovered terminal names the run cause from the same durable
+            # evidence the live handler path reads, so it no longer reaches
+            # workflow_outcome as ``unknown``.
+            assert snapshot.result_meta["failure_cause"] == "worker_fabrication_suspected"
+            assert snapshot.result_meta["failure_reason_code"] == "validation"
+            capture.assert_called_once()
+            forwarded = capture.call_args.kwargs["result_meta"]
+            assert forwarded["failure_cause"] == "worker_fabrication_suspected"
+            assert forwarded["failure_reason_code"] == "validation"
         finally:
             await store.close()
 
