@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.claims import (
@@ -10,6 +12,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_command_claim,
     _runtime_messages_support_file_claim,
     _runtime_support_messages_for_field,
+    _workspace_relative_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import (
@@ -112,13 +115,13 @@ def _verify_atomic_evidence_against_runtime_messages(
         if not values:
             if field_name in required_fields:
                 # A pure-verification run may honestly have nothing to touch:
-                # when the AC's hidden verify gate stays the behavioral
-                # authority and the harness's own snapshot diff witnessed zero
-                # workspace mutation, an empty files_touched is corroborated
-                # truth, not withheld evidence.
+                # when the verify gate is active and the harness's own
+                # snapshot diff witnessed zero workspace mutation, an empty
+                # files_touched is corroborated truth, not withheld evidence.
+                # Whether the AC also carries a success contract does not
+                # change what the snapshot proved, so it is not a condition.
                 if (
                     field_name == "files_touched"
-                    and has_success_contract
                     and verify_gate_active
                     and observations_confirm_unmutated_workspace(support_messages)
                 ):
@@ -148,6 +151,25 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
+                # A dependent AC often finds its files already built by a
+                # sibling, verifies them, and lists them as "touched". The
+                # claim is literally false, so it is admitted only where it is
+                # harmless: the AC carries a success contract whose hidden
+                # verify gate is the behavioural authority (a leaf that did
+                # nothing still has to pass it), the harness's own snapshot
+                # diff witnessed zero mutation, and the named path is a real
+                # workspace file. A prose AC keeps the rejection -- there a
+                # stale file must not prove this run touched it. A ghost path
+                # stays unsupported, and any observed mutation withdraws the
+                # waiver so a leaf that wrote something else cannot launder an
+                # unrelated claim through it.
+                if (
+                    has_success_contract
+                    and verify_gate_active
+                    and observations_confirm_unmutated_workspace(support_messages)
+                    and _claimed_file_exists_in_workspace(value, task_cwd=workspace_cwd)
+                ):
+                    continue
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if field_name == "tests_passed":
@@ -158,19 +180,18 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
-                # Functional-verification tier: only when a hidden verify gate
-                # stays the behavioral authority for this AC, a non-test claim
-                # that IS a transcript-backed successful execution of an
-                # artifact this run produced is honest evidence, not
-                # fabrication.
-                if (
-                    has_success_contract
-                    and verify_gate_active
-                    and _functional_command_supports_test_claim(
-                        value=value,
-                        messages=support_messages,
-                        task_cwd=workspace_cwd,
-                    )
+                # Functional-verification tier: while the verify gate is
+                # active, a non-test claim that IS a transcript-backed,
+                # zero-exit execution of a real workspace artifact is honest
+                # evidence, not fabrication. The tier used to require a
+                # success contract on the AC as well; a prose AC is exactly
+                # where transcript-backed functional evidence is the only
+                # behavioural evidence there is, so that condition kept the
+                # tier away from the ACs that needed it.
+                if verify_gate_active and _functional_command_supports_test_claim(
+                    value=value,
+                    messages=support_messages,
+                    task_cwd=workspace_cwd,
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(
@@ -205,3 +226,17 @@ def _verify_atomic_evidence_against_runtime_messages(
         )
 
     return VerifierVerdict(passed=True)
+
+
+def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bool:
+    """Return True when a ``files_touched`` value names an existing regular file
+    inside the workspace. Without a workspace nothing can vouch for it."""
+    if task_cwd is None:
+        return False
+    relative = _workspace_relative_file_claim(value, task_cwd=task_cwd)
+    if relative is None:
+        return False
+    try:
+        return (Path(task_cwd).resolve() / relative).is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False

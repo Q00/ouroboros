@@ -196,38 +196,119 @@ VALIDATION_CLAIM = (
 )
 
 
-def test_zero_mutation_witness_admits_preexisting_artifact_execution(tmp_path) -> None:
+def test_preexisting_artifact_execution_is_admitted_with_or_without_witness(tmp_path) -> None:
+    """A ``tests_passed`` claim vouches for a behaviour check, not authorship.
+
+    The artifact pre-exists as a real workspace file and this leaf never
+    edited it. That is the dependent-AC shape (verify a sibling's artifact);
+    the zero-mutation witness used to be the only way through, which rejected
+    every such leaf that also edited its own test file.
+    """
     (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
     task_cwd = str(tmp_path)
     start, result = _codex_bash_pair(VALIDATION_CLAIM)
-    # No Edit evidence: the artifact pre-exists as a real workspace file. The
-    # harness witnessed zero workspace mutation, so this is pure verification.
-    messages = (start, result, _observation_message())
-    assert (
-        _functional_command_supports_test_claim(
-            value=VALIDATION_CLAIM, messages=messages, task_cwd=task_cwd
-        )
-        is True
-    )
-    # A mutated, deleting, or truncated observation withdraws the waiver.
-    for witness in (
-        _observation_message(changed=("habits.json",)),
-        _observation_message(deleted=("removed.py",)),
-        _observation_message(truncated=True),
+    for extra in (
+        (_observation_message(),),
+        (),
+        (_observation_message(changed=("habits.json",)),),
     ):
         assert (
             _functional_command_supports_test_claim(
-                value=VALIDATION_CLAIM, messages=(start, result, witness), task_cwd=task_cwd
+                value=VALIDATION_CLAIM, messages=(start, result, *extra), task_cwd=task_cwd
             )
-            is False
+            is True
         )
-    # And with no observation at all, the stale-artifact guard still holds.
+
+
+def test_sibling_artifact_check_from_real_rejected_session(tmp_path) -> None:
+    """Frozen from bench session exec_be93c8bc71e9/node_V6ALL3NPCODS4 (2026-09-03).
+
+    The leaf edited only ``test_habit_tracker.py``, ran the AC's own check
+    against the sibling-built ``habit_tracker.py`` (recorded as a structured
+    Bash call, correlated completion exit 0), and cited that command as
+    ``tests_passed``. main rejected it as FABRICATION_SUSPECTED because the
+    invoked file was not this run's mutation and the test-file edit voided the
+    zero-mutation waiver.
+    """
+    (tmp_path / "habit_tracker.py").write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+    claim = "python3 habit_tracker.py unknown-command; test $? -eq 2 && echo EXIT_TWO_OK"
+    start, result = _codex_bash_pair(claim)
+    messages = (
+        *_edit_pair("test_habit_tracker.py"),
+        start,
+        result,
+        AgentMessage(type="result", content="done"),
+    )
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["test_habit_tracker.py"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="An unknown subcommand prints a usage error and exits with status 2",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
+
+    # Adversarial probes: the same shape stays rejected when the claim is not
+    # what the transcript shows, when the check failed, or when the artifact
+    # is a ghost.
+    absent_start, absent_result = _codex_bash_pair("python3 habit_tracker.py list")
     assert (
         _functional_command_supports_test_claim(
-            value=VALIDATION_CLAIM, messages=(start, result), task_cwd=task_cwd
+            value=claim, messages=(absent_start, absent_result), task_cwd=str(tmp_path)
         )
         is False
     )
+    failed_start, failed_result = _codex_bash_pair(claim, exit_code=1)
+    assert (
+        _functional_command_supports_test_claim(
+            value=claim, messages=(failed_start, failed_result), task_cwd=str(tmp_path)
+        )
+        is False
+    )
+    (tmp_path / "habit_tracker.py").unlink()
+    assert (
+        _functional_command_supports_test_claim(
+            value=claim, messages=(start, result), task_cwd=str(tmp_path)
+        )
+        is False
+    )
+
+
+def test_verifier_admits_functional_claim_on_prose_ac() -> None:
+    """A prose AC (no success contract) is where functional evidence is the
+    only behavioural evidence; the tier no longer requires a contract."""
+    start, result = _codex_bash_pair(CLAIM)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("habit_tracker.py"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["habit_tracker.py"],
+                "commands_run": [CLAIM],
+                "tests_passed": [CLAIM],
+            }
+        ),
+        ac_content="habit_tracker.py supports `add <name>` and `list`",
+        execution_profile=load_profile("code"),
+        task_cwd=None,
+        adapter_working_directory=None,
+        has_success_contract=False,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
 
 
 def test_zero_mutation_waiver_requires_the_cited_file_to_exist(tmp_path) -> None:
@@ -303,3 +384,82 @@ def test_verifier_accepts_empty_files_touched_only_with_zero_mutation_witness(tm
     without_witness = verdict(())
     assert without_witness.passed is False
     assert any("files_touched" in reason for reason in without_witness.reasons)
+
+
+def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> None:
+    """Frozen from bench run orch_777fb6248525 / AC 4 (2026-09-08).
+
+    A sibling AC had already written ``habit_tracker.py`` and
+    ``test_habit_tracker.py``; this leaf only ran ``python -m pytest -q``
+    (4 passed, exit 0) and listed both files as ``files_touched``. main rejected
+    the run's last AC as FABRICATION_SUSPECTED twice and the run ended 3/4.
+    The harness snapshot diff witnessed zero mutation, so the claim is a
+    mislabelled verification of real workspace files.
+    """
+    (tmp_path / "habit_tracker.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "test_habit_tracker.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    command = "python -m pytest -q"
+    start = AgentMessage(
+        type="assistant",
+        content="Calling tool: Bash",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "/bin/zsh -lc " + shlex.quote(command)},
+            "tool_call_id": "item_3",
+        },
+    )
+    result = AgentMessage(
+        type="tool_result",
+        content="....                                    [100%]\n4 passed in 0.05s",
+        data={
+            "tool_call_id": "item_3",
+            "exit_code": 0,
+            "tool_result": {
+                "is_error": False,
+                "text_content": "....                                    [100%]\n4 passed in 0.05s",
+                "meta": {"tool_call_id": "item_3", "exit_status": 0},
+            },
+        },
+    )
+    evidence = EvidenceRecord(
+        data={
+            "files_touched": ["habit_tracker.py", "test_habit_tracker.py"],
+            "commands_run": [command],
+            "tests_passed": [command],
+        }
+    )
+
+    def verdict(extra: tuple[AgentMessage, ...], evidence=evidence, contract: bool = True):
+        return _verify_atomic_evidence_against_runtime_messages(
+            messages=(start, result, *extra, AgentMessage(type="result", content="done")),
+            typed_evidence=evidence,
+            ac_content="test_habit_tracker.py covers add, list, done and the suite passes",
+            execution_profile=load_profile("code"),
+            task_cwd=str(tmp_path),
+            adapter_working_directory=str(tmp_path),
+            has_success_contract=contract,
+            verify_gate_active=True,
+        )
+
+    assert verdict((_observation_message(),)).passed is True
+    # A prose AC has no hidden verify gate to make the mislabel harmless: a
+    # stale workspace file must not prove this run touched it.
+    prose = verdict((_observation_message(),), contract=False)
+    assert prose.passed is False
+    assert any("files_touched" in reason for reason in prose.reasons)
+    # No witness, a mutated witness, or a truncated witness: still rejected.
+    for extra in (
+        (),
+        (_observation_message(changed=("habits.json",)),),
+        (_observation_message(truncated=True),),
+    ):
+        v = verdict(extra)
+        assert v.passed is False
+        assert any("files_touched" in reason for reason in v.reasons)
+    # A ghost path stays rejected even with a clean witness.
+    ghost = EvidenceRecord(
+        data={"files_touched": ["ghost.py"], "commands_run": [command], "tests_passed": [command]}
+    )
+    v = verdict((_observation_message(),), evidence=ghost)
+    assert v.passed is False
+    assert any("ghost.py" in reason for reason in v.reasons)

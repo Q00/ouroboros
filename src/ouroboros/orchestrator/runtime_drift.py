@@ -37,6 +37,7 @@ RUNTIME_DRIFT_KINDS = frozenset(
         "skill_dispatch_registry",
         "profile_routing",
         "baseline_unavailable",
+        "attestation_timeout",
     }
 )
 DRIFT_EPOCH_METADATA_KEY = "ouroboros_runtime_drift_epoch"
