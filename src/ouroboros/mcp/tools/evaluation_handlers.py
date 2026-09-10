@@ -90,6 +90,19 @@ def _direct_evaluation_failure_reason(error: object) -> str | None:
     return None
 
 
+def _failure_reason_details(error: object) -> dict[str, str]:
+    """Carry the branch reason code for the background evaluate job runner.
+
+    The direct ``ouroboros_evaluate`` path already records this code on
+    ``workflow_outcome``; the job path only sees the ``Result.err``, so the
+    same closed code rides in ``MCPToolError.failure_meta`` (never rendered,
+    never sent) for ``mcp.tools.background.job_work_error`` to lift into
+    ``result_meta``.
+    """
+    reason = _direct_evaluation_failure_reason(error)
+    return {"failure_reason_code": reason} if reason else {}
+
+
 if TYPE_CHECKING:
     from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
     from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
@@ -566,6 +579,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "session_id is required",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "validation"},
                 )
             )
 
@@ -575,6 +589,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "artifact is required",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "validation"},
                 )
             )
 
@@ -845,6 +860,7 @@ class EvaluateHandler:
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
                         tool_name="ouroboros_evaluate",
+                        failure_meta=_failure_reason_details(result.error),
                     )
                 )
 
@@ -904,6 +920,7 @@ class EvaluateHandler:
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "config"},
                 )
             )
         except (ValueError, RuntimeError) as e:
@@ -921,6 +938,7 @@ class EvaluateHandler:
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
+                    failure_meta=_failure_reason_details(e),
                 )
             )
         except Exception as exc:
@@ -935,6 +953,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_evaluate",
+                    failure_meta=_failure_reason_details(exc),
                 )
             )
         finally:

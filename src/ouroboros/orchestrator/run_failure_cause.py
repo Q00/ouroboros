@@ -44,6 +44,11 @@ _REASON_CODE_BY_CAUSE: Mapping[str, FailureReasonCode] = {
     "runtime_error": FailureReasonCode.TOOL,
     "cancelled": FailureReasonCode.CANCELLED,
     "unknown": FailureReasonCode.UNKNOWN,
+    # Pre-launch rejections: the environment (workspace/config) or the
+    # handler's own preparation failed, not the produced work.
+    "launch_workspace_unavailable": FailureReasonCode.CONFIG,
+    "launch_config_error": FailureReasonCode.CONFIG,
+    "launch_prepare_failed": FailureReasonCode.TOOL,
 }
 
 

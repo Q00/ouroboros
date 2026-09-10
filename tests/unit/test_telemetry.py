@@ -787,6 +787,22 @@ class TestCapture:
         assert props["failure_reason_code"] == "validation"
         assert props["failure_cause"] == "verify_workspace_mutated"
 
+    def test_failed_run_forwards_launch_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "config",
+                "failure_cause": "launch_workspace_unavailable",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "config"
+        assert props["failure_cause"] == "launch_workspace_unavailable"
+
     def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
             "job-private-id",

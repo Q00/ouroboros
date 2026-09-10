@@ -19,6 +19,7 @@ Exception Hierarchy:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ouroboros.core.errors import OuroborosError
@@ -358,6 +359,7 @@ class MCPToolError(MCPServerError):
         error_code: str | None = None,
         is_retriable: bool = False,
         details: dict[str, Any] | None = None,
+        failure_meta: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize tool error.
 
@@ -368,6 +370,11 @@ class MCPToolError(MCPServerError):
             error_code: Tool-specific error code.
             is_retriable: Whether the operation can be retried.
             details: Optional dict with additional context.
+            failure_meta: Closed-vocabulary failure metadata
+                (``failure_cause`` / ``failure_reason_code``) for a background
+                job runner to lift into the failed terminal payload. Unlike
+                ``details`` it is never rendered by ``__str__`` nor sent to
+                the client, so stamping it cannot change what a caller sees.
         """
         super().__init__(
             message,
@@ -377,3 +384,21 @@ class MCPToolError(MCPServerError):
         )
         self.tool_name = tool_name
         self.error_code = error_code
+        self.failure_meta: dict[str, Any] = dict(failure_meta or {})
+
+
+class JobWorkError(RuntimeError):
+    """A background job's work function failed with machine-readable metadata.
+
+    Job runners raise this instead of ``RuntimeError(str(result.error))`` so
+    ``JobManager`` can persist ``result_meta`` on the ``mcp.job.failed``
+    terminal payload, and from there the ``workflow_outcome`` telemetry event
+    can name why the job failed. ``result_meta`` must hold only closed
+    vocabulary values (``failure_cause`` / ``failure_reason_code``) lifted
+    from ``MCPToolError.failure_meta``, never prose, paths, commands, or
+    output; the message stays the human-readable error exactly as before.
+    """
+
+    def __init__(self, message: str, *, result_meta: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.result_meta: dict[str, Any] = dict(result_meta or {})
