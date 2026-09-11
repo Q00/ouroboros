@@ -145,8 +145,17 @@ Notes:
   `worker_fabrication_suspected`, `worker_blocked`, `worker_failed` (an AC was
   judged not done and no retry budget or route remained), `dependency_blocked`
   (every judged AC was blocked upstream), `runtime_error` (the orchestrator
-  raised an audited exception class), `cancelled`, or `unknown`. Anything else
-  folds to `unknown` before serialization.
+  raised an audited exception class), `launch_<branch>` (the run was rejected
+  before any executor evidence existed: `launch_workspace_unavailable`,
+  `launch_seed_invalid`, `launch_resume_blocked`, `launch_config_error`,
+  `launch_prepare_failed`, `launch_rejected`), `cancelled`, or `unknown`.
+  Anything else folds to `unknown` before serialization. A job that fails
+  before its work function returns (pre-launch rejection, or a run whose
+  terminal is recovered from linked execution evidence after a restart)
+  carries the same closed values; a background `evaluate` job that fails
+  carries only the branch-level `failure_reason_code` its handler already
+  reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
+  never a `failure_cause`.
 - `command` values come only from static built-in command/tool/job registries.
 - `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
   anonymous ID, UTC day, event, and retained dimensions. Job-derived

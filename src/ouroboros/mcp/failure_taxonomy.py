@@ -31,7 +31,22 @@ class FailureReasonCode(StrEnum):
 # executor evidence; anything outside this set folds to ``unknown`` at the
 # telemetry boundary. ``verify_*`` mirrors the verify gate's cause vocabulary
 # (orchestrator/verify_gate_outcome.py) — edit both together.
-RUN_FAILURE_CAUSES = frozenset(
+#
+# ``launch_*`` names the pre-launch branch that rejected a run before any
+# executor evidence existed (mcp/tools/run_failure_meta.launch_error); the
+# execute_seed handler stamps it, the job runner lifts it into the failed
+# terminal payload.
+LAUNCH_FAILURE_CAUSES = frozenset(
+    {
+        "launch_workspace_unavailable",
+        "launch_seed_invalid",
+        "launch_resume_blocked",
+        "launch_config_error",
+        "launch_prepare_failed",
+        "launch_rejected",
+    }
+)
+RUN_FAILURE_CAUSES = LAUNCH_FAILURE_CAUSES | frozenset(
     {
         "verify_invalid_contract",
         "verify_artifacts_missing",

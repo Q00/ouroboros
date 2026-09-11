@@ -88,6 +88,7 @@ _OUROBOROS_ERROR_NAMES = frozenset(
         "MCPAuthError",
         "MCPResourceNotFoundError",
         "MCPToolError",
+        "JobWorkError",
     }
 )
 

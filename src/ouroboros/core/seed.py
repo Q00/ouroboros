@@ -646,7 +646,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if isinstance(value, list | tuple | set):
             if any(not isinstance(item, str) for item in value):
                 raise ValueError("expected_artifacts entries must be strings")
-            artifacts = tuple(value)
+            artifacts = tuple(sorted(value)) if isinstance(value, set) else tuple(value)
             if any(
                 not artifact
                 or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
