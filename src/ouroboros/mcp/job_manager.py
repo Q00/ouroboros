@@ -1989,20 +1989,24 @@ class JobManager:
         """Name why a recovered ``execute_seed`` job's linked run failed.
 
         Same closed vocabulary and evidence as the live handler path
-        (``derive_run_failure_meta``); only run jobs carry ``failure_cause``.
+        (``derive_run_failure_meta`` + ``derive_run_ac_tally``); only run
+        jobs carry ``failure_cause`` and the ``ac_passed``/``ac_total`` tally.
         """
         if snapshot.job_type != "execute_seed":
             return {}
         if not snapshot.links.session_id or not snapshot.links.execution_id:
             return {}
+        from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
         from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
 
-        return await derive_run_failure_meta(
-            self._event_store,
-            session_id=snapshot.links.session_id,
-            execution_id=snapshot.links.execution_id,
-            session_status=SessionStatus.FAILED,
+        ids = {
+            "session_id": snapshot.links.session_id,
+            "execution_id": snapshot.links.execution_id,
+        }
+        failure_meta = await derive_run_failure_meta(
+            self._event_store, session_status=SessionStatus.FAILED, **ids
         )
+        return {**failure_meta, **await derive_run_ac_tally(self._event_store, **ids)}
 
     async def _recover_linked_execution_terminal_snapshot(
         self,

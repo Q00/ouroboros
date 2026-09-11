@@ -1633,6 +1633,24 @@ class TestJobManager:
                     },
                 )
             )
+            for root, outcome in ((0, "failed"), (1, "succeeded")):
+                await store.append(
+                    BaseEvent(
+                        type="execution.ac.attempt_judged",
+                        aggregate_type="execution",
+                        aggregate_id="exec_default_failed",
+                        data={
+                            "execution_id": "exec_default_failed",
+                            "session_id": "orch_default_failed",
+                            "root_ac_index": root,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "is_decomposed": False,
+                            "success": outcome == "succeeded",
+                            "outcome": outcome,
+                        },
+                    )
+                )
 
             with (
                 patch.object(
@@ -1653,10 +1671,13 @@ class TestJobManager:
             # workflow_outcome as ``unknown``.
             assert snapshot.result_meta["failure_cause"] == "worker_fabrication_suspected"
             assert snapshot.result_meta["failure_reason_code"] == "validation"
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 2
             capture.assert_called_once()
             forwarded = capture.call_args.kwargs["result_meta"]
             assert forwarded["failure_cause"] == "worker_fabrication_suspected"
             assert forwarded["failure_reason_code"] == "validation"
+            assert (forwarded["ac_passed"], forwarded["ac_total"]) == (1, 2)
         finally:
             await store.close()
 
