@@ -16,14 +16,22 @@ EXECUTION = "exec_tally"
 
 
 def _judged(root: int, outcome: str, *, session: str = SESSION, **extra: Any) -> BaseEvent:
+    retry_attempt = extra.pop("retry_attempt", 0)
+    attempt_number = extra.pop("attempt_number", retry_attempt + 1)
     return BaseEvent(
         type="execution.ac.attempt_judged",
         aggregate_type="execution",
         aggregate_id=EXECUTION,
         data={
+            "execution_id": EXECUTION,
             "session_id": session,
             "root_ac_index": root,
+            "ac_index": root,
+            "retry_attempt": retry_attempt,
+            "attempt_number": attempt_number,
+            "is_decomposed": False,
             "outcome": outcome,
+            "success": outcome in {"succeeded", "satisfied_externally"},
             "ac_text": "/Users/private/project must never leak",
             **extra,
         },
@@ -39,16 +47,22 @@ def test_counts_each_root_ac_once_and_any_accepted_attempt_as_passed() -> None:
         _judged(3, "satisfied_externally"),
     ]
 
-    assert tally_judged_acs(events, session_id=SESSION) == {"ac_passed": 2, "ac_total": 4}
+    assert tally_judged_acs(events, session_id=SESSION, execution_id=EXECUTION) == {
+        "ac_passed": 2,
+        "ac_total": 4,
+    }
 
 
 def test_decomposed_children_fold_into_their_root() -> None:
     events = [
-        _judged(0, "succeeded", ac_index=5, is_decomposed_child=True),
-        _judged(0, "failed", ac_index=6, is_decomposed_child=True),
+        _judged(0, "succeeded", is_decomposed=True, is_decomposed_child=True),
+        _judged(0, "failed", is_decomposed=True, is_decomposed_child=True),
     ]
 
-    assert tally_judged_acs(events, session_id=SESSION) == {"ac_passed": 1, "ac_total": 1}
+    assert tally_judged_acs(events, session_id=SESSION, execution_id=EXECUTION) == {
+        "ac_passed": 1,
+        "ac_total": 1,
+    }
 
 
 def test_other_sessions_and_malformed_rows_are_ignored() -> None:
@@ -69,11 +83,31 @@ def test_other_sessions_and_malformed_rows_are_ignored() -> None:
         _judged(1, "failed"),
     ]
 
-    assert tally_judged_acs(events, session_id=SESSION) == {"ac_passed": 0, "ac_total": 1}
+    assert tally_judged_acs(events, session_id=SESSION, execution_id=EXECUTION) == {
+        "ac_passed": 0,
+        "ac_total": 1,
+    }
 
 
 def test_nothing_judged_yields_no_tally() -> None:
-    assert tally_judged_acs([], session_id=SESSION) == {}
+    assert tally_judged_acs([], session_id=SESSION, execution_id=EXECUTION) == {}
+
+
+def test_malformed_or_spoofed_judgments_are_ignored() -> None:
+    malformed = _judged(
+        -7,
+        "succeeded",
+        execution_id="exec-foreign",
+        ac_index=999,
+        is_decomposed="yes",
+        success=False,
+    )
+
+    assert tally_judged_acs(
+        [malformed, _judged(1, "failed")],
+        session_id=SESSION,
+        execution_id=EXECUTION,
+    ) == {"ac_passed": 0, "ac_total": 1}
 
 
 @pytest.mark.asyncio
@@ -85,8 +119,29 @@ async def test_derive_reads_only_judged_attempts_of_the_execution() -> None:
 
     assert tally == {"ac_passed": 1, "ac_total": 2}
     store.query_events.assert_awaited_once_with(
-        aggregate_id=EXECUTION, event_type="execution.ac.attempt_judged", limit=5000
+        aggregate_id=EXECUTION,
+        event_type="execution.ac.attempt_judged",
+        limit=5000,
+        offset=0,
     )
+
+
+@pytest.mark.asyncio
+async def test_derive_does_not_truncate_judgments_above_5000() -> None:
+    events = [_judged(root, "succeeded") for root in range(5001)]
+    store = AsyncMock()
+
+    async def query_events(**kwargs: Any) -> list[BaseEvent]:
+        limit = kwargs.get("limit")
+        offset = kwargs.get("offset", 0)
+        return events[offset:] if limit is None else events[offset : offset + limit]
+
+    store.query_events = AsyncMock(side_effect=query_events)
+
+    assert await derive_run_ac_tally(store, session_id=SESSION, execution_id=EXECUTION) == {
+        "ac_passed": 5001,
+        "ac_total": 5001,
+    }
 
 
 @pytest.mark.asyncio
