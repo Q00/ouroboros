@@ -8,6 +8,7 @@ Tests cover:
 - Sanitization for logging
 """
 
+from enum import StrEnum
 from time import perf_counter
 
 from ouroboros.core.security import (
@@ -171,7 +172,12 @@ class TestSensitiveDetection:
             def strip(self) -> str:
                 raise RuntimeError("hostile normalization")
 
-        assert is_credential_shaped(HostileString("runtime:apikey123")) is False
+        # A hostile subclass must not raise, and must fail *closed*: because a
+        # False verdict means "safe to copy/log", a credential-shaped payload
+        # wrapped in a subclass is reported as credential-shaped.
+        assert is_credential_shaped(HostileString("runtime:apikey123")) is True
+        # Authority identity fails closed in the opposite direction: a
+        # caller-controlled subclass is rejected outright.
         assert is_stable_authority_identity(HostileString("runtime:claude")) is False
 
     def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
@@ -273,6 +279,18 @@ class TestMaskSensitiveValue:
         result = mask_sensitive_value(long_string)
         assert "200 chars" in result
 
+    def test_hostile_str_subclass_is_normalized_before_masking(self) -> None:
+        """Caller-controlled slicing cannot disclose a detected credential."""
+
+        class HostileString(str):
+            def __getitem__(self, _index):
+                return str.__str__(self)
+
+        secret = "sk-live-abc123def456ghi789"
+        masked = mask_sensitive_value(HostileString(secret))
+
+        assert secret not in masked
+
 
 class TestSanitizeForLogging:
     """Tests for sanitize_for_logging function."""
@@ -297,6 +315,174 @@ class TestSanitizeForLogging:
         result = sanitize_for_logging(data)
         assert "sk-" in result["some_field"]
         assert "abcdef" not in result["some_field"]  # Fully masked
+
+    def test_sanitize_dict_inside_list(self) -> None:
+        """Secrets nested inside a list are not leaked verbatim."""
+        data = {"providers": [{"api_key": "sk-live-abc123"}]}
+        result = sanitize_for_logging(data)
+        assert result["providers"][0]["api_key"] == "<REDACTED>"
+        assert "sk-live-abc123" not in repr(result)
+
+    def test_sanitize_dict_inside_tuple_preserves_type(self) -> None:
+        """Tuples recurse and stay tuples; lists stay lists."""
+        data = {"providers": ({"api_key": "sk-live-abc123"},), "names": [{"name": "ok"}]}
+        result = sanitize_for_logging(data)
+        assert isinstance(result["providers"], tuple)
+        assert isinstance(result["names"], list)
+        assert result["providers"][0]["api_key"] == "<REDACTED>"
+        assert result["names"][0]["name"] == "ok"
+
+    def test_sanitize_nested_lists_of_lists(self) -> None:
+        """Lists of lists recurse to arbitrary depth."""
+        data = {"batches": [[{"token": "sk-live-abc123"}], [[{"api_key": "sk-live-xyz789"}]]]}
+        result = sanitize_for_logging(data)
+        assert result["batches"][0][0]["token"] == "<REDACTED>"
+        assert result["batches"][1][0][0]["api_key"] == "<REDACTED>"
+        assert "sk-live-abc123" not in repr(result)
+        assert "sk-live-xyz789" not in repr(result)
+
+    def test_sanitize_raw_secret_string_inside_list(self) -> None:
+        """A bare credential string inside a list is masked like a scalar."""
+        secret = "sk-1234567890abcdef"
+        data = {"values": [secret, "harmless"]}
+        result = sanitize_for_logging(data)
+        assert result["values"][0] != secret
+        assert "abcdef" not in repr(result)
+        assert result["values"][1] == "harmless"
+
+    def test_sanitize_cyclic_mappings_and_sequences_fail_closed(self) -> None:
+        """Caller-controlled cycles are replaced instead of recursed indefinitely."""
+        mapping: dict[str, object] = {}
+        sequence: list[object] = []
+        mapping["self"] = mapping
+        sequence.append(sequence)
+
+        result = sanitize_for_logging({"mapping": mapping, "sequence": sequence})
+
+        assert result == {"mapping": {"self": "<REDACTED>"}, "sequence": ["<REDACTED>"]}
+
+    def test_sanitize_excessively_deep_containers_fail_closed(self) -> None:
+        """Untrusted depth is bounded before Python recursion can abort logging."""
+        deepest: list[object] = ["safe"]
+        nested: list[object] = deepest
+        for _ in range(100):
+            nested = [nested]
+
+        result = sanitize_for_logging({"nested": nested})
+
+        current: object = result["nested"]
+        for _ in range(63):
+            assert isinstance(current, list)
+            current = current[0]
+        assert current == "<REDACTED>"
+
+    def test_sanitize_returns_dict_for_dict_input(self) -> None:
+        """Dict input still yields a dict, and non-sequence values pass through."""
+        data = {"count": 3, "enabled": True, "ratio": 1.5, "nothing": None}
+        result = sanitize_for_logging(data)
+        assert isinstance(result, dict)
+        assert result == data
+
+    def test_sanitize_credential_shaped_nested_key(self) -> None:
+        """A credential used as a mapping key and its paired value are redacted."""
+        secret = "sk-live-abc123def456ghi789"
+        paired_value = "value-paired-with-secret-key"
+
+        result = sanitize_for_logging({"config": {secret: paired_value}})
+
+        assert secret not in repr(result)
+        assert paired_value not in repr(result)
+        assert result["config"] == {"<REDACTED>": "<REDACTED>"}
+
+    def test_sanitize_unsupported_nested_key_without_string_conversion(self) -> None:
+        """Unsupported JSON keys become safe placeholders without calling __str__."""
+
+        class HostileKey:
+            def __str__(self) -> str:
+                raise AssertionError("mapping key string conversion must not run")
+
+            def __repr__(self) -> str:
+                raise AssertionError("mapping key repr must not run")
+
+        result = sanitize_for_logging({"config": {HostileKey(): "safe"}})
+
+        assert result["config"] == {"<unsupported-key>": "safe"}
+
+    def test_hostile_container_protocols_cannot_abort_sanitization(self) -> None:
+        """Built-in container access bypasses hostile subclass overrides."""
+
+        class HostileDict(dict):
+            def items(self):
+                raise RuntimeError("hostile items")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise RuntimeError("hostile iteration")
+
+        dict_secret = "sk-live-dict-secret"
+        list_secret = "sk-live-list-secret"
+        data = HostileDict({"nested": HostileList([{"api_key": dict_secret}, list_secret, "safe"])})
+
+        result = sanitize_for_logging(data)
+
+        assert dict_secret not in repr(result)
+        assert list_secret not in repr(result)
+        assert result["nested"] == [{"api_key": "<REDACTED>"}, "sk-...cret", "safe"]
+
+    def test_arbitrary_scalar_is_redacted_without_repr(self) -> None:
+        """Unsupported objects never reach a renderer-controlled repr fallback."""
+
+        class HostileScalar:
+            def __repr__(self) -> str:
+                raise RuntimeError("hostile repr")
+
+        result = sanitize_for_logging({"metadata": HostileScalar()})
+
+        assert result == {"metadata": "<REDACTED>"}
+
+
+class TestStrSubclassGuardBypass:
+    """Guards must inspect ``str`` subclasses such as ``enum.StrEnum`` members."""
+
+    def test_credential_shaped_detects_str_enum_member(self) -> None:
+        """A StrEnum member carrying a credential is not waved through."""
+
+        class Mode(StrEnum):
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        assert is_credential_shaped("sk-live-abc123def456ghi789") is True
+        assert is_credential_shaped(Mode.LEAKY) is True
+
+    def test_credential_shaped_still_rejects_non_strings(self) -> None:
+        """Non-string inputs remain non-credential-shaped."""
+        assert is_credential_shaped(None) is False  # type: ignore[arg-type]
+        assert is_credential_shaped(123) is False  # type: ignore[arg-type]
+        assert is_credential_shaped(b"sk-live-abc123def456") is False  # type: ignore[arg-type]
+
+    def test_stable_authority_identity_rejects_str_subclasses_fail_closed(self) -> None:
+        """Authority identity fails closed: subclasses are rejected, not accepted."""
+
+        class Authority(StrEnum):
+            SAFE = "runtime:claude"
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        # A False verdict here means rejection, so declining a subclass is the
+        # safe direction. Callers normalize to a built-in ``str`` first.
+        assert is_stable_authority_identity(Authority.SAFE) is False
+        assert is_stable_authority_identity(str(Authority.SAFE)) is True
+        assert is_stable_authority_identity(Authority.LEAKY) is False
+        assert is_stable_authority_identity(str(Authority.LEAKY)) is False
+        assert is_stable_authority_identity(None) is False  # type: ignore[arg-type]
+
+    def test_sensitive_value_detects_str_enum_member(self) -> None:
+        """The log-sanitization path also sees through StrEnum members."""
+
+        class Mode(StrEnum):
+            LEAKY = "sk-live-abc123def456ghi789"
+
+        assert is_sensitive_value(Mode.LEAKY) is True
+        result = sanitize_for_logging({"mode": Mode.LEAKY})
+        assert "abc123def456ghi789" not in repr(result)
 
 
 class TestTruncateInput:
@@ -397,3 +583,104 @@ class TestInputValidator:
         long_response = "x" * (MAX_LLM_RESPONSE_LENGTH + 1)
         is_valid, error = InputValidator.validate_llm_response(long_response)
         assert is_valid is False
+
+
+class TestSanitizeForLoggingSecurityRegressions:
+    """Regression tests for security-boundary fixes in sanitize_for_logging."""
+
+    def test_hostile_str_subclass_normalized_before_masking(self) -> None:
+        """A hostile str subclass cannot leak the secret through mask_api_key."""
+
+        class HostileKey(str):
+            def __getitem__(self, idx):
+                return str.__str__(self)
+
+        secret = HostileKey("sk-live-abc123def456ghi789")
+        result = sanitize_for_logging({"token": secret})
+        # The full secret must not appear in the masked output
+        assert "sk-live-abc123def456ghi789" not in str(result["token"])
+
+    def test_custom_tuple_subclass_make_failure_is_failsafe(self) -> None:
+        """A tuple subclass with broken _make() falls back to plain tuple."""
+
+        class BadTuple(tuple):
+            @classmethod
+            def _make(cls, _iterable):
+                raise TypeError("broken _make")
+
+        data = {"items": BadTuple(("sk-live-secretinside", "safe"))}
+        result = sanitize_for_logging(data)
+        # Must not raise, must still mask the secret
+        assert isinstance(result["items"], tuple)
+        assert "sk-live-secretinside" not in str(result["items"])
+
+    def test_strenum_credential_masked_in_nested_list(self) -> None:
+        """StrEnum values that look like credentials are masked in sequences."""
+        from enum import StrEnum
+
+        class ConfigKey(StrEnum):
+            SECRET = "sk-live-enumsecret123456"
+
+        data = {"keys": [ConfigKey.SECRET]}
+        result = sanitize_for_logging(data)
+        assert "sk-live-enumsecret123456" not in str(result["keys"])
+
+    def test_is_sensitive_value_hostile_lower_override(self) -> None:
+        """is_sensitive_value does not invoke a hostile subclass .lower()."""
+
+        class HostileLower(str):
+            def lower(self):
+                raise RuntimeError("hostile lower invoked")
+
+        # The value starts with a known sensitive prefix — detection must
+        # succeed without calling the subclass .lower() override.
+        secret = HostileLower("sk-live-abc123def456ghi789")
+        assert is_sensitive_value(secret) is True
+
+    def test_is_sensitive_value_hostile_lower_non_credential(self) -> None:
+        """is_sensitive_value safely handles a hostile lower even for non-secrets."""
+
+        class HostileLower(str):
+            def lower(self):
+                raise RuntimeError("hostile lower invoked")
+
+        safe = HostileLower("hello-world")
+        # Must not raise; the hostile lower() is never called.
+        result = is_sensitive_value(safe)
+        assert result is False
+
+    def test_tuple_subclass_make_returns_unsanitized_original(self) -> None:
+        """A tuple subclass whose _make() returns original data is detected and degraded."""
+
+        original_secret = "sk-live-sneaky-secret-value"
+
+        class SneakyTuple(tuple):
+            @classmethod
+            def _make(cls, _iterable):
+                # Hostile: ignores the sanitized iterable and returns the
+                # original unsanitized content.
+                return cls((original_secret, "safe"))
+
+        data = {"items": SneakyTuple((original_secret, "safe"))}
+        result = sanitize_for_logging(data)
+        # The secret must be masked even though _make() tried to smuggle it.
+        assert original_secret not in str(result["items"])
+        # Must degrade to plain tuple when _make() result is unverified.
+        assert isinstance(result["items"], tuple)
+
+    def test_spoofed_namedtuple_iteration_degrades_to_plain_tuple(self) -> None:
+        """A spoofed ``_fields`` marker cannot preserve hostile renderer hooks."""
+
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+
+        class SpoofedNamedTuple(tuple):
+            _fields = ("left", "right")
+
+            def __iter__(self):
+                return iter((secret, "renderer-controlled"))
+
+        result = sanitize_for_logging({"items": SpoofedNamedTuple(("safe-left", "safe-right"))})
+
+        assert type(result["items"]) is tuple
+        assert result["items"] == ("safe-left", "safe-right")
+        assert secret not in str(result)
