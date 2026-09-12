@@ -119,7 +119,7 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_successful_command(self) -> None:
         """Run successful command."""
-        result = await run_command(("echo", "hello"), timeout=5)
+        result = await run_command((sys.executable, "-c", "print('hello')"), timeout=5)
         assert result.return_code == 0
         assert "hello" in result.stdout
         assert result.timed_out is False
@@ -168,8 +168,8 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_failed_command(self) -> None:
         """Run failing command."""
-        result = await run_command(("false",), timeout=5)
-        assert result.return_code != 0
+        result = await run_command((sys.executable, "-c", "raise SystemExit(7)"), timeout=5)
+        assert result.return_code == 7
 
     @pytest.mark.asyncio
     async def test_command_not_found(self) -> None:

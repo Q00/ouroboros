@@ -162,6 +162,20 @@ mechanical:
 
 ### Diagnosing Stage 1 Failures
 
+Multi-AC MCP evaluation runs Stage 1 once and shares that result across the ACs.
+The response starts with the shared mechanical report, before the AC checklist.
+Its additive `stage1_result` metadata contains `passed`, `coverage_score`, and
+`checks`; each check retains its type, verdict, message, and known diagnostic
+`details`. Background evaluation jobs persist this report and metadata for later
+retrieval. A shared build/test failure is not evidence that each AC's own tests ran.
+
+Diagnostics include the configured `command`, `working_dir`, and, when a launch
+was attempted, `executed_command` (the actual argument list). Exit codes and
+timeout flags are retained when available, together with the last 500 characters
+of stdout and stderr. Missing output is not reconstructed; environment variables
+and full logs are not newly collected. This reporting does not change approval
+decisions or rerun checks.
+
 Event query to inspect what happened:
 
 ```bash
@@ -173,6 +187,24 @@ Look for events of type `evaluation.stage1.completed`. The payload contains:
 - `checks`: list with `check_type`, `passed`, `message` for each check
 - `coverage_score`: numeric coverage if parsed
 - `failed_count`: number of failed checks
+
+### Windows Command Dispatch
+
+Keep validated commands such as `npm run build` in `.ouroboros/mechanical.toml`.
+At execution time, Windows bare executable names are resolved using absolute
+PATH entries and PATHEXT, so an installed `npm.CMD` can run without changing the
+configuration or enabling `shell=True`. This lookup does not prepend the current
+directory. Existing validation and non-Windows execution remain unchanged.
+
+Windows can interpret `.cmd`/`.bat` files even without `shell=True`. For those
+files only, the launcher explicitly rejects paths or arguments containing CMD
+metacharacters (`& | < > ^ % ! " ( )`), control characters, or a space-containing
+argument ending in a backslash. Ordinary spaces, Unicode and empty arguments are
+supported. Unsupported batch input is a failed check, not a skipped or successful
+check; use a native executable for arguments requiring these characters. Native
+executable arguments retain their existing behavior. A missing executable still
+produces a command-not-found failure. The existing policy for unconfigured or
+rejected TOML commands is not changed by this dispatch adaptation.
 
 ---
 
