@@ -5287,6 +5287,21 @@ class ParallelACExecutor:
             return results
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+
+        def workspace_metadata_fingerprint() -> tuple[tuple[str, int, int], ...] | None:
+            """Capture write metadata so a same-content verifier write is visible."""
+            try:
+                entries: list[tuple[str, int, int]] = []
+                root = Path(cwd)
+                for path in root.rglob("*"):
+                    if path.is_symlink():
+                        continue
+                    stat = path.stat()
+                    entries.append((str(path.relative_to(root)), stat.st_mtime_ns, stat.st_size))
+                return tuple(sorted(entries))
+            except (OSError, RuntimeError, ValueError):
+                return None
+
         settled: list[ACExecutionResult] = []
         # (reason, outcome, verify_cause): every settlement branch names its
         # own machine-readable cause at classification time — a shared
@@ -5372,10 +5387,17 @@ class ParallelACExecutor:
                     # while siblings were writing. verify_command is an
                     # observation contract (a mutating one is rejected by the
                     # gate), so judge the final, quiescent workspace once.
+                    metadata_before_replay = workspace_metadata_fingerprint()
                     replayed = await _invoke_execution_authority_entry(
                         self, _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE, spec=spec, cwd=cwd
                     )
-                    if replayed.workspace_mutated:
+                    metadata_after_replay = workspace_metadata_fingerprint()
+                    replay_wrote_workspace = (
+                        metadata_before_replay is None
+                        or metadata_after_replay is None
+                        or metadata_before_replay != metadata_after_replay
+                    )
+                    if replayed.workspace_mutated or replay_wrote_workspace:
                         # The replay itself changed the workspace (or made its
                         # digest unreadable): every provisional success is now
                         # stale. Fold it into the settlement-wide mutation
