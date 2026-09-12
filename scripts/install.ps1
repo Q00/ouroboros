@@ -368,6 +368,10 @@ Write-Ok "Installed: $((& $ouroborosExe --version 2>$null) -join ' ')"
 function Test-PythonAtLeast([string]$Exe) {
     $found = Get-CommandPath $Exe
     if (-not $found) { return $false }
+    # Windows ships Microsoft Store execution aliases in WindowsApps. They
+    # print a diagnostic instead of running Python; skip them before invoking
+    # the native command so Windows PowerShell does not surface NativeCommandError.
+    if ($found -match '\\WindowsApps\\(?:python|python3)(?:\.exe)?$') { return $false }
     # The Microsoft Store alias python.exe/python3.exe prints a hint and fails
     # here, so it counts as absent instead of as an interpreter.
     $out = (& $found -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null) -join ''
