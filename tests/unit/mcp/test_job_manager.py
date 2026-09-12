@@ -1364,6 +1364,24 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed",
+                    data={
+                        "execution_id": "exec_recover_failed",
+                        "session_id": "orch_recover_failed",
+                        "root_ac_index": 0,
+                        "ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "success": True,
+                        "outcome": "succeeded",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
                     type="execution.session.completed",
                     aggregate_type="execution",
                     aggregate_id="exec_recover_failed_ac_1",
@@ -1393,6 +1411,8 @@ class TestJobManager:
             assert snapshot.result_meta["failure_reason_code"] == "timeout"
             assert snapshot.result_meta["recovery_action"] == "retry"
             assert snapshot.result_meta["next_step"] == "Retry the workflow."
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 1
             assert "workflow progress accounting stalled" in (snapshot.error or "")
             events, _ = await store.get_events_after("job", "job_recover_failed", last_row_id=0)
             assert [event.type for event in events] == ["mcp.job.created", "mcp.job.failed"]
@@ -1633,6 +1653,24 @@ class TestJobManager:
                     },
                 )
             )
+            for root, outcome in ((0, "failed"), (1, "succeeded")):
+                await store.append(
+                    BaseEvent(
+                        type="execution.ac.attempt_judged",
+                        aggregate_type="execution",
+                        aggregate_id="exec_default_failed",
+                        data={
+                            "execution_id": "exec_default_failed",
+                            "session_id": "orch_default_failed",
+                            "root_ac_index": root,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "is_decomposed": False,
+                            "success": outcome == "succeeded",
+                            "outcome": outcome,
+                        },
+                    )
+                )
 
             with (
                 patch.object(
@@ -1653,10 +1691,13 @@ class TestJobManager:
             # workflow_outcome as ``unknown``.
             assert snapshot.result_meta["failure_cause"] == "worker_fabrication_suspected"
             assert snapshot.result_meta["failure_reason_code"] == "validation"
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 2
             capture.assert_called_once()
             forwarded = capture.call_args.kwargs["result_meta"]
             assert forwarded["failure_cause"] == "worker_fabrication_suspected"
             assert forwarded["failure_reason_code"] == "validation"
+            assert (forwarded["ac_passed"], forwarded["ac_total"]) == (1, 2)
         finally:
             await store.close()
 
@@ -1963,6 +2004,24 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover",
+                    data={
+                        "execution_id": "exec_recover",
+                        "session_id": "orch_recover",
+                        "root_ac_index": 0,
+                        "ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "success": True,
+                        "outcome": "succeeded",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
                     type="execution.terminal",
                     aggregate_type="execution",
                     aggregate_id="exec_recover",
@@ -1975,6 +2034,8 @@ class TestJobManager:
             assert snapshot.status is JobStatus.COMPLETED
             assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["ac_passed"] == 1
+            assert snapshot.result_meta["ac_total"] == 1
             assert snapshot.result_meta["evaluated"] is False
             assert snapshot.result_meta["verification_status"] == "executed_unverified"
             assert snapshot.result_meta["formal_evaluation_required"] is True
