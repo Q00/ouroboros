@@ -147,8 +147,45 @@ class TestExtractEvidence:
     def test_bare_non_json_fence_still_rejected_without_later_json_fence(self) -> None:
         text = 'summary\n```python\ndef hello():\n    return "hello"\n```\n'
 
-        with pytest.raises(EvidenceError, match="not valid JSON"):
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
             extract_evidence(text)
+
+    def test_json_shaped_content_in_non_json_fence_is_not_evidence(self) -> None:
+        text = 'summary\n```python\n{"files_touched": ["example.py"]}\n```\n'
+
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("code_fence_first", [True, False])
+    def test_non_json_fence_cannot_displace_real_evidence(self, code_fence_first: bool) -> None:
+        code_fence = '```python\n{"files_touched": ["example.py"]}\n```'
+        evidence = '{"files_touched": ["actual.py"], "tests_passed": ["test_actual"]}'
+        text = f"{code_fence}\n{evidence}" if code_fence_first else f"{evidence}\n{code_fence}"
+
+        record = extract_evidence(text)
+
+        assert record.data["files_touched"] == ["actual.py"]
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            '> {"files_touched": ["quoted-example.py"]}\n',
+            'Example:\n\n    {"files_touched": ["indented-example.py"]}\n',
+            '~~~python\n{"files_touched": ["tilde-example.py"]}\n~~~\n',
+        ],
+    )
+    def test_markdown_examples_are_not_recovered_as_evidence(self, example: str) -> None:
+        with pytest.raises(
+            EvidenceError,
+            match="Leaf output contains no JSON object and no fenced evidence block",
+        ):
+            extract_evidence(example)
 
     def test_empty_text_rejected(self) -> None:
         with pytest.raises(EvidenceError, match="empty"):
@@ -162,9 +199,245 @@ class TestExtractEvidence:
         with pytest.raises(EvidenceError, match="not valid JSON"):
             extract_evidence("{not: json}")
 
+    def test_prose_before_json_fallback_recovered(self) -> None:
+        """Models running on smaller tiers (adaptive mode) sometimes emit
+        prose markers like ``[AC_COMPLETE: 6]`` or a summary paragraph
+        *before* the final evidence JSON block. The extractor must skip
+        that prose and still parse the JSON."""
+        text = (
+            "[AC_COMPLETE: 6]\n"
+            "All tests pass, graceful failure handling confirmed.\n\n"
+            '{"files_touched": ["src/graceful.ts"],'
+            ' "commands_run": ["npx jest"],'
+            ' "tests_passed": ["graceful.test.ts::test_basic"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data == {
+            "files_touched": ["src/graceful.ts"],
+            "commands_run": ["npx jest"],
+            "tests_passed": ["graceful.test.ts::test_basic"],
+        }
+
+    @pytest.mark.parametrize(
+        "trailing_prose",
+        [
+            "[AC_COMPLETE: 1]",
+            "[done]",
+            "[status: done]",
+            "[ac_complete: 1]",
+            "See [issue #1] for context.",
+            "Configuration remains at {config.host}.",
+            "Configuration remains at { config.host }.",
+            "All requested work is complete.",
+        ],
+    )
+    def test_prose_after_recovered_evidence_is_ignored(self, trailing_prose: str) -> None:
+        text = (
+            "Summary before evidence.\n"
+            '{"files_touched": ["main.py"], "tests_passed": ["test_main"]}\n'
+            f"{trailing_prose}\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data["files_touched"] == ["main.py"]
+
+    def test_unfenced_json_after_prose_only_brace_fallback(self) -> None:
+        """Fallback should also work when there's no fence at all, just
+        prose before a bare JSON object starting with ``{``."""
+        text = (
+            "All done. Here's the evidence:\n"
+            '{"files_touched": ["a.ts"], "commands_run": ["npm test"], '
+            '"tests_passed": ["a.test.ts"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["a.ts"]
+
+    def test_non_json_brace_before_evidence_still_recovered(self) -> None:
+        """A stray non-JSON ``{`` in the prose (e.g. a code snippet) must
+        not stop the fallback from finding the real evidence object later."""
+        text = (
+            "Applied patch to {config.host} placeholder.\n"
+            '{"files_touched": ["b.ts"], "commands_run": ["npm test"], '
+            '"tests_passed": ["b.test.ts"]}\n'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["b.ts"]
+
+    def test_list_payload_not_rescued_by_inner_object(self) -> None:
+        """A top-level list parses successfully at the trusted position, so
+        its inner objects must never be adopted as evidence."""
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence('[{"files_touched": ["a.ts"]}]')
+
     def test_non_object_payload(self) -> None:
         with pytest.raises(EvidenceError, match="must be a JSON object"):
             extract_evidence("[1, 2, 3]")
+
+    def test_prose_prefixed_list_does_not_leak_inner_object(self) -> None:
+        """Recovery must not extract an object nested inside a top-level list.
+
+        Regression: `Summary\n[{"files_touched":["wrong.py"]}]` previously
+        caused recovery to accept the inner object, contradicting the
+        requirement that list payloads cannot be rescued.
+        """
+        text = 'Summary\n[{"files_touched": ["wrong.py"]}]'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("earlier_form", ["bare", "fenced"])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "42",
+            '"terminal evidence"',
+            "null",
+        ],
+    )
+    def test_terminal_non_object_displaces_earlier_valid_object(
+        self, earlier_form: str, terminal_payload: str
+    ) -> None:
+        """The final complete JSON value owns the evidence boundary.
+
+        Regression: recovery considered only objects, allowing an earlier
+        schema-valid record to remain authoritative when the terminal payload
+        was a prohibited list or scalar.
+        """
+        earlier = '{"files_touched": ["stale.py"]}'
+        if earlier_form == "fenced":
+            earlier = f"```json\n{earlier}\n```"
+        text = f"Summary\n{earlier}\nFinal evidence:\n{terminal_payload}\n"
+
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "{broken",
+        ],
+    )
+    def test_trusted_object_cannot_bypass_terminal_authority(self, terminal_payload: str) -> None:
+        text = f'{{"files_touched": ["stale.py"]}}\nValidation evidence: {terminal_payload}'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize("fence_tag", ["json", ""])
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            '[{"files_touched": ["terminal.py"]}]',
+            "{broken",
+        ],
+    )
+    def test_fenced_object_cannot_bypass_terminal_payload(
+        self, fence_tag: str, terminal_payload: str
+    ) -> None:
+        text = f'```{fence_tag}\n{{"files_touched": ["stale.py"]}}\n{terminal_payload}\n```\n'
+
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_valid_inline_evidence_label_is_recovered(self) -> None:
+        record = extract_evidence('Actual evidence: {"files_touched": ["actual.py"]}')
+
+        assert record.data["files_touched"] == ["actual.py"]
+
+    def test_inline_evidence_label_displaces_stale_object(self) -> None:
+        record = extract_evidence(
+            '{"files_touched": ["stale.py"]}\nActual evidence: {"files_touched": ["actual.py"]}'
+        )
+
+        assert record.data["files_touched"] == ["actual.py"]
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "evidence:",
+            "actual evidence:",
+            "validation evidence:",
+            "evidence follows:",
+            "actual evidence follows:",
+            "validation evidence follows:",
+        ],
+    )
+    @pytest.mark.parametrize("terminal_payload", ["null", '"invalid"', "true", "17"])
+    def test_inline_scalar_evidence_label_displaces_stale_object(
+        self,
+        label: str,
+        terminal_payload: str,
+    ) -> None:
+        text = (
+            '{"files_touched":["stale.py"],"commands_run":["pytest"],"tests_passed":["x"]}\n'
+            f"{label} {terminal_payload}"
+        )
+
+        with pytest.raises(EvidenceError, match="must be a JSON object"):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "terminal_payload",
+        [
+            "[undefined]",
+            "[broken,",
+            "[tru,",
+            "[null,",
+            "[{'not': 'json'}]",
+        ],
+    )
+    def test_malformed_inline_array_label_displaces_stale_object(
+        self,
+        terminal_payload: str,
+    ) -> None:
+        text = (
+            '{"files_touched":["stale.py"],"commands_run":["pytest"],"tests_passed":["x"]}\n'
+            f"Actual evidence: {terminal_payload}"
+        )
+
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_earlier_illustrative_object_does_not_displace_final(self) -> None:
+        """Recovery must prefer the terminal evidence object over earlier ones.
+
+        Regression: prose containing an earlier valid illustrative object
+        previously caused that object to be returned instead of the later
+        final evidence record.
+        """
+        text = (
+            'For example: {"illustrative": true}\n'
+            "Here is the actual result:\n"
+            '{"files_touched": ["main.py"], "pass": true}'
+        )
+        record = extract_evidence(text)
+        assert record.data["files_touched"] == ["main.py"]
+        assert record.data["pass"] is True
+        assert "illustrative" not in record.data
+
+    @pytest.mark.parametrize("example_tag", ["json", ""])
+    @pytest.mark.parametrize("actual_form", ["bare", "json_fence", "untagged_fence"])
+    def test_illustrative_fence_cannot_displace_later_evidence(
+        self, example_tag: str, actual_form: str
+    ) -> None:
+        example = f'```{example_tag}\n{{"illustrative": true}}\n```'
+        payload = '{"files_touched": ["real.py"], "tests_passed": ["test_real"]}'
+        if actual_form == "bare":
+            actual = payload
+        elif actual_form == "json_fence":
+            actual = f"```json\n{payload}\n```"
+        else:
+            actual = f"```\n{payload}\n```"
+        text = f"Example:\n{example}\nActual evidence:\n{actual}\n"
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["real.py"],
+            "tests_passed": ["test_real"],
+        }
 
     def test_quoted_brace_inside_string_value(self) -> None:
         # Regression: old regex stopped at the first `}` even inside a
@@ -205,6 +478,169 @@ class TestExtractEvidence:
         text = '```json\n{"x": 1}\nsome trailing prose\n```\n'
         record = extract_evidence(text)
         assert record.data == {"x": 1}
+
+    def test_nested_object_in_prose_prefixed_final_record(self) -> None:
+        """Recovery must return the complete top-level object, not an inner
+        nested object.
+
+        Regression: reverse scanning without nesting awareness encountered
+        the innermost ``{`` first and returned ``{"source": "final"}``
+        instead of the complete enclosing record.
+        """
+        text = 'Summary\n{"files_touched": ["a.py"], "metadata": {"source": "final"}}'
+        record = extract_evidence(text)
+        assert record.data == {
+            "files_touched": ["a.py"],
+            "metadata": {"source": "final"},
+        }
+
+    def test_multi_element_list_does_not_leak_any_inner_object(self) -> None:
+        """Recovery must not extract any object from a multi-element top-level
+        list, regardless of element position.
+
+        Regression: the backward comma scan in _is_inside_array stopped at
+        the first element's ``{`` before reaching the containing ``[``, so
+        the second element was accepted as evidence.
+        """
+        text = 'Summary\n[{"a": 1}, {"files_touched": ["wrong.py"]}]'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_malformed_fenced_json_reports_malformed_not_absent(self) -> None:
+        """A fenced block containing invalid JSON must report 'not valid JSON',
+        not 'no JSON object'.
+
+        Regression: error classification used only ``text.find("{")`` so
+        malformed JSON without a brace was reported as having no evidence.
+        """
+        text = "```json\nnot valid json at all\n```\n"
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_malformed_bracket_payload_reports_malformed_not_absent(self) -> None:
+        """Prose followed by a broken array ``[1, 2,]`` must report malformed,
+        not absent.
+
+        Regression: presence of ``{`` was the only signal; a broken array
+        without braces was classified as 'no JSON object'.
+        """
+        text = "Summary\n[1, 2,]"
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_deeply_nested_object_not_extracted(self) -> None:
+        """An object nested multiple levels deep must not be extracted."""
+        text = 'Summary\n{"outer": {"middle": {"deep": true}}, "files_touched": ["x.py"]}'
+        record = extract_evidence(text)
+        # Must return the full outer object, not {"deep": true} or {"middle": ...}
+        assert record.data["outer"] == {"middle": {"deep": True}}
+        assert record.data["files_touched"] == ["x.py"]
+
+    def test_malformed_final_evidence_fence_fails_closed(self) -> None:
+        """A malformed JSON body inside the final evidence fence must fail.
+
+        Regression (round2): when the authoritative fence contained invalid
+        JSON wrapping a valid inner object, recovery rescued the inner object.
+        The fence is the strongest structural boundary and must own its body.
+        """
+        text = (
+            "Validation evidence:\n\n"
+            "```json\n"
+            '{invalid_wrapper: {"files_touched": ["rescued.py"]}}\n'
+            "```\n"
+        )
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_fence_with_earlier_valid_object_fails_closed(self) -> None:
+        """Earlier illustrative objects cannot override a malformed final fence.
+
+        Regression (round2): when an earlier valid object existed in prose
+        before a malformed evidence fence, recovery adopted the earlier object
+        instead of failing closed on the authoritative fence.
+        """
+        text = (
+            'Earlier example: {"illustrative": true}\n\n'
+            "Validation evidence:\n\n"
+            "```json\n"
+            "{not valid json at all\n"
+            "```\n"
+        )
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_untagged_fence_fails_closed(self) -> None:
+        """An untagged fence (```) with malformed body also has fence authority.
+
+        Regression (round2): only json-tagged fences were treated as
+        authoritative; untagged fences allowed recovery to bypass them.
+        """
+        text = 'Earlier: {"illustrative": true}\n\n```\n{broken json\n```\n'
+        with pytest.raises(EvidenceError, match="fence is malformed"):
+            extract_evidence(text)
+
+    def test_malformed_array_does_not_yield_inner_candidates(self) -> None:
+        """A malformed outer array cannot yield valid inner objects.
+
+        Regression (round2): `[{"valid": true}, {broken` allowed recovery
+        to rescue `{"valid": true}` because the malformed outer boundary
+        was absent from the containment check.
+        """
+        text = 'Summary\n[{"files_touched": ["wrong.py"]}, {broken'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    def test_malformed_object_does_not_yield_inner_candidates(self) -> None:
+        """A malformed outer object cannot yield valid inner objects.
+
+        Regression (round2): `{wrapper: {"valid": true}` (no closer) allowed
+        recovery to rescue the inner object.
+        """
+        text = 'Summary\n{wrapper: {"files_touched": ["wrong.py"]}'
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'Summary\n{foo-bar:\n{"files_touched": ["wrong.py"]}\n}',
+            'Summary\n{1invalid:\n{"files_touched": ["wrong.py"]}\n}',
+            'Summary\n[tru,\n{"files_touched": ["wrong.py"]}\n]',
+            'Summary\n[undefined,\n{"files_touched": ["wrong.py"]}\n]',
+        ],
+    )
+    def test_uncommon_malformed_container_tokens_cannot_expose_inner_object(
+        self, text: str
+    ) -> None:
+        """Containment must not depend on recognizing the invalid first token."""
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'Actual evidence: [broken,\n{"files_touched": ["rescued.py"]}\n]',
+            'Earlier: {"files_touched": ["stale.py"]}\nActual evidence: {broken',
+        ],
+    )
+    def test_inline_malformed_evidence_label_is_authoritative(self, text: str) -> None:
+        with pytest.raises(EvidenceError, match="not valid JSON"):
+            extract_evidence(text)
+
+    def test_earlier_example_cannot_override_malformed_final_evidence(self) -> None:
+        """When the final structural evidence is malformed, earlier objects
+        in prose must not become authoritative.
+
+        Regression (round2): the last-object preference in recovery meant
+        the earlier object was returned when the final one was malformed.
+        """
+        text = (
+            'Example output: {"illustrative": true}\n'
+            "Actual evidence follows:\n"
+            '{broken: {"files_touched": ["wrong.py"]}}'
+        )
+        with pytest.raises(EvidenceError):
+            extract_evidence(text)
 
 
 class TestValidateCodeProfile:
