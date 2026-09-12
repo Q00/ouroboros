@@ -347,36 +347,10 @@ class TestWheelPackaging:
     cannot spawn external builds).
     """
 
-    @pytest.mark.slow
-    def test_wheel_contains_profile_yamls(self, tmp_path: Path) -> None:
-        import shutil
-        import subprocess
+    def test_wheel_contains_profile_yamls(self, built_wheel: Path) -> None:
         import zipfile
 
-        if shutil.which("uv") is None:
-            pytest.skip("uv is not on PATH; cannot build the wheel here")
-
-        repo_root = Path(__file__).resolve().parents[3]
-        out = tmp_path / "dist"
-        result = subprocess.run(
-            ["uv", "build", "--wheel", "--out-dir", str(out)],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        # The whole point of this test is to catch packaging regressions —
-        # a non-zero build status is the regression signal, not a skip.
-        assert result.returncode == 0, (
-            f"uv build failed (rc={result.returncode}):\n"
-            f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
-        )
-
-        wheels = list(out.glob("*.whl"))
-        assert wheels, f"no wheel produced in {out}"
-        wheel = wheels[0]
-        with zipfile.ZipFile(wheel) as zf:
+        with zipfile.ZipFile(built_wheel) as zf:
             # Keep the list — not a set — so duplicate ZIP entries (which
             # PyPI rejects) are caught here. The exclude/force-include
             # pairing in pyproject.toml is fragile; this is the guard.

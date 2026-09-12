@@ -4944,7 +4944,7 @@ async def test_server_shutdown_drains_runtime_control_bus() -> None:
 
     async def blocked(_event: BaseEvent) -> None:
         started.set()
-        await asyncio.sleep(60)
+        await asyncio.Event().wait()
 
     bus.subscribe(lambda _event: True, blocked)
     tasks = bus.publish(
@@ -4983,7 +4983,7 @@ async def test_server_shutdown_stops_before_dependents_when_control_bus_refuses_
     async def stubborn(_event: BaseEvent) -> None:
         started.set()
         try:
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             await release.wait()
 
