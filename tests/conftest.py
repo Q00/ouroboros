@@ -40,6 +40,7 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
     return wheels[0]
 
+
 # In CI, GITHUB_ACTIONS env var causes Typer to set force_terminal=True on
 # Rich Console (see typer/rich_utils.py:75-78). This makes Rich emit ANSI
 # escape codes even into CliRunner's string buffer, inserting style sequences

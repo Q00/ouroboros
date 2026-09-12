@@ -349,6 +349,7 @@ class TestWheelPackaging:
 
     def test_wheel_contains_profile_yamls(self, built_wheel: Path) -> None:
         import zipfile
+
         with zipfile.ZipFile(built_wheel) as zf:
             # Keep the list — not a set — so duplicate ZIP entries (which
             # PyPI rejects) are caught here. The exclude/force-include

@@ -40,9 +40,7 @@ def _extract_python_resolver(contents: str) -> str:
 
 
 @pytest.mark.slow
-def test_built_wheel_preserves_packaging_contracts(
-    built_wheel: Path, tmp_path: Path
-) -> None:
+def test_built_wheel_preserves_packaging_contracts(built_wheel: Path, tmp_path: Path) -> None:
     """Build the wheel and verify schema assets plus dependency markers.
 
     A future change that drops the `force-include` for
@@ -294,7 +292,8 @@ def test_built_wheel_preserves_packaging_contracts(
 
 @pytest.mark.slow
 def test_built_wheel_ships_builtin_interview_adapter_packs_once_and_loadable(
-    built_wheel: Path, tmp_path: Path,
+    built_wheel: Path,
+    tmp_path: Path,
 ) -> None:
     expected = {
         f"ouroboros/interview_adapters/packs/{pack_name}" for pack_name in BUILTIN_GLOSSARY_PACKS
