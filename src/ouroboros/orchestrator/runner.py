@@ -192,6 +192,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_name,
     normalized_message_type,
     project_runtime_message,
+    should_emit_runtime_progress,
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
@@ -7487,16 +7488,8 @@ class OrchestratorRunner:
         messages_processed: int,
     ) -> bool:
         """Determine whether a message should emit a persisted progress event."""
-        projected = project_runtime_message(message)
-        runtime_backend = message.resume_handle.backend if message.resume_handle else None
-        return (
-            message.is_final
-            or messages_processed % PROGRESS_EMIT_INTERVAL == 0
-            or projected.is_tool_call
-            or projected.thinking is not None
-            or message.type == "system"
-            or runtime_backend == "opencode"
-            or projected.is_tool_result
+        return should_emit_runtime_progress(
+            message, messages_processed, interval=PROGRESS_EMIT_INTERVAL
         )
 
     async def _update_and_persist_progress(

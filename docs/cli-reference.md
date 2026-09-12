@@ -292,6 +292,10 @@ ouroboros setup --runtime claude
 # Explicitly select Kiro CLI as runtime backend (writes ~/.kiro/settings/mcp.json)
 ouroboros setup --runtime kiro
 
+# Keep backend copilot, but opt into experimental live ACP execution
+ouroboros setup --runtime copilot
+ouroboros config set orchestrator.copilot_transport acp
+
 # Explicitly select Zcode as a runtime-only backend
 ouroboros setup --runtime zcode
 
@@ -300,6 +304,13 @@ ouroboros setup --non-interactive
 ```
 
 **What setup does:**
+
+Copilot's runtime token remains `copilot` for setup, run, and MCP commands;
+`copilot-acp` is not a separate `--runtime` value. ACP is a transport setting,
+with default `cli`. `orchestrator.copilot_acp_fallback` defaults to `true`, but
+only permits pre-prompt read-only/tool-less fallback. LLM-only flows remain on
+the existing CLI adapter. See [the ACP guide](runtime-guides/copilot-acp.md)
+for permissions, authentication and streaming diagnostics.
 
 - Detects configured paths and PATH entries for the shipped runtimes, including `zcode` and the macOS ZCode app-bundle script
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
@@ -1339,6 +1350,8 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
+| `OUROBOROS_COPILOT_TRANSPORT` | `orchestrator.copilot_transport` | `cli` (default) or experimental `acp`; backend remains `copilot`. Trusted environment only |
+| `OUROBOROS_COPILOT_ACP_FALLBACK` | `orchestrator.copilot_acp_fallback` | Boolean, default `true`; read-only/tool-less fallback before prompt submission only. No auth fallback or prompt replay |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored runtime preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches wherever the backend exposes an approval surface. OpenCode maps it to `--dangerously-skip-permissions`; Pi and GJC have no separate approval flag and already run headlessly without an approval dialogue |
 | `OUROBOROS_MODEL_TIER_ROUTING` | — | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable it completely |
 | `OUROBOROS_SHADOW_REPLAY` | — | Arms the opt-in shadow-baseline experiment only for `1`, `true`, or `on`. Current live decompositions are quarantined before baseline model dispatch because they lack deterministic MECE attestation; bundled runtimes also lack the required isolation attestation |
@@ -1354,6 +1367,10 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Stop an evolve generation after activity continues without material progress |
 | `OUROBOROS_GENERATION_SAFETY_TIMEOUT_SECONDS` | `runtime_controls.generation_safety_timeout_seconds` | Optional final hard cap for one generation; `0` disables it |
 | `OUROBOROS_WATCHDOG_POLL_SECONDS` | `runtime_controls.watchdog_poll_seconds` | EventStore polling interval for generation watchdog decisions |
+
+Copilot ACP is an exception to runner-requested unrestricted approval:
+`bypassPermissions` is capped to `acceptEdits`, with an exact native tool
+envelope and one-shot permission decisions.
 
 ---
 

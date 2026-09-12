@@ -251,6 +251,17 @@ Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID ma
 
 See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 
+For experimental live task activity, keep `runtime_backend: copilot` and opt into
+the [ACP transport](./docs/runtime-guides/copilot-acp.md):
+
+```bash
+ouroboros config set orchestrator.copilot_transport acp
+```
+
+The default remains `cli` (`copilot -p`). ACP streams assistant text and tool
+progress through the existing event store; authentication is still owned by
+Copilot, and no TCP listener or display is required.
+
 </details>
 
 <details>

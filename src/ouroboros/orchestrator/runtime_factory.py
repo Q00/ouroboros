@@ -14,7 +14,9 @@ from ouroboros.config import (
     get_agent_runtime_backend,
     get_cli_path,
     get_codex_cli_path,
+    get_copilot_acp_fallback,
     get_copilot_cli_path,
+    get_copilot_transport,
     get_gjc_cli_path,
     get_goose_cli_path,
     get_hermes_cli_path,
@@ -197,6 +199,17 @@ def _create_kiro_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 def _create_copilot_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 
+    if get_copilot_transport() == "acp":
+        from ouroboros.orchestrator.copilot_acp_runtime import CopilotAcpRuntime
+
+        return CopilotAcpRuntime(
+            cli_path=request.cli_path or get_copilot_cli_path(),
+            runtime_profile=get_runtime_profile(),
+            startup_output_timeout_seconds=request.startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
+            fallback_to_cli=get_copilot_acp_fallback(),
+            **_runtime_kwargs(request),
+        )
     return CopilotCliRuntime(
         cli_path=request.cli_path or get_copilot_cli_path(),
         runtime_profile=get_runtime_profile(),

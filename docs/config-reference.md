@@ -173,6 +173,8 @@ orchestrator:
   codex_cli_path: null          # Path to Codex CLI binary; null = resolve from PATH
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   copilot_cli_path: null        # Path to Copilot CLI binary; null = resolve from PATH
+  copilot_transport: cli        # "cli" (default) | "acp" (experimental live activity)
+  copilot_acp_fallback: true    # ACP-only, read-only/tool-less pre-prompt fallback
   pi_cli_path: null             # Path to Pi CLI binary; null = resolve from PATH
   omp_cli_path: null            # Path to OMP (Oh My Pi) CLI binary; null = resolve from PATH
   zcode_cli_path: null          # Path to zcode.cjs or a zcode executable
@@ -189,6 +191,8 @@ orchestrator:
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
+| `copilot_transport` | `"cli" \| "acp"` | `"cli"` | Execution transport under the existing `copilot` backend. ACP streams structured activity over stdio; LLM-only calls retain the CLI adapter. Overridable via trusted `OUROBOROS_COPILOT_TRANSPORT`. See [the ACP guide](runtime-guides/copilot-acp.md). |
+| `copilot_acp_fallback` | `bool` | `true` | Permit fallback to legacy CLI only before prompt submission and for read-only/tool-less envelopes. Never fallback on auth failures or replay submitted prompts. Overridable via trusted `OUROBOROS_COPILOT_ACP_FALLBACK`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
 | `omp_cli_path` | `string \| null` | `null` | Absolute path to the OMP (Oh My Pi) CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OMP_CLI_PATH`. |
 | `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
@@ -196,6 +200,11 @@ orchestrator:
 | `dsh_cli_path` | `string \| null` | `null` | Absolute path to the DeepSeek Harness ACP server binary `dsh-acp-demo` (`~` is expanded). Used by the LLM-only `dsh` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_DSH_CLI_PATH`. |
 | `dsh_config_path` | `string \| null` | `null` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required for that backend — it fails closed rather than guessing, and a relative path is rejected because it would resolve against the untrusted project cwd. Overridable via `OUROBOROS_DSH_CONFIG_PATH`. See [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
+
+Copilot ACP deliberately caps runner-requested `bypassPermissions` to
+`acceptEdits`; it never enables unrestricted execution. Its exact tool envelope
+and one-shot approvals are not an OS shell sandbox. See
+[ACP permissions](runtime-guides/copilot-acp.md#permissions-and-authentication).
 
 ---
 
@@ -632,6 +641,8 @@ All environment variables have higher priority than the corresponding `config.ya
 | Variable | Overrides | Description |
 |----------|-----------|-------------|
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime). |
+| `OUROBOROS_COPILOT_TRANSPORT` | `orchestrator.copilot_transport` | `cli` (default) or experimental `acp`. Invalid non-empty values fail. Blocked in untrusted project `.env`. |
+| `OUROBOROS_COPILOT_ACP_FALLBACK` | `orchestrator.copilot_acp_fallback` | Accepts `1/true/yes/on` or `0/false/no/off`, case-insensitively; default `true`. Invalid non-empty values fail. Blocked in untrusted project `.env`. |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
 | `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
