@@ -272,6 +272,30 @@ export function parseMetadata(meta: unknown): { subs: Sub[]; responseShape: Reco
   }
 }
 
+type ParsedDispatch = {
+  subs: Sub[]
+  responseShape: Record<string, unknown>
+  preserveContent?: boolean
+}
+
+export function mergeDispatchSources(
+  parsedText: ParsedDispatch,
+  parsedMeta: ParsedDispatch,
+): { subs: Sub[]; responseShape: Record<string, unknown>; preserveContent: boolean } {
+  if (parsedText.subs.length === 0) {
+    return {
+      subs: parsedMeta.subs.slice(0, MAX_FANOUT),
+      responseShape: parsedMeta.responseShape,
+      preserveContent: parsedMeta.preserveContent === true,
+    }
+  }
+  return {
+    subs: [...parsedText.subs, ...parsedMeta.subs].slice(0, MAX_FANOUT),
+    responseShape: { ...parsedText.responseShape, ...parsedMeta.responseShape },
+    preserveContent: false,
+  }
+}
+
 export function readText(r: Output): string {
   if (Array.isArray(r.content)) {
     const texts = r.content
@@ -787,10 +811,11 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const out = output as Output
         const originalText = readText(out)
         const parsedText = parse(originalText)
-        const parsedMeta = parsedText.subs.length === 0 ? parseMetadata(out.metadata) : { subs: [], responseShape: {}, preserveContent: false }
-        const subs = parsedText.subs.length > 0 ? parsedText.subs : parsedMeta.subs
-        const responseShape = parsedText.subs.length > 0 ? parsedText.responseShape : parsedMeta.responseShape
-        const preserveContent = parsedText.subs.length === 0 && parsedMeta.preserveContent
+        const parsedMeta = parseMetadata(out.metadata)
+        const merged = mergeDispatchSources(parsedText, parsedMeta)
+        const subs = merged.subs
+        const responseShape = merged.responseShape
+        const preserveContent = merged.preserveContent
         if (subs.length === 0) return
 
         const pid = typeof input.sessionID === "string" ? input.sessionID : ""

@@ -389,6 +389,203 @@ def _interview_code_investigation_answer_contract() -> dict[str, Any]:
     }
 
 
+def _interview_web_reference_answer_contract() -> dict[str, Any]:
+    """Return the closed contract for start-turn web reconnaissance."""
+    source_type_schema = {
+        "type": "string",
+        "enum": [
+            "primary",
+            "official",
+            "standard",
+            "research",
+            "reputable_secondary",
+        ],
+    }
+    verified_at_schema = {
+        "type": "string",
+        "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$",
+        "maxLength": 64,
+    }
+    reference = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["title", "url", "source_type", "relevance", "verified_at"],
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": 300},
+            "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
+            "source_type": source_type_schema,
+            "relevance": {"type": "string", "minLength": 1, "maxLength": 500},
+            "verified_at": verified_at_schema,
+        },
+    }
+    shared = {
+        "question_identity": {
+            "type": "string",
+            "pattern": r"^interview-question:[0-9a-f]{16}$",
+        },
+        "lane_id": {"const": "web_context"},
+        "search_queries": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+        },
+    }
+    found = {
+        "title": "ReferencesFound",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "question_identity",
+            "lane_id",
+            "status",
+            "search_queries",
+            "references",
+        ],
+        "properties": {
+            **shared,
+            "status": {"const": "references_found"},
+            "references": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 5,
+                "uniqueItems": True,
+                "items": reference,
+                "contains": {
+                    "type": "object",
+                    "properties": {
+                        "source_type": {"enum": ["primary", "official"]},
+                    },
+                    "required": ["source_type"],
+                },
+                "minContains": 1,
+            },
+        },
+    }
+    not_found = {
+        "title": "NoReliableReference",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "question_identity",
+            "lane_id",
+            "status",
+            "search_queries",
+            "failure_reason",
+        ],
+        "properties": {
+            **shared,
+            "status": {"const": "no_reliable_reference"},
+            "failure_reason": {
+                "type": "string",
+                "enum": [
+                    "no_relevant_results",
+                    "only_low_quality_results",
+                    "search_failed_after_attempts",
+                ],
+            },
+        },
+    }
+    source_evidence = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "attested_by",
+            "search_queries",
+            "search_attempts",
+            "fetched_sources",
+        ],
+        "properties": {
+            "attested_by": {"const": "parent_runtime"},
+            "search_queries": shared["search_queries"],
+            "search_attempts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["query", "outcome", "result_urls"],
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "outcome": {
+                            "type": "string",
+                            "enum": ["results_found", "no_results", "search_failed"],
+                        },
+                        "result_urls": {
+                            "type": "array",
+                            "maxItems": 25,
+                            "uniqueItems": True,
+                            "items": {
+                                "type": "string",
+                                "pattern": r"^https?://",
+                                "maxLength": 2048,
+                            },
+                        },
+                    },
+                    "allOf": [
+                        {
+                            "if": {"properties": {"outcome": {"const": "results_found"}}},
+                            "then": {"properties": {"result_urls": {"minItems": 1}}},
+                        },
+                        {
+                            "if": {
+                                "properties": {"outcome": {"enum": ["no_results", "search_failed"]}}
+                            },
+                            "then": {"properties": {"result_urls": {"maxItems": 0}}},
+                        },
+                    ],
+                },
+            },
+            "fetched_sources": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "url",
+                        "http_status",
+                        "source_type",
+                        "verified_at",
+                    ],
+                    "properties": {
+                        "url": {"type": "string", "pattern": r"^https?://", "maxLength": 2048},
+                        "http_status": {"type": "integer", "minimum": 200, "maximum": 399},
+                        "source_type": source_type_schema,
+                        "verified_at": verified_at_schema,
+                    },
+                },
+            },
+        },
+    }
+    return {
+        "contract_id": "web_reference_reconnaissance.v1",
+        "scope": "same_interview_start_reference_baseline",
+        "response_model_schema": {"oneOf": [found, not_found]},
+        "source_evidence_schema": source_evidence,
+        "runtime_instruction": (
+            "Issue at least one real web search for the research_subject. Prefer primary "
+            "and official sources, fetch promising results when available, and return two "
+            "to five URL-bearing references with relevance and verification time. Verification "
+            "timestamps must describe the current search/fetch, be no more than seven days old, "
+            "and not be future-dated relative to submission. The parent runtime must independently "
+            "search the submitted queries, record one search_attempts entry per query (including "
+            "zero-result and failed searches), fetch every submitted reference, and attach "
+            "source_evidence when submitting this lane; child-authored claims are not provenance. "
+            "If reliable references remain absent after searching, return the exact queries and a "
+            "closed failure reason. If web tools are unavailable, do not fabricate queries or "
+            "references; the host must submit this lane as undispatched."
+        ),
+    }
+
+
+def interview_web_reference_answer_contract() -> dict[str, Any]:
+    """Return the public web-reference contract for generated requests."""
+    return _interview_web_reference_answer_contract()
+
+
 def interview_code_investigation_answer_contract() -> dict[str, Any]:
     """Return the public code-fact answer contract for generated requests."""
     return _interview_code_investigation_answer_contract()
@@ -1057,6 +1254,29 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minLength": 1,
                 "description": "The already user-visible MCP interview question.",
             },
+            "research_subject": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 3500,
+                "description": "Original interview goal used for bounded factual research.",
+            },
+            "baseline_findings": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    lane: {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["contract_id", "lane_id", "published_at"],
+                        "properties": {
+                            "contract_id": {"type": "string", "minLength": 1},
+                            "lane_id": {"const": lane},
+                            "published_at": {"type": "string", "minLength": 1},
+                        },
+                    }
+                    for lane in ("code_context", "web_context")
+                },
+            },
             "recent_findings": {
                 "type": "object",
                 "additionalProperties": False,
@@ -1122,11 +1342,8 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 ),
             },
             "advisory_goal": {
-                "const": "help_human_answer_interview_question",
-                "description": (
-                    "Generate concise answer options, uncertainty notes, and a "
-                    "recommended draft without mutating interview state."
-                ),
+                "const": "build_reusable_factual_interview_context",
+                "description": "Build code and source-backed web context once for reuse.",
             },
             "parallel_preference": {
                 "const": "parallel_when_runtime_supports_subagents",
@@ -1146,7 +1363,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review", "read_data"],
+                    "enum": ["inspect_code", "web_research"],
                 },
             },
             "lanes": {
@@ -1159,39 +1376,18 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "properties": {
                         "lane_id": {
                             "type": "string",
-                            "enum": [
-                                "code_context",
-                                "web_context",
-                                "data_context",
-                                "ambiguity_contrarian",
-                                "answer_simplifier",
-                                "architecture_implications",
-                            ],
+                            "enum": ["code_context", "web_context"],
                         },
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": [
-                                "inspect_code",
-                                "web_research",
-                                "run_lateral_review",
-                                "read_data",
-                            ],
-                        },
-                        "persona": {
-                            "type": "string",
-                            "enum": ["researcher", "contrarian", "simplifier", "architect"],
+                            "enum": ["inspect_code", "web_research"],
                         },
                         "required": {"type": "boolean"},
                         "answer_contract": {
                             "type": "object",
                             "additionalProperties": True,
-                            "description": (
-                                "Versioned response contract this lane's output "
-                                "is validated against at re-entry. A lane "
-                                "without one completes on the generic advisory "
-                                "shape."
-                            ),
+                            "description": "Optional closed factual-lane response contract.",
                         },
                     },
                 },
@@ -1209,23 +1405,15 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "additionalProperties": False,
                 "required": [
                     "output_shape",
-                    "max_options",
-                    "include_recommended_draft",
+                    "cache_scope",
+                    "requires_delta_check",
                     "preserve_user_agency",
-                    "forward_to_mcp_only_after_user_or_auto_confirm",
                 ],
                 "properties": {
-                    "output_shape": {
-                        "const": "answer_advisory",
-                    },
-                    "max_options": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 5,
-                    },
-                    "include_recommended_draft": {"type": "boolean"},
+                    "output_shape": {"const": "factual_context"},
+                    "cache_scope": {"const": "same_interview_start_snapshot"},
+                    "requires_delta_check": {"const": True},
                     "preserve_user_agency": {"const": True},
-                    "forward_to_mcp_only_after_user_or_auto_confirm": {"const": True},
                 },
             },
             "mcp_tool_capability": {
@@ -1260,96 +1448,35 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
 
 
 def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
-    """Return structured metadata for parent-session interview answer help."""
+    """Return bounded factual-research metadata for interview questions."""
     lanes = [
         {
             "lane_id": "code_context",
-            "purpose": "Find repo-local facts that may answer or constrain the question.",
+            "purpose": "Build or refresh repo-local facts that constrain the interview.",
             "capability": "inspect_code",
-            "required": False,
+            "required": True,
         },
         {
             "lane_id": "web_context",
-            "purpose": (
-                "Check current external facts only when the question depends on "
-                "third-party APIs, pricing, standards, security, or recent changes."
-            ),
+            "purpose": "Build or refresh a source-backed reference map for the interview goal.",
             "capability": "web_research",
-            "required": False,
-        },
-        {
-            "lane_id": "data_context",
-            "purpose": (
-                "Take the measurements that inform this question, so the "
-                "user judges against numbers instead of memory."
-            ),
-            "capability": "read_data",
-            # Required because its no-op answer always exists: a question that is
-            # not data-driven still completes this lane. Optional would let a
-            # data-driven question lose its evidence silently, which is the
-            # defect the lane exists to remove (#1754).
             "required": True,
-            "answer_contract": _interview_data_evidence_answer_contract(),
-        },
-        {
-            "lane_id": "ambiguity_contrarian",
-            "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
-            "capability": "run_lateral_review",
-            "persona": "contrarian",
-            "required": True,
-        },
-        {
-            "lane_id": "answer_simplifier",
-            "purpose": "Turn the question into easy choices or a concise answer draft.",
-            "capability": "run_lateral_review",
-            "persona": "simplifier",
-            "required": True,
-        },
-        {
-            "lane_id": "architecture_implications",
-            "purpose": (
-                "Check whether the answer would change system shape, ownership, "
-                "interfaces, or rollout strategy."
-            ),
-            "capability": "run_lateral_review",
-            "persona": "architect",
-            "required": False,
+            "answer_contract": _interview_web_reference_answer_contract(),
         },
     ]
     return {
         "contract_id": "interview_question_advisory_fanout.v1",
         "mcp_tool": "ouroboros_interview",
-        # What the fan-out builder used to hardcode for its only caller. These
-        # move here so one builder serves every tool without either one's
-        # emitted payloads or request changing by a byte.
         "question_identity_prefix": "interview-question",
-        # This tool measures ambiguity, so its request always carries the score
-        # and milestone -- ``None`` included, because "not scored yet" is a
-        # state of a thing that exists. A tool with no such concept omits the
-        # keys rather than reporting them empty.
         "scores_ambiguity": True,
-        "advisory_goal": "help_human_answer_interview_question",
-        "payload_title_prefix": "Interview advisory",
-        "allowed_capabilities": [
-            "inspect_code",
-            "web_research",
-            "run_lateral_review",
-            "read_data",
-        ],
+        "advisory_goal": "build_reusable_factual_interview_context",
+        "payload_title_prefix": "Interview factual research",
+        "allowed_capabilities": ["inspect_code", "web_research"],
         "question_heading": "## Interview Question",
-        # Carried whole rather than composed from parts: this paragraph states
-        # what a child may do with a clear finding, which is the one thing the
-        # two tools genuinely disagree about, and assembling it from fragments
-        # would put that disagreement in the builder instead of the catalog.
         "task_preamble": (
-            "You are an Ouroboros interview advisory subagent.\n"
-            "\n"
-            "The parent session has already shown the interview question to the "
-            "user. Your job\nis to help the user answer it; do not answer on "
-            "behalf of the user unless the\nanswer is a descriptive fact with "
-            "clear evidence."
+            "You are an Ouroboros factual-research subagent. The visible interview "
+            "question does not narrow the start-turn research subject or permit skipping it."
         ),
-        "companion_tool": "ouroboros_lateral_think",
         "dispatch_timing": "after_question_is_visible_to_user",
         "parallel_preference": "parallel_when_runtime_supports_subagents",
         "sequential_fallback": {
@@ -1360,32 +1487,22 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "request_model_schema": _interview_question_advisory_request_schema(),
         "lanes": lanes,
         "synthesis_contract": {
-            "output_shape": "answer_advisory",
-            "max_options": 3,
-            "include_recommended_draft": True,
+            "output_shape": "factual_context",
+            "cache_scope": "same_interview_start_snapshot",
+            "requires_delta_check": True,
             "preserve_user_agency": True,
-            "forward_to_mcp_only_after_user_or_auto_confirm": True,
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
-            # The dotted path, because that is what re-entry compares against.
-            # This read ``lane_id`` while the producer stamped and the registry
-            # registered ``context.lane_id``, so a host following the advertised
-            # contract was refused with ``correlation_mismatch`` — the sibling
-            # panel advertises ``context.persona`` for the same reason.
             "result_correlation_key": "context.lane_id",
             "requires_prose_parsing": False,
             "synthesis_owner": "parent_session",
         },
         "runtime_instruction": (
-            "Show the MCP interview question to the user first, then fan out "
-            "advisory lanes for code context, current web facts when needed, "
-            "measurements taken, ambiguity critique, simplification, and "
-            "architecture implications. "
-            "Read child task results as they complete and synthesize them into "
-            "two or three answer options or one recommended draft. Do not forward advisory text to "
-            "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm."
+            "Show the interview question first. On start or factual-cache repair turns, "
+            "dispatch only emitted code/web payloads. A full cache hit emits no advisory "
+            "subagents. The web lane must search the original research_subject and satisfy "
+            "its URL-bearing reference contract; generic no-op prose is invalid."
         ),
     }
 
@@ -1402,4 +1519,6 @@ __all__ = [
     "_interview_question_advisory_request_schema",
     "interview_code_investigation_answer_contract",
     "interview_data_evidence_answer_contract",
+    "_interview_web_reference_answer_contract",
+    "interview_web_reference_answer_contract",
 ]

@@ -722,12 +722,13 @@ class TestBuildInterviewSubagent:
             initial_context="Build a planning assistant",
         )
 
-        assert "## Question-first Advisory Fanout" in p.prompt
-        assert "1. Show the interview question first." in p.prompt
+        assert "## Factual Research Snapshot" in p.prompt
         assert "code_context" in p.prompt
-        assert "ambiguity_contrarian" in p.prompt
-        assert "answer_simplifier" in p.prompt
-        assert p.context["question_advisory_strategy"] == "plugin_child_question_first_advisory"
+        assert "source-backed web_context" in p.prompt
+        assert "ordinary per-question reasoning panel" in p.prompt
+        assert "ambiguity_contrarian" not in p.prompt
+        assert "answer_simplifier" not in p.prompt
+        assert p.context["question_advisory_strategy"] == "plugin_child_factual_snapshot"
 
     def test_plugin_interview_prompt_preserves_hard_facts_closure_contract(self) -> None:
         p = build_interview_subagent(session_id="sess-123", action="start")
@@ -741,7 +742,7 @@ class TestBuildInterviewSubagent:
 class TestBuildInterviewQuestionAdvisorySubagents:
     """Test per-question advisory fanout payloads."""
 
-    def test_builds_one_payload_per_lane(self) -> None:
+    def test_builds_factual_payloads_with_web_reference_contract(self) -> None:
         request = {
             "session_id": "sess-123",
             "question_identity": "interview-question:0123456789abcdef",
@@ -749,34 +750,30 @@ class TestBuildInterviewQuestionAdvisorySubagents:
             "ambiguity_score": 0.35,
             "milestone": "progress",
             "user_question_first": True,
+            "research_subject": "Build a planning assistant",
             "lanes": [
                 {
                     "lane_id": "code_context",
                     "capability": "inspect_code",
                     "purpose": "Find code facts.",
-                    "required": False,
-                },
-                {
-                    "lane_id": "ambiguity_contrarian",
-                    "capability": "run_lateral_review",
-                    "persona": "contrarian",
-                    "purpose": "Find hidden assumptions.",
                     "required": True,
                 },
                 {
-                    "lane_id": "answer_simplifier",
-                    "capability": "run_lateral_review",
-                    "persona": "simplifier",
-                    "purpose": "Make it easy to answer.",
+                    "lane_id": "web_context",
+                    "capability": "web_research",
+                    "purpose": "Find source-backed references.",
                     "required": True,
+                    "answer_contract": {
+                        "contract_id": "web_reference_reconnaissance.v1",
+                        "response_model_schema": {"type": "object"},
+                    },
                 },
             ],
             "synthesis_contract": {
-                "output_shape": "answer_advisory",
-                "max_options": 3,
-                "include_recommended_draft": True,
+                "output_shape": "factual_context",
+                "cache_scope": "same_interview_start_snapshot",
+                "requires_delta_check": True,
                 "preserve_user_agency": True,
-                "forward_to_mcp_only_after_user_or_auto_confirm": True,
             },
             "code_investigation_request": {"question": "Which users need this first?"},
         }
@@ -784,23 +781,16 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         payloads = build_interview_question_advisory_subagents(request)
 
         assert [payload.title for payload in payloads] == [
-            "Interview advisory: code_context",
-            "Interview advisory: ambiguity_contrarian",
-            "Interview advisory: answer_simplifier",
+            "Interview factual research: code_context",
+            "Interview factual research: web_context",
         ]
-        assert [payload.agent for payload in payloads] == [
-            "researcher",
-            "contrarian",
-            "simplifier",
-        ]
+        assert [payload.agent for payload in payloads] == ["researcher", "general"]
         assert all(payload.tool_name == "ouroboros_interview" for payload in payloads)
-        assert all(
-            "The parent session has already shown the interview question" in payload.prompt
-            for payload in payloads
-        )
         assert payloads[0].context["lane_id"] == "code_context"
-        assert payloads[0].context["user_question_first"] is True
-        assert payloads[1].context["persona"] == "contrarian"
+        assert payloads[1].context["lane_id"] == "web_context"
+        assert "## Research Subject\nBuild a planning assistant" in payloads[1].prompt
+        assert "## Web Reference Contract" in payloads[1].prompt
+        assert "Do not return generic advice" in payloads[1].prompt
 
     def test_requires_question_identity(self) -> None:
         with pytest.raises(ValueError, match="question_identity"):
