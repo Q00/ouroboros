@@ -87,6 +87,7 @@ def test_invoked_files_require_an_interpreter_and_a_file_token() -> None:
         r"Start-Process -FilePath .\hello.exe -Wait"
     )
     assert _functional_command_invoked_files("echo fake.exe") == ()
+    assert _functional_command_invoked_files("echo -FilePath fake.exe") == ()
     # Heredoc drivers reference the artifact inside their body.
     heredoc = (
         "python3 - <<'PY'\nimport subprocess, sys\n"
@@ -231,6 +232,36 @@ def test_windows_executable_functional_claim_rejects_missing_artifact(tmp_path) 
             }
         ),
         ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is False
+
+
+def test_windows_option_form_rejects_non_powershell_command(tmp_path) -> None:
+    """An option-shaped mention must not certify an artifact that was not run."""
+    artifact = tmp_path / "fake.exe"
+    artifact.write_bytes(b"MZ")
+    claim = "echo -FilePath fake.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("fake.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["fake.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="fake.exe prints the required output",
         execution_profile=load_profile("code"),
         task_cwd=str(tmp_path),
         adapter_working_directory=str(tmp_path),
