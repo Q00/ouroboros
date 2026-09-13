@@ -82,6 +82,11 @@ def test_invoked_files_require_an_interpreter_and_a_file_token() -> None:
     assert _functional_command_invoked_files("cp habit_tracker.py /tmp/") == ()
     assert _functional_command_invoked_files("echo ok") == ()
     assert _functional_command_invoked_files("./run.sh") == ("run.sh",)
+    assert "hello.exe" in _functional_command_invoked_files(r".\hello.exe")
+    assert "hello.exe" in _functional_command_invoked_files(
+        r"Start-Process -FilePath .\hello.exe -Wait"
+    )
+    assert _functional_command_invoked_files("echo fake.exe") == ()
     # Heredoc drivers reference the artifact inside their body.
     heredoc = (
         "python3 - <<'PY'\nimport subprocess, sys\n"
@@ -136,6 +141,103 @@ def test_claim_without_transcript_execution_does_not_support() -> None:
         _functional_command_supports_test_claim(value=CLAIM, messages=messages, task_cwd=None)
         is False
     )
+
+
+def test_windows_executable_functional_claim_is_admitted(tmp_path) -> None:
+    """A Windows artifact invoked directly is valid functional evidence."""
+    artifact = tmp_path / "hello.exe"
+    artifact.write_bytes(b"MZ")
+    claim = r".\hello.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("hello.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_windows_powershell_wrapper_functional_claim_is_admitted(tmp_path) -> None:
+    """The native Codex PowerShell wrapper can prove a produced executable."""
+    artifact = tmp_path / "hello.exe"
+    artifact.write_bytes(b"MZ")
+    claim = r"Start-Process -FilePath .\hello.exe -Wait -PassThru"
+    wrapped = (
+        '"C:\\Users\\runner\\pwsh.exe" -NoProfile -Command '
+        "'Start-Process -FilePath .\\\\hello.exe -Wait -PassThru'"
+    )
+    start = AgentMessage(
+        type="assistant",
+        content=f"Calling tool: Bash: {wrapped}",
+        tool_name="Bash",
+        data={"tool_input": {"command": wrapped}, "tool_call_id": "item-win"},
+    )
+    result = AgentMessage(
+        type="tool_result",
+        content="hello.exe",
+        data={"tool_call_id": "item-win", "exit_code": 0, "is_error": False},
+    )
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair("hello.exe"),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.exe"],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_windows_executable_functional_claim_rejects_missing_artifact(tmp_path) -> None:
+    """A direct Windows command cannot prove a ghost artifact."""
+    claim = r".\missing.exe"
+    start, result = _codex_bash_pair(claim)
+    verdict = _verify_atomic_evidence_against_runtime_messages(
+        messages=(start, result, AgentMessage(type="result", content="done")),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": [],
+                "commands_run": [claim],
+                "tests_passed": [claim],
+            }
+        ),
+        ac_content="hello.exe prints the required output",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=str(tmp_path),
+        has_success_contract=True,
+        verify_gate_active=True,
+    )
+    assert verdict.passed is False
 
 
 def _verdict(*, verify_gate_active: bool):
