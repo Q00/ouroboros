@@ -372,9 +372,18 @@ function Test-PythonAtLeast([string]$Exe) {
     # print a diagnostic instead of running Python; skip them before invoking
     # the native command so Windows PowerShell does not surface NativeCommandError.
     if ($found -match '\\WindowsApps\\(?:python|python3)(?:\.exe)?$') { return $false }
-    # The Microsoft Store alias python.exe/python3.exe prints a hint and fails
-    # here, so it counts as absent instead of as an interpreter.
-    $out = (& $found -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null) -join ''
+    # Avoid embedded quotes: Windows PowerShell 5.1 strips them from native arguments.
+    # This optional probe may emit stderr, which 5.1 turns into NativeCommandError
+    # under Stop even with 2>$null. Judge the exit code and stdout instead.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $out = (& $found -c 'import sys; print(*sys.version_info[:2], sep=chr(46))' 2>$null) -join ''
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($LASTEXITCODE -ne 0 -or -not ($out -match '^\d+\.\d+$')) { return $false }
     return ([version]$out -ge $MinPython)
 }
