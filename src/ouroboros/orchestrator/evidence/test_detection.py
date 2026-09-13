@@ -503,6 +503,14 @@ _FUNCTIONAL_INTERPRETER_NAMES = frozenset(
     {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "php", "deno", "bun"}
 )
 
+# Native Windows verification commonly exercises the produced artifact
+# directly (for example ``.\\hello.exe``) instead of routing it through an
+# interpreter.  Treat executable/script suffixes as functional command
+# anchors; the existing workspace-file and zero-exit checks still provide the
+# authority, so this does not admit arbitrary command names or narration.
+_FUNCTIONAL_EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1")
+_FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+
 
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
@@ -520,9 +528,25 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
     the tier entirely.
     """
     tokens = [token.strip("'\"") for token in command.split()]
-    has_interpreter = any(
-        token.rsplit("/", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES or token.startswith("./")
+    has_powershell = any(
+        token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower() in _FUNCTIONAL_POWERSHELL_NAMES
         for token in tokens
+    )
+    has_start_process = any(token.lower() == "start-process" for token in tokens)
+    has_interpreter = any(
+        token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES
+        or token.startswith(("./", ".\\"))
+        or (
+            token.lower().endswith(_FUNCTIONAL_EXECUTABLE_SUFFIXES)
+            and (
+                index == 0
+                or (
+                    tokens[index - 1].lower() in {"-filepath", "-file", "--file"}
+                    and (has_powershell or has_start_process)
+                )
+            )
+        )
+        for index, token in enumerate(tokens)
     )
     if not has_interpreter:
         return ()
