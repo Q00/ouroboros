@@ -22,6 +22,7 @@ from ouroboros.orchestrator.evidence.harness_observation import (
 )
 from ouroboros.orchestrator.evidence.test_detection import (
     _functional_command_supports_test_claim,
+    _runtime_messages_have_completed_command_for_test_claim,
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
 )
@@ -98,6 +99,8 @@ def _verify_atomic_evidence_against_runtime_messages(
 
     unsupported: list[str] = []
     evidence_form_mismatches: list[str] = []
+    masked_command_mismatch = False
+    completed_command_mismatch = False
     backed_commands = tuple(
         command
         for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
@@ -139,6 +142,7 @@ def _verify_atomic_evidence_against_runtime_messages(
                     value,
                     field_messages,
                 ):
+                    masked_command_mismatch = True
                     evidence_form_mismatches.append(f"{field_name}: {value}")
                     unsupported.append(f"{field_name}: {value}")
                     continue
@@ -199,9 +203,15 @@ def _verify_atomic_evidence_against_runtime_messages(
                     messages=support_messages,
                     task_cwd=workspace_cwd,
                 ):
+                    masked_command_mismatch = True
                     evidence_form_mismatches.append(f"{field_name}: {value}")
                     unsupported.append(f"{field_name}: {value}")
                     continue
+                if _runtime_messages_have_completed_command_for_test_claim(
+                    value=value, messages=support_messages
+                ):
+                    completed_command_mismatch = True
+                    evidence_form_mismatches.append(f"{field_name}: {value}")
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if not _runtime_messages_support_claim(value, field_messages):
@@ -213,12 +223,20 @@ def _verify_atomic_evidence_against_runtime_messages(
             if evidence_form_mismatches and len(evidence_form_mismatches) == len(unsupported)
             else "FABRICATION_SUSPECTED"
         )
-        reason_prefix = (
-            "evidence form mismatch; unprotected output-filter pipeline "
-            "cannot prove a clean command claim"
-            if failure_class == "EVIDENCE_FORM_MISMATCH"
-            else "unsupported evidence claims"
-        )
+        reason_prefix = "unsupported evidence claims"
+        if failure_class == "EVIDENCE_FORM_MISMATCH":
+            details = []
+            if masked_command_mismatch:
+                details.append(
+                    "unprotected output-filter pipeline cannot prove a clean command claim"
+                )
+            if completed_command_mismatch:
+                details.append(
+                    "recorded command completion cannot prove tests_passed; "
+                    "retry with contract-compliant test evidence from the runtime "
+                    "or a runner-owned adapter"
+                )
+            reason_prefix = "evidence form mismatch; " + "; ".join(details)
         return VerifierVerdict(
             passed=False,
             reasons=(reason_prefix + ": " + "; ".join(unsupported),),
