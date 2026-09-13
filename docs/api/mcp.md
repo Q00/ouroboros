@@ -562,6 +562,11 @@ class MCPClientAdapter:
 
 Connect to an MCP server.
 
+If the task is cancelled during SDK connection establishment, the adapter clears
+its connection state and attempts to close its SDK client and any HTTP client
+it owns before propagating `asyncio.CancelledError`. Ordinary cleanup errors
+are logged without replacing cancellation or triggering a connection retry.
+
 ```python
 async with MCPClientAdapter() as client:
     result = await client.connect(config)
