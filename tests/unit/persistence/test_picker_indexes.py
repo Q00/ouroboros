@@ -1394,3 +1394,198 @@ def test_picker_projection_write_and_disk_budgets(
             projected.unlink(missing_ok=True)
     assert median(time_ratios) < max_time_ratio
     assert max(size_ratios) < max_size_ratio
+
+
+async def test_interview_roots_write_batch_backfill_and_rollback(tmp_path) -> None:
+    from ouroboros.dashboard_web.reader import list_recent_interviews
+    from ouroboros.events.interview import interview_started
+    from ouroboros.persistence.picker_indexes import PICKER_INTERVIEW_ROOT_TABLE
+    from ouroboros.persistence.picker_projection_updates import insert_event_with_picker_projection
+
+    db = tmp_path / "interviews.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(interview_started("single", "private context"))
+    await store.append_batch([interview_started("batch-a", "a"), interview_started("batch-b", "b")])
+    await store.append_batch(
+        [
+            interview_started("mixed", "m"),
+            BaseEvent(type="unrelated.test", aggregate_type="other", aggregate_id="other", data={}),
+        ]
+    )
+    assert store._engine is not None
+    with pytest.raises(RuntimeError, match="abort"):
+        async with store._engine.begin() as connection:
+            await insert_event_with_picker_projection(
+                connection, interview_started("rollback", "r"), True
+            )
+            raise RuntimeError("abort")
+    await store.close()
+    assert [r["interview_id"] for r in list_recent_interviews(db)] == [
+        "mixed",
+        "batch-b",
+        "batch-a",
+        "single",
+    ]
+    with sqlite3.connect(db) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM events WHERE aggregate_id = 'rollback'").fetchone()[
+                0
+            ]
+            == 0
+        )
+        conn.execute(f"DROP TABLE {PICKER_INTERVIEW_ROOT_TABLE}")
+    with pytest.raises(PickerIndexContractError):
+        list_recent_interviews(db)
+    await _initialize(db)
+    assert len(list_recent_interviews(db)) == 4
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing-index", "stale-index", "gap", "pointer", "duplicate", "marker"]
+)
+async def test_interview_roots_fail_closed_and_writer_repairs_contract(tmp_path, damage) -> None:
+    from ouroboros.dashboard_web.reader import list_recent_interviews
+    from ouroboros.events.interview import interview_started
+    from ouroboros.persistence.picker_indexes import (
+        PICKER_INTERVIEW_ROOT_INDEX,
+        PICKER_INTERVIEW_ROOT_TABLE,
+    )
+
+    db = tmp_path / "damaged.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(interview_started("root", "context"))
+    if damage == "duplicate":
+        await store.append(interview_started("root", "second"))
+    await store.close()
+    with sqlite3.connect(db) as conn:
+        if damage in {"missing-index", "stale-index"}:
+            conn.execute(f"DROP INDEX {PICKER_INTERVIEW_ROOT_INDEX}")
+            if damage == "stale-index":
+                conn.execute(
+                    f"CREATE INDEX {PICKER_INTERVIEW_ROOT_INDEX} ON {PICKER_INTERVIEW_ROOT_TABLE} (event_rowid)"
+                )
+        elif damage == "gap":
+            conn.execute("UPDATE events SET picker_projection_version = NULL")
+        elif damage == "pointer":
+            conn.execute(f"UPDATE {PICKER_INTERVIEW_ROOT_TABLE} SET interview_id = 'wrong'")
+        elif damage == "marker":
+            conn.execute(f"DELETE FROM {PICKER_META_TABLE}")
+    with pytest.raises(PickerIndexContractError):
+        list_recent_interviews(db)
+    if damage in {"missing-index", "stale-index", "gap", "marker"}:
+        await _initialize(db)
+        assert list_recent_interviews(db)[0]["interview_id"] == "root"
+
+
+async def test_interview_root_read_is_bounded_and_ignores_other_families(
+    tmp_path, monkeypatch
+) -> None:
+    from ouroboros.dashboard_web import reader
+    from ouroboros.events.interview import interview_started
+    from ouroboros.persistence.picker_indexes import (
+        PICKER_INTERVIEW_ROOT_INDEX,
+        PICKER_INTERVIEW_ROOT_TABLE,
+    )
+
+    db = tmp_path / "budget.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(interview_started("shared", "not exposed"))
+    await store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch",
+            data={"execution_id": "shared"},
+        )
+    )
+    await store.append(
+        BaseEvent(type="interview.started", aggregate_type="wrong", aggregate_id="wrong", data={})
+    )
+    await store.append(interview_started(" \t", "blank"))
+    await store.close()
+    with sqlite3.connect(db) as conn:
+        conn.executemany(
+            "INSERT INTO events (id, aggregate_type, aggregate_id, event_type, payload, timestamp) VALUES (?, 'other', 'noise', 'noise.event', '{broken', '2026-01-01')",
+            [(f"noise-{i}",) for i in range(20000)],
+        )
+        conn.execute("ANALYZE")
+        plan = conn.execute(
+            f"EXPLAIN QUERY PLAN SELECT event_rowid FROM {PICKER_INTERVIEW_ROOT_TABLE} INDEXED BY {PICKER_INTERVIEW_ROOT_INDEX} WHERE interview_id = ? LIMIT 2",
+            ("shared",),
+        ).fetchall()
+        assert any("SEARCH" in row[3] and PICKER_INTERVIEW_ROOT_INDEX in row[3] for row in plan)
+    original = reader._connect_readonly
+    steps = 0
+    statements = []
+
+    def connect(path):
+        conn = original(path)
+
+        def tick():
+            nonlocal steps
+            steps += 1
+            return int(steps > 5000)
+
+        conn.set_progress_handler(tick, 1)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(reader, "_connect_readonly", connect)
+    rows = reader.list_recent_interviews(db, limit=1)
+    assert rows == [{"family": "interview", "interview_id": "shared", "root_event_rowid": 1}]
+    assert steps < 5000
+    assert not any(
+        s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER"))
+        for s in statements
+    )
+    for limit in (0, 101, -1, True):
+        with pytest.raises(ValueError):
+            reader.list_recent_interviews(db, limit=limit)
+
+
+async def test_interview_backfill_skips_malformed_and_wrong_family_roots(tmp_path) -> None:
+    from ouroboros.dashboard_web.reader import list_recent_interviews
+    from ouroboros.persistence.picker_indexes import PICKER_INTERVIEW_ROOT_TABLE
+
+    db = tmp_path / "legacy-interviews.db"
+    await _initialize(db)
+    with sqlite3.connect(db) as conn:
+        conn.executemany(
+            "INSERT INTO events (id, aggregate_type, aggregate_id, event_type, payload, timestamp) "
+            "VALUES (?, ?, ?, 'interview.started', ?, '2026-01-01')",
+            [
+                ("a", "interview", "valid", "{}"),
+                ("b", "other", "wrong", "{}"),
+                ("c", "interview", "broken", "{invalid"),
+                ("d", "interview", "array", "[]"),
+                ("e", "interview", "\t ", "{}"),
+            ],
+        )
+        conn.execute(f"DROP TABLE {PICKER_INTERVIEW_ROOT_TABLE}")
+    with pytest.raises(PickerIndexContractError):
+        list_recent_interviews(db)
+    await _initialize(db)
+    assert [row["interview_id"] for row in list_recent_interviews(db)] == ["valid"]
+
+
+async def test_interview_root_identity_collision_does_not_enter_run_tail(tmp_path) -> None:
+    from ouroboros.events.interview import interview_started
+
+    db = tmp_path / "root-run-collision.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="shared",
+            data={"execution_id": "exec-shared"},
+        )
+    )
+    await store.append(interview_started("shared", "PRIVATE CONTEXT"))
+    await store.close()
+    events = EventTail(db, "exec-shared").fetch_new()
+    assert [event["event_type"] for event in events] == ["orchestrator.session.started"]
