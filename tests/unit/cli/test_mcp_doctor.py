@@ -637,6 +637,36 @@ class TestDoctorCommand:
             result = runner.invoke(app, [])
         assert result.exit_code == 0
 
+    def test_machine_snapshot_json_is_structured_and_opt_in(self):
+        app = _make_app()
+        check = CheckResult(name="x", status="pass", message="ok")
+        snapshot = MagicMock()
+        snapshot.to_dict.return_value = {"os": {"status": "ok", "value": {"system": "Linux"}}}
+        with (
+            patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
+            patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
+        ):
+            result = runner.invoke(app, ["--machine-snapshot", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["checks"][0]["name"] == "x"
+        assert data["machine_snapshot"]["os"]["value"]["system"] == "Linux"
+
+    def test_machine_snapshot_human_output_is_readable(self):
+        app = _make_app()
+        check = CheckResult(name="x", status="pass", message="ok")
+        snapshot = MagicMock()
+        snapshot.to_dict.return_value = {"python": {"status": "ok", "value": {"version": "3.13"}}}
+        with (
+            patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", [lambda: check]),
+            patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot", return_value=snapshot),
+        ):
+            result = runner.invoke(app, ["--machine-snapshot"])
+        assert result.exit_code == 0
+        assert "Static machine snapshot" in result.output
+        assert "python" in result.output
+        assert "3.13" in result.output
+
     def test_json_flag_emits_valid_json(self):
         app = _make_app()
         check_a = CheckResult(name="a", status="pass", message="good")
@@ -781,3 +811,40 @@ def _import_error_for(module_name: str):
         return real_import(name, *args, **kwargs)
 
     return _side_effect
+
+
+def test_machine_snapshot_actual_collector_through_cli(tmp_path: Path):
+    config = tmp_path / ".ouroboros" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("PRIVATE_CONFIG_SENTINEL")
+    app = _make_app()
+    with (
+        patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
+        patch("ouroboros.mcp.machine_snapshot.Path.home", return_value=tmp_path),
+        patch(
+            "ouroboros.mcp.machine_snapshot.shutil.disk_usage",
+            side_effect=PermissionError("PRIVATE_EXCEPTION_SENTINEL"),
+        ),
+    ):
+        for args in (["--machine-snapshot", "--json"], ["--machine-snapshot"]):
+            result = runner.invoke(app, args)
+            assert result.exit_code == 0, result.output
+            assert "PRIVATE_CONFIG_SENTINEL" not in result.output
+            assert "PRIVATE_EXCEPTION_SENTINEL" not in result.output
+            assert "permission_denied" in result.output
+        result = runner.invoke(app, ["--machine-snapshot", "--json"])
+    snapshot = json.loads(result.output)["machine_snapshot"]
+    assert snapshot["config_path"]["value"]["kind"] == "regular_file"
+    assert snapshot["python"]["status"] == "ok"
+    assert snapshot["disk"]["reason"] == "permission_denied"
+
+
+def test_default_doctor_does_not_collect_machine_snapshot():
+    with (
+        patch("ouroboros.cli.commands.mcp_doctor._ALL_CHECKS", []),
+        patch("ouroboros.mcp.machine_snapshot.collect_machine_snapshot") as collect,
+    ):
+        result = runner.invoke(_make_app(), ["--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+    collect.assert_not_called()

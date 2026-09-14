@@ -537,6 +537,13 @@ def register_doctor_command(app: typer.Typer) -> None:
 
     @app.command()
     def doctor(
+        machine_snapshot: Annotated[
+            bool,
+            typer.Option(
+                "--machine-snapshot",
+                help="Include an opt-in static, content-free machine snapshot.",
+            ),
+        ] = False,
         as_json: Annotated[
             bool,
             typer.Option("--json", help="Emit machine-readable JSON to stdout."),
@@ -557,11 +564,18 @@ def register_doctor_command(app: typer.Typer) -> None:
             # Machine-readable (for bug reports)
             ouroboros mcp doctor --json
         """
+        snapshot = None
+        if machine_snapshot:
+            from ouroboros.mcp.machine_snapshot import collect_machine_snapshot
+
+            snapshot = collect_machine_snapshot()
         console = Console()
         results: list[CheckResult] = [fn() for fn in _ALL_CHECKS]
 
         if as_json:
-            payload = [asdict(r) for r in results]
+            payload: object = [asdict(r) for r in results]
+            if snapshot is not None:
+                payload = {"checks": payload, "machine_snapshot": snapshot.to_dict()}
             print(json.dumps(payload, indent=2))
         else:
             console.print()
@@ -574,6 +588,12 @@ def register_doctor_command(app: typer.Typer) -> None:
                 )
                 if result.remediation:
                     console.print(f"      [dim]hint: {escape(result.remediation)}[/dim]")
+            if snapshot is not None:
+                console.print("[bold]Static machine snapshot[/bold]")
+                for name, probe in snapshot.to_dict().items():
+                    status = probe["status"]
+                    detail = probe.get("value") if status == "ok" else probe.get("reason")
+                    console.print(f"  {status}: {escape(name)} = {escape(str(detail))}")
             console.print()
 
         has_failure = any(r.status == "fail" for r in results)

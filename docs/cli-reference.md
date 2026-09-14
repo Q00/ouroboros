@@ -1162,6 +1162,16 @@ ouroboros tui monitor --backend slt
 
 MCP (Model Context Protocol) server commands for Claude Desktop and other MCP-compatible clients.
 
+### `mcp doctor --machine-snapshot`
+
+Run read-only MCP environment diagnostics. The default command prints health checks; `--json` emits the existing list of checks. Add `--machine-snapshot` to opt into a typed, content-free static snapshot; with `--json`, the result is an object containing the existing `checks` list and `machine_snapshot` fields.
+
+The snapshot covers OS, architecture, Python, current executable, installed `ouroboros-ai` version/location, home-directory disk usage, and fixed `~/.ouroboros/config.yaml` `lstat` metadata. It never reads configuration contents or credentials, invokes commands, scans `PATH`, inspects processes, probes ports or networks, writes files, or repairs anything. Missing, permission, unsupported, and unexpected probe failures are reported as `not_checked` with stable reasons. Native Windows machine architecture is explicitly `not_checked` rather than inferred from shell commands or environment variables. PATH collisions, loopback/port checks, and owned-process metadata are outside this static snapshot.
+
+```bash
+ouroboros mcp doctor [--json] [--machine-snapshot]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
