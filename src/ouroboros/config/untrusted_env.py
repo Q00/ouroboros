@@ -163,6 +163,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_DIR",
         "XDG_CONFIG_HOME",
+        # Claude Code resolves settings.json (hooks, permission mode, MCP
+        # servers) from this root; same class as CODEX_HOME.
+        "CLAUDE_CONFIG_DIR",
         # Platform home selectors also choose Ouroboros' trusted config root.
         # A project .env must not turn a repository directory into ~/.ouroboros.
         "HOME",
@@ -242,6 +245,17 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # is therefore an approval-gate-bypass sink — same class as the
         # permission-mode overrides above.
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Backend limits YAML root (`orchestrator/backend_limits.py`); a
+        # relative value resolves against the cloned repository — same
+        # config-root class as the tool-capability override above.
+        "OUROBOROS_BACKEND_LIMITS",
+        # Network MCP shared secret: a cloned repository must not be the
+        # source of the token that gates non-loopback `mcp serve` binds.
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        # Journal preview privacy switch (`events/io.py`): same operator-owned
+        # boundary as the telemetry toggles; the project `.env` loads first
+        # and would win the race against a persisted home opt-out.
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
         # Execution-cost/behavior dial — an untrusted repo .env must not be able
         # to force a higher (or invalid) reasoning-effort level for every AC,
         # which changes runtime cost and behavior. Follows the same trusted-source
@@ -264,6 +278,14 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # spelling of the same hook.
         "BASH_ENV",
         "ENV",
+        # zsh sources $ZDOTDIR/.zshenv for every invocation, including the
+        # `$SHELL -l -c` login-shell environment import in `cli/commands/mcp.py`;
+        # SHELL itself is argv[0] of that spawn when the real environment does
+        # not carry it (GUI-launched agent hosts).
+        "ZDOTDIR",
+        "SHELL",
+        # `webbrowser.open` (config GUI launcher) executes $BROWSER as a command.
+        "BROWSER",
         # Shell option state carried into that child: `xtrace` writes into the
         # output an assertion is checked against, `errexit` changes which leg
         # of a chain decides the status, `xpg_echo` changes what `echo` prints.

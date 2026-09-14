@@ -176,6 +176,16 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "PYTHONUSERBASE",
         "PYTHONEXECUTABLE",
         "NODE_PATH",
+        # Same-class keys surfaced by the threat-model scan: vendor config
+        # root, shell startup/argv[0], browser command, config roots, network
+        # secret, privacy switch.
+        "CLAUDE_CONFIG_DIR",
+        "ZDOTDIR",
+        "SHELL",
+        "BROWSER",
+        "OUROBOROS_BACKEND_LIMITS",
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
     }
     missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -620,6 +630,13 @@ def test_untrusted_env_cannot_set_dynamic_loader_controls(
         "GIT_EXEC_PATH",
         "GIT_CONFIG_GLOBAL",
         "GIT_ASKPASS",
+        "CLAUDE_CONFIG_DIR",
+        "ZDOTDIR",
+        "SHELL",
+        "BROWSER",
+        "OUROBOROS_BACKEND_LIMITS",
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
     ],
 )
 def test_untrusted_env_cannot_set_runtime_loader_controls(
