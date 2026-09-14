@@ -302,17 +302,17 @@ def _discover_spawn_sites(root: Path) -> tuple[SpawnSite, ...]:
 #:
 #: "inherit" = no ``env=`` at all (child gets ``os.environ``);
 #: "os.environ.copy" / "merge(os.environ)" = copy plus edits;
-#: "parameter" = env passed in by the caller. Sites whose child honours a
-#: loader-class key that the denylist does not yet reject are cross-referenced
-#: to docs/security/TRIAGE.md so the allowlist never silently absorbs a finding.
+#: "parameter" = env passed in by the caller. A justification must name why
+#: inheriting is acceptable so the allowlist never silently absorbs a finding.
 SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
     # -- Python interpreters running our own modules ------------------------
     ("src/ouroboros/mcp/detached_jobs.py", "_spawn_worker", "subprocess.Popen"): (
         "os.environ.copy()+marker via **kwargs; fixed `sys.executable -m` argv. "
-        "PYTHON* inheritance is"
+        "PYTHON* keys are denied from the untrusted .env by the loader."
     ),
     ("src/ouroboros/dashboard_web/daemon.py", "_spawn_detached", "subprocess.Popen"): (
-        "implicit inherit; fixed `sys.executable -m` argv, detached daemon. PYTHON* inheritance is"
+        "implicit inherit; fixed `sys.executable -m` argv, detached daemon. PYTHON* keys are "
+        "denied from the untrusted .env by the loader."
     ),
     (
         "src/ouroboros/providers/litellm_adapter.py",
@@ -322,7 +322,8 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
     # -- mechanical evaluation of repo-declared commands ---------------------
     ("src/ouroboros/evaluation/mechanical.py", "run_command", "asyncio.create_subprocess_exec"): (
         "os.environ.copy() minus _OUROBOROS_NESTED; runs .ouroboros/mechanical.toml "
-        "commands. Not routed through sanitized_verify_environment:"
+        "commands; the repo already controls the command text, so env from the same repo adds no "
+        "capability. Not routed through sanitized_verify_environment."
     ),
     # -- verify gate plumbing (env supplied by the three sanitized callers) --
     (
@@ -341,7 +342,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
     # -- launchers / relaunches ---------------------------------------------
     ("src/ouroboros/config_tui/launcher.py", "_relaunch_with_tui_profile", "os.execvpe"): (
         "os.environ.copy()+bootstrap marker; `uvx --isolated` relaunch of ourselves. "
-        "XDG_DATA_HOME concern is"
+        "XDG_DATA_HOME (uv resolution) is an open question in THREAT_MODEL.md."
     ),
     ("src/ouroboros/cli/commands/tui.py", "open_command", "subprocess.Popen"): (
         "implicit inherit; opens a terminal emulator with a shlex-quoted argv built "
@@ -380,7 +381,8 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
         "implicit inherit; `omp config get|set <literal>` (two spawns in one function)."
     ),
     ("src/ouroboros/cli/opencode_config.py", "_debug_paths_config_dir", "subprocess.run"): (
-        "implicit inherit; `opencode debug paths` probe. APPDATA root gap is"
+        "implicit inherit; `opencode debug paths` probe. APPDATA is OS-populated on Windows, so "
+        "the loader never overrides it."
     ),
     ("src/ouroboros/copilot/model_discovery.py", "_resolve_token", "subprocess.run"): (
         "implicit inherit; `gh auth token`."
@@ -402,7 +404,7 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
         "src/ouroboros/orchestrator/runtime_evidence.py",
         "run",
         "subprocess.run",
-    ): "implicit inherit; HeadlessRunProbe command. Command source is",
+    ): "implicit inherit; HeadlessRunProbe command from trusted config, not the repo.",
     # -- process-table / system probes (fixed argv, output never a verdict) --
     ("src/ouroboros/cli/commands/mcp.py", "_ps_value", "subprocess.run"): (
         "implicit inherit; `ps -p <pid> -o <literal column>=` (start time / ppid)."
@@ -425,10 +427,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
     ): ("implicit inherit; Windows `wmic process ... delete` cleanup of our own child."),
     # -- git (implicit inherit; GIT_* denial is the sibling PR:
     ("src/ouroboros/auto/checkpoint_commits.py", "_staged_changes", "subprocess.run"): (
-        "implicit inherit; `git diff --cached`. GIT_* gap:"
+        "implicit inherit; `git diff --cached`. GIT_* is denied from the untrusted .env by the loader."
     ),
     ("src/ouroboros/auto/checkpoint_commits.py", "_git", "subprocess.run"): (
-        "implicit inherit; `git add/commit`. GIT_* gap:"
+        "implicit inherit; `git add/commit`. GIT_* is denied from the untrusted .env by the loader."
     ),
     ("src/ouroboros/bigbang/brownfield.py", "_origin_remote_url", "subprocess.run"): (
         "implicit inherit; `git -C <path> remote get-url origin`."
@@ -443,10 +445,10 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
         "implicit inherit; read-only git snapshot commands."
     ),
     ("src/ouroboros/core/worktree.py", "_run_git_process", "subprocess.run"): (
-        "implicit inherit; `git worktree add/remove/status`. GIT_* gap:"
+        "implicit inherit; `git worktree add/remove/status`. GIT_* is denied from the untrusted .env by the loader."
     ),
     ("src/ouroboros/core/worktree.py", "_run_git_bytes", "subprocess.run"): (
-        "implicit inherit; git plumbing with bytes output. GIT_* gap:"
+        "implicit inherit; git plumbing with bytes output. GIT_* is denied from the untrusted .env by the loader."
     ),
     ("src/ouroboros/evolution/frugality.py", "_git", "subprocess.run"): (
         "implicit inherit; `git -C <path> status --porcelain`."
