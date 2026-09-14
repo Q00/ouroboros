@@ -200,6 +200,44 @@ class TestSessionRepository:
         event = mock_event_store.append.call_args[0][0]
         assert event.type == "orchestrator.session.started"
         assert event.aggregate_type == "session"
+        assert "interview_id" not in event.data
+
+    @pytest.mark.asyncio
+    async def test_create_session_persists_explicit_source_interview_link(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """A valid source identity is additive metadata on the start event."""
+        result = await repository.create_session(
+            execution_id="exec_linked",
+            seed_id="seed_linked",
+            session_id="orch_linked",
+            interview_id="interview_source",
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert event.aggregate_id == "orch_linked"
+        assert event.data["interview_id"] == "interview_source"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("interview_id", ["", "   ", " interview_1", "interview_1 ", 7])
+    async def test_create_session_rejects_invalid_source_interview_link(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        interview_id: object,
+    ) -> None:
+        """A present identity claim must fail before any start event is durable."""
+        with pytest.raises(ValueError, match="interview_id"):
+            await repository.create_session(
+                execution_id="exec_invalid_link",
+                seed_id="seed_invalid_link",
+                interview_id=interview_id,  # type: ignore[arg-type]
+            )
+
+        mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_session_persists_seed_goal(
