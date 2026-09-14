@@ -315,6 +315,69 @@ def _upsert_ac_card(
     card["parent_id"] = item.get("parent_node_id") or card.get("parent_id")
 
 
+_INTERVIEW_EVENTS = frozenset(
+    {
+        "interview.started",
+        "interview.response.recorded",
+        "interview.completed",
+        "interview.failed",
+        "interview.question_generation.parent_handoff",
+        "interview.response.emitted",
+        "interview.lateral_review.recommended",
+    }
+)
+
+
+def project_interview(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Project recognized interview lifecycle events into a read-only summary."""
+    projection: dict[str, Any] | None = None
+    for event in events:
+        event_type = event.get("event_type")
+        payload = event.get("payload")
+        interview_id = event.get("aggregate_id")
+        if (
+            event_type not in _INTERVIEW_EVENTS
+            or not isinstance(payload, dict)
+            or not isinstance(interview_id, str)
+            or not interview_id
+        ):
+            continue
+        if projection is None:
+            projection = {
+                "interview_id": interview_id,
+                "status": "started",
+                "round": None,
+                "total_rounds": None,
+                "last_event": event_type,
+            }
+        projection["interview_id"] = interview_id
+        projection["last_event"] = event_type
+        if event_type == "interview.started":
+            projection["status"] = "started"
+        elif event_type in {
+            "interview.response.recorded",
+            "interview.question_generation.parent_handoff",
+            "interview.response.emitted",
+            "interview.lateral_review.recommended",
+        }:
+            projection["status"] = "active"
+            round_number = payload.get("round_number")
+            if isinstance(round_number, int) and not isinstance(round_number, bool):
+                projection["round"] = round_number
+        elif event_type == "interview.completed":
+            projection["status"] = "completed"
+            total_rounds = payload.get("total_rounds")
+            if isinstance(total_rounds, int) and not isinstance(total_rounds, bool):
+                projection["total_rounds"] = total_rounds
+        elif event_type == "interview.failed":
+            projection["status"] = "failed"
+            for key in ("error", "phase"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    projection[key] = value[:500]
+    return projection
+
+
 def reduce_board(
     events: list[dict[str, Any]],
     *,
@@ -345,6 +408,7 @@ def reduce_board(
         "total_tokens": 0.0,
         "frugality": None,
         "frugality_retrospective": None,
+        "interview": project_interview(events),
     }
 
     for ev in events:
@@ -499,5 +563,6 @@ __all__ = [
     "ProviderLedger",
     "fold_provider_event",
     "fold_telemetry_event",
+    "project_interview",
     "reduce_board",
 ]
