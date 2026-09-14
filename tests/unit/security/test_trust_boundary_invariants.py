@@ -17,10 +17,9 @@ Two invariants turn that class into something a PR cannot regress silently:
    :data:`SPAWN_SITE_ALLOWLIST` with a one-line justification. A new site that
    inherits ``os.environ`` verbatim fails CI until someone consciously
    allowlists it.
-2. **A catalog of known loader / executable-selector keys** is denied. Cases
-   the sibling PR ``fix/untrusted-env-runtime-loader`` fixes are marked
-   ``xfail(strict=True)`` so this branch is green now and turns into a hard
-   failure — "un-xfail me" — the moment that PR merges.
+2. **A catalog of known loader / executable-selector keys** is denied by
+   ``config/untrusted_env.py``. A new report of this class is answered by
+   adding the key to both places; forgetting either one fails CI.
 
 Discovery is AST-based (mirroring ``tests/unit/config/test_loader_env.py``) so
 new call sites are found without a hand-maintained roster; the rosters that do
@@ -337,7 +336,8 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str], str] = {
     # -- login-shell env import ---------------------------------------------
     ("src/ouroboros/cli/commands/mcp.py", "_ensure_shell_env", "subprocess.run"): (
         "implicit inherit; spawns `$SHELL -l -c` to dump the login environment. "
-        "SHELL and ZDOTDIR are not denied from the untrusted .env; open question in THREAT_MODEL.md."
+        "SHELL and ZDOTDIR are denied from the untrusted .env (PR #2404), so argv[0] and the "
+        "zsh startup file come from the real environment."
     ),
     # -- launchers / relaunches ---------------------------------------------
     ("src/ouroboros/config_tui/launcher.py", "_relaunch_with_tui_profile", "os.execvpe"): (
@@ -711,7 +711,8 @@ def test_spawn_site_discovery_finds_new_modules(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 #: Keys every reviewer agrees must never come from a cloned repository's .env.
-#: Denied on this branch today.
+#: Adding a key here without adding it to ``untrusted_env.py`` fails CI, which
+#: is the point: the catalog is the reviewer's checklist, the denylist the code.
 LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "PATH",
     "LD_PRELOAD",
@@ -754,13 +755,7 @@ LOADER_KEY_CATALOG_DENIED: tuple[str, ...] = (
     "OUROBOROS_CLI",
     "OUROBOROS_CLI_PATH",
     "OPENCODE_CLI_PATH",
-)
-
-#: Keys the sibling PR `fix/untrusted-env-runtime-loader` adds. Each case is
-#: ``xfail(strict=True)``: green now, and a hard failure ("un-xfail me: move the
-#: key to LOADER_KEY_CATALOG_DENIED") as soon as that PR merges into this
-#: branch's base. Do NOT fix these here — the sibling PR owns the change.
-LOADER_KEY_CATALOG_PENDING_SIBLING_PR: tuple[str, ...] = (
+    # Runtime module-resolution, package-manager and git families (PR #2404).
     "PYTHONPATH",
     "PYTHONHOME",
     "PYTHONSTARTUP",
@@ -780,21 +775,18 @@ LOADER_KEY_CATALOG_PENDING_SIBLING_PR: tuple[str, ...] = (
     "GIT_DIR",
     "GIT_EXEC_PATH",
     "GIT_EXTERNAL_DIFF",
+    # Same-class keys folded into PR #2404 from the threat-model scan.
+    "CLAUDE_CONFIG_DIR",
+    "ZDOTDIR",
+    "SHELL",
+    "BROWSER",
+    "OUROBOROS_BACKEND_LIMITS",
+    "OUROBOROS_MCP_AUTH_TOKEN",
+    "OUROBOROS_IO_JOURNAL_PREVIEWS",
 )
 
-_SIBLING_PR_REASON = "fixed by fix/untrusted-env-runtime-loader PR"
 
-
-def _catalog_cases() -> list[object]:
-    cases: list[object] = [pytest.param(key, id=key) for key in LOADER_KEY_CATALOG_DENIED]
-    cases.extend(
-        pytest.param(key, id=key, marks=pytest.mark.xfail(strict=True, reason=_SIBLING_PR_REASON))
-        for key in LOADER_KEY_CATALOG_PENDING_SIBLING_PR
-    )
-    return cases
-
-
-@pytest.mark.parametrize("key", _catalog_cases())
+@pytest.mark.parametrize("key", LOADER_KEY_CATALOG_DENIED)
 def test_loader_and_executable_selector_catalog_is_denied(key: str) -> None:
     assert is_untrusted_env_denied_key(key), f"{key} must be denied from the untrusted .env"
 
@@ -803,8 +795,3 @@ def test_loader_and_executable_selector_catalog_is_denied(key: str) -> None:
 def test_loader_catalog_denial_is_case_insensitive(key: str) -> None:
     """The loader upper-cases before matching; a lowercase spelling must not slip through."""
     assert is_untrusted_env_denied_key(key.lower())
-
-
-def test_catalog_rosters_are_disjoint() -> None:
-    overlap = sorted(set(LOADER_KEY_CATALOG_DENIED) & set(LOADER_KEY_CATALOG_PENDING_SIBLING_PR))
-    assert not overlap, overlap
