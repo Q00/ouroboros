@@ -28,7 +28,7 @@ from rich.markup import escape
 import typer
 
 from ouroboros.config.models import resolve_event_store_path
-from ouroboros.mcp.client.adapter import create_mcp_client
+from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.types import MCPServerConfig, TransportType
 from ouroboros.package_profiles import (
     UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
@@ -94,7 +94,14 @@ def _local_stdio_probe_environment(home: Path) -> dict[str, str]:
             "OUROBOROS_LOG_LEVEL": "ERROR",
             "OUROBOROS_TELEMETRY": "0",
             "USERPROFILE": str(home),
+            "APPDATA": str(home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home / "AppData" / "Local"),
+            "HOMEDRIVE": home.drive,
+            "HOMEPATH": str(home)[len(home.drive) :],
             "XDG_CONFIG_HOME": str(home / ".config"),
+            "TEMP": str(home),
+            "TMP": str(home),
+            "TMPDIR": str(home),
             "OUROBOROS_AGENT_RUNTIME": "host",
             "OUROBOROS_RUNTIME": "host",
             # Prevent mcp serve's detached-host hydration from sourcing a real
@@ -111,9 +118,9 @@ def _local_stdio_probe_environment(home: Path) -> dict[str, str]:
 
 def _expected_ouroboros_tool_names() -> frozenset[str]:
     """Return the canonical built-in tool surface used by server composition."""
-    from ouroboros.mcp.tools.definitions import OUROBOROS_TOOLS
+    from ouroboros.mcp.tool_manifest import BUILTIN_TOOL_NAMES
 
-    return frozenset(handler.definition.name for handler in OUROBOROS_TOOLS)
+    return BUILTIN_TOOL_NAMES
 
 
 def _not_run_result(name: str, blocked_by: str) -> CheckResult:
@@ -125,163 +132,167 @@ def _not_run_result(name: str, blocked_by: str) -> CheckResult:
     )
 
 
-async def _probe_local_stdio() -> list[CheckResult]:
-    """Probe this installation's own stdio server without invoking a tool.
+def _local_stdio_probe_config(home: Path) -> MCPServerConfig:
+    # -I ignores caller PYTHONPATH and cwd imports. Only this already-imported
+    # installation is added, and cwd changes before importing its entrypoint.
+    source_root = str(Path(__file__).resolve().parents[3])
+    bootstrap = (
+        "import os,sys; "
+        f"os.chdir({str(home)!r}); "
+        f"sys.path.insert(0, {source_root!r}); "
+        "from ouroboros.cli.commands.mcp_doctor import _serve_local_stdio_probe; "
+        "import asyncio; asyncio.run(_serve_local_stdio_probe())"
+    )
+    return MCPServerConfig(
+        name="ouroboros-doctor-local",
+        transport=TransportType.STDIO,
+        command=sys.executable,
+        args=("-I", "-B", "-c", bootstrap),
+        env=_local_stdio_probe_environment(home),
+        timeout=15.0,
+    )
 
-    ``create_mcp_client`` owns subprocess teardown, including partial startup
-    failures. A temporary home prevents the child from reading or mutating the
-    user's Ouroboros configuration, EventStore, and PID registry.
+
+async def _serve_local_stdio_probe() -> None:
+    """Serve the production composition offline, only inside the probe child.
+
+    Bypass CLI dotenv/login-shell hydration, update refresh, and PID registry.
+    All handlers still come from the ordinary production composition root.
     """
-    with tempfile.TemporaryDirectory(prefix="ouroboros-doctor-") as temporary_home:
-        config = MCPServerConfig(
-            name="ouroboros-doctor-local",
-            transport=TransportType.STDIO,
-            command=sys.executable,
-            args=(
-                "-m",
-                "ouroboros",
-                "mcp",
-                "serve",
-                "--transport",
-                "stdio",
-                "--runtime",
-                "host",
-            ),
-            env=_local_stdio_probe_environment(Path(temporary_home)),
-            timeout=15.0,
+
+    def block_network(event: str, _args: tuple[object, ...]) -> None:
+        if event.startswith("socket.") or event in {
+            "subprocess.Popen",
+            "os.system",
+            "os.exec",
+            "os.posix_spawn",
+        }:
+            raise RuntimeError(
+                "Network and command execution are disabled for the local doctor probe"
+            )
+
+    sys.addaudithook(block_network)
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+
+    home = Path.home()
+    store = EventStore(sqlite_database_url(home / "probe.db"))
+    server = None
+    try:
+        await store.initialize()
+        server = create_ouroboros_server(
+            event_store=store, project_dir=home, state_dir=home, runtime_backend="host"
         )
-
+        await server.serve(transport="stdio")
+    finally:
         try:
-            async with create_mcp_client(config, max_retries=1) as adapter:
-                results = [
-                    CheckResult(
-                        name=_LOCAL_STDIO_STAGE_STARTUP,
-                        status="pass",
-                        message="Local Ouroboros server started and stdio transport connected",
-                    )
-                ]
+            if server is not None:
+                await server.shutdown()
+        finally:
+            await store.close()
 
-                try:
-                    snapshot = adapter.server_snapshot
-                    protocol_version = adapter.protocol_version
-                except Exception as exc:
-                    results.extend(
-                        [
-                            CheckResult(
-                                name=_LOCAL_STDIO_STAGE_PROTOCOL,
-                                status="fail",
-                                message=f"MCP protocol discovery failed: {exc}",
-                                remediation=(
-                                    "Reinstall the isolated MCP 2 profile and rerun with "
-                                    "--probe-local-stdio."
-                                ),
-                            ),
-                            _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "protocol discovery"),
-                        ]
-                    )
-                    return results
-                if snapshot is None or not protocol_version:
-                    results.extend(
-                        [
-                            CheckResult(
-                                name=_LOCAL_STDIO_STAGE_PROTOCOL,
-                                status="fail",
-                                message="Connected, but MCP protocol discovery returned no snapshot",
-                                remediation=(
-                                    "Reinstall the isolated MCP 2 profile and rerun with "
-                                    "--probe-local-stdio."
-                                ),
-                            ),
-                            _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "protocol discovery"),
-                        ]
-                    )
-                    return results
 
-                results.append(
-                    CheckResult(
-                        name=_LOCAL_STDIO_STAGE_PROTOCOL,
-                        status="pass",
-                        message=f"Negotiated MCP protocol {protocol_version}",
-                    )
-                )
-
-                try:
-                    tools_result = await adapter.list_tools()
-                except Exception as exc:
-                    results.append(
-                        CheckResult(
-                            name=_LOCAL_STDIO_STAGE_TOOLS,
-                            status="fail",
-                            message=f"MCP tools/list failed: {exc}",
-                            remediation=(
-                                "Inspect the server stderr and reinstall the isolated MCP 2 profile."
-                            ),
-                        )
-                    )
-                    return results
-                if tools_result.is_err:
-                    results.append(
-                        CheckResult(
-                            name=_LOCAL_STDIO_STAGE_TOOLS,
-                            status="fail",
-                            message=f"MCP tools/list failed: {tools_result.error}",
-                            remediation=(
-                                "Inspect the server stderr and reinstall the isolated MCP 2 profile."
-                            ),
-                        )
-                    )
-                    return results
-
-                actual_names = frozenset(tool.name for tool in tools_result.value)
-                try:
-                    expected_names = _expected_ouroboros_tool_names()
-                except Exception as exc:
-                    results.append(
-                        CheckResult(
-                            name=_LOCAL_STDIO_STAGE_TOOLS,
-                            status="fail",
-                            message=f"Could not load the expected Ouroboros tool surface: {exc}",
-                            remediation="Reinstall Ouroboros and rerun the local stdio probe.",
-                        )
-                    )
-                    return results
-                missing_names = sorted(expected_names - actual_names)
-                if missing_names:
-                    results.append(
-                        CheckResult(
-                            name=_LOCAL_STDIO_STAGE_TOOLS,
-                            status="fail",
-                            message="Missing expected Ouroboros tools: " + ", ".join(missing_names),
-                            remediation=(
-                                "Reinstall Ouroboros and verify that the client and server use "
-                                "the same package version."
-                            ),
-                        )
-                    )
-                    return results
-
-                results.append(
-                    CheckResult(
-                        name=_LOCAL_STDIO_STAGE_TOOLS,
-                        status="pass",
-                        message=f"Recognized {len(actual_names)} Ouroboros tools (none called)",
-                    )
-                )
-                return results
-        except Exception as exc:
+async def _collect_local_stdio_results(
+    adapter: MCPClientAdapter, config: MCPServerConfig
+) -> list[CheckResult]:
+    connected = await adapter.connect(config)
+    if connected.is_err:
+        if adapter.transport_entered:
             return [
+                CheckResult(_LOCAL_STDIO_STAGE_STARTUP, "pass", "Local stdio streams established"),
                 CheckResult(
-                    name=_LOCAL_STDIO_STAGE_STARTUP,
-                    status="fail",
-                    message=f"Local server startup or stdio transport failed: {exc}",
-                    remediation=(
-                        "Run `ouroboros mcp doctor` to resolve package checks, then rerun "
-                        "with --probe-local-stdio."
-                    ),
+                    _LOCAL_STDIO_STAGE_PROTOCOL,
+                    "fail",
+                    f"MCP protocol discovery failed: {connected.error}",
+                    "Check protocol compatibility in the isolated MCP 2 installation.",
                 ),
-                _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "startup/transport"),
-                _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "startup/transport"),
+                _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "protocol discovery"),
             ]
+        return [
+            CheckResult(
+                _LOCAL_STDIO_STAGE_STARTUP,
+                "fail",
+                f"Local server startup or stdio transport failed: {connected.error}",
+                "Resolve package checks, then rerun --probe-local-stdio.",
+            ),
+            _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "startup/transport"),
+            _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "startup/transport"),
+        ]
+    results = [CheckResult(_LOCAL_STDIO_STAGE_STARTUP, "pass", "Local stdio streams established")]
+    if adapter.server_snapshot is None or not adapter.protocol_version:
+        results.extend(
+            [
+                CheckResult(
+                    _LOCAL_STDIO_STAGE_PROTOCOL,
+                    "fail",
+                    "Connected, but MCP protocol discovery returned no snapshot",
+                    "Check protocol compatibility in the isolated MCP 2 installation.",
+                ),
+                _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "protocol discovery"),
+            ]
+        )
+        return results
+    results.append(
+        CheckResult(
+            _LOCAL_STDIO_STAGE_PROTOCOL,
+            "pass",
+            f"Negotiated MCP protocol {adapter.protocol_version}",
+        )
+    )
+    tools = await adapter.list_tools()
+    if tools.is_err:
+        results.append(
+            CheckResult(
+                _LOCAL_STDIO_STAGE_TOOLS,
+                "fail",
+                f"MCP tools/list failed: {tools.error}",
+                "Inspect server stderr and reinstall the isolated MCP 2 profile.",
+            )
+        )
+    else:
+        names = frozenset(tool.name for tool in tools.value)
+        missing = sorted(_expected_ouroboros_tool_names() - names)
+        results.append(
+            CheckResult(
+                _LOCAL_STDIO_STAGE_TOOLS,
+                "fail" if missing else "pass",
+                "Missing expected Ouroboros tools: " + ", ".join(missing)
+                if missing
+                else f"Recognized {len(names)} Ouroboros tools (none called)",
+                "Reinstall matching client and server versions." if missing else "",
+            )
+        )
+    return results
+
+
+async def _probe_local_stdio() -> list[CheckResult]:
+    """Own the isolated offline probe lifecycle and observe teardown results."""
+    with tempfile.TemporaryDirectory(prefix="ouroboros-doctor-") as temporary_home:
+        config = _local_stdio_probe_config(Path(temporary_home))
+        adapter = MCPClientAdapter(max_retries=1)
+        try:
+            results = await _collect_local_stdio_results(adapter, config)
+        except Exception as exc:
+            results = [
+                CheckResult(
+                    _LOCAL_STDIO_STAGE_STARTUP,
+                    "fail",
+                    f"Local probe failed: {exc}",
+                    "Inspect the isolated MCP installation and rerun the doctor.",
+                ),
+                _not_run_result(_LOCAL_STDIO_STAGE_PROTOCOL, "local probe"),
+                _not_run_result(_LOCAL_STDIO_STAGE_TOOLS, "local probe"),
+            ]
+        finally:
+            # Explicit Result inspection also catches a failed cleanup after
+            # partial connect: no passing report escapes before child teardown.
+            cleanup = await adapter.disconnect()
+        if cleanup.is_err:
+            for result in results:
+                result.status = "fail"
+                result.remediation = "Resolve local stdio teardown before rerunning the probe."
+            results[0].message = f"Local stdio teardown failed: {cleanup.error}"
+        return results
 
 
 def check_python_version() -> CheckResult:

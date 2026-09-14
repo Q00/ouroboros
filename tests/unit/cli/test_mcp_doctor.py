@@ -8,7 +8,6 @@ Covers:
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import importlib.metadata
 import json
 from pathlib import Path
@@ -617,20 +616,26 @@ def _fake_probe_client(
     enter_error: Exception | None = None,
     exit_error: Exception | None = None,
 ):
-    """Return a create_mcp_client replacement with observable cleanup."""
+    """Return an adapter factory with explicit connection and cleanup results."""
 
-    @asynccontextmanager
-    async def create_client(config, *, max_retries):
-        captured["config"] = config
+    def create_client(*, max_retries):
         captured["max_retries"] = max_retries
-        if enter_error is not None:
-            raise enter_error
-        try:
-            yield adapter
-        finally:
+
+        async def connect(config):
+            captured["config"] = config
+            if enter_error is not None:
+                adapter.transport_entered = False
+                return Result.err(enter_error)
+            adapter.transport_entered = True
+            return Result.ok(None)
+
+        async def disconnect():
             captured["cleaned_up"] = True
-            if exit_error is not None:
-                raise exit_error
+            return Result.err(exit_error) if exit_error else Result.ok(None)
+
+        adapter.connect = AsyncMock(side_effect=connect)
+        adapter.disconnect = AsyncMock(side_effect=disconnect)
+        return adapter
 
     return create_client
 
@@ -659,7 +664,7 @@ class TestLocalStdioProbe:
         with (
             patch.object(sys, "platform", host_platform),
             patch(
-                "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
                 _fake_probe_client(adapter, captured),
             ),
             patch(
@@ -671,16 +676,10 @@ class TestLocalStdioProbe:
 
         config = captured["config"]
         assert config.command == sys.executable
-        assert config.args == (
-            "-m",
-            "ouroboros",
-            "mcp",
-            "serve",
-            "--transport",
-            "stdio",
-            "--runtime",
-            "host",
-        )
+        assert config.args[:3] == ("-I", "-B", "-c")
+        assert "os.chdir(" in config.args[3]
+        assert "_serve_local_stdio_probe" in config.args[3]
+        assert "do-not-execute" not in config.args[3]
         assert config.transport is TransportType.STDIO
         assert config.url is None
         assert "OUROBOROS_MCP_COMMAND" not in config.env
@@ -696,7 +695,7 @@ class TestLocalStdioProbe:
         captured: dict[str, object] = {}
         adapter = _successful_probe_adapter("ouroboros_interview")
         with patch(
-            "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
             _fake_probe_client(
                 adapter,
                 captured,
@@ -722,7 +721,7 @@ class TestLocalStdioProbe:
         adapter = _successful_probe_adapter("ouroboros_interview")
         adapter.server_snapshot = None
         with patch(
-            "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
             _fake_probe_client(adapter, captured),
         ):
             results = await _probe_local_stdio()
@@ -740,7 +739,7 @@ class TestLocalStdioProbe:
         adapter = _successful_probe_adapter()
         adapter.list_tools.return_value = Result.err(RuntimeError("tools/list unavailable"))
         with patch(
-            "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
             _fake_probe_client(adapter, captured),
         ):
             results = await _probe_local_stdio()
@@ -758,7 +757,7 @@ class TestLocalStdioProbe:
         adapter = _successful_probe_adapter("ouroboros_interview")
         with (
             patch(
-                "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
                 _fake_probe_client(adapter, captured),
             ),
             patch(
@@ -779,7 +778,7 @@ class TestLocalStdioProbe:
         adapter = _successful_probe_adapter("ouroboros_interview")
         with (
             patch(
-                "ouroboros.cli.commands.mcp_doctor.create_mcp_client",
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
                 _fake_probe_client(
                     adapter,
                     captured,
