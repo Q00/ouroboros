@@ -385,7 +385,9 @@ function Test-PythonAtLeast([string]$Exe) {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     if ($LASTEXITCODE -ne 0 -or -not ($out -match '^\d+\.\d+$')) { return $false }
-    return ([version]$out -ge $MinPython)
+    $parsedVersion = $null
+    if (-not [version]::TryParse($out, [ref]$parsedVersion)) { return $false }
+    return ($parsedVersion -ge $MinPython)
 }
 if ((Test-PythonAtLeast 'python3') -or (Test-PythonAtLeast 'python')) {
     Write-Ok "Python >= $MinPython found on PATH (used by the Claude Code plugin hooks)"

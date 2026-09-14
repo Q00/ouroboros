@@ -140,6 +140,16 @@ def test_python_stderr_with_successful_exit(shell: tuple[str, bool], tmp_path: P
     assert _probe(shell, sys.executable, extra_env={"PYTHONPATH": str(tmp_path)})["result"] is True
 
 
+def test_unrepresentable_python_version_is_optional(
+    shell: tuple[str, bool], tmp_path: Path
+) -> None:
+    (tmp_path / "sitecustomize.py").write_text(
+        "import sys\nsys.version_info = (999999999999999999999999999999, 1)\n",
+        encoding="utf-8",
+    )
+    assert _probe(shell, sys.executable, extra_env={"PYTHONPATH": str(tmp_path)})["result"] is False
+
+
 def test_windows_store_alias_is_skipped(shell: tuple[str, bool], tmp_path: Path) -> None:
     # Resolution-only fixture: an invalid executable proves the existing alias
     # guard returns before invocation, without opening the user's Store app.
