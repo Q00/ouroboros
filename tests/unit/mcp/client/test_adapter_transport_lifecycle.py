@@ -172,7 +172,7 @@ class TestFactory:
         assert client_class.call_args.kwargs["mode"] == "auto"
         assert resources.client is sdk_client and resources.http_client is http_client
 
-    def test_stdio_factory_delegates_transport_lifecycle_to_high_level_client(self) -> None:
+    async def test_stdio_factory_delegates_transport_lifecycle_to_high_level_client(self) -> None:
         transport = MagicMock()
         sdk_client = MagicMock()
         with (
@@ -180,6 +180,45 @@ class TestFactory:
             patch("mcp.client.Client", return_value=sdk_client) as client_class,
         ):
             resources = build_sdk_client(_config())
-        assert client_class.call_args.args[0] is transport
+        observed = client_class.call_args.args[0]
+        assert resources.transport_lifecycle.entered is False
+        async with observed:
+            assert resources.transport_lifecycle.entered is True
+        transport.__aenter__.assert_awaited_once()
+        transport.__aexit__.assert_awaited_once()
         assert client_class.call_args.kwargs["mode"] == "auto"
         assert resources.http_client is None
+
+
+async def test_context_exit_propagates_real_adapter_disconnect_error():
+    adapter = MCPClientAdapter()
+    adapter._client = _entered_client(exit_error=RuntimeError("child reap failed"))
+    with pytest.raises(Exception, match="child reap failed"):
+        async with adapter:
+            pass
+
+
+async def test_failed_discovery_preserves_cleanup_error_for_probe():
+    adapter = MCPClientAdapter(max_retries=1)
+    client = _entered_client(
+        enter_error=RuntimeError("discovery rejected"), exit_error=RuntimeError("child reap failed")
+    )
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client", return_value=SDKClientResources(client)
+    ):
+        result = await adapter.connect(_config())
+    assert result.is_err and "discovery rejected" in str(result.error)
+    cleanup = await adapter.disconnect()
+    assert cleanup.is_err and "child reap failed" in str(cleanup.error)
+
+
+@pytest.mark.parametrize("body_error", [asyncio.CancelledError, KeyboardInterrupt, ValueError])
+async def test_context_exit_preserves_body_exception_when_cleanup_fails(body_error):
+    adapter = MCPClientAdapter()
+    adapter._client = _entered_client(exit_error=RuntimeError("child reap failed"))
+    original = body_error("body failed")
+    with pytest.raises(body_error) as caught:
+        async with adapter:
+            raise original
+    assert caught.value is original
+    assert any("child reap failed" in note for note in original.__notes__)
