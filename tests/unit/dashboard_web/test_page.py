@@ -78,10 +78,10 @@ class TestLivePage:
         assert "renderInterview(meta && meta.interview)" in INDEX_HTML
         assert "interview.last_event" in INDEX_HTML
         assert "interview.error" in INDEX_HTML
-        assert "method:\"POST\"" not in INDEX_HTML
-        assert "method:\"PUT\"" not in INDEX_HTML
-        assert "method:\"PATCH\"" not in INDEX_HTML
-        assert "method:\"DELETE\"" not in INDEX_HTML
+        assert 'method:"POST"' not in INDEX_HTML
+        assert 'method:"PUT"' not in INDEX_HTML
+        assert 'method:"PATCH"' not in INDEX_HTML
+        assert 'method:"DELETE"' not in INDEX_HTML
 
 
 class TestStaticSnapshot:
