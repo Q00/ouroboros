@@ -613,7 +613,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: all_pass],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
     def test_exits_1_when_any_fail(self):
@@ -624,7 +624,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: failing, lambda: passing],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 1
 
     def test_exits_0_when_only_warn(self):
@@ -634,7 +634,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: warning],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
     def test_json_flag_emits_valid_json(self):
@@ -645,7 +645,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_a, lambda: check_b],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert isinstance(data, list)
@@ -661,7 +661,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         data = json.loads(result.output)
         for item in data:
             assert "name" in item
@@ -676,7 +676,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert "mcp" in result.output
 
     def test_human_output_shows_remediation(self):
@@ -691,7 +691,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert "pip install mcp" in result.output
 
     def test_human_output_preserves_literal_package_profiles(self):
@@ -706,7 +706,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 1
         for profile in (
@@ -725,7 +725,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: failing],
         ):
-            result = runner.invoke(app, ["--json"])
+            result = runner.invoke(app, ["doctor", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data[0]["status"] == "fail"
@@ -743,7 +743,7 @@ class TestDoctorCommand:
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: pass_result, lambda: warn_result],
         ):
-            result = runner.invoke(app, [])
+            result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 
 
