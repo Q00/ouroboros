@@ -781,3 +781,64 @@ def _import_error_for(module_name: str):
         return real_import(name, *args, **kwargs)
 
     return _side_effect
+
+
+def test_doctor_runtime_json_uses_real_collector(tmp_path: Path):
+    from ouroboros.cli.commands.mcp import app
+
+    with patch("ouroboros.mcp.machine_runtime._DEFAULT_REGISTRY", tmp_path):
+        result = runner.invoke(app, ["doctor-runtime", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload) == {"path", "loopback", "registry"}
+    assert "PATH" not in json.dumps(payload)
+    assert all(
+        item["status"] in {"available", "unavailable", "not_checked"}
+        for item in payload["loopback"]
+    )
+
+
+def test_doctor_runtime_human_output_is_readable(tmp_path: Path):
+    from ouroboros.cli.commands.mcp import app
+
+    with patch("ouroboros.mcp.machine_runtime._DEFAULT_REGISTRY", tmp_path):
+        result = runner.invoke(app, ["doctor-runtime"])
+
+    assert result.exit_code == 0
+    assert "Ouroboros MCP Runtime Facts" in result.output
+    assert "registry records" in result.output
+
+
+def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
+    from types import SimpleNamespace
+
+    app = _make_app()
+    callback = next(
+        command.callback
+        for command in app.registered_commands
+        if command.callback.__name__ == "doctor_runtime"
+    )
+    snapshot = SimpleNamespace(
+        path=SimpleNamespace(candidates=(), truncated=False),
+        loopback=(
+            SimpleNamespace(family="ipv4", status="unavailable", port=None, reason="denied"),
+        ),
+        registry=SimpleNamespace(records=(), status="available"),
+    )
+    with patch(
+        "ouroboros.mcp.machine_runtime.collect_runtime_snapshot",
+        return_value=snapshot,
+    ):
+        callback()
+
+    output = capsys.readouterr().out
+    assert "loopback ipv4: unavailable (port -, denied)" in output
+
+
+def test_doctor_runtime_command_is_registered():
+    from ouroboros.cli.commands.mcp import app
+
+    callback_names = [cmd.callback.__name__ for cmd in app.registered_commands]
+
+    assert "doctor_runtime" in callback_names
