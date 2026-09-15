@@ -67,6 +67,10 @@ _MAX_EXTRACTION_RETRIES = 1
 _AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
 _AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
 _WORD_APOSTROPHE_SUFFIXES = frozenset({"d", "ll", "m", "re", "s", "t", "ve"})
+# Some CLI agents prefix emitted lines with a wall-clock stamp ("[13:57:34] GOAL: ...").
+# It breaks the line-anchored field prefixes, and the preamble scan then drops
+# the whole GOAL line as conversational text.
+_LINE_TIMESTAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -2190,7 +2194,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         Returns:
             Cleaned response starting from first recognized prefix.
         """
-        text = response.strip()
+        text = _LINE_TIMESTAMP_RE.sub("", response.strip())
 
         # Strip markdown code block markers
         code_block_match = re.search(r"```(?:\w*)\n(.*?)```", text, re.DOTALL)

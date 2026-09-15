@@ -2700,6 +2700,24 @@ class TestSeedGeneratorErrorHandling:
 class TestSeedGeneratorRobustParsing:
     """Test SeedGenerator handles non-ideal LLM responses."""
 
+    def test_parse_response_with_cli_timestamp_prefix(self) -> None:
+        """A wall-clock prefix on the GOAL line does not drop the goal field."""
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = "[13:57:34] " + create_valid_extraction_response(goal="Stamped goal")
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["goal"] == "Stamped goal"
+
+    def test_parse_response_keeps_mid_line_bracket_timestamp(self) -> None:
+        """Only a line-leading stamp is stripped; values keep their brackets."""
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(goal="Ship by [13:57:34] sharp")
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["goal"] == "Ship by [13:57:34] sharp"
+
     @pytest.mark.asyncio
     async def test_parse_response_with_conversational_preamble(self) -> None:
         """Parser handles LLM response with prose before structured output."""
