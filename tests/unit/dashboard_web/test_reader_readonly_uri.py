@@ -2816,9 +2816,7 @@ async def test_event_tail_reads_only_explicitly_linked_interview_from_real_sqlit
         ]
         assert all("aggregate_id" in event for event in events)
         assert "interview-unrelated" not in {event["aggregate_id"] for event in events}
-        assert "interview.future.unsupported" not in {
-            event["event_type"] for event in events
-        }
+        assert "interview.future.unsupported" not in {event["event_type"] for event in events}
 
 
 @pytest.mark.asyncio

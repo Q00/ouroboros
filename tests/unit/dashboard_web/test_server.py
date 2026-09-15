@@ -279,7 +279,7 @@ def test_snapshot_and_sse_share_linked_interview_read_only_projection(tmp_path) 
     assert streamed["meta"]["interview"] == expected
     for value in ("interview-http", "active", "interview.response.recorded"):
         assert value in snapshot_html
-    assert "method:\"POST\"" not in snapshot_html
+    assert 'method:"POST"' not in snapshot_html
 
 
 def test_stream_contract_loss_closes_without_handler_traceback(tmp_path, monkeypatch) -> None:

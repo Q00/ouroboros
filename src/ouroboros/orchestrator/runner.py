@@ -8653,8 +8653,7 @@ class OrchestratorRunner:
                 )
                 interview_id = getattr(seed.metadata, "interview_id", None)
                 if interview_id is not None and (
-                    "interview_id" in create_session_parameters
-                    or accepts_extra_session_metadata
+                    "interview_id" in create_session_parameters or accepts_extra_session_metadata
                 ):
                     create_session_kwargs["interview_id"] = interview_id
                 if "acceptance_root_indices" in create_session_parameters:

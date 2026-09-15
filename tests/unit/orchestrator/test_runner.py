@@ -3091,9 +3091,7 @@ class TestOrchestratorRunner:
 
         try:
             assert result.is_ok
-            assert create_session.await_args.kwargs["interview_id"] == (
-                "interview_runner_source"
-            )
+            assert create_session.await_args.kwargs["interview_id"] == ("interview_runner_source")
         finally:
             runner._retire_process_local_authority(
                 session_id=tracker.session_id,
