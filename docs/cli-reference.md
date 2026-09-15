@@ -1223,6 +1223,21 @@ The snapshot covers OS, architecture, Python, current executable, installed `our
 
 ```bash
 ouroboros mcp doctor [--json] [--machine-snapshot]
+
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+The command reads no registry contents, process arguments, credentials, or
+environment values other than `PATH`; it does not execute commands, connect to
+the network, or mutate the machine. PATH and registry scans have fixed bounds.
+Loopback probes only bind an ephemeral socket and close it immediately.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
 ```
 
 ### `mcp serve`
