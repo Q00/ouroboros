@@ -28,6 +28,7 @@ from typing import Literal
 import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.evaluation.command_parsing import split_command
 from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
 from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
@@ -513,16 +514,14 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
         return False
 
     try:
-        import shlex
-
-        parts = shlex.split(command, posix=(os.name != "nt"))
+        parts = split_command(command)
     except ValueError:
         return False
     if not parts:
         return False
 
     raw_head = parts[0]
-    if raw_head.startswith(("/", "~")) or ".." in Path(raw_head).parts:
+    if PureWindowsPath(raw_head).anchor or raw_head.startswith("~") or ".." in Path(raw_head).parts:
         return False
     # ``./mvnw`` is fine, but any other path that points outside the cwd
     # component (e.g. ``bin/foo`` pointing at a committed shim) would still

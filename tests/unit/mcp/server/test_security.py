@@ -235,6 +235,47 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
+    def test_validate_allows_shell_chains_inside_session_context(self) -> None:
+        """Interview-less seed material is verbatim prose, never shell input.
+
+        A verifiable acceptance criterion is usually a shell chain, and a
+        decision is a sentence with a semicolon; both were rejected under the
+        container's leaf names while the same bytes passed as ``seed_content``.
+        """
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_generate_seed",
+            {
+                "session_context": {
+                    "goal": "Add a --json flag; keep default output byte-identical",
+                    "acceptance_criteria": [
+                        "`uv run ruff check src/ && uv run pytest tests/unit/cli -q` exits 0",
+                        "`ouroboros version | head -1` prints the semver",
+                    ],
+                    "constraints": ["No new dependencies || vendored code"],
+                    "decisions": ["Use the existing typer option style; no global flag"],
+                    "project_type": "brownfield",
+                }
+            },
+        )
+
+        assert result.is_ok
+
+    def test_validate_still_checks_siblings_of_session_context(self) -> None:
+        """The exemption is scoped to the container, not to the whole call."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_generate_seed",
+            {
+                "session_context": {"goal": "x", "acceptance_criteria": ["a && b"]},
+                "session_id": "s1; rm -rf /tmp/nope",
+            },
+        )
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
+        assert "session_id" in str(result.error)
+
     def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
         """Operator-supplied user_preferences carry freetext, never shell input."""
         validator = InputValidator()

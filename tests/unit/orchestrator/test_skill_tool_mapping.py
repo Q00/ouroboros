@@ -215,7 +215,9 @@ def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
             "problem_context",
             "failed_attempts",
         ),
-        "ouroboros_generate_seed": ("session_id",),
+        # The seed skill declares both entrances: the interview session and
+        # the interview-less ``session_context`` object (RFC D6).
+        "ouroboros_generate_seed": ("session_context", "session_id"),
         "ouroboros_session_status": ("session_id",),
         "ouroboros_measure_drift": (
             "session_id",

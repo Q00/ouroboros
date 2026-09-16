@@ -9,6 +9,7 @@ from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_has_conflicting_tool_call_ids,
+    _runtime_message_has_following_success,
     _runtime_message_has_success_evidence,
     _runtime_message_is_tool_completion,
     _runtime_message_supports_command_claim,
@@ -19,7 +20,6 @@ from ouroboros.orchestrator.evidence.claims import (
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.harness_observation import (
     observation_from_message,
-    observations_confirm_unmutated_workspace,
 )
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
@@ -31,6 +31,76 @@ from ouroboros.orchestrator.evidence.shell_parsing import (
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
 )
+
+
+def _runtime_messages_have_completed_command_for_test_claim(
+    *, value: str, messages: tuple[AgentMessage, ...]
+) -> bool:
+    """Diagnose a command-valued test claim without approving its result.
+
+    A correlated zero-exit command is related runtime work, but need not have
+    run any tests. This runner-neutral fallback is only for classifying an
+    already rejected claim as an evidence-form mismatch. It does not parse
+    output or infer test names, and requires a distinct, ID-linked completion.
+    """
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
+            continue
+        call_id = _runtime_message_tool_call_id(message)
+        if call_id is None or not _runtime_message_supports_command_claim(value, message):
+            continue
+        # Unlike inline success, following-success requires unique starts and
+        # completions and rejects contradictory correlation aliases.
+        if not _runtime_message_has_following_success(messages, index):
+            continue
+        completions = [
+            candidate
+            for candidate in messages
+            if _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+        ]
+        # Also reject reused IDs with a completion preceding this start.
+        if len(completions) != 1:
+            continue
+        completion = completions[0]
+        exit_code = completion.data.get("exit_code")
+        if type(exit_code) is not int or exit_code != 0:
+            continue
+        pair = [message, completion]
+        if _test_chunk_has_structured_failure(pair):
+            continue
+        if any(_completed_command_has_invalid_status(item) for item in pair):
+            continue
+        return True
+    return False
+
+
+def _completed_command_has_invalid_status(message: AgentMessage) -> bool:
+    """Veto malformed markers and nested exits in the diagnostic-only path."""
+    containers = [message.data]
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        containers.append(tool_result)
+    for container in containers:
+        if container.get("is_error_invalid") is True:
+            return True
+        if "exit_code" in container and (
+            type(container["exit_code"]) is not int or container["exit_code"] != 0
+        ):
+            return True
+        for key in ("status", "runtime_event_type"):
+            if key in container and not isinstance(container[key], str):
+                return True
+        if str(container.get("status", "")).strip().lower() in {"failed", "error"}:
+            return True
+        if (
+            str(container.get("runtime_event_type", ""))
+            .strip()
+            .lower()
+            .endswith((".failed", ".error"))
+        ):
+            return True
+    return False
 
 
 def _runtime_messages_have_masked_test_command_for_test_claim(
@@ -433,6 +503,14 @@ _FUNCTIONAL_INTERPRETER_NAMES = frozenset(
     {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "php", "deno", "bun"}
 )
 
+# Native Windows verification commonly exercises the produced artifact
+# directly (for example ``.\\hello.exe``) instead of routing it through an
+# interpreter.  Treat executable/script suffixes as functional command
+# anchors; the existing workspace-file and zero-exit checks still provide the
+# authority, so this does not admit arbitrary command names or narration.
+_FUNCTIONAL_EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1")
+_FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+
 
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
@@ -450,9 +528,25 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
     the tier entirely.
     """
     tokens = [token.strip("'\"") for token in command.split()]
-    has_interpreter = any(
-        token.rsplit("/", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES or token.startswith("./")
+    has_powershell = any(
+        token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower() in _FUNCTIONAL_POWERSHELL_NAMES
         for token in tokens
+    )
+    has_start_process = any(token.lower() == "start-process" for token in tokens)
+    has_interpreter = any(
+        token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] in _FUNCTIONAL_INTERPRETER_NAMES
+        or token.startswith(("./", ".\\"))
+        or (
+            token.lower().endswith(_FUNCTIONAL_EXECUTABLE_SUFFIXES)
+            and (
+                index == 0
+                or (
+                    tokens[index - 1].lower() in {"-filepath", "-file", "--file"}
+                    and (has_powershell or has_start_process)
+                )
+            )
+        )
+        for index, token in enumerate(tokens)
     )
     if not has_interpreter:
         return ()
@@ -496,13 +590,17 @@ def _functional_command_supports_test_claim(
         _runtime_messages_support_file_claim(invoked, messages, task_cwd=task_cwd)
         for invoked in invoked_files
     ):
-        # The invoked artifact must be this run's own work — unless the
-        # harness witnessed a pure-verification run (zero mutation, zero
-        # deletion, complete snapshots), where the cited artifact must still
-        # be a real workspace file: existence now proves existence throughout
-        # the leaf's window, so a ghost path in a comment stays rejected.
-        if not observations_confirm_unmutated_workspace(messages):
-            return False
+        # A ``tests_passed`` claim asserts that a behaviour was checked, not
+        # that this leaf authored the artifact it checked. A dependent AC
+        # routinely verifies a sibling's artifact (the leaf that adds the
+        # unknown-command test edits only the test file and then runs
+        # ``python3 habit_tracker.py unknown-command``); requiring the
+        # invoked file to be this run's own mutation rejected 43 of 90
+        # transcript-backed, zero-exit claims on the 2026-09 bench. Authorship
+        # stays a ``files_touched`` question. What this tier still requires
+        # of the artifact is that it is a real regular file in the workspace
+        # at verification time, so a ghost path in a comment stays rejected;
+        # without a workspace to check against nothing can vouch for it.
         if not any(
             _invoked_file_is_existing_workspace_file(invoked, task_cwd=task_cwd)
             for invoked in invoked_files

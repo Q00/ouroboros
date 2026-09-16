@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -88,6 +88,7 @@ _OUROBOROS_ERROR_NAMES = frozenset(
         "MCPAuthError",
         "MCPResourceNotFoundError",
         "MCPToolError",
+        "JobWorkError",
     }
 )
 
@@ -155,6 +156,33 @@ def _is_logical_error(value: object) -> bool:
         return False
 
 
+_SEED_TOOL_NAME = "ouroboros_generate_seed"
+
+
+def _seed_origin(name: str, value: object) -> str | None:
+    """Name which entrance a completed ``ouroboros_generate_seed`` call took.
+
+    The interview-less handler stamps ``meta.source == "session_context"`` and
+    ``meta.status`` (``seed_generated`` or ``gap_questions_required``); the
+    interview handler stamps neither, so an absent marker is the interview.
+    Returns ``None`` for every other tool. Reads only those two closed
+    fields, never the Seed text, and never raises (see ``_is_logical_error``).
+    """
+    if name != _SEED_TOOL_NAME:
+        return None
+    try:
+        meta = getattr(value, "meta", None)
+        if not isinstance(meta, Mapping):
+            return "interview"
+        if meta.get("source") != "session_context":
+            return "interview"
+        if meta.get("status") == "gap_questions_required":
+            return "session_context_gap"
+        return "session_context"
+    except BaseException:  # noqa: BLE001 -- sanitization-only
+        return None
+
+
 def _duration_ms(started_at: float) -> float:
     return (time.monotonic() - started_at) * 1000
 
@@ -202,6 +230,7 @@ async def observe_adapter_tool_call[T, E](
         error_type=_safe_error_type(result.error) if result.is_err else None,
         blocked=logical_error,
         registered=registered,
+        origin=_seed_origin(safe_name, result.value) if result.is_ok else None,
     )
     return result
 
@@ -313,6 +342,7 @@ async def call_sdk_tool(
         duration_ms=_duration_ms(started_at),
         blocked=logical_error,
         registered=registered,
+        origin=_seed_origin(safe_name, value),
     )
     return response
 

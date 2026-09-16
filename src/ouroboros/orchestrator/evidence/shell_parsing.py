@@ -45,7 +45,13 @@ def _test_command_invocation(command: str) -> str | None:
     body = _shell_command_body(normalized)
     if body is None:
         return None
-    return _test_invocation_from_shell_body(body)
+    invocation = _test_invocation_from_shell_body(body)
+    if invocation is not None:
+        return invocation
+    # Nested wrapper (``zsh -lc "zsh -lc '<test cmd>'"``): the body is itself a
+    # wrapper, so look one layer further. Recursion ends when the body is no
+    # longer a shell ``-c`` form.
+    return _test_command_invocation(body)
 
 
 def _test_command_invocation_allowing_output_plumbing(command: str) -> str | None:
@@ -855,10 +861,21 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
             aliases.append(candidate)
 
     append_alias(_normalized_shell_words_text(command))
+    # A leaf sometimes nests the wrapper -- ``/bin/zsh -lc "/bin/zsh -lc
+    # '<body>'"`` (observed on codex when it re-issues a command it read from
+    # a seed). Each layer is the same runtime-backed wrapper around the same
+    # argv vector, so peel until the body is no longer a shell ``-c`` form.
+    # Bounded so a pathological input cannot loop; each layer must parse as
+    # an exact wrapper, so this never widens proof to arbitrary substrings.
     shell_body = _shell_command_body(command)
-    normalized_shell_body = _normalized_evidence_text(shell_body) if shell_body else None
-    append_alias(normalized_shell_body)
-    append_alias(_normalized_shell_words_text(shell_body) if shell_body else None)
+    for _ in range(4):
+        normalized_shell_body = _normalized_evidence_text(shell_body) if shell_body else None
+        append_alias(normalized_shell_body)
+        append_alias(_normalized_shell_words_text(shell_body) if shell_body else None)
+        inner_body = _shell_command_body(shell_body) if shell_body else None
+        if not inner_body or inner_body == shell_body:
+            break
+        shell_body = inner_body
     test_invocation = _test_command_invocation(command)
     append_alias(test_invocation)
     # A recorded command may append output plumbing (``... 2>&1 | tail -20``)

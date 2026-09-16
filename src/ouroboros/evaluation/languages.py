@@ -17,13 +17,12 @@ skips gracefully rather than running the wrong tool.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
-from pathlib import Path
-import shlex
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import structlog
 
+from ouroboros.evaluation.command_parsing import split_command
 from ouroboros.evaluation.mechanical import MechanicalConfig
 
 log = structlog.get_logger()
@@ -191,7 +190,7 @@ def _parse_command(
         log.warning("mechanical.toml_shell_operator_blocked", command=value)
         return None
     try:
-        parts = tuple(shlex.split(value, posix=(os.name != "nt")))
+        parts = tuple(split_command(value))
     except ValueError as exc:
         log.warning("mechanical.toml_parse_error", command=value, error=str(exc))
         return None
@@ -201,7 +200,7 @@ def _parse_command(
     # Reject absolute paths and other non-allowlisted forms. Basename-only
     # allowlisting still accepts project-local wrappers like ``./mvnw``
     # because ``Path("./mvnw").name == "mvnw"`` matches the allowlist.
-    if head.startswith("/") or head.startswith("~"):
+    if PureWindowsPath(head).anchor or head.startswith("~"):
         log.warning("mechanical.toml_absolute_path_blocked", command=value)
         return None
     executable = Path(head).name

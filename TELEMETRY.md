@@ -87,10 +87,10 @@ use. Each row below is the exact property set accepted by the serializer.
 | `service_active` | The running MCP service receives its first tool request that day | service (`mcp`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `mcp_serve_started` | A host attaches the Ouroboros MCP server — at most one row per user/day/transport | transport (`stdio`/`sse`/`streamable-http`/`unknown`), runtime_backend, app_version, os, ci, `$insert_id` |
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
-| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), runtime_backend, app_version, os, ci, `$insert_id` |
+| `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow or direct evaluation reaches a terminal result inside Ouroboros | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
-| `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`unknown`), runtime_backend, app_version, os, ci |
+| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
+| `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
 Notes:
@@ -104,6 +104,13 @@ Notes:
   removed. `mcp_serve_started` is the top of the activation funnel ("MCP
   attached"), distinct from `service_active` ("made a tool request").
 
+- `origin` on a `command=seed` row names which entrance produced the row:
+  `interview` (a completed interview session), `session_context` (the
+  interview-less path crystallized a Seed from session-settled material), or
+  `session_context_gap` (the interview-less path returned gap questions
+  instead of a Seed). It answers one adoption question — is the
+  interview-less path used, and does it close — and carries none of the
+  goal, criteria, or question text. Any other value is dropped.
 - `cause` on `ac_verify_failed` names which structural branch of the
   deterministic verify gate rejected the attempt — e.g.
   `artifacts_missing_found_elsewhere` means the expected artifact exists in
@@ -138,8 +145,17 @@ Notes:
   `worker_fabrication_suspected`, `worker_blocked`, `worker_failed` (an AC was
   judged not done and no retry budget or route remained), `dependency_blocked`
   (every judged AC was blocked upstream), `runtime_error` (the orchestrator
-  raised an audited exception class), `cancelled`, or `unknown`. Anything else
-  folds to `unknown` before serialization.
+  raised an audited exception class), `launch_<branch>` (the run was rejected
+  before any executor evidence existed: `launch_workspace_unavailable`,
+  `launch_seed_invalid`, `launch_resume_blocked`, `launch_config_error`,
+  `launch_prepare_failed`, `launch_rejected`), `cancelled`, or `unknown`.
+  Anything else folds to `unknown` before serialization. A job that fails
+  before its work function returns (pre-launch rejection, or a run whose
+  terminal is recovered from linked execution evidence after a restart)
+  carries the same closed values; a background `evaluate` job that fails
+  carries only the branch-level `failure_reason_code` its handler already
+  reports on the direct path (`validation`/`config`/`auth`/`timeout`/`model`),
+  never a `failure_cause`.
 - `command` values come only from static built-in command/tool/job registries.
 - `$insert_id` on `command_run` and `service_active` is a SHA-256 digest of the
   anonymous ID, UTC day, event, and retained dimensions. Job-derived

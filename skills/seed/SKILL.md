@@ -102,7 +102,31 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via runtime tool 
 1. Determine the interview session:
    - If `session_id` provided: Use it directly
    - If no session_id: Check conversation for a recent `ouroboros_interview` session ID
-   - If none found: Ask the user
+   - If none found but THIS conversation already settled the goal, the
+     constraints, and verifiable success criteria (a lateral decision, a
+     brownfield scan, or plain discussion that converged): take the
+     **interview-less path** below. Do not send the user to `ooo interview`
+     just to repeat what they already told you.
+   - If none found and the material is not settled: Ask the user
+
+   **Interview-less path** (`session_context`):
+   ```
+   Tool: ouroboros_generate_seed
+   Arguments:
+     session_context:
+       goal: <the user's own settled wording — verbatim, never your paraphrase>
+       acceptance_criteria: [<verifiable checks: a command, a visible behaviour, a measurable state>]
+       constraints: [<optional>]
+       decisions: [<optional; each becomes a constraint>]
+       project_type: greenfield | brownfield
+   ```
+   Every value enters the Seed byte-for-byte, so shell chains in an AC
+   (`ruff check && pytest`) are expected and allowed.
+   - If the response has `status: "gap_questions_required"`, it lists the
+     exact 1-5 questions the Seed still needs. Ask the user those questions
+     only, merge the answers into `session_context`, and call again. That is
+     the whole interview: it shrinks to the gaps the session left open.
+   - If the response contains Seed YAML, continue at step 3 with that YAML.
 
 2. Call the MCP tool through the active runtime's `call_mcp` capability:
    ```

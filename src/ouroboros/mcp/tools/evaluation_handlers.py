@@ -30,6 +30,10 @@ from ouroboros.mcp.telemetry_boundary import (
     record_direct_evaluation_outcome,
 )
 from ouroboros.mcp.tools import background as background_jobs
+from ouroboros.mcp.tools.evaluation_stage1_report import (
+    format_stage1_result,
+    serialize_stage1_result,
+)
 from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
     FetchArtifactHandler,
     SubmitFanoutResultsHandler,
@@ -88,6 +92,19 @@ def _direct_evaluation_failure_reason(error: object) -> str | None:
     if isinstance(error, ProviderError):
         return "model"
     return None
+
+
+def _failure_reason_details(error: object) -> dict[str, str]:
+    """Carry the branch reason code for the background evaluate job runner.
+
+    The direct ``ouroboros_evaluate`` path already records this code on
+    ``workflow_outcome``; the job path only sees the ``Result.err``, so the
+    same closed code rides in ``MCPToolError.failure_meta`` (never rendered,
+    never sent) for ``mcp.tools.background.job_work_error`` to lift into
+    ``result_meta``.
+    """
+    reason = _direct_evaluation_failure_reason(error)
+    return {"failure_reason_code": reason} if reason else {}
 
 
 if TYPE_CHECKING:
@@ -566,6 +583,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "session_id is required",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "validation"},
                 )
             )
 
@@ -575,6 +593,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "artifact is required",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "validation"},
                 )
             )
 
@@ -845,6 +864,7 @@ class EvaluateHandler:
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
                         tool_name="ouroboros_evaluate",
+                        failure_meta=_failure_reason_details(result.error),
                     )
                 )
 
@@ -904,6 +924,7 @@ class EvaluateHandler:
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
+                    failure_meta={"failure_reason_code": "config"},
                 )
             )
         except (ValueError, RuntimeError) as e:
@@ -921,6 +942,7 @@ class EvaluateHandler:
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
+                    failure_meta=_failure_reason_details(e),
                 )
             )
         except Exception as exc:
@@ -935,6 +957,7 @@ class EvaluateHandler:
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_evaluate",
+                    failure_meta=_failure_reason_details(exc),
                 )
             )
         finally:
@@ -1103,7 +1126,10 @@ class EvaluateHandler:
         if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
             code_changes = await self._has_code_changes(working_dir)
 
-        text_parts = [format_checklist(checklist)]
+        text_parts = [
+            *format_stage1_result(shared_stage1, include_exit_status=True),
+            format_checklist(checklist),
+        ]
         if code_changes is False:
             text_parts.append("\nNote: no code changes detected in the working tree.")
         result_text = "\n".join(text_parts)
@@ -1129,6 +1155,7 @@ class EvaluateHandler:
             ],
             "run_feedback": list(feedback),
             "code_changes_detected": code_changes,
+            "stage1_result": serialize_stage1_result(shared_stage1),
         }
 
         log.info(
@@ -1192,36 +1219,7 @@ class EvaluateHandler:
         ]
 
         # Stage 1 results
-        if result.stage1_result:
-            s1 = result.stage1_result
-            lines.extend(
-                [
-                    "Stage 1: Mechanical Verification",
-                    "-" * 40,
-                    f"Status: {'PASSED' if s1.passed else 'FAILED'}",
-                    f"Coverage: {s1.coverage_score:.1%}" if s1.coverage_score else "Coverage: N/A",
-                ]
-            )
-            for check in s1.checks:
-                status = "PASS" if check.passed else "FAIL"
-                lines.append(f"  [{status}] {check.check_type}: {check.message}")
-                if not check.passed:
-                    details = check.details
-                    command = details.get("command")
-                    if isinstance(command, list) and command:
-                        lines.append(f"    command: {' '.join(str(part) for part in command)}")
-                    working_dir = details.get("working_dir")
-                    if working_dir:
-                        lines.append(f"    cwd: {working_dir}")
-                    stdout_tail = str(details.get("stdout_tail") or "").strip()
-                    stderr_tail = str(details.get("stderr_tail") or "").strip()
-                    if stdout_tail:
-                        lines.append("    stdout tail:")
-                        lines.extend(f"      {line}" for line in stdout_tail.splitlines())
-                    if stderr_tail:
-                        lines.append("    stderr tail:")
-                        lines.extend(f"      {line}" for line in stderr_tail.splitlines())
-            lines.append("")
+        lines.extend(format_stage1_result(result.stage1_result))
 
         # Stage 2 results
         if result.stage2_result:
