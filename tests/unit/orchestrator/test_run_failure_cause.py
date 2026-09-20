@@ -141,6 +141,72 @@ def test_verify_attributed_exhaustion_outranks_unattributed_sibling() -> None:
     assert _derive(events) == "verify_exit_nonzero"
 
 
+def test_blocked_dependency_cascade_does_not_outvote_root_failure() -> None:
+    events = [
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="failed"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=0,
+            last_failure_class="unknown",
+        ),
+    ]
+    for ac_index in (1, 2, 3):
+        events.extend(
+            [
+                _execution_event(
+                    "execution.ac.attempt_judged",
+                    root_ac_index=ac_index,
+                    outcome="blocked",
+                ),
+                _execution_event(
+                    "execution.ac.recovery_exhausted",
+                    root_ac_index=ac_index,
+                    last_failure_class="BLOCKED",
+                ),
+            ]
+        )
+    assert _derive(events) == "worker_failed"
+
+
+def test_latest_judgement_controls_dependency_cascade_attribution() -> None:
+    events = [
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="blocked"),
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="failed"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=0,
+            last_failure_class="EVIDENCE_MISSING",
+        ),
+        _execution_event("execution.ac.attempt_judged", root_ac_index=1, outcome="blocked"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=1,
+            last_failure_class="BLOCKED",
+        ),
+    ]
+    assert _derive(events) == "worker_evidence_missing"
+
+
+def test_every_exhausted_ac_blocked_remains_dependency_blocked() -> None:
+    events = []
+    for ac_index in (0, 1):
+        events.extend(
+            [
+                _execution_event(
+                    "execution.ac.attempt_judged",
+                    root_ac_index=ac_index,
+                    outcome="blocked",
+                ),
+                _execution_event(
+                    "execution.ac.recovery_exhausted",
+                    root_ac_index=ac_index,
+                    last_failure_class="BLOCKED",
+                ),
+            ]
+        )
+    assert _derive(events) == "dependency_blocked"
+
+
 def test_orchestrator_exception_is_runtime_error() -> None:
     events = [_session_failed(error_type="OrchestratorError")]
     assert _derive(events) == "runtime_error"
