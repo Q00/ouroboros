@@ -128,10 +128,24 @@ def derive_run_failure_cause(
                 judged_outcomes.append(outcome)
                 ac_index = data.get("root_ac_index", data.get("ac_index"))
                 timestamp = getattr(event, "timestamp", None)
+                event_id = getattr(event, "id", None)
                 if isinstance(ac_index, int) and not isinstance(ac_index, bool):
                     previous = last_judged_by_ac.get(ac_index)
-                    if previous is None or timestamp is None or previous[0] <= timestamp:
-                        last_judged_by_ac[ac_index] = (timestamp, outcome)
+                    # The durable store orders equal timestamps by event id
+                    # (event_store.query_events: timestamp, id), so "latest"
+                    # must key on both. Timestamp alone leaves same-instant
+                    # judgements to iterable order.
+                    ordering_key = (
+                        timestamp,
+                        event_id if isinstance(event_id, str) else "",
+                    )
+                    if (
+                        previous is None
+                        or timestamp is None
+                        or previous[0][0] is None
+                        or previous[0] <= ordering_key
+                    ):
+                        last_judged_by_ac[ac_index] = (ordering_key, outcome)
         elif event_type == "orchestrator.session.failed":
             error_type = data.get("error_type")
             if isinstance(error_type, str) and error_type:
