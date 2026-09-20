@@ -2355,6 +2355,158 @@ class TestCodexSetup:
         if os.name != "nt":
             assert credentials_path.stat().st_mode & 0o777 == 0o600
 
+    def test_setup_codex_persists_do_not_track_opt_out_in_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """DO_NOT_TRACK at setup time must disable telemetry in the written config."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is False
+
+    def test_setup_codex_persists_ouroboros_telemetry_opt_out_in_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """OUROBOROS_TELEMETRY=0 at setup time must reach the written config."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "0")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is False
+
+    def test_setup_codex_env_opt_out_overrides_existing_enabled_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An env opt-out flips an existing telemetry.enabled: true to false."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+        monkeypatch.setenv("DO_NOT_TRACK", "true")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is False
+
+    def test_setup_codex_preserves_existing_opt_out_without_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A persisted telemetry.enabled: false survives setup with no env opt-out."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("telemetry:\n  enabled: false\n", encoding="utf-8")
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is False
+
+    def test_setup_codex_keeps_telemetry_enabled_without_opt_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """No env opt-out leaves the default telemetry.enabled: true untouched."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is True
+
+    def test_setup_codex_ouroboros_telemetry_1_is_not_an_opt_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """OUROBOROS_TELEMETRY=1 cannot re-enable telemetry against an opt-out."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["telemetry"]["enabled"] is True
+
     def test_setup_codex_rolls_back_fresh_config_when_credentials_write_fails(
         self, tmp_path: Path
     ) -> None:
