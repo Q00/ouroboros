@@ -102,6 +102,36 @@ def test_exhausted_ac_is_attributed_to_its_last_verify_cause() -> None:
     assert _derive(events) == "verify_workspace_mutated"
 
 
+def test_latest_verify_cause_follows_durable_event_order() -> None:
+    when = datetime(2026, 9, 21, tzinfo=UTC)
+
+    def failed(event_id: str, cause: str) -> BaseEvent:
+        return BaseEvent(
+            type="execution.verify.failed",
+            aggregate_type="execution",
+            aggregate_id=EXECUTION,
+            id=event_id,
+            timestamp=when,
+            data={
+                "session_id": SESSION,
+                "execution_id": EXECUTION,
+                "ac_index": 0,
+                "verify_cause": cause,
+            },
+        )
+
+    earlier = failed("a" * 32, "exit_nonzero")
+    later = failed("z" * 32, "timeout")
+    exhausted = _execution_event(
+        "execution.ac.recovery_exhausted",
+        root_ac_index=0,
+        last_failure_class="EVIDENCE_MISSING",
+    )
+
+    assert _derive([earlier, later, exhausted]) == "verify_timeout"
+    assert _derive([later, earlier, exhausted]) == "verify_timeout"
+
+
 def test_exhausted_ac_without_verify_cause_uses_audited_failure_class() -> None:
     events = [
         _execution_event(
