@@ -61,6 +61,7 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_env import telemetry_opt_out_in_env
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
@@ -1541,19 +1542,6 @@ def get_opencode_mode() -> str | None:
         return config.orchestrator.opencode_mode
     except ConfigError:
         return None
-
-
-def telemetry_opt_out_in_env() -> bool:
-    """Whether the process environment disables telemetry right now.
-
-    The env half of the telemetry opt-out contract, split out so flows that
-    persist configuration (setup) can honor the same semantics they run
-    under. Truthy ``DO_NOT_TRACK`` or falsy ``OUROBOROS_TELEMETRY`` counts;
-    an explicit ``OUROBOROS_TELEMETRY=1`` is not an opt-out.
-    """
-    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
-        return True
-    return _env_flag("OUROBOROS_TELEMETRY") is False
 
 
 def get_telemetry_enabled() -> bool:
