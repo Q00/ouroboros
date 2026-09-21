@@ -167,6 +167,25 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "SHELLOPTS",
         "BASHOPTS",
         "BASH_XTRACEFD",
+        # Runtime module-resolution controls. Every child inherits os.environ,
+        # so PYTHONPATH reaches the detached worker interpreter and NODE_PATH
+        # reaches a spawned JavaScript CLI before any Ouroboros code runs.
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "PYTHONEXECUTABLE",
+        "NODE_PATH",
+        # Same-class keys surfaced by the threat-model scan: vendor config
+        # root, shell startup/argv[0], browser command, config roots, network
+        # secret, privacy switch.
+        "CLAUDE_CONFIG_DIR",
+        "ZDOTDIR",
+        "SHELL",
+        "BROWSER",
+        "OUROBOROS_BACKEND_LIMITS",
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
     }
     missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -591,6 +610,119 @@ def test_untrusted_env_cannot_set_dynamic_loader_controls(
     _load_env_file(env_file, trusted=False)
 
     assert key not in os.environ
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "PYTHONEXECUTABLE",
+        "NODE_PATH",
+        "NPM_CONFIG_SCRIPT_SHELL",
+        "npm_config_script_shell",
+        "YARN_RC_FILENAME",
+        "PNPM_HOME",
+        "COREPACK_HOME",
+        "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_ASKPASS",
+        "CLAUDE_CONFIG_DIR",
+        "ZDOTDIR",
+        "SHELL",
+        "BROWSER",
+        "OUROBOROS_BACKEND_LIMITS",
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
+    ],
+)
+def test_untrusted_env_cannot_set_runtime_loader_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    """A cloned repo cannot steer module resolution of any spawned child.
+
+    Regression for the PYTHONPATH -> sitecustomize chain into the detached
+    worker (incomplete-fix follow-up to CVE-2026-66065) and the GIT_* family.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=./attacker-controlled\n")
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(key.upper(), raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
+    assert key.upper() not in os.environ
+
+
+@pytest.mark.parametrize("key", ["PYTHONPATH", "NODE_PATH", "GIT_SSH_COMMAND"])
+def test_trusted_env_may_set_runtime_loader_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    """The trusted home .env keeps developer/operator loader configuration."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=/operator/choice\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ[key] == "/operator/choice"
+
+
+def test_project_env_pythonpath_cannot_reach_detached_worker(tmp_path: Path) -> None:
+    """End-to-end: the reporter's chain, run against the real loader and spawner.
+
+    A project `.env` sets PYTHONPATH at an attacker directory holding a
+    `sitecustomize.py` that writes a marker on import. The real
+    `_spawn_worker` then launches the detached worker with the loaded
+    environment. Before the fix the marker was written by the worker pid
+    (code ran inside the child before any Ouroboros import); after the fix
+    the key never enters `os.environ`, so the child never sees it.
+    """
+    project = tmp_path / "project"
+    evil = project / "evil"
+    evil.mkdir(parents=True)
+    marker = tmp_path / "marker"
+    (evil / "sitecustomize.py").write_text(
+        f"import os, pathlib\npathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n",
+        encoding="utf-8",
+    )
+    (project / ".env").write_text(f"PYTHONPATH={evil}\n", encoding="utf-8")
+    script = """
+import os
+from pathlib import Path
+import ouroboros.config.loader
+from ouroboros.mcp.detached_jobs import _spawn_worker
+print(os.environ.get("PYTHONPATH", "<unset>"))
+process = _spawn_worker(Path("missing-request.json"), cwd=os.getcwd())
+process.wait(timeout=60)
+"""
+    environment = os.environ.copy()
+    # The suite may legitimately run with PYTHONPATH=src; the child must still
+    # import ouroboros, so keep the real value and only assert the attacker
+    # directory never joins it.
+    environment.pop("OUROBOROS_TELEMETRY", None)
+    environment["DO_NOT_TRACK"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert not marker.exists(), "attacker sitecustomize executed inside the detached worker"
+    assert str(evil) not in completed.stdout
 
 
 def test_untrusted_env_cannot_disable_approval_gate(
