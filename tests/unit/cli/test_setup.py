@@ -2507,6 +2507,38 @@ class TestCodexSetup:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config_dict["telemetry"]["enabled"] is True
 
+    def test_setup_codex_env_opt_out_rejects_null_telemetry_section(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An explicit null telemetry section must not be repaired during setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "telemetry: null\ncustom:\n  keep: value\n"
+        config_path.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server") as mock_register,
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles") as mock_retire,
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile"
+            ) as mock_worker_profile,
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == original
+        mock_install.assert_not_called()
+        mock_register.assert_not_called()
+        mock_retire.assert_not_called()
+        mock_worker_profile.assert_not_called()
+
     def test_setup_codex_rolls_back_fresh_config_when_credentials_write_fails(
         self, tmp_path: Path
     ) -> None:

@@ -2827,6 +2827,8 @@ def _setup_codex(
             # so a process-level opt-out (DO_NOT_TRACK / OUROBOROS_TELEMETRY=0)
             # would not reach later sessions. Persist it in the config the MCP
             # server loads instead of relying on the caller's environment.
+            if "telemetry" in config_dict and not isinstance(config_dict["telemetry"], dict):
+                raise ValueError("Invalid non-mapping 'telemetry' section in config.yaml.")
             telemetry_config = _ensure_mapping_section(config_dict, "telemetry")
             telemetry_config["enabled"] = False
 
