@@ -30,6 +30,20 @@ from __future__ import annotations
 #      inherits trusted process/home configuration so corporate indexes keep
 #      working, but a cloned repository must not redirect uv/pipx resolution to
 #      its own index or config file through the project `.env`.
+#   6. Runtime module-resolution controls. Every child this process spawns
+#      inherits `os.environ` (detached job workers, the dashboard daemon,
+#      vendor CLIs via `runtime/child_env.py`), so a loader-search-path key
+#      lands in the child verbatim: PYTHONPATH makes the worker interpreter
+#      import an attacker `sitecustomize` (or shadow any stdlib module)
+#      before a line of Ouroboros runs; NODE_PATH does the same for a
+#      spawned JavaScript CLI. `orchestrator/verify_shell.py` strips these
+#      from the verify gate for verdict integrity, but the gate is one sink
+#      of many — the trust boundary is here. Completes CVE-2026-66065.
+#   7. `git` process controls. Ouroboros spawns `git` from `os.environ` for
+#      worktrees, checkpoints and project identity; GIT_SSH_COMMAND,
+#      GIT_EXEC_PATH, GIT_CONFIG_GLOBAL/SYSTEM, GIT_ASKPASS, GIT_EDITOR,
+#      GIT_PAGER and friends each name a program or config that git then
+#      runs — the same executable-selection class as the CLI paths above.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -44,6 +58,22 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Node/Electron preload hook. A project .env could otherwise inject a
         # --require/--import payload before a spawned JavaScript CLI starts.
         "NODE_OPTIONS",
+        # Node module search path: a bare `require("x")` inside a spawned
+        # JavaScript CLI resolves attacker modules from here first.
+        "NODE_PATH",
+        # Python interpreter module-resolution controls (class 6 above).
+        # PYTHONPATH prepends to sys.path, so `sitecustomize` — auto-imported
+        # by site.py at every interpreter start — and any stdlib module can be
+        # shadowed in the spawned worker. PYTHONHOME relocates the whole
+        # stdlib; PYTHONSTARTUP is sourced by interactive interpreters;
+        # PYTHONUSERBASE moves user site-packages (also on sys.path);
+        # PYTHONEXECUTABLE overrides sys.executable on macOS, which is the
+        # very argv[0] `_spawn_worker` executes.
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "PYTHONEXECUTABLE",
         # Non-LD_/DYLD_ dynamic-loader controls used by supported or adjacent
         # Unix platforms. Prefix families are rejected below.
         "LDR_PRELOAD",
@@ -133,6 +163,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_DIR",
         "XDG_CONFIG_HOME",
+        # Claude Code resolves settings.json (hooks, permission mode, MCP
+        # servers) from this root; same class as CODEX_HOME.
+        "CLAUDE_CONFIG_DIR",
         # Platform home selectors also choose Ouroboros' trusted config root.
         # A project .env must not turn a repository directory into ~/.ouroboros.
         "HOME",
@@ -212,6 +245,17 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # is therefore an approval-gate-bypass sink — same class as the
         # permission-mode overrides above.
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Backend limits YAML root (`orchestrator/backend_limits.py`); a
+        # relative value resolves against the cloned repository — same
+        # config-root class as the tool-capability override above.
+        "OUROBOROS_BACKEND_LIMITS",
+        # Network MCP shared secret: a cloned repository must not be the
+        # source of the token that gates non-loopback `mcp serve` binds.
+        "OUROBOROS_MCP_AUTH_TOKEN",
+        # Journal preview privacy switch (`events/io.py`): same operator-owned
+        # boundary as the telemetry toggles; the project `.env` loads first
+        # and would win the race against a persisted home opt-out.
+        "OUROBOROS_IO_JOURNAL_PREVIEWS",
         # Execution-cost/behavior dial — an untrusted repo .env must not be able
         # to force a higher (or invalid) reasoning-effort level for every AC,
         # which changes runtime cost and behavior. Follows the same trusted-source
@@ -234,6 +278,14 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # spelling of the same hook.
         "BASH_ENV",
         "ENV",
+        # zsh sources $ZDOTDIR/.zshenv for every invocation, including the
+        # `$SHELL -l -c` login-shell environment import in `cli/commands/mcp.py`;
+        # SHELL itself is argv[0] of that spawn when the real environment does
+        # not carry it (GUI-launched agent hosts).
+        "ZDOTDIR",
+        "SHELL",
+        # `webbrowser.open` (config GUI launcher) executes $BROWSER as a command.
+        "BROWSER",
         # Shell option state carried into that child: `xtrace` writes into the
         # output an assertion is checked against, `errexit` changes which leg
         # of a chain decides the status, `xpg_echo` changes what `echo` prints.
@@ -258,6 +310,20 @@ UNTRUSTED_ENV_DENIED_PREFIXES = (
     "PIP_",
     "PIPX_",
     "UV_",
+    # Node package-manager configuration families (class 6). npm reads every
+    # `npm_config_*` variable as a config key — `script-shell`, `prefix`,
+    # `registry`, `onload-script` — and yarn/pnpm/corepack expose the same
+    # shape; a cloned repo must not steer a spawned JavaScript toolchain.
+    # Keys are upper-cased before matching, so lowercase `npm_config_` is
+    # covered.
+    "NPM_CONFIG_",
+    "YARN_",
+    "PNPM_",
+    "COREPACK_",
+    # git process controls (class 7). Prefix rather than an enumerated list:
+    # git keeps adding program-naming variables, and none of them is
+    # something a repository's own `.env` has a legitimate reason to set.
+    "GIT_",
 )
 
 
