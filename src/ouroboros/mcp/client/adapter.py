@@ -7,6 +7,7 @@ only owns application DTO conversion, retry policy, and resource cleanup.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from types import MappingProxyType
@@ -185,6 +186,16 @@ class MCPClientAdapter:
             await resources.client.__aenter__()
             self._server_info = self._parse_server_info(resources.client, config.name)
             self._server_snapshot = self._parse_server_snapshot(resources.client)
+        except asyncio.CancelledError:
+            # SDK entry unwinds its transport, but our published state and
+            # explicitly owned HTTP client still need cleanup. A cleanup error
+            # must not turn task cancellation into a retried connection error.
+            if resources is not None:
+                try:
+                    await self._reset_connection_state()
+                except Exception as exc:
+                    log.warning("mcp.cancelled_connect_cleanup_failed", error=str(exc))
+            raise
         except Exception:
             # The high-level Client unwinds its own transport.  Ouroboros still
             # closes its explicitly owned HTTP client, even if Client teardown fails.

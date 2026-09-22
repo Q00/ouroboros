@@ -9,7 +9,7 @@ Guided onboarding wizard that converts users into power users.
 
 > **Standalone users** (Codex, pip install): Use `ouroboros setup --runtime codex` in your terminal instead.
 > This skill runs inside a Claude Code session. For other runtime backends, the CLI `ouroboros setup` command handles configuration.
-> For full install and onboarding instructions, see [Getting Started](docs/getting-started.md).
+> For full install and onboarding instructions, see [Getting Started](https://github.com/Q00/ouroboros/blob/main/docs/getting-started.md).
 
 > **GitHub Copilot CLI users**: Run `ouroboros setup --runtime copilot` (after `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`). Setup will:
 >
@@ -296,7 +296,7 @@ A backup will be created: CLAUDE.md.bak
 **If "Preview first", show:**
 ````markdown
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.54.4 -->
+<!-- ooo:VERSION:0.54.5 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.
