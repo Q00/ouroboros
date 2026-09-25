@@ -223,12 +223,25 @@ class GradeGate:
         # See #1170 R2 (2026-05-27): cli-todo terminated BLOCKED at this
         # very gate with ambiguity_score=0.467 despite ledger_only closure.
         ledger_primary_closure = closure_mode in {"ledger_only", "safe_default"}
-        if not ledger_primary_closure and not degraded and seed.metadata.ambiguity_score > 0.20:
+        ambiguity_score = seed.metadata.ambiguity_score
+        if ambiguity_score is None:
+            # Unavailable is recorded as such, never replaced by a number and
+            # never read as "high": it is a visible finding, not a blocker.
+            findings.append(
+                GradeFinding(
+                    "ambiguity_score_unavailable",
+                    "medium",
+                    "Seed records no ambiguity score (unavailable)",
+                    "metadata.ambiguity_score",
+                    "Run the interview to obtain a score, or accept the Seed as unscored.",
+                )
+            )
+        elif not ledger_primary_closure and not degraded and ambiguity_score > 0.20:
             blockers.append(
                 GradeFinding(
                     "high_ambiguity_score",
                     "high",
-                    f"Seed ambiguity score is too high for auto execution: {seed.metadata.ambiguity_score:.2f}",
+                    f"Seed ambiguity score is too high for auto execution: {ambiguity_score:.2f}",
                     "metadata.ambiguity_score",
                     "Continue interview or repair until ambiguity_score <= 0.20.",
                 )

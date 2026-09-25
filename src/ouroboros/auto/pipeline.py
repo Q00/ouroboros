@@ -2366,7 +2366,8 @@ class AutoPipeline:
     ) -> Seed:
         """Persist a newly generated Seed and apply deterministic auto enrichments."""
         floor = deterministic_floor(ledger)
-        if floor > seed.metadata.ambiguity_score:
+        # An unavailable score stays unavailable; the floor never synthesizes one.
+        if seed.metadata.ambiguity_score is not None and floor > seed.metadata.ambiguity_score:
             seed = seed.model_copy(
                 update={
                     "metadata": seed.metadata.model_copy(update={"ambiguity_score": floor}),
