@@ -13,6 +13,9 @@ tool arguments, environment variables, account data, or project identifiers.
 2. **Aggregate adoption** — installs, active users, versions, operating systems,
    countries, and runtime backends may be reported only as aggregates. Cells
    covering fewer than 10 users are withheld.
+3. **Research use.** Anonymous aggregate statistics derived from the existing
+   events may be published in research publications. See
+   [Research use](#research-use).
 
 **Counting rules:**
 
@@ -35,6 +38,34 @@ machine or user. Delete the file to reset it; opt out to stop collection.
 minor/major version with a fresh notice, and default off. Scope reductions do
 not require users to acknowledge a new notice.
 
+### Research use
+
+Anonymous aggregate statistics derived from the existing telemetry events may
+be published in research publications (papers, technical reports) about
+coding-agent reliability and verification. Research use adds no events and no
+properties; it is a new purpose for the data already listed under
+[What is sent](#what-is-sent).
+
+- **Aggregates only.** Only aggregate counts and rates are published. Any cell
+  covering fewer than 10 distinct anonymous IDs is pooled into "other" or
+  withheld. No raw event rows leave the analytics store.
+- **Populations.** Only these events may be analyzed for research:
+  `workflow_outcome` (for example `command`, `terminal_status`, `verified`,
+  `failure_reason_code`, and `failure_cause`) and `ac_verify_failed`
+  (`cause`), each with its `runtime_backend`, `app_version`, and `os`.
+- **Collection window.** Research use applies from the first release
+  containing notice v3 (the next release after v0.54.6; version:
+  `<filled in at release>`) until this section is changed. Events collected
+  before that release are not used for research; the window is enforced with
+  the `app_version` property that every analyzed event carries.
+- **Recorded versions.** Every published aggregate records the `app_version`
+  values it includes.
+- **Exclusions.** Opted-out installs send nothing, so they never appear in
+  research data. Events with `ci=true` are excluded.
+- **Questions and opt-out.** Ask questions in a
+  [GitHub issue](https://github.com/Q00/ouroboros/issues). You can opt out at
+  any time with any control under [How to opt out](#how-to-opt-out).
+
 ### Changelog
 
 - v1 (2026-08): initial contract.
@@ -42,6 +73,7 @@ not require users to acknowledge a new notice.
   durations, tool names, provider details, Python version, frontdoor/onboarding
   attribution, recovery actions, and subagent dispatch data; added daily
   deduplication for retained command and service activity.
+- v3 (2026-09): research-use purpose added; no new events or properties.
 
 ## How to opt out
 
