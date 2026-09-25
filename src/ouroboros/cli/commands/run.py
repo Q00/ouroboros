@@ -961,7 +961,8 @@ async def _run_orchestrator(
             else:
                 print_error("Execution failed")
                 print_info(f"Session ID: {res.session_id}")
-                console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
+                if not res.success:  # else the check package lines above give the reason
+                    console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
                 raise typer.Exit(1)
         else:
             print_error(f"Orchestrator error: {result.error}")
