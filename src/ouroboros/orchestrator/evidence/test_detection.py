@@ -513,6 +513,30 @@ _FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh"
 
 
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
+_PYTHON_MODULE_NAME = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_PYTHON_FROM_IMPORT_RE = re.compile(rf"\bfrom\s+({_PYTHON_MODULE_NAME})\s+import\b")
+_PYTHON_IMPORT_RE = re.compile(
+    rf"(?:^|[\s;\"'(])import\s+({_PYTHON_MODULE_NAME}(?:\s*,\s*{_PYTHON_MODULE_NAME})*)"
+)
+
+
+def _python_imported_module_files(command: str) -> list[str]:
+    """Return workspace file candidates for modules an inline Python program imports.
+
+    ``python3 -c "from mathutils import clamp; assert ..."`` exercises
+    ``mathutils.py`` as directly as ``python3 mathutils.py`` does, but names it
+    only as a module. Each absolute import ``a.b`` maps to ``a/b.py`` and
+    ``a/b/__init__.py``; the caller still requires one candidate to be a real
+    workspace file, so a stdlib import (``import os``) anchors nothing.
+    """
+    modules: list[str] = [match.group(1) for match in _PYTHON_FROM_IMPORT_RE.finditer(command)]
+    for match in _PYTHON_IMPORT_RE.finditer(command):
+        modules.extend(name.strip() for name in match.group(1).split(","))
+    candidates: list[str] = []
+    for module in modules:
+        base = module.replace(".", "/")
+        candidates.extend((f"{base}.py", f"{base}/__init__.py"))
+    return candidates
 
 
 def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
@@ -556,6 +580,8 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
         # Skip pure version-ish tokens such as ``2.0`` (no letter anywhere).
         if any(ch.isalpha() for ch in match.group(0))
     ]
+    if any(_is_python_executable(token) for token in tokens):
+        invoked.extend(_python_imported_module_files(command))
     return tuple(dict.fromkeys(invoked))
 
 
