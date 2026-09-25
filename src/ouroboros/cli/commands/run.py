@@ -678,6 +678,7 @@ async def _run_orchestrator(
     skip_completed: str | None = None,
     project_dir: Path | None = None,
     project_fallback_dir: Path | None = None,
+    check_package: bool | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -695,6 +696,8 @@ async def _run_orchestrator(
         project_dir: Optional explicit project directory for seed path resolution.
         project_fallback_dir: Directory to stand in for the Seed file's folder
             when the Seed itself does not say where it belongs.
+        check_package: ``--check-package`` / ``--no-check-package``; ``None``
+            defers to ``OUROBOROS_CHECK_PACKAGE`` and ``boundary.check_package``.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
@@ -858,6 +861,17 @@ async def _run_orchestrator(
     if dashboard_url:
         print_info(f"Live Dashboard: {dashboard_url}")
 
+    boundary_run = await _prepare_check_package_boundary(
+        seed,
+        check_package,
+        event_store=event_store,
+        execution_id=execution_id,
+        resume_session=resume_session,
+        worker_dir=Path(workspace.effective_cwd) if workspace else project_dir,
+        runtime_backend=resolved_runtime_backend,
+        execution_model=execution_model,
+    )
+
     # Execute
     try:
         if resume_session:
@@ -893,6 +907,7 @@ async def _run_orchestrator(
             execution_id=execution_id,
             session_id=session_id_for_run,
         )
+        boundary_verdict = await _verify_check_package_boundary(boundary_run, event_store)
         if result.is_ok:
             res = result.value
             if res.success:
@@ -900,6 +915,9 @@ async def _run_orchestrator(
                 print_info(f"Session ID: {res.session_id}")
                 print_info(f"Messages processed: {res.messages_processed}")
                 print_info(f"Duration: {res.duration_seconds:.1f}s")
+                if boundary_verdict == "fail":
+                    print_error("The finished workspace fails the frozen check package.")
+                    raise typer.Exit(1)
 
                 # Post-execution QA
                 if not no_qa:
@@ -958,6 +976,82 @@ async def _run_orchestrator(
         # ones (which keep going through QA) survive. The run is over, so a
         # bounded wait here blocks no command (see ``telemetry.flush``).
         usage_telemetry.flush()
+
+
+async def _prepare_check_package_boundary(
+    seed: "Seed",
+    cli_value: bool | None,
+    *,
+    event_store: Any,
+    execution_id: str | None,
+    resume_session: str | None,
+    worker_dir: Path,
+    runtime_backend: str,
+    execution_model: str | None,
+) -> Any:
+    """Freeze and admit a check package before the worker starts (opt-in).
+
+    Returns ``(state, settings)`` or ``None`` when the feature is off. With the
+    feature off nothing here calls a model or writes an event.
+    """
+    from ouroboros.boundary.run_wiring import resolve_check_package_settings
+
+    settings = resolve_check_package_settings(cli_value)
+    if not settings.enabled:
+        return None
+    if resume_session or execution_id is None:
+        print_warning("Check package is not applied on resume; the session keeps its boundary.")
+        return None
+    from ouroboros.boundary.constructor import CheckConstructor
+    from ouroboros.boundary.ledger import BoundaryOrderError
+    from ouroboros.boundary.run_wiring import prepare_check_package, render_preparation
+
+    print_info("Check package: constructing checks from the acceptance criteria (read-only)...")
+    constructor = CheckConstructor(
+        runtime_backend=runtime_backend,
+        model=execution_model,
+        timeout_seconds=settings.constructor_timeout_seconds,
+    )
+    try:
+        state = await prepare_check_package(
+            seed,
+            event_store=event_store,
+            constructor=constructor,
+            execution_id=execution_id,
+            base_checkout=worker_dir,
+            worker_workspace=worker_dir,
+            runtime_label=runtime_backend,
+            settings=settings,
+        )
+    except BoundaryOrderError as exc:
+        print_error(f"Check package refused the worker start: {exc}")
+        raise typer.Exit(1) from exc
+    for line in render_preparation(state):
+        print_info(line)
+    return state, settings
+
+
+async def _verify_check_package_boundary(boundary_run: Any, event_store: Any) -> str | None:
+    """Verify the finished workspace against the frozen package; return the verdict."""
+    if boundary_run is None:
+        return None
+    from ouroboros.boundary.run_wiring import render_verdict, verify_check_package
+
+    state, settings = boundary_run
+    try:
+        verdict = await verify_check_package(
+            state,
+            event_store=event_store,
+            candidate_checkout=state.base_checkout,
+            settings=settings,
+        )
+    except Exception as exc:  # noqa: BLE001 - verification must not hide the run result
+        print_warning(f"Check package verification could not run: {exc}")
+        return "indeterminate"
+    printer = {"pass": print_success, "fail": print_error}.get(verdict.verdict, print_warning)
+    for index, line in enumerate(render_verdict(verdict)):
+        (printer if index == 0 else console.print)(line)
+    return verdict.verdict
 
 
 @app.command()
@@ -1071,6 +1165,17 @@ def workflow(
             ),
         ),
     ] = None,
+    check_package: Annotated[
+        bool | None,
+        typer.Option(
+            "--check-package/--no-check-package",
+            help=(
+                "Before the worker starts, build executable checks from the acceptance "
+                "criteria, admit them on the current tree, and verify the result against "
+                "them. Default: boundary.check_package in config (off)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -1147,6 +1252,7 @@ def workflow(
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,
+                    check_package=check_package,
                 )
             )
         except (ValueError, NotImplementedError) as e:
