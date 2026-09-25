@@ -21,12 +21,14 @@ from ouroboros.boundary import (
     seed_digest,
     verify_boundary_order,
 )
+from ouroboros.boundary.acceptance import ExistingOutcome
 from ouroboros.boundary.constructor import (
     CHECK_DIR,
     ConstructionOutcome,
     package_from_reply,
 )
 from ouroboros.boundary.events import (
+    ACCEPTANCE_RECONCILED,
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
     BOUNDARY_AGGREGATE_TYPE,
@@ -481,9 +483,9 @@ SEED_DATA = {
 }
 
 
-def _fake_exec() -> SimpleNamespace:
+def _fake_exec(success: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
-        success=True,
+        success=success,
         session_id="sess",
         messages_processed=1,
         duration_seconds=1.0,
@@ -502,6 +504,8 @@ async def _run_cli(
     worker_edit: str | None,
     monkeypatch: pytest.MonkeyPatch,
     seen: dict[str, Any] | None = None,
+    run_success: bool = True,
+    existing: dict[int, ExistingOutcome] | None = None,
 ) -> tuple[EventStore, MagicMock, dict[str, Any]]:
     monkeypatch.delenv("OUROBOROS_CHECK_PACKAGE", raising=False)
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
@@ -515,7 +519,10 @@ async def _run_cli(
         seen["events_at_dispatch"] = [event.type for event in rows]
         if worker_edit is not None:
             (project / "calc.py").write_text(worker_edit)
-        return Result.ok(_fake_exec())
+        return Result.ok(_fake_exec(run_success))
+
+    async def load_existing(_store: Any, _execution_id: str) -> dict[int, ExistingOutcome]:
+        return dict(existing or {})
 
     runner = MagicMock()
     runner.execute_seed = AsyncMock(side_effect=execute_seed)
@@ -532,6 +539,7 @@ async def _run_cli(
             "ouroboros.boundary.run_wiring.default_store_dir",
             side_effect=lambda execution_id: tmp_path / "store" / execution_id,
         ),
+        patch("ouroboros.boundary.run_wiring.load_existing_outcomes", load_existing),
     ):
         await _run_orchestrator(
             seed_file, no_qa=True, project_dir=project, check_package=check_package
@@ -615,6 +623,7 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
         ACTOR_STARTED,
         CANDIDATE_VERIFIED,
         SELECTION_DECIDED,
+        ACCEPTANCE_RECONCILED,
     ]
     verified = (await store.replay(BOUNDARY_AGGREGATE_TYPE, f"{execution_id}/check_package/v1"))[3]
     assert verified.data["verdict"] == "pass"
@@ -654,3 +663,111 @@ async def test_cli_refuses_to_dispatch_into_a_leaking_workspace(
         )
     assert exit_info.value.exit_code == 1
     assert seen["runner"].execute_seed.await_count == 0
+
+
+_REJECTED = {0: ExistingOutcome(0, "failed", "failed", "failed")}
+
+
+async def test_cli_package_pass_overrides_an_evidence_form_rejection(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The existing verifier rejected a correct fix; the covering package passed it."""
+    store, _runner, seen = await _run_cli(
+        tmp_path,
+        repo,
+        check_package=True,
+        constructor_cls=_constructor_factory(BUGFIX_SCRIPT, []),
+        worker_edit=FIXED,
+        monkeypatch=monkeypatch,
+        run_success=False,
+        existing=_REJECTED,
+    )  # no typer.Exit: the run is accepted
+    boundary_id = f"{seen['kwargs']['execution_id']}/check_package/v1"
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, boundary_id)
+    reconciled = events[-1]
+    assert reconciled.type == ACCEPTANCE_RECONCILED
+    assert reconciled.data["run_accepted"] is True
+    assert reconciled.data["existing_run_accepted"] is False
+    (criterion,) = reconciled.data["criteria"]
+    assert criterion["governed_by"] == "check_package"
+    assert criterion["package_status"] == "pass"
+    assert criterion["existing_outcome"] == "failed"
+    assert verify_boundary_order(events) == ()
+    await store.close()
+
+
+async def test_cli_package_fail_keeps_a_rejected_run_failed(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(typer.Exit) as exit_info:
+        await _run_cli(
+            tmp_path,
+            repo,
+            check_package=True,
+            constructor_cls=_constructor_factory(BUGFIX_SCRIPT, []),
+            worker_edit=None,
+            monkeypatch=monkeypatch,
+            run_success=False,
+            existing=_REJECTED,
+        )
+    assert exit_info.value.exit_code == 1
+
+
+async def test_cli_flag_off_keeps_a_rejected_run_failed(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.config.models import BoundaryConfig
+
+    calls: list[dict[str, Any]] = []
+    with (
+        patch("ouroboros.boundary.run_wiring._load_boundary_config", return_value=BoundaryConfig()),
+        pytest.raises(typer.Exit) as exit_info,
+    ):
+        await _run_cli(
+            tmp_path,
+            repo,
+            check_package=None,
+            constructor_cls=_constructor_factory(BUGFIX_SCRIPT, calls),
+            worker_edit=FIXED,
+            monkeypatch=monkeypatch,
+            run_success=False,
+            existing=_REJECTED,
+        )
+    assert exit_info.value.exit_code == 1
+    assert calls == []
+
+
+async def test_reconciliation_must_follow_a_verification_and_is_single(
+    store, repo: Path, tmp_path: Path
+) -> None:
+    seed = _seed("add(2, 3) returns 5")
+    package = _package(seed, "repro_add", BUGFIX_SCRIPT)
+    settings = CheckPackageSettings(enabled=True)
+    state = await prepare_check_package(
+        seed,
+        event_store=store,
+        constructor=FakeConstructor(_ok(package)),
+        execution_id="exec_r",
+        base_checkout=repo,
+        worker_workspace=repo,
+        runtime_label="codex",
+        settings=settings,
+        store_dir=tmp_path / "store",
+    )
+    ledger = BoundaryLedger(store)
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_acceptance_reconciled(
+            state.boundary_id, package_sha256=package.sha256, reconciliation={}
+        )
+    (repo / "calc.py").write_text(FIXED)
+    verdict = await verify_check_package(
+        state, event_store=store, candidate_checkout=repo, settings=settings
+    )
+    assert verdict.criteria == {seed_criterion_keys(seed)[0]: "pass"}
+    await ledger.record_acceptance_reconciled(
+        state.boundary_id, package_sha256=package.sha256, reconciliation={}
+    )
+    with pytest.raises(BoundaryOrderError):
+        await ledger.record_acceptance_reconciled(
+            state.boundary_id, package_sha256=package.sha256, reconciliation={}
+        )

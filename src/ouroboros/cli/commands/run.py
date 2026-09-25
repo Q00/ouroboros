@@ -910,14 +910,16 @@ async def _run_orchestrator(
         boundary_verdict = await _verify_check_package_boundary(boundary_run, event_store)
         if result.is_ok:
             res = result.value
-            if res.success:
+            run_succeeded = res.success
+            if boundary_run is not None:
+                run_succeeded = await _reconcile_check_package_boundary(
+                    boundary_run, boundary_verdict, seed=seed, event_store=event_store, res=res
+                )
+            if run_succeeded:
                 print_success("Execution completed successfully!")
                 print_info(f"Session ID: {res.session_id}")
                 print_info(f"Messages processed: {res.messages_processed}")
                 print_info(f"Duration: {res.duration_seconds:.1f}s")
-                if boundary_verdict == "fail":
-                    print_error("The finished workspace fails the frozen check package.")
-                    raise typer.Exit(1)
 
                 # Post-execution QA
                 if not no_qa:
@@ -1031,7 +1033,7 @@ async def _prepare_check_package_boundary(
     return state, settings
 
 
-async def _verify_check_package_boundary(boundary_run: Any, event_store: Any) -> str | None:
+async def _verify_check_package_boundary(boundary_run: Any, event_store: Any) -> Any:
     """Verify the finished workspace against the frozen package; return the verdict."""
     if boundary_run is None:
         return None
@@ -1047,11 +1049,53 @@ async def _verify_check_package_boundary(boundary_run: Any, event_store: Any) ->
         )
     except Exception as exc:  # noqa: BLE001 - verification must not hide the run result
         print_warning(f"Check package verification could not run: {exc}")
-        return "indeterminate"
+        return None
     printer = {"pass": print_success, "fail": print_error}.get(verdict.verdict, print_warning)
     for index, line in enumerate(render_verdict(verdict)):
         (printer if index == 0 else console.print)(line)
-    return verdict.verdict
+    return verdict
+
+
+async def _reconcile_check_package_boundary(
+    boundary_run: Any, verdict: Any, *, seed: "Seed", event_store: Any, res: Any
+) -> bool:
+    """Return whether the run is accepted, with the package authoritative per criterion.
+
+    A criterion the admitted package covers is decided by the package (pass
+    accepts, fail with a counterexample rejects); the existing verifier's
+    verdict is kept as advisory. Uncovered or indeterminate criteria keep the
+    existing verdict. Without a verified package the existing result stands.
+    """
+    if verdict is None:
+        return bool(res.success)
+    from ouroboros.boundary.acceptance import render_reconciliation
+    from ouroboros.boundary.run_wiring import reconcile_check_package_acceptance
+
+    state, _settings = boundary_run
+    try:
+        reconciliation = await reconcile_check_package_acceptance(
+            state,
+            verdict,
+            seed=seed,
+            event_store=event_store,
+            existing_run_accepted=bool(res.success),
+        )
+    except Exception as exc:  # noqa: BLE001 - reconciliation must not hide the run result
+        print_warning(f"Check package acceptance could not be reconciled: {exc}")
+        return bool(res.success) and verdict.verdict != "fail"
+    if reconciliation is None:
+        return bool(res.success)
+    for line in render_reconciliation(reconciliation):
+        console.print(line)
+    if reconciliation.run_accepted and not res.success:
+        print_info(
+            "The check package accepted every criterion the existing verifier rejected; "
+            "the existing verdict is advisory. Session status in the journal stays "
+            f"as the existing harness recorded it. Advisory: {res.final_message[:300]}"
+        )
+    elif res.success and not reconciliation.run_accepted:
+        print_error("The finished workspace fails the frozen check package.")
+    return reconciliation.run_accepted
 
 
 @app.command()

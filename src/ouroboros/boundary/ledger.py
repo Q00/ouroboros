@@ -30,9 +30,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ouroboros.boundary.admission import AdmissionResult, CandidateVerification
 from ouroboros.boundary.events import (
+    ACCEPTANCE_RECONCILED,
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
     BOUNDARY_AGGREGATE_TYPE,
@@ -41,6 +43,7 @@ from ouroboros.boundary.events import (
     PACKAGE_FROZEN,
     SELECTION_DECIDED,
     SUPERSEDED,
+    acceptance_reconciled_event,
     actor_started_event,
     admission_completed_event,
     candidate_verified_event,
@@ -294,6 +297,27 @@ class BoundaryLedger:
                 details={"boundary_id": boundary_id},
             )
         event = selection_decided_event(boundary_id, decision)
+        await self._store.append(event)
+        return event
+
+    async def record_acceptance_reconciled(
+        self, boundary_id: str, *, package_sha256: str, reconciliation: dict[str, Any]
+    ) -> BaseEvent:
+        """Persist the per-criterion acceptance decision once, after verification."""
+        events = await self.events(boundary_id)
+        verified = _first(events, CANDIDATE_VERIFIED)
+        if verified is None or verified.data.get("package_sha256") != package_sha256:
+            raise BoundaryOrderError(
+                "acceptance must cite a verification of the frozen package",
+                details={"boundary_id": boundary_id},
+            )
+        if _first(events, ACCEPTANCE_RECONCILED) is not None:
+            raise BoundaryOrderError(
+                "acceptance already reconciled", details={"boundary_id": boundary_id}
+            )
+        event = acceptance_reconciled_event(
+            boundary_id, package_sha256=package_sha256, reconciliation=reconciliation
+        )
         await self._store.append(event)
         return event
 

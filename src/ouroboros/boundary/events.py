@@ -34,6 +34,7 @@ ACTOR_STARTED = "boundary.actor.started"
 CANDIDATE_VERIFIED = "boundary.candidate.verified"
 SELECTION_DECIDED = "boundary.selection.decided"
 SUPERSEDED = "boundary.check_package.superseded"
+ACCEPTANCE_RECONCILED = "boundary.acceptance.reconciled"
 
 
 def _event(boundary_id: str, event_type: str, data: dict[str, Any]) -> BaseEvent:
@@ -115,3 +116,14 @@ def superseded_event(
 def selection_decided_event(boundary_id: str, decision: SelectionDecision) -> BaseEvent:
     """Selection reason plus incumbent, candidate, selected, and package digests."""
     return _event(boundary_id, SELECTION_DECIDED, decision.model_dump(mode="json"))
+
+
+def acceptance_reconciled_event(
+    boundary_id: str, *, package_sha256: str, reconciliation: dict[str, Any]
+) -> BaseEvent:
+    """Per-criterion acceptance: package verdict, existing verdict (advisory), decision."""
+    return _event(
+        boundary_id,
+        ACCEPTANCE_RECONCILED,
+        {"package_sha256": package_sha256, **reconciliation},
+    )

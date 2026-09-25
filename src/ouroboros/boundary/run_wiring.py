@@ -37,6 +37,13 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.boundary.acceptance import (
+    AcceptanceReconciliation,
+    PackageCriterionStatus,
+    load_existing_outcomes,
+    package_criterion_statuses,
+    reconcile_acceptance,
+)
 from ouroboros.boundary.admission import (
     AdmissionResult,
     CandidateVerdict,
@@ -48,8 +55,18 @@ from ouroboros.boundary.admission import (
     write_receipt,
 )
 from ouroboros.boundary.ledger import BoundaryLedger
-from ouroboros.boundary.package import CheckPackage, seed_digest, write_check_package
-from ouroboros.boundary.selection import ArtifactRef, SelectionDecision, select_incumbent
+from ouroboros.boundary.package import (
+    CheckPackage,
+    seed_criterion_keys,
+    seed_digest,
+    write_check_package,
+)
+from ouroboros.boundary.selection import (
+    ArtifactRef,
+    SelectionDecision,
+    SelectionReason,
+    select_incumbent,
+)
 from ouroboros.boundary.tree import tree_digest
 
 if TYPE_CHECKING:
@@ -179,6 +196,7 @@ class BoundaryVerdict:
     selection: SelectionDecision | None = None
     receipt_path: Path | None = None
     uncovered: tuple[str, ...] = field(default_factory=tuple)
+    criteria: dict[str, PackageCriterionStatus] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
         """JSON-safe summary for run output (no check code, no argv)."""
@@ -189,6 +207,7 @@ class BoundaryVerdict:
             "package_sha256": self.package_sha256,
             "failing_checks": [example.check_id for example in self.counterexamples],
             "uncovered_criteria": list(self.uncovered),
+            "criteria": {key: status.value for key, status in self.criteria.items()},
             "selection": (
                 None
                 if self.selection is None
@@ -367,6 +386,11 @@ async def verify_check_package(
         candidate_checkout=candidate,
     )
     await ledger.record_selection(state.boundary_id, decision)
+    criteria = package_criterion_statuses(
+        package,
+        verification,
+        candidate_identity_ok=decision.reason is not SelectionReason.CANDIDATE_IDENTITY_MISMATCH,
+    )
     return BoundaryVerdict(
         verdict=verification.verdict.value,
         reasons=verification.reasons,
@@ -376,7 +400,40 @@ async def verify_check_package(
         selection=decision,
         receipt_path=receipt,
         uncovered=tuple(item.criterion_key for item in package.uncovered),
+        criteria=criteria,
     )
+
+
+async def reconcile_check_package_acceptance(
+    state: BoundaryRunState,
+    verdict: BoundaryVerdict,
+    *,
+    seed: Seed,
+    event_store: EventStore,
+    existing_run_accepted: bool,
+) -> AcceptanceReconciliation | None:
+    """Decide each criterion with the package as the authority where it covers it.
+
+    Returns ``None`` when no admitted package was verified; the existing
+    verdict then stands unchanged. Otherwise reads the run's final acceptance
+    decisions, reconciles them with ``verdict.criteria`` (see
+    ``boundary/acceptance.py``), and records ``boundary.acceptance.reconciled``.
+    """
+    if verdict.package_sha256 is None or not verdict.criteria:
+        return None
+    existing = await load_existing_outcomes(event_store, state.execution_id)
+    reconciliation = reconcile_acceptance(
+        seed_criterion_keys(seed),
+        verdict.criteria,
+        existing,
+        existing_run_accepted=existing_run_accepted,
+    )
+    await BoundaryLedger(event_store).record_acceptance_reconciled(
+        state.boundary_id,
+        package_sha256=verdict.package_sha256,
+        reconciliation=reconciliation.to_dict(),
+    )
+    return reconciliation
 
 
 def render_preparation(state: BoundaryRunState) -> list[str]:
