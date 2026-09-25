@@ -27,7 +27,11 @@ def load_raw_config() -> dict[str, Any]:
     config_path = get_config_dir() / "config.yaml"
     if not config_path.exists():
         return {}
-    data = yaml.safe_load(config_path.read_text()) or {}
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except UnicodeError:
+        msg = "Configuration file must be UTF-8 encoded."
+        raise ConfigWriteError(msg) from None
     if not isinstance(data, dict):
         msg = f"Invalid config format in {config_path} (expected mapping)"
         raise ConfigWriteError(msg)
@@ -49,7 +53,7 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
     from ouroboros.cli.commands.config import _validate_key_path
 
     config_path = get_config_dir() / "config.yaml"
-    original_text = config_path.read_text() if config_path.exists() else None
+    original_bytes = config_path.read_bytes() if config_path.exists() else None
     data = load_raw_config()
 
     for key, value in values.items():
@@ -73,20 +77,22 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
             target[keys[-1]] = value
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if original_text is not None:
+    if original_bytes is not None:
         # One-step undo support: `ouroboros config undo` swaps this back in.
-        (config_path.parent / "config.yaml.bak").write_text(original_text)
-    config_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        (config_path.parent / "config.yaml.bak").write_bytes(original_bytes)
+    config_path.write_text(
+        yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8"
+    )
 
     try:
         from ouroboros.config.loader import load_config
 
         load_config()
     except Exception as exc:
-        if original_text is None:
+        if original_bytes is None:
             config_path.unlink(missing_ok=True)
         else:
-            config_path.write_text(original_text)
+            config_path.write_bytes(original_bytes)
         msg = f"Invalid value — rolled back. {exc}"
         raise ConfigWriteError(msg) from exc
 
