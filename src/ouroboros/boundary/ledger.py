@@ -14,6 +14,13 @@ check variant. Its lifecycle is enforced at write time:
 4. ``record_candidate_verification`` and ``record_selection`` must cite the
    frozen digest.
 
+Regeneration policy. The seal rule above is per boundary id and never
+changes. A caller that allows regeneration (the product run path) gives each
+attempt its own boundary version id and calls ``record_superseded`` on the old
+version once the new one is sealed; the old package stays in the journal,
+marked superseded. A caller that forbids regeneration (the study harness)
+never calls it, so "exactly one package per boundary" holds unchanged.
+
 ``verify_boundary_order`` re-checks the same rules over replayed events for
 audit and replay. The ledger assumes one writer per boundary.
 """
@@ -33,12 +40,14 @@ from ouroboros.boundary.events import (
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     SELECTION_DECIDED,
+    SUPERSEDED,
     actor_started_event,
     admission_completed_event,
     candidate_verified_event,
     construction_failed_event,
     package_frozen_event,
     selection_decided_event,
+    superseded_event,
 )
 from ouroboros.boundary.package import (
     CheckPackage,
@@ -209,6 +218,51 @@ class BoundaryLedger:
             )
         await self._store.append_batch(started)
         return started
+
+    async def record_superseded(
+        self,
+        boundary_id: str,
+        *,
+        superseded_by: str,
+        reason: str,
+    ) -> BaseEvent:
+        """Mark ``boundary_id`` as replaced by the sealed version ``superseded_by``.
+
+        Refused unless both versions are sealed, they differ, the old version
+        is not already superseded, and no actor was ever bound to the old
+        version (a worker's verdict must cite the package it was bound to).
+        """
+        if superseded_by == boundary_id:
+            raise BoundaryOrderError(
+                "a boundary cannot supersede itself", details={"boundary_id": boundary_id}
+            )
+        old = await self.events(boundary_id)
+        new = await self.events(superseded_by)
+        old_seal = _first(old, PACKAGE_FROZEN) or _first(old, CONSTRUCTION_FAILED)
+        new_seal = _first(new, PACKAGE_FROZEN) or _first(new, CONSTRUCTION_FAILED)
+        if old_seal is None or new_seal is None:
+            raise BoundaryOrderError(
+                "both boundary versions must be sealed before one supersedes the other",
+                details={"boundary_id": boundary_id, "superseded_by": superseded_by},
+            )
+        if _first(old, SUPERSEDED) is not None:
+            raise BoundaryOrderError(
+                "boundary version already superseded", details={"boundary_id": boundary_id}
+            )
+        if _first(old, ACTOR_STARTED) is not None:
+            raise BoundaryOrderError(
+                "a boundary version bound to a worker cannot be superseded",
+                details={"boundary_id": boundary_id},
+            )
+        event = superseded_event(
+            boundary_id,
+            superseded_by=superseded_by,
+            package_sha256=old_seal.data.get("package_sha256"),
+            successor_package_sha256=new_seal.data.get("package_sha256"),
+            reason=reason,
+        )
+        await self._store.append(event)
+        return event
 
     async def record_candidate_verification(
         self, boundary_id: str, verification: CandidateVerification

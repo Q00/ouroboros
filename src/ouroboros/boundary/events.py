@@ -7,6 +7,8 @@ Event Types (aggregate_type ``boundary``, aggregate_id = boundary id):
     boundary.actor.started - a worker bound to this boundary started
     boundary.candidate.verified - frozen package run on a candidate
     boundary.selection.decided - incumbent kept or replaced, with reason and digests
+    boundary.check_package.superseded - product regeneration: this boundary
+        version was replaced by a later version before any worker bound to it
 
 Payloads never carry generated file contents, check argv, or check output, so
 the shared journal does not expose check code or counterexamples. The package
@@ -31,6 +33,7 @@ ADMISSION_COMPLETED = "boundary.check_package.admission_completed"
 ACTOR_STARTED = "boundary.actor.started"
 CANDIDATE_VERIFIED = "boundary.candidate.verified"
 SELECTION_DECIDED = "boundary.selection.decided"
+SUPERSEDED = "boundary.check_package.superseded"
 
 
 def _event(boundary_id: str, event_type: str, data: dict[str, Any]) -> BaseEvent:
@@ -86,6 +89,27 @@ def actor_started_event(
 def candidate_verified_event(boundary_id: str, verification: CandidateVerification) -> BaseEvent:
     """Frozen package run on one candidate."""
     return _event(boundary_id, CANDIDATE_VERIFIED, verification.event_summary())
+
+
+def superseded_event(
+    boundary_id: str,
+    *,
+    superseded_by: str,
+    package_sha256: str | None,
+    successor_package_sha256: str | None,
+    reason: str,
+) -> BaseEvent:
+    """Mark a sealed boundary version as replaced by a later version."""
+    return _event(
+        boundary_id,
+        SUPERSEDED,
+        {
+            "superseded_by": superseded_by,
+            "package_sha256": package_sha256,
+            "successor_package_sha256": successor_package_sha256,
+            "reason": reason,
+        },
+    )
 
 
 def selection_decided_event(boundary_id: str, decision: SelectionDecision) -> BaseEvent:
