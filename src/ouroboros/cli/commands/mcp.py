@@ -1236,10 +1236,15 @@ async def _run_mcp_server(
         # (SIGTERM/orphan-exit/stdin EOF) and propagates nothing.
         if serve_task is not None and serve_task.done() and not serve_task.cancelled():
             serve_exc = serve_task.exception()
-        if hard_exit_required and serve_exc is None:
-            # Every cleanup above has run; only the unjoinable stdin reader
-            # keeps this process alive. See _flush_and_hard_exit.
-            _flush_and_hard_exit(0)
+        if hard_exit_required:
+            # Every cleanup above has run; only an unjoinable stdin reader or
+            # residual task keeps this process alive. See _flush_and_hard_exit.
+            # Raising a serve-loop failure here would leave asyncio.run()
+            # teardown blocked on that survivor, so record it and exit non-zero.
+            if serve_exc is not None:
+                with contextlib.suppress(Exception):
+                    log.error("mcp.command.serve_failed", exc_info=serve_exc)
+            _flush_and_hard_exit(0 if serve_exc is None else 1)
 
     # Surface a serve-loop failure only after cleanup has collapsed the WAL and
     # released the stores. This preserves the error-propagation contract of the
