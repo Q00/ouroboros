@@ -58,6 +58,7 @@ CONSTRUCTOR_AGENT = "check-constructor"
 CONSTRUCTOR_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
 CONSTRUCTOR_PERMISSION_MODE = "default"
 CHECK_DIR = ".ouroboros_checks"
+CHECK_INTERPRETERS = frozenset({"python3", "python"})
 DEFAULT_CONSTRUCTOR_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_OUTPUT_CHARS = 200_000
 _CHECK_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -188,6 +189,7 @@ def package_from_reply(
             PackageFile.from_content(_check_file_path(item.get("path")), str(item["content"]))
             for item in reply.get("files") or ()
         )
+        file_paths = {item.path for item in files}
         checks: list[CheckSpec] = []
         signatures: set[str] = set()
         for raw in reply.get("checks") or ():
@@ -205,8 +207,18 @@ def package_from_reply(
             else:
                 signature = None
             argv = raw.get("argv")
-            if not isinstance(argv, list) or not argv:
-                raise CheckPackageError(f"{check_id}: argv must be a non-empty list")
+            if (
+                not isinstance(argv, list)
+                or len(argv) != 2
+                or argv[0] not in CHECK_INTERPRETERS
+                or argv[1] not in file_paths
+                or str(raw.get("cwd") or ".") != "."
+            ):
+                # The only accepted shape is the one the prompt prescribes: a
+                # packaged script run by the Python interpreter from the root.
+                raise CheckPackageError(
+                    f"{check_id}: argv must be [python3, <packaged script>] with cwd '.'"
+                )
             assertions = tuple(
                 AssertionLink(
                     assertion_id=str(link.get("assertion_id") or f"{check_id}.a{number}"),
@@ -221,7 +233,7 @@ def package_from_reply(
                     check_id=check_id,
                     role=role,
                     argv=tuple(str(arg) for arg in argv),
-                    cwd=str(raw.get("cwd") or "."),
+                    cwd=".",
                     assertions=assertions,
                     failure_signature=signature,
                 )

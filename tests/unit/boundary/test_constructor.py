@@ -149,6 +149,24 @@ async def test_feedback_reaches_the_prompt() -> None:
     assert "- repro_add: passed on base" in prompt
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["rm", "-rf", "x"],
+        ["python3", "-c", "print(1)"],
+        ["python3", f"{CHECK_DIR}/other.py"],
+        ["/usr/bin/python3", f"{CHECK_DIR}/repro_add.py"],
+    ],
+)
+async def test_argv_outside_the_prescribed_shape_is_refused(base: Path, argv: list[str]) -> None:
+    body = json.loads(_reply().split("```json\n")[1].split("\n```")[0])
+    body["checks"][0]["argv"] = argv
+    outcome = await _constructor(FakeRuntime(json.dumps(body)), []).construct(_seed(), base)
+    assert outcome.package is None
+    assert (outcome.failure_reason or "").startswith("constructor_reply_invalid:")
+    assert "argv must be" in (outcome.failure_reason or "")
+
+
 def test_extract_json_accepts_raw_and_fenced_objects() -> None:
     assert extract_json_object('{"a": 1}') == {"a": 1}
     assert extract_json_object('text ```json\n{"b": 2}\n``` more') == {"b": 2}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,7 +48,6 @@ from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.persistence.event_store import EventStore
 
-PY = sys.executable
 INPUT_DIGEST = "2" * 64
 BUGGY = "def add(a, b):\n    return a - b\n"
 FIXED = "def add(a, b):\n    return a + b\n"
@@ -107,7 +105,7 @@ def _reply(check_id: str, script: str, *, criterion: int = 1, uncovered: tuple =
             {
                 "check_id": check_id,
                 "role": "reproduction",
-                "argv": [PY, path],
+                "argv": ["python3", path],
                 "cwd": ".",
                 "failure_signature": f"OUROBOROS_CHECK_FAILED:{check_id}",
                 "assertions": [{"criterion": criterion, "locator": "main assertion"}],
@@ -313,7 +311,7 @@ def test_constructor_prompt_requires_guarded_feature_checks() -> None:
     prompt = load_agent_prompt("check-constructor")
     assert "Feature tasks" in prompt
     assert "OUROBOROS_CHECK_FAILED:<check_id>" in prompt
-    assert "—" not in prompt
+    assert chr(0x2014) not in prompt
 
 
 def test_unlinked_criteria_are_recorded_as_uncovered_never_dropped() -> None:
