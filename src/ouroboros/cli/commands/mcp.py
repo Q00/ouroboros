@@ -89,8 +89,29 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 _IDLE_SHUTDOWN_POLL_SECONDS = 60.0
 _NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS = 7200.0
 
+
+class _DeadPeerSafeConsole(Console):
+    """Console whose writes go quiet instead of raising once its peer is gone.
+
+    Rich's default ``on_broken_pipe`` dup2()s /dev/null over fd 1 — the stdio
+    JSON-RPC channel — and raises ``SystemExit``, which ``suppress(Exception)``
+    does not catch: a lifecycle notice on a dead stderr would then abort the
+    watchdog's stop signal and the shutdown cleanup (#2325).
+    """
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        try:
+            super().print(*args, **kwargs)
+        except (OSError, ValueError):
+            # ECONNRESET on a socket stderr, or a closed file object.
+            self.quiet = True
+
+
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
-_stderr_console = Console(stderr=True)
+_stderr_console = _DeadPeerSafeConsole(stderr=True)
 log = structlog.get_logger(__name__)
 
 
