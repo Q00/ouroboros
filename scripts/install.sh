@@ -677,21 +677,28 @@ else:
   printf '%s' "$id"
 }
 
+# Version of the telemetry disclosure; telemetry.py `_NOTICE_VERSION` carries
+# the same number (edit both together). A state whose top-level
+# `notice_version` is older, missing, or not an integer shows the notice once
+# more, so existing installs see an updated disclosure after a scope change.
+TELEMETRY_NOTICE_VERSION=4
+
 _telemetry_notice() {
   _telemetry_enabled || return 0
   local f="$HOME/.ouroboros/telemetry.json" tmp id py already_shown
 
-  # Skip only when the persisted state is valid JSON, a dict, and its
-  # TOP-LEVEL `notice_shown` is the literal boolean `true` -- mirrors the
-  # identity reader's structural approach above (and telemetry.py's own
-  # check). Fail toward disclosure: missing, nested-only (e.g. a
-  # `{"wrapper": {"notice_shown": true}}` sibling object), a string
-  # "true"/"false", any other non-bool, or malformed JSON must all still
-  # show the notice -- a duplicate notice is harmless, a suppressed one
-  # breaks the privacy contract. Without python3 on PATH we cannot parse
-  # JSON structure in pure shell, so this falls back to the old raw-text
-  # grep (documented best-effort gap, matches the identity reader's
-  # NO_PYTHON3 fallback).
+  # Skip only when the persisted state is valid JSON, a dict, its
+  # TOP-LEVEL `notice_shown` is the literal boolean `true`, and its TOP-LEVEL
+  # `notice_version` is an integer at or above TELEMETRY_NOTICE_VERSION --
+  # mirrors the identity reader's structural approach above (and
+  # telemetry.py's own check). Fail toward disclosure: missing, nested-only
+  # (e.g. a `{"wrapper": {"notice_shown": true}}` sibling object), a string
+  # "true"/"false", any other non-bool, an older or non-integer version, or
+  # malformed JSON must all still show the notice -- a duplicate notice is
+  # harmless, a suppressed one breaks the privacy contract. Without python3
+  # on PATH we cannot parse JSON structure in pure shell, so this falls back
+  # to a raw-text grep for both fields (documented best-effort gap, matches
+  # the identity reader's NO_PYTHON3 fallback).
   py=$(command -v python3 2>/dev/null || true)
   already_shown=false
   if [ -f "$f" ]; then
@@ -704,12 +711,21 @@ try:
         data = json.load(fh)
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(data, dict) and data.get("notice_shown") is True else 1)
-' "$f" 2>/dev/null; then
+if not isinstance(data, dict) or data.get("notice_shown") is not True:
+    sys.exit(1)
+version = data.get("notice_version")
+if isinstance(version, bool) or not isinstance(version, int):
+    sys.exit(1)
+sys.exit(0 if version >= int(sys.argv[2]) else 1)
+' "$f" "$TELEMETRY_NOTICE_VERSION" 2>/dev/null; then
         already_shown=true
       fi
     elif grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f" 2>/dev/null; then
-      already_shown=true
+      local recorded
+      recorded=$(sed -n 's/.*"notice_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -n 1)
+      if [ -n "$recorded" ] && [ "$recorded" -ge "$TELEMETRY_NOTICE_VERSION" ] 2>/dev/null; then
+        already_shown=true
+      fi
     fi
   fi
   [ "$already_shown" = false ] || return 0
@@ -717,6 +733,7 @@ sys.exit(0 if isinstance(data, dict) and data.get("notice_shown") is True else 1
   _blank
   _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
   _info "Collects commands, versions, and success rates — never code, prompts, or paths."
+  _info "Used to improve Ouroboros, to compare randomized product defaults, and for aggregate statistics, including research."
   _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
 
   # Persist the one-time notice before the first collection attempt. Failure
@@ -726,13 +743,14 @@ sys.exit(0 if isinstance(data, dict) and data.get("notice_shown") is True else 1
   tmp="${f}.notice.$$"
   if [ -n "$py" ]; then
     # Structural set: parses the file, sets the TOP-LEVEL `notice_shown` to
-    # the literal boolean `true`, and preserves every other field as-is.
-    # Unlike the sed fallback below, this also covers a document whose
-    # top-level `notice_shown` never existed in the first place (e.g. an
-    # already-valid identity file that was never rewritten by the repair
-    # path above) -- a blind "replace false with true" text substitution
-    # has nothing to match there and would silently leave the field
-    # missing forever, so a later run would show the notice again.
+    # the literal boolean `true` and `notice_version` to the shown version,
+    # and preserves every other field as-is. Unlike the sed fallback below,
+    # this also covers a document whose top-level `notice_shown` never
+    # existed in the first place (e.g. an already-valid identity file that
+    # was never rewritten by the repair path above) -- a blind "replace
+    # false with true" text substitution has nothing to match there and
+    # would silently leave the field missing forever, so a later run would
+    # show the notice again.
     if "$py" -c '
 import json, sys
 
@@ -744,13 +762,22 @@ try:
 except Exception:
     sys.exit(1)
 data["notice_shown"] = True
+data["notice_version"] = int(sys.argv[3])
 with open(sys.argv[2], "w", encoding="utf-8") as fh:
     json.dump(data, fh)
     fh.write("\n")
-' "$f" "$tmp" 2>/dev/null; then
+' "$f" "$tmp" "$TELEMETRY_NOTICE_VERSION" 2>/dev/null; then
       mv "$tmp" "$f" 2>/dev/null || true
     fi
-  elif sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
+  elif grep -q '"notice_version"' "$f" 2>/dev/null; then
+    if sed -e 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' \
+      -e "s/\"notice_version\"[[:space:]]*:[[:space:]]*[^,}]*/\"notice_version\": $TELEMETRY_NOTICE_VERSION/" \
+      "$f" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$f" 2>/dev/null || true
+    fi
+  elif sed -e 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' \
+    -e "s/\"notice_shown\"[[:space:]]*:[[:space:]]*true/\"notice_shown\": true, \"notice_version\": $TELEMETRY_NOTICE_VERSION/" \
+    "$f" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$f" 2>/dev/null || true
   fi
   rm -f "$tmp" 2>/dev/null || true

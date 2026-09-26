@@ -1228,13 +1228,89 @@ class TestNotice:
         state_dir.mkdir(parents=True)
         state_path = state_dir / "telemetry.json"
         valid_id = str(uuid.uuid4())
-        original = json.dumps({"distinct_id": valid_id, "notice_shown": True})
+        original = json.dumps(
+            {
+                "distinct_id": valid_id,
+                "notice_shown": True,
+                "notice_version": telemetry._NOTICE_VERSION,
+            }
+        )
         state_path.write_text(original, encoding="utf-8")
 
         telemetry.show_first_run_notice()
 
         assert capsys.readouterr().err == ""
         assert state_path.read_text(encoding="utf-8") == original  # untouched, no repair write
+
+    def test_state_without_notice_version_redisplays_the_notice_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Every telemetry.json written before notice versioning carries only
+        ``notice_shown: true``. Those installs must see the updated notice
+        exactly once, even though the old notice marker is still on disk."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        valid_id = str(uuid.uuid4())
+        state_path.write_text(
+            json.dumps({"distinct_id": valid_id, "notice_shown": True}), encoding="utf-8"
+        )
+        marker = state_dir / "telemetry.notice"
+        marker.write_text("", encoding="utf-8")
+        stale = time.time() - telemetry._NOTICE_MARKER_STALE_SECONDS - 5
+        os.utime(marker, (stale, stale))
+
+        telemetry.show_first_run_notice()
+        printed = capsys.readouterr().err.lower()
+        assert "randomized product defaults" in printed
+        assert "research" in printed
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["notice_shown"] is True
+        assert state["notice_version"] == telemetry._NOTICE_VERSION
+        assert state["distinct_id"] == valid_id
+
+        telemetry._reset_for_tests()
+        telemetry.show_first_run_notice()
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("recorded", [0, 3, "4", True, 4.0, None])
+    def test_older_or_invalid_notice_version_fails_toward_disclosure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        recorded: object,
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text(
+            json.dumps(
+                {"distinct_id": str(uuid.uuid4()), "notice_shown": True, "notice_version": recorded}
+            ),
+            encoding="utf-8",
+        )
+
+        telemetry.show_first_run_notice()
+
+        assert "anonymous" in capsys.readouterr().err.lower()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["notice_version"] == telemetry._NOTICE_VERSION
+
+    def test_notice_version_matches_the_installer(self) -> None:
+        install_sh = Path(__file__).resolve().parents[2] / "scripts" / "install.sh"
+        match = re.search(
+            r"^TELEMETRY_NOTICE_VERSION=(\d+)$",
+            install_sh.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        assert match is not None
+        assert int(match.group(1)) == telemetry._NOTICE_VERSION
 
 
 class TestExitDoesNotBlock:

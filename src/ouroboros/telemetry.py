@@ -1224,11 +1224,33 @@ def capture_cli_command(subcommand: str | None) -> None:
 
 _NOTICE = (
     "Ouroboros collects anonymous usage data (commands, versions, success rates - "
-    "never code, prompts, or file contents) to guide improvements and to publish "
-    "aggregate adoption stats.\n"
+    "never code, prompts, or file contents) to guide improvements, to compare "
+    "randomized product defaults, and to publish aggregate statistics, including "
+    "in research publications.\n"
     "Opt out anytime: export OUROBOROS_TELEMETRY=0  |  details: "
     "https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
 )
+
+# Version of the disclosure above; it equals the latest TELEMETRY.md changelog
+# entry that required a fresh notice. ``notice_version`` in telemetry.json
+# records the version a user was last shown. A state whose recorded version is
+# older (or missing, as in every file written before versioning existed) shows
+# the notice once more, so a scope expansion is disclosed to existing installs
+# and not only to new ones. scripts/install.sh carries the same number
+# (``TELEMETRY_NOTICE_VERSION``); edit both together.
+_NOTICE_VERSION = 4
+
+
+def _recorded_notice_version(state: dict[str, Any]) -> int:
+    """The notice version a state records; anything but a real int reads as 0.
+
+    Same fail-toward-disclosure rule as ``notice_shown``: a missing, string,
+    bool, or otherwise corrupted value means "not shown at this version".
+    """
+    value = state.get("notice_version")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 _NOTICE_MARKER_STALE_SECONDS = 10.0
@@ -1300,6 +1322,9 @@ def show_first_run_notice() -> None:
     never actually persisted would be the same silent-non-disclosure
     failure mode this function exists to avoid.
 
+    The notice also prints once more when the state's ``notice_version`` is
+    older than ``_NOTICE_VERSION`` (see ``_recorded_notice_version``).
+
     ``state.get("notice_shown")`` below is a plain truthiness check, which
     is safe because _validate_state (and every candidate constructor --
     _fresh_candidate, _build_repair_candidate) guarantees the field is
@@ -1313,8 +1338,11 @@ def show_first_run_notice() -> None:
         state = _load_state()
         if state is None:
             return
-        if state.get("notice_shown"):
+        if state.get("notice_shown") and _recorded_notice_version(state) >= _NOTICE_VERSION:
             return
+        # A marker left by an earlier notice version is older than
+        # _NOTICE_MARKER_STALE_SECONDS, so the stale-reclaim path below lets
+        # exactly one process re-display the updated notice.
         marker_path = _state_path().with_name("telemetry.notice")
         if not _claim_notice_marker(marker_path):
             return
@@ -1323,6 +1351,7 @@ def show_first_run_notice() -> None:
 
         print(f"\n{_NOTICE}\n", file=sys.stderr)
         state["notice_shown"] = True
+        state["notice_version"] = _NOTICE_VERSION
         _write_state(state)
     except Exception:
         pass
