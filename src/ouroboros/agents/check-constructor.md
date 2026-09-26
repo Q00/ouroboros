@@ -19,10 +19,11 @@ A check that passes on the base cannot be a reproduction check. A check that fai
 4. `failure_signature` is `OUROBOROS_CHECK_FAILED:<check_id>`. Print it on its own line, followed by the expected and observed values, so a failure explains itself.
 5. Deterministic, offline, and fast (well under 60 seconds). Write temporary data only under a `tempfile` directory. Never modify repository files.
 6. Assert observable behavior the criterion states (return values, output, exit codes, file contents). Do not assert implementation details the criterion does not require, such as private helper names, unless the criterion names them.
+7. Exercise the behavior by running code: import and call the project's code, or run its command. When a criterion can only be checked by reading documentation or other prose (a README, a changelog, docstrings or comments, the wording of a message in a file), do not write a check that reads or pattern-matches that text. List the criterion in `uncovered` with the reason `not executable`; the run's other verifier decides it. A check whose script only reads prose files and matches text, without executing project code, is rejected before the worker starts (`prose_only_check`).
 
 ## Linking and coverage
 
-Criteria are numbered from 1 in the order given. Each check lists the criteria it asserts, and each assertion inside it names one criterion. A criterion you cannot check mechanically (for example "the code is readable") goes into `uncovered` with a one-line reason. Never invent a criterion and never drop one silently: every criterion number appears either in some assertion or in `uncovered`.
+Criteria are numbered from 1 in the order given. Each check lists the criteria it asserts, and each assertion inside it names one criterion. A criterion you cannot check by executing code (for example "the code is readable", or "the README documents X") goes into `uncovered` with a one-line reason. If no criterion can be checked by executing code, answer with an empty `checks` list and every criterion in `uncovered`. Never invent a criterion and never drop one silently: every criterion number appears either in some assertion or in `uncovered`.
 
 ## Output
 

@@ -55,6 +55,7 @@ from ouroboros.boundary.check_env import (
     resolve_check_interpreter,
     scrubbed_check_environment,
 )
+from ouroboros.boundary.constructor import ALL_CRITERIA_UNCOVERED
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import (
     CheckPackage,
@@ -283,6 +284,7 @@ async def prepare_check_package(
                 env=scrubbed_check_environment(),
                 interpreter=interpreter.path,
                 interpreter_source=interpreter.source,
+                reject_prose_only_checks=True,
             )
             write_receipt(admission, store / "receipts")
             await ledger.record_admission(boundary_id, admission)
@@ -297,7 +299,9 @@ async def prepare_check_package(
             await ledger.record_superseded(
                 previous, superseded_by=boundary_id, reason=previous_reason
             )
-        if failure_reason is None:
+        if failure_reason is None or failure_reason == ALL_CRITERIA_UNCOVERED:
+            # Admitted, or every criterion declared not executable (the
+            # existing verifier decides them all; regenerating cannot help).
             break
         previous, previous_reason = boundary_id, failure_reason
 

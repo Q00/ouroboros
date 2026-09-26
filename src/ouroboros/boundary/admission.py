@@ -45,6 +45,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from ouroboros.boundary.check_rules import PROSE_ONLY_CHECK_REASON, prose_only_checks
 from ouroboros.boundary.package import (
     CheckPackage,
     CheckRole,
@@ -438,6 +439,7 @@ async def _run_package(
     unprotected_names: frozenset[str],
     env: Mapping[str, str] | None = None,
     interpreter: str | None = None,
+    extra_preconditions: tuple[str, ...] = (),
 ) -> _Run:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -447,7 +449,10 @@ async def _run_package(
     started_at = datetime.now(UTC)
     source_manifest = tree_manifest(source, unprotected_names=unprotected_names)
     source_before = manifest_digest(source_manifest)
-    preconditions = tuple(_package_preconditions(package, source_manifest))
+    preconditions = (
+        *_package_preconditions(package, source_manifest),
+        *extra_preconditions,
+    )
     owned_work_dir = work_dir is None
     root = Path(tempfile.mkdtemp(prefix="ouroboros-check-")) if work_dir is None else work_dir
     root.mkdir(parents=True, exist_ok=True)
@@ -510,13 +515,17 @@ async def admit_check_package(
     env: Mapping[str, str] | None = None,
     interpreter: str | None = None,
     interpreter_source: str | None = None,
+    reject_prose_only_checks: bool = False,
 ) -> AdmissionResult:
     """Run the whole package on isolated copies of the pinned base checkout.
 
     ``env`` replaces the process environment of every check (default: this
     process's environment); ``interpreter`` replaces a bare ``python3`` or
     ``python`` in a check's argv, and it and ``interpreter_source`` are
-    recorded in the receipt.
+    recorded in the receipt. With ``reject_prose_only_checks`` a check that
+    only matches text in prose files (``boundary/check_rules.py``) makes the
+    package ``rejected`` (``prose_only_check:<check_id>``) before any command
+    runs.
 
     Verdict rules, in order: a precondition failure (package path collides with
     the checkout, scratch overlaps it, a pinned base file differs, or there are
@@ -535,6 +544,10 @@ async def admit_check_package(
         unprotected_names=unprotected_names,
         env=env,
         interpreter=interpreter,
+        extra_preconditions=tuple(
+            f"{PROSE_ONLY_CHECK_REASON}:{check_id}"
+            for check_id in (prose_only_checks(package) if reject_prose_only_checks else ())
+        ),
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]
@@ -544,7 +557,9 @@ async def admit_check_package(
     reasons.extend(
         f"{c.reason}:{c.check_id}" for c in undecided if c.reason != "protected_bytes_mutated"
     )
-    if run.preconditions or mutated:
+    if any(reason.startswith(f"{PROSE_ONLY_CHECK_REASON}:") for reason in run.preconditions):
+        verdict = PackageVerdict.REJECTED
+    elif run.preconditions or mutated:
         verdict = PackageVerdict.INDETERMINATE
     elif violated:
         verdict = PackageVerdict.REJECTED

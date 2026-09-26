@@ -61,6 +61,7 @@ CHECK_DIR = ".ouroboros_checks"
 CHECK_INTERPRETERS = frozenset({"python3", "python"})
 DEFAULT_CONSTRUCTOR_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_OUTPUT_CHARS = 200_000
+ALL_CRITERIA_UNCOVERED = "constructor_all_criteria_uncovered"
 _CHECK_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _MIN_SIGNATURE_CHARS = 12
 
@@ -378,5 +379,11 @@ class CheckConstructor:
         except CheckPackageError as exc:
             return failed(f"constructor_reply_invalid:{exc}", reply_sha)
         if not package.checks:
+            if package.uncovered and all(
+                item.reason != "constructor_omitted" for item in package.uncovered
+            ):
+                # Every criterion was declared not executable: nothing for the
+                # package to decide, and regenerating would not change that.
+                return failed(ALL_CRITERIA_UNCOVERED, reply_sha)
             return failed("constructor_produced_no_checks", reply_sha)
         return ConstructionOutcome(package, None, input_digest, self.generator, reply_sha)
