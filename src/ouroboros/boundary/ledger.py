@@ -18,7 +18,7 @@ Regeneration policy. The seal rule above is per boundary id and never
 changes. A caller that allows regeneration (the product run path) gives each
 attempt its own boundary version id and calls ``record_superseded`` on the old
 version once the new one is sealed; the old package stays in the journal,
-marked superseded. A caller that forbids regeneration (the study harness)
+marked superseded. A caller that forbids regeneration (an evaluation harness)
 never calls it, so "exactly one package per boundary" holds unchanged.
 
 ``verify_boundary_order`` re-checks the same rules over replayed events for

@@ -1,6 +1,6 @@
 """Acceptance authority: the admitted check package decides the criteria it covers.
 
-Policy (the paper's evaluated policy, "Evaluated policy and replay"):
+Policy:
 executable verification is authoritative and semantic or evidence-form
 judgments are advisory. With the check package on, each acceptance criterion
 is decided as follows once the worker has stopped:
