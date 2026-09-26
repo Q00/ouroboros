@@ -178,3 +178,61 @@ async def test_a_runtime_that_writes_to_the_base_fails_construction(base: Path) 
     runtime = FakeRuntime(_reply(), write_to=base)
     outcome = await _constructor(runtime, []).construct(_seed(), base)
     assert outcome.package is None and outcome.failure_reason == "constructor_mutated_base"
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        ("gpt-6-luna", "codex:gpt-6-luna"),
+        (None, "codex:default"),
+        ("  ", "codex:default"),
+        ("default", "codex:default"),
+    ],
+)
+async def test_unpinned_constructor_records_the_runtime_resolved_model(
+    base: Path, resolved: str | None, expected: str
+) -> None:
+    runtime = FakeRuntime(_reply())
+    runtime._resolved_fallback_model = resolved  # type: ignore[attr-defined]
+
+    def factory(**_kwargs: Any) -> FakeRuntime:
+        return runtime
+
+    constructor = CheckConstructor(
+        runtime_backend="codex", model=None, runtime_factory=factory, system_prompt="SYSTEM"
+    )
+    outcome = await constructor.construct(_seed(), base)
+
+    assert outcome.generator == expected
+    assert outcome.package is not None and outcome.package.generator == expected
+
+
+class ObservingRuntime(FakeRuntime):
+    """Reports its effective model the way the Codex runtime surfaces it."""
+
+    async def execute_task_to_result(self, prompt: str, tools=None, system_prompt=None):
+        from ouroboros.orchestrator.adapter import AgentMessage
+
+        observed = AgentMessage(
+            type="system",
+            content="Codex selected model: gpt-6-luna",
+            data={
+                "subtype": "model.observed",
+                "model_observation": {"status": "observed", "effective_model": "gpt-6-luna"},
+            },
+        )
+        return Result.ok(TaskResult(success=True, final_message=self.reply, messages=(observed,)))
+
+
+async def test_unpinned_constructor_records_the_model_the_runtime_reported(base: Path) -> None:
+    runtime = ObservingRuntime(_reply())
+    runtime._resolved_fallback_model = "default"  # type: ignore[attr-defined]
+    constructor = CheckConstructor(
+        runtime_backend="codex",
+        model=None,
+        runtime_factory=lambda **_kwargs: runtime,
+        system_prompt="SYSTEM",
+    )
+    outcome = await constructor.construct(_seed(), base)
+    assert outcome.package is not None
+    assert outcome.package.generator == "codex:gpt-6-luna"

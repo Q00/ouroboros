@@ -270,6 +270,14 @@ def package_from_reply(
 RuntimeFactory = Callable[..., Any]
 
 
+def _concrete_model(value: object) -> str | None:
+    """A model id, or None for an unset or ``default`` placeholder."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if candidate and candidate.lower() != "default" else None
+
+
 class CheckConstructor:
     """One read-only model call per attempt through the run's runtime backend."""
 
@@ -292,7 +300,40 @@ class CheckConstructor:
 
     @property
     def generator(self) -> str:
+        """The configured label; ``construct`` records the runtime's resolved model."""
         return f"{self._backend}:{self._model or 'default'}"
+
+    def _resolved_generator(self, runtime: Any) -> str:
+        """``<backend>:<model>`` for the model requested from the runtime.
+
+        Without an explicit pin this is the model the runtime resolved from
+        Ouroboros' own role/profile configuration, when it resolved one.
+        """
+        model = self._model
+        for attribute in ("_resolved_fallback_model", "_model"):
+            if model:
+                break
+            model = _concrete_model(getattr(runtime, attribute, None))
+        return f"{self._backend}:{model or 'default'}"
+
+    def _observed_generator(self, messages: Sequence[Any], requested: str) -> str:
+        """The model the runtime reported it used, else ``requested``.
+
+        Codex reports its effective model on lifecycle events, surfaced as a
+        ``model.observed`` message; that is evidence of the author, whereas a
+        requested ``default`` only means "whatever the CLI's own config picks".
+        """
+        if self._model:
+            return requested
+        for message in messages:
+            data = getattr(message, "data", None) or {}
+            if data.get("subtype") != "model.observed":
+                continue
+            observation = data.get("model_observation") or {}
+            model = _concrete_model(observation.get("effective_model"))
+            if model:
+                return f"{self._backend}:{model}"
+        return requested
 
     def _create_runtime(self, cwd: Path) -> Any:
         factory = self._factory
@@ -319,22 +360,23 @@ class CheckConstructor:
         user_prompt = build_constructor_prompt(seed, feedback)
         base = base_checkout.resolve()
         base_before = await asyncio.to_thread(tree_digest, base)
-        input_digest = constructor_input_digest(
-            seed,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            base_tree_digest=base_before,
-            generator=self.generator,
-        )
-
-        def failed(reason: str, reply_sha: str | None = None) -> ConstructionOutcome:
-            return ConstructionOutcome(None, reason, input_digest, self.generator, reply_sha)
-
         scratch = Path(tempfile.mkdtemp(prefix="ouroboros-constructor-"))
         try:
             view = scratch / "repo"
             await asyncio.to_thread(copy_checkout, base, view)
             runtime = await asyncio.to_thread(self._create_runtime, view)
+            generator = self._resolved_generator(runtime)
+            input_digest = constructor_input_digest(
+                seed,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                base_tree_digest=base_before,
+                generator=generator,
+            )
+
+            def failed(reason: str, reply_sha: str | None = None) -> ConstructionOutcome:
+                return ConstructionOutcome(None, reason, input_digest, generator, reply_sha)
+
             from ouroboros.orchestrator.runtime_factory import preflight_agent_runtime
 
             blocker = preflight_agent_runtime(runtime)
@@ -365,6 +407,9 @@ class CheckConstructor:
             return failed("constructor_mutated_base")
         if result.is_err:
             return failed(f"constructor_call_failed:{type(result.error).__name__}")
+        # The input digest keeps the requested label; the package names the
+        # model that actually answered when the runtime reported it.
+        generator = self._observed_generator(result.value.messages or (), generator)
         reply = result.value.final_message or ""
         reply_sha = sha256_bytes(reply.encode("utf-8"))
         if len(reply) > self._max_output_chars:
@@ -374,7 +419,7 @@ class CheckConstructor:
                 extract_json_object(reply),
                 seed,
                 input_digest=input_digest,
-                generator=self.generator,
+                generator=generator,
             )
         except CheckPackageError as exc:
             return failed(f"constructor_reply_invalid:{exc}", reply_sha)
@@ -386,4 +431,4 @@ class CheckConstructor:
                 # package to decide, and regenerating would not change that.
                 return failed(ALL_CRITERIA_UNCOVERED, reply_sha)
             return failed("constructor_produced_no_checks", reply_sha)
-        return ConstructionOutcome(package, None, input_digest, self.generator, reply_sha)
+        return ConstructionOutcome(package, None, input_digest, generator, reply_sha)
