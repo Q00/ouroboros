@@ -32,6 +32,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/26008?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-26008" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26008" alt="Q00%2Fouroboros | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="#为什么选-ouroboros">为什么</a> ·
   <a href="#你能得到什么">效果</a> ·
@@ -53,7 +57,7 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
 
-<p align="center"><sub><b>五次各自独立的运行，五个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
+<p align="center"><sub><b>六次各自独立的运行，六个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
 <table align="center">
 <tr>
@@ -65,7 +69,8 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 <td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" width="440" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
 </tr>
 </table>
 
@@ -142,7 +147,10 @@ Windows 安装脚本会在缺少 Git 和 uv 时通过 winget 安装它们，Pyth
 ```
 
 `ooo setup` 只需运行一次，用来配置运行环境；`ooo interview` 才是安装后
-启动第一个工作流的命令。
+启动第一个工作流的命令，它会开启苏格拉底式访谈。配置完成后，Codex 会沿用
+它当前选中的模型，Claude Code 则使用推荐的模型设置。只有需要把某个阶段
+固定到特定模型时，才选择**直接配置模型**——它会在浏览器里打开本地设置
+界面。之后随时可以用 `ooo config` 回到这些设置。
 
 也可以不经过 agent 宿主，直接在终端里跑：
 
@@ -162,7 +170,9 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
   <sub>在一台机器上跑 <code>ouroboros setup refresh</code>。它只装进这台机器真正有的宿主，各按各自的形态：Codex 装规则和技能，Hermes 装技能，OpenCode 装插件和 <code>AGENTS.md</code>，Pi 和 GJC 装 bridge。你的机器上会出现 13 个里你装了的那些。</sub>
 </p>
 
-> 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、OMP CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型。
+> 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、OMP CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|omp|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型；Kiro 的设置选择器则用 `kiro-cli chat --listmodels -f json` 查询已认证的 CLI，所以账号和企业白名单的变动会直接反映出来，不需要硬编码的模型表。
+
+> **DeepSeek 支持。** Ouroboros 与 DeepSeek 有两种接法。把访谈 / Seed / QA 流水线指向 DeepSeek 自家的模型：用 `--llm-backend dsh`（`ouroboros mcp serve --runtime claude-cli --llm-backend dsh`，或 `OUROBOROS_LLM_BACKEND=dsh`）——底层驱动的是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 ACP server。反过来也可以：安装 [`dsh-ouroboros` 插件](./integrations/dsh-plugin)（`dsh plugin --profile <your-profile> add "github:Q00/ouroboros#main&path:integrations/dsh-plugin"`），然后在 DeepSeek Harness 的聊天里直接输入 `ooo interview` / `ooo auto`——同一套 `ouroboros_interview` / `ouroboros_auto` 工具在它内部原生运行，苏格拉底式提问一应俱全。两个方向的完整说明，包括 `dsh` 后端除了这一个环境变量之外还需要什么，都在 [DeepSeek Harness 指南](./docs/guides/deepseek-harness.md)。
 
 <details>
 <summary><strong>Codex 插件快速开始</strong></summary>
@@ -214,7 +224,7 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
                                              # 在 ~/.copilot/mcp-config.json 中注册 MCP server
 ```
 
-重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。**模型 ID 映射的覆盖范围比看上去要窄**：静态映射表只覆盖 `claude-opus-4-6` 和 `claude-sonnet-4-5`；已经包含 `.` 的 ID 会原样通过；连字符转点号的兜底逻辑会替换**每一个**连字符，因此当前默认值 `claude-opus-4-8` 会变成 `claude.opus.4.8` 而匹配失败。请让各角色模型保持未设置，由 setup 写入发现到的 ID；或显式设置一个 Copilot 可用的点号格式 ID。参见 [#1995](https://github.com/Q00/ouroboros/issues/1995) 与 [Copilot 运行时指南](./docs/runtime-guides/copilot.md)。
+重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。模型 ID 映射由发现到的目录把关：当前 direct 与 OpenRouter 的 Opus 默认值都会解析为 Copilot 已发布的 `claude-opus-5`；旧版 Anthropic 版本只转换末尾的数字版本分隔符，且仅当发现到的目录里确实存在该候选 ID 时才转换。未知 ID 会原样保留，让 Copilot 明确报出模型不可用，而不是悄悄换成一个不同的模型。请让各角色模型保持未设置，由 setup 写入发现到的 ID；或显式设置一个 Copilot 可用的 ID。参见 [Copilot 运行时指南](./docs/runtime-guides/copilot.md)。
 
 完整说明见 [GitHub Copilot CLI 运行时指南](./docs/runtime-guides/copilot.md)。
 
@@ -234,20 +244,26 @@ claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@o
 
 **pip / uv / pipx**：
 ```bash
-pip install ouroboros-ai                # 基础
-pip install 'ouroboros-ai[claude]'        # + Claude Code 依赖
-pip install 'ouroboros-ai[litellm]'       # + LiteLLM 多 provider；Python 3.12-3.13
-pip install 'ouroboros-ai[mcp]'           # + MCP server / client 支持
-pip install 'ouroboros-ai[tui]'           # + Textual 终端 UI
-pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI + dashboard（不含 MCP 2）；Python 3.12-3.13
+pip install 'ouroboros-ai[mcp,tui]' && ouroboros setup --runtime claude-cli  # 推荐的 MCP v2 默认组合
+pip install 'ouroboros-ai[claude]'      # Claude Agent SDK profile（MCP 1.x，需隔离）
+pip install 'ouroboros-ai[claude-cli]'  # 不引入额外依赖的 Claude CLI worker
+pip install 'ouroboros-ai[claude-sdk]'  # Claude SDK profile 的显式别名
+pip install 'ouroboros-ai[litellm]'     # + LiteLLM 多 provider；Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'         # 不带 GUI 的 MCP v2 server / client
+pip install 'ouroboros-ai[tui]'         # 仅设置界面
+pip install 'ouroboros-ai[all]'         # MCP 1.x 应用包；按设计不含 MCP 2
 ouroboros setup                         # 配置运行时
 ```
 
 `[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
 
-基础包和非 LiteLLM 安装支持 Python 3.12-3.14。包含 LiteLLM 的安装（`[litellm]`、`[all]`、source `--all-extras`）支持 Python 3.12-3.13；当前示例优先使用 Python 3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix)。
+基础包和非 LiteLLM 安装支持 Python 3.12-3.14。包含 LiteLLM 的安装（`[litellm]`、`[all]`，以及源码安装的 `--extra all`）支持 Python 3.12-3.13；当前示例优先使用 Python 3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix)。
 
-历史兼容：在 extras 迁移期间，`ouroboros-ai[dashboard]` 仍然作为兼容别名保留。
+推荐的独立安装方式是 `ouroboros-ai[mcp,tui]`，之后显式选择一个兼容 MCP v2 的运行时。示例用的是 `--runtime claude-cli`；可以替换成其他兼容运行时，例如 `codex`、`opencode`、`hermes`、`gemini`、`goose`、`kiro`、`copilot`、`pi` 或 `gjc`。只有在需要隔离的 MCP 1.x 环境里才使用 `[claude]` 和 `[claude-sdk]`。
+
+`pip install 'ouroboros-ai[mcp]'` 适合在已经隔离的 Python 环境里嵌入 MCP client / server 库，但宿主注册需要 `uvx --isolated --python '>=3.12'` 或 `pipx`。在执行 `ouroboros setup --runtime <claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>` 之前，请先 `pipx install 'ouroboros-ai[mcp]'` 或 `uv tool install 'ouroboros-ai[mcp]'`；两个隔离启动器都不可用时，setup 会直接退出，不修改运行时配置。
+
+历史兼容：`ouroboros-ai[dashboard]` 仍被接受为兼容别名 / no-op，不会安装任何 dashboard 运行时负载。`ouroboros-ai[all]` 包含这个 no-op 别名也只为兼容。
 
 **Homebrew（macOS/Linux）**：
 ```bash
@@ -391,14 +407,12 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo brownfield`     | *(经由 skill)*                                                    | 扫描并管理 brownfield 仓库 / worktree 默认值                  |
 | `ooo publish`        | *(skill / 运行时；底层用 `gh` CLI)*                               | 把 Seed 发布成 GitHub Epic / Task issue，用于团队协作         |
 
-> Claude Code 将 `/run`、`/status`、`/help` 和 `/config` 保留为内置命令。
-> 直接调用 Ouroboros skill 时请使用 `/ouroboros:ouroboros-run`、
-> `/ouroboros:ouroboros-status`、`/ouroboros:ouroboros-help` 和
-> `/ouroboros:ouroboros-config`；原有的 `ooo run`、`ooo status`、
-> `ooo help` 和 `ooo config` 文本入口仍然受支持。
-
 > 不是所有技能都有直接对应的 CLI 子命令。其中一些（`evaluate`、`evolve`、`unstuck`、`ralph`、`publish`）通过 agent 技能、运行时规则或 MCP 工具暴露，而不是 `ouroboros <subcommand>` 这种 shell 命令。
 > `/resume` 是 Claude Code 内置的会话选择器保留指令；要恢复 Ouroboros 进行中的会话，请使用 `ooo resume-session`。
+> Claude Code 还会保留 `/run`、`/status`、`/help` 和 `/config`。安全的直接调用形式是
+> `/ouroboros:ouroboros-run`、`/ouroboros:ouroboros-status`、
+> `/ouroboros:ouroboros-help` 和 `/ouroboros:ouroboros-config`；原有的
+> `ooo run`、`ooo status`、`ooo help` 和 `ooo config` 文本入口仍然受支持。
 
 完整细节见 [CLI 参考](./docs/cli-reference.md)。
 
@@ -406,7 +420,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 ## 九种心智
 
-九个 agent，每一个对应一种思维模式。按需加载，不预加载：
+下面重点列出九个 agent，另有 12 个专用 agent（共 21 个）。全部按需加载，从不预加载：
 
 | Agent                    | 角色                       | 核心问题                                       |
 | :----------------------- | :------------------------- | :--------------------------------------------- |
@@ -431,13 +445,13 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 src/ouroboros/
 +-- bigbang/        Interview、模糊度打分、brownfield 探查
 +-- routing/        PAL Router —— 三档成本优化（1x / 10x / 30x）
-+-- execution/      Double Diamond、分层 AC 分解
++-- execution/      （已弃用 —— 逻辑已移至 orchestrator/ 和 mcp/tools/）
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect 循环、收敛判定
 +-- resilience/     四种停滞模式检测、5 个横向思维人格
 +-- observability/  三要素漂移度量、自动复盘
 +-- persistence/    Event sourcing（SQLAlchemy + aiosqlite）、检查点
-+-- orchestrator/   运行时抽象层（Claude Code、Codex CLI、OpenCode、Hermes）
++-- orchestrator/   运行时抽象层（Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、OMP、GJC、Goose、Antigravity、Grok、Zcode）
 +-- core/           类型、错误、seed、本体、安全
 +-- providers/      LiteLLM 适配器（100+ 模型）
 +-- mcp/            MCP 客户端 / 服务端集成
@@ -453,7 +467,7 @@ src/ouroboros/
 - **Evolution** —— 最多 30 代，本体相似度 ≥ 0.95 时收敛
 - **Stagnation** —— 检测打转、震荡、无漂移、收益递减四种模式
 - **Agent OS runtime** —— 跨能力发现、策略、指令、事件日志、agent 进程的可重放执行契约
-- **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes；同一份工作流规约，跑在不同执行引擎上
+- **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Goose、Kiro、Copilot、Pi 和 OMP；同一份工作流规约，跑在不同执行引擎上
 
 完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文文档：
 

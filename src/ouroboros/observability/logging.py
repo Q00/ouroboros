@@ -558,13 +558,26 @@ class _FileWritingPrintLogger:
         # through emit(). Cached proxies therefore cannot observe a new level
         # with an old handler, dereference a removed handler, or reopen a file
         # that reset/reconfigure has just closed.
+        global _console_logging_enabled
         with _sink_lock:
             generation = _live_generation
             if level < generation.min_level:
                 return
 
             if _console_logging_enabled:
-                print(message, file=sys.stderr)
+                # A log call must never raise into its caller: when stderr's
+                # peer is gone (e.g. the MCP client exited and closed the
+                # socket), the print raises BrokenPipeError. Letting it escape
+                # skipped the file write and aborted shutdown paths whose first
+                # statement is a log call (#2325). A gone peer or closed stream
+                # stops console output for good; any other OSError drops only
+                # this line. Either way the file sink below still runs.
+                try:
+                    print(message, file=sys.stderr)
+                except (BrokenPipeError, ConnectionError, ValueError):
+                    _console_logging_enabled = False
+                except OSError:
+                    pass
 
             if generation.file_handler is not None:
                 record = logging.LogRecord(

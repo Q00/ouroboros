@@ -89,8 +89,29 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 _IDLE_SHUTDOWN_POLL_SECONDS = 60.0
 _NETWORK_IDLE_SHUTDOWN_DEFAULT_SECONDS = 7200.0
 
+
+class _DeadPeerSafeConsole(Console):
+    """Console whose writes go quiet instead of raising once its peer is gone.
+
+    Rich's default ``on_broken_pipe`` dup2()s /dev/null over fd 1 — the stdio
+    JSON-RPC channel — and raises ``SystemExit``, which ``suppress(Exception)``
+    does not catch: a lifecycle notice on a dead stderr would then abort the
+    watchdog's stop signal and the shutdown cleanup (#2325).
+    """
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        try:
+            super().print(*args, **kwargs)
+        except (OSError, ValueError):
+            # ECONNRESET on a socket stderr, or a closed file object.
+            self.quiet = True
+
+
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
-_stderr_console = Console(stderr=True)
+_stderr_console = _DeadPeerSafeConsole(stderr=True)
 log = structlog.get_logger(__name__)
 
 
@@ -851,6 +872,9 @@ async def _run_mcp_server(
     idle_checkpoint_task: asyncio.Task[None] | None = None
     idle_shutdown_task: asyncio.Task[None] | None = None
     serve_exc: BaseException | None = None
+    # Tasks alive before this server started belong to the caller, never to
+    # the residual-task check at the end of the finally block.
+    preexisting_tasks = asyncio.all_tasks()
 
     # The protective try spans store init -> composition -> serve: a failure
     # anywhere after a store initialized (bridge discovery, backend validation
@@ -1147,10 +1171,13 @@ async def _run_mcp_server(
                 _, pending = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_GRACE_SECONDS)
             if pending:
                 hard_exit_required = True
-                _console_out.print(
-                    "[yellow]Serve loop did not stop within the shutdown grace; "
-                    "cleaning up and forcing exit[/yellow]"
-                )
+                # stdio's console is stderr, whose peer is typically gone by
+                # now; a raise here would skip every cleanup below (#2325).
+                with contextlib.suppress(Exception):
+                    _console_out.print(
+                        "[yellow]Serve loop did not stop within the shutdown grace; "
+                        "cleaning up and forcing exit[/yellow]"
+                    )
         # Retrieve parked results so completed tasks never log
         # "exception was never retrieved" during interpreter teardown.
         for _task in (serve_task, *helper_tasks):
@@ -1201,6 +1228,26 @@ async def _run_mcp_server(
             with contextlib.suppress(Exception):
                 await event_store.close()
         _cleanup_pid_file()
+        # Any task this server spawned that is still alive keeps asyncio.run()
+        # teardown blocked in _cancel_all_tasks — e.g. the MCP SDK's shielded
+        # stdio-client drain of a bridged upstream whose close never ran
+        # (#2325). Cancel survivors, allow one grace, and treat whatever still
+        # refuses to finish like the stdin reader above. Skipped when a hard
+        # exit is already due, so a stuck stdin reader adds no extra grace.
+        residual = {
+            t
+            for t in asyncio.all_tasks() - preexisting_tasks
+            if t is not asyncio.current_task() and not t.done()
+        }
+        if residual and not hard_exit_required:
+            for _task in residual:
+                _task.cancel()
+            finished, residual = await asyncio.wait(residual, timeout=_SHUTDOWN_DRAIN_GRACE_SECONDS)
+            for _task in finished:
+                with contextlib.suppress(BaseException):
+                    _task.exception()
+            if residual:
+                hard_exit_required = True
         # Single error-propagation point: preserve a serve-loop failure (bind/
         # listen/runtime errors — asyncio.wait() leaves the exception parked on
         # the task) but raise it only after cleanup, from OUTSIDE this finally.
@@ -1210,10 +1257,15 @@ async def _run_mcp_server(
         # (SIGTERM/orphan-exit/stdin EOF) and propagates nothing.
         if serve_task is not None and serve_task.done() and not serve_task.cancelled():
             serve_exc = serve_task.exception()
-        if hard_exit_required and serve_exc is None:
-            # Every cleanup above has run; only the unjoinable stdin reader
-            # keeps this process alive. See _flush_and_hard_exit.
-            _flush_and_hard_exit(0)
+        if hard_exit_required:
+            # Every cleanup above has run; only an unjoinable stdin reader or
+            # residual task keeps this process alive. See _flush_and_hard_exit.
+            # Raising a serve-loop failure here would leave asyncio.run()
+            # teardown blocked on that survivor, so record it and exit non-zero.
+            if serve_exc is not None:
+                with contextlib.suppress(Exception):
+                    log.error("mcp.command.serve_failed", exc_info=serve_exc)
+            _flush_and_hard_exit(0 if serve_exc is None else 1)
 
     # Surface a serve-loop failure only after cleanup has collapsed the WAL and
     # released the stores. This preserves the error-propagation contract of the

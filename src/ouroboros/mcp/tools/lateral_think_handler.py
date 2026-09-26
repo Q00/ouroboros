@@ -595,6 +595,10 @@ class LateralThinkHandler(BridgeAwareMixin):
                 )
 
                 response_text += DECISION_INLINE_CONTRACT_TEXT
+            if research:
+                from ouroboros.mcp.tools.lateral_decision import build_lateral_research_block
+
+                response_text += build_lateral_research_block(True)
 
             single_meta = stamp_decision_meta(
                 {
@@ -604,6 +608,8 @@ class LateralThinkHandler(BridgeAwareMixin):
                 },
                 mode,
             )
+            if research:
+                single_meta["research"] = True
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),
