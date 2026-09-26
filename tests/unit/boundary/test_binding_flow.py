@@ -469,7 +469,6 @@ async def test_reveal_one_held_out_case_and_retire_it(
     second = plan_repair(again, keys[0])
     assert second is not None and second.revealed_case_id is None
     assert retire_revealed(None, {"oracle_1": {"held"}}) is None
-    assert criterion_verdicts  # imported API stays available
 
 
 def test_only_one_of_several_failing_held_out_cases_is_revealed() -> None:
@@ -527,5 +526,5 @@ def test_only_one_of_several_failing_held_out_cases_is_revealed() -> None:
     assert "- 2 held-out case(s) also failed" in plan.message
     # Retiring h1 leaves two failing held-out cases and one failing visible case.
     retired = apply_reveals(result, ["h1"])
-    assert not failed_heldout_only(retired)
+    assert retired is not None and not failed_heldout_only(retired)
     assert sum(1 for c in retired["cases"] if c["held_out"]) == 2
