@@ -20,6 +20,7 @@ at least one ``tests_passed`` claim is currently unsupported.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 import shlex
 
 from ouroboros.orchestrator.adapter import AgentMessage
@@ -29,7 +30,9 @@ from ouroboros.orchestrator.evidence.harness_observation import CommandObservati
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _is_env_assignment,
     _looks_like_test_command,
+    _project_test_runner_script,
     _shell_command_body,
+    _split_leading_cd,
 )
 from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
@@ -82,8 +85,14 @@ def safe_test_invocation(command: str) -> tuple[dict[str, str], tuple[str, ...]]
     assignment values are literal bytes in both shell and direct execution —
     the semantics the leaf claims are exactly the semantics that run. A bare
     ``env`` prefix is peeled the same way ``_strip_env_prefix`` does.
+
+    A leading ``cd <relative-dir> &&`` (see ``_split_leading_cd``) is not part
+    of the argv: it is a working-directory change that
+    ``confined_test_invocation`` resolves inside the workspace. Only the
+    remainder is tokenized, so it passes the same metacharacter gate.
     """
-    argv = safe_test_argv(command)
+    leading_cd = _split_leading_cd(command)
+    argv = safe_test_argv(leading_cd[1] if leading_cd is not None else command)
     if argv is None:
         return None
     index = 1 if argv[0] == "env" else 0
@@ -96,6 +105,43 @@ def safe_test_invocation(command: str) -> tuple[dict[str, str], tuple[str, ...]]
     if not executable:
         return None
     return env_delta, executable
+
+
+def confined_test_invocation(
+    command: str, workspace: str | None
+) -> tuple[dict[str, str], tuple[str, ...], str | None] | None:
+    """Return ``(environment delta, argv, cwd)`` confined to the workspace, or None.
+
+    ``cwd`` is ``workspace`` unchanged unless the command starts with
+    ``cd <relative-dir> &&``; then it is that directory, resolved (symlinks
+    included) and required to be an existing directory inside the workspace.
+    A project test-runner script (``tests/runtests.py``, ``manage.py``,
+    ``bin/test``) must resolve to a regular file inside the workspace, the
+    same bar an inline program's import must clear to anchor anything: a
+    script outside the workspace is not the project's runner and is never run.
+    """
+    invocation = safe_test_invocation(command)
+    if invocation is None:
+        return None
+    env_delta, argv = invocation
+    leading_cd = _split_leading_cd(command)
+    script = _project_test_runner_script(argv)
+    if leading_cd is None and script is None:
+        return env_delta, argv, workspace
+    if workspace is None:
+        return None
+    try:
+        root = Path(workspace).resolve()
+        directory = (root / leading_cd[0]).resolve() if leading_cd is not None else root
+        if not directory.is_relative_to(root) or not directory.is_dir():
+            return None
+        if script is not None:
+            target = (directory / script).resolve()
+            if not target.is_relative_to(root) or not target.is_file():
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return env_delta, argv, str(directory) if leading_cd is not None else workspace
 
 
 def select_test_reexecution_commands(
@@ -159,8 +205,9 @@ def select_test_reexecution_commands(
         if not key or key in seen:
             continue
         seen.add(key)
-        if safe_test_invocation(candidate) is None:
-            # Shell-dependent text is not a runnable claim; never a candidate.
+        if confined_test_invocation(candidate, task_cwd) is None:
+            # Shell-dependent text is not a runnable claim, and a command that
+            # would leave the workspace is not one either; never a candidate.
             continue
         selected.append(candidate)
         if len(selected) >= MAX_REEXECUTED_COMMANDS:
@@ -178,15 +225,15 @@ async def reexecute_test_commands(
     """Run each command as a direct argv (no shell) and record what happened."""
     observations: list[CommandObservation] = []
     for command in commands:
-        invocation = safe_test_invocation(command)
+        invocation = confined_test_invocation(command, cwd)
         if invocation is None:
             continue
-        env_delta, argv = invocation
+        env_delta, argv, run_cwd = invocation
         # ``run_with_shell`` executes exactly the argv it is given; no shell
         # is placed in front, so leaf-authored text cannot be interpreted.
         run = await run_with_shell(
             argv,
-            cwd=cwd,
+            cwd=run_cwd or cwd,
             env={**env, **env_delta} if env_delta else env,
             timeout_seconds=timeout_seconds,
         )
@@ -206,6 +253,7 @@ async def reexecute_test_commands(
 
 __all__ = [
     "MAX_REEXECUTED_COMMANDS",
+    "confined_test_invocation",
     "reexecute_test_commands",
     "safe_test_argv",
     "safe_test_invocation",
