@@ -393,6 +393,7 @@ from ouroboros.orchestrator.route_escalation import (
     VerifierOutcome as RouteVerifierOutcome,
 )
 from ouroboros.orchestrator.route_policy import MAX_ROUTE_ID_CHARS, RouteCandidate
+from ouroboros.orchestrator.runtime_message_projection import should_emit_runtime_progress
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -7695,16 +7696,7 @@ Respond with either ATOMIC or the structured JSON object only.
         messages_processed: int,
     ) -> bool:
         """Reuse the shared progress-emission policy for AC session messages."""
-        runtime_backend = message.resume_handle.backend if message.resume_handle else None
-        return (
-            message.is_final
-            or messages_processed % 10 == 0
-            or projected.is_tool_call
-            or projected.thinking is not None
-            or message.type == "system"
-            or runtime_backend == "opencode"
-            or projected.is_tool_result
-        )
+        return should_emit_runtime_progress(message, messages_processed, projected=projected)
 
     def _build_session_progress_event(
         self,

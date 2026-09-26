@@ -11,6 +11,12 @@ Kiro runtimes: Ouroboros owns the orchestration loop and shells out to
 flows through your existing `gh auth` session, so there is no separate API
 key to manage.
 
+For live assistant/tool activity, opt into the experimental
+[Copilot ACP transport](copilot-acp.md). It uses the same `copilot` backend and
+setup, but runs `copilot --acp --stdio` instead of `-p`. The CLI behavior described
+on this page remains the default; ACP's permissions and fallback limits are
+documented separately.
+
 > **What makes this runtime different**: Copilot is the only Ouroboros
 > backend that **live-discovers its model catalog**. `ouroboros setup
 > --runtime copilot` queries the GitHub Copilot models API at setup time
@@ -132,6 +138,8 @@ from the discovered list (or rerun setup to refresh).
 # ~/.ouroboros/config.yaml
 orchestrator:
   runtime_backend: copilot
+  copilot_transport: cli                     # default; acp enables live activity
+  copilot_acp_fallback: true                 # ACP-only, guarded pre-prompt fallback
   copilot_cli_path: C:\Users\you\AppData\Local\Programs\copilot\copilot.exe   # optional
 llm:
   backend: copilot
