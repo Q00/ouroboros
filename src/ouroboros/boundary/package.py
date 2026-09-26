@@ -33,9 +33,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ouroboros.boundary.binding import BINDING_GRAMMAR
+from ouroboros.boundary.oracle import (
+    ORACLE_DATA_PATH,
+    ORACLE_HARNESS_PATH,
+    ORACLE_HARNESS_SOURCE,
+    OracleSpec,
+    oracle_data_text,
+)
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, derive_semantic_ac_key
 
 CHECK_PACKAGE_SCHEMA = "ouroboros.check_package.v1"
+ORACLE_PACKAGE_SCHEMA = "ouroboros.check_package.v2"
+# Fields added with the oracle split. They are left out of the canonical
+# bytes while empty, so a package without oracles keeps its v1 bytes and
+# digest (stored v1 packages still load and verify).
+_OPTIONAL_PACKAGE_FIELDS = ("oracles", "binding_grammar")
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MIN_LEAK_TEXT_CHARS = 16
@@ -199,7 +212,9 @@ class CheckPackage(BaseModel, frozen=True):
     a new package identity.
     """
 
-    schema_version: Literal["ouroboros.check_package.v1"] = CHECK_PACKAGE_SCHEMA
+    schema_version: Literal["ouroboros.check_package.v1", "ouroboros.check_package.v2"] = (
+        CHECK_PACKAGE_SCHEMA
+    )
     seed_digest: str
     criterion_keys: tuple[str, ...] = Field(..., min_length=1)
     input_digest: str
@@ -210,6 +225,8 @@ class CheckPackage(BaseModel, frozen=True):
     base_files: tuple[BaseFileRef, ...] = ()
     scratch_paths: tuple[str, ...] = ()
     uncovered: tuple[UncoveredObligation, ...] = ()
+    oracles: tuple[OracleSpec, ...] = ()
+    binding_grammar: str | None = None
 
     @field_validator("seed_digest", "input_digest")
     @classmethod
@@ -274,11 +291,50 @@ class CheckPackage(BaseModel, frozen=True):
                 "every criterion must be linked to an assertion or listed as uncovered: "
                 + ", ".join(sorted(missing))
             )
+        self._validate_oracles()
         return self
+
+    def _validate_oracles(self) -> None:
+        if not self.oracles:
+            if self.binding_grammar is not None or self.schema_version != CHECK_PACKAGE_SCHEMA:
+                raise ValueError("binding_grammar and schema v2 require oracles")
+            return
+        if self.schema_version != ORACLE_PACKAGE_SCHEMA or self.binding_grammar != BINDING_GRAMMAR:
+            raise ValueError(
+                f"a package with oracles is {ORACLE_PACKAGE_SCHEMA} / {BINDING_GRAMMAR}"
+            )
+        checks = {check.check_id: check for check in self.checks}
+        files = {item.path: item.content for item in self.files}
+        seen: set[str] = set()
+        for spec in self.oracles:
+            check = checks.get(spec.check_id)
+            if check is None or spec.check_id in seen:
+                raise ValueError(f"oracle {spec.check_id} needs exactly one check")
+            seen.add(spec.check_id)
+            if check.argv != oracle_argv(spec.check_id) or check.cwd != ".":
+                raise ValueError(f"oracle check {spec.check_id} must run the product harness")
+            if check.failure_signature not in (None, spec.failure_signature) or (
+                check.role is CheckRole.REPRODUCTION and not check.failure_signature
+            ):
+                raise ValueError(f"oracle check {spec.check_id} has a foreign failure signature")
+            if {link.criterion_key for link in check.assertions} != {spec.criterion_key}:
+                raise ValueError(f"oracle check {spec.check_id} must link only its criterion")
+        if files.get(ORACLE_HARNESS_PATH) != ORACLE_HARNESS_SOURCE:
+            raise ValueError("oracle packages carry the product harness unchanged")
+        if files.get(ORACLE_DATA_PATH) != oracle_data_text(self.oracles):
+            raise ValueError("oracle data file does not match the package oracles")
 
     def canonical_dict(self) -> dict[str, Any]:
         """Return the JSON-mode dict whose canonical bytes define ``sha256``."""
-        return self.model_dump(mode="json")
+        data = self.model_dump(mode="json")
+        for key in _OPTIONAL_PACKAGE_FIELDS:
+            if not data.get(key):
+                data.pop(key, None)
+        return data
+
+    def oracle_for(self, check_id: str) -> OracleSpec | None:
+        """The oracle a check executes, or ``None`` for a model-written script."""
+        return next((spec for spec in self.oracles if spec.check_id == check_id), None)
 
     def to_json_bytes(self) -> bytes:
         """Return the canonical serialized package."""
@@ -323,7 +379,63 @@ class CheckPackage(BaseModel, frozen=True):
             "base_files": [item.model_dump(mode="json") for item in self.base_files],
             "scratch_paths": list(self.scratch_paths),
             "uncovered": [item.model_dump(mode="json") for item in self.uncovered],
+            **self._oracle_summary(),
         }
+
+    def _oracle_summary(self) -> dict[str, Any]:
+        if not self.oracles:
+            return {}
+        return {
+            "binding_grammar": self.binding_grammar,
+            "oracles": [
+                {
+                    "check_id": spec.check_id,
+                    "criterion_key": spec.criterion_key,
+                    "call_kind": spec.call_kind.value,
+                    "params": list(spec.params),
+                    "default_symbol": spec.default_binding.symbol,
+                    "default_resolves": spec.default_resolves,
+                    "case_count": len(spec.cases),
+                    "held_out_count": spec.held_out_count,
+                }
+                for spec in self.oracles
+            ],
+        }
+
+
+def oracle_argv(check_id: str) -> tuple[str, ...]:
+    """The argv of an oracle check: the product harness, run from the controller dir."""
+    return ("python3", ORACLE_HARNESS_PATH, check_id)
+
+
+def oracle_check(spec: OracleSpec, role: CheckRole) -> CheckSpec:
+    """The check that executes ``spec``; one assertion per case."""
+    return CheckSpec(
+        check_id=spec.check_id,
+        role=role,
+        argv=oracle_argv(spec.check_id),
+        cwd=".",
+        assertions=tuple(
+            AssertionLink(
+                assertion_id=f"{spec.check_id}.{case.case_id}",
+                criterion_key=spec.criterion_key,
+                locator="held-out case" if case.held_out else "case from the Seed text",
+            )
+            for case in spec.cases
+        ),
+        failure_signature=spec.failure_signature if role is CheckRole.REPRODUCTION else None,
+    )
+
+
+def oracle_files(oracles: Iterable[OracleSpec]) -> tuple[PackageFile, ...]:
+    """The product harness and the frozen oracle data, as package files."""
+    specs = tuple(oracles)
+    if not specs:
+        return ()
+    return (
+        PackageFile.from_content(ORACLE_HARNESS_PATH, ORACLE_HARNESS_SOURCE),
+        PackageFile.from_content(ORACLE_DATA_PATH, oracle_data_text(specs)),
+    )
 
 
 def _is_under(path: str, root: str) -> bool:

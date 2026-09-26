@@ -45,7 +45,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from ouroboros.boundary.admission_rules import UNSAFE_CHECK_REASON, unsafe_checks
+from ouroboros.boundary.binding import Binding, CheckTier
 from ouroboros.boundary.check_rules import PROSE_ONLY_CHECK_REASON, prose_only_checks
+from ouroboros.boundary.controller_dir import (
+    controller_mutations,
+    prepare_controller_dir,
+    remove_controller_dir,
+)
+from ouroboros.boundary.oracle import (
+    is_oracle_file,
+    journal_safe_oracle_result,
+    parse_oracle_result,
+)
 from ouroboros.boundary.package import (
     CheckPackage,
     CheckRole,
@@ -111,6 +123,10 @@ class CheckExecution(BaseModel, frozen=True):
     mutated_paths: tuple[str, ...]
     scratch_outputs: tuple[str, ...]
     undeclared_outputs: tuple[str, ...]
+    # Oracle split (optional; omitted from receipts and events while unset).
+    tier: str | None = None
+    binding: dict[str, Any] | None = None
+    oracle_result: dict[str, Any] | None = None
 
 
 class AdmissionResult(BaseModel, frozen=True):
@@ -130,6 +146,7 @@ class AdmissionResult(BaseModel, frozen=True):
     completed_at: datetime
     interpreter: str | None = None
     interpreter_source: str | None = None
+    check_tiers: dict[str, str] | None = None
 
     def event_summary(self) -> dict[str, Any]:
         """Return the journal payload: statuses and digests, no argv or output."""
@@ -154,6 +171,8 @@ class CandidateVerification(BaseModel, frozen=True):
     completed_at: datetime
     interpreter: str | None = None
     interpreter_source: str | None = None
+    check_tiers: dict[str, str] | None = None
+    bindings: dict[str, dict[str, Any]] | None = None
 
     def event_summary(self) -> dict[str, Any]:
         """Return the journal payload: statuses and digests, no argv or output."""
@@ -164,8 +183,11 @@ _JOURNAL_EXCLUDED_CHECK_FIELDS = frozenset({"argv", "output_tail"})
 # Optional receipt fields: omitted when unset (callers that pass no
 # interpreter keep byte-identical receipts), and the interpreter's absolute
 # path stays in the stored receipt only, never in the journal.
-_OPTIONAL_RECEIPT_FIELDS = ("interpreter", "interpreter_source")
+_OPTIONAL_RECEIPT_FIELDS = ("interpreter", "interpreter_source", "check_tiers", "bindings")
 _JOURNAL_EXCLUDED_RECEIPT_FIELDS = frozenset({"interpreter"})
+# Fields added with the oracle split: omitted while unset, so receipts and
+# events of a package without oracles keep their earlier bytes.
+_OPTIONAL_CHECK_KEYS = ("tier", "binding", "oracle_result")
 
 
 def _receipt_dump(receipt: BaseModel) -> dict[str, Any]:
@@ -173,6 +195,10 @@ def _receipt_dump(receipt: BaseModel) -> dict[str, Any]:
     for key in _OPTIONAL_RECEIPT_FIELDS:
         if data.get(key) is None:
             data.pop(key, None)
+    for check in data.get("checks", ()):
+        for key in _OPTIONAL_CHECK_KEYS:
+            if check.get(key) is None:
+                check.pop(key, None)
     return data
 
 
@@ -190,6 +216,10 @@ def _journal_safe(receipt: BaseModel) -> dict[str, Any]:
         {key: value for key, value in check.items() if key not in _JOURNAL_EXCLUDED_CHECK_FIELDS}
         for check in data["checks"]
     ]
+    for check in data["checks"]:
+        if "oracle_result" in check:
+            # Case pass/fail and held-out flags only: no inputs, no observations.
+            check["oracle_result"] = journal_safe_oracle_result(check["oracle_result"])
     return data
 
 
@@ -312,6 +342,8 @@ def _package_preconditions(package: CheckPackage, manifest: Mapping[str, str]) -
 
 def _materialize(package: CheckPackage, root: Path) -> None:
     for item in package.files:
+        if is_oracle_file(item.path):
+            continue  # oracle files run from the controller directory
         target = root / item.path
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "xb") as handle:
@@ -369,19 +401,36 @@ async def _execute_check(
     unprotected: frozenset[str],
     env: Mapping[str, str] | None = None,
     interpreter: str | None = None,
+    bindings: Mapping[str, Binding] | None = None,
+    tier: str | None = None,
 ) -> CheckExecution:
     copy_checkout(source, copy_root)
     protected = tree_manifest(copy_root, unprotected_names=unprotected)
     _materialize(package, copy_root)
-    protected.update({item.path: item.sha256 for item in package.files})
+    protected.update(
+        {item.path: item.sha256 for item in package.files if not is_oracle_file(item.path)}
+    )
     digest_before = manifest_digest(protected)
+    oracle = package.oracle_for(check.check_id)
+    argv: tuple[str, ...] = check.argv
+    ctrl: Path | None = None
+    ctrl_manifest: dict[str, str] = {}
+    if oracle is not None:
+        argv, ctrl_manifest, ctrl = prepare_controller_dir(
+            package, check, copy_root, bindings=bindings
+        )
     cwd = copy_root / check.cwd
-    if cwd.is_dir():
-        completed = await _run_argv(check.argv, cwd, timeout, env=env, interpreter=interpreter)
-    else:
-        completed = _Completed(None, b"", b"", False, f"cwd missing: {check.cwd}", 0.0)
+    try:
+        if cwd.is_dir():
+            completed = await _run_argv(argv, cwd, timeout, env=env, interpreter=interpreter)
+        else:
+            completed = _Completed(None, b"", b"", False, f"cwd missing: {check.cwd}", 0.0)
+        ctrl_mutated = controller_mutations(ctrl, ctrl_manifest) if ctrl is not None else ()
+    finally:
+        if ctrl is not None:
+            remove_controller_dir(ctrl)
     after = tree_manifest(copy_root, unprotected_names=unprotected)
-    mutated_paths = changed_paths(protected, after)
+    mutated_paths = (*changed_paths(protected, after), *ctrl_mutated)
     new_paths = added_paths(protected, after)
     scratch = tuple(p for p in new_paths if any(_is_under(p, s) for s in package.scratch_paths))
     undeclared = tuple(p for p in new_paths if p not in scratch)
@@ -396,6 +445,7 @@ async def _execute_check(
         on_base=on_base,
     )
     tail = combined if completed.launch_error is None else completed.launch_error
+    binding = (bindings or {}).get(check.check_id)
     return CheckExecution(
         check_id=check.check_id,
         role=check.role,
@@ -415,6 +465,17 @@ async def _execute_check(
         mutated_paths=mutated_paths,
         scratch_outputs=scratch,
         undeclared_outputs=undeclared,
+        tier=tier,
+        binding=(
+            binding.to_dict()
+            if binding is not None
+            else (oracle.default_binding.to_dict() if oracle is not None else None)
+        ),
+        oracle_result=(
+            parse_oracle_result(completed.stdout.decode("utf-8", errors="replace"))
+            if oracle is not None
+            else None
+        ),
     )
 
 
@@ -440,6 +501,9 @@ async def _run_package(
     env: Mapping[str, str] | None = None,
     interpreter: str | None = None,
     extra_preconditions: tuple[str, ...] = (),
+    bindings: Mapping[str, Binding] | None = None,
+    check_tiers: Mapping[str, str] | None = None,
+    only_checks: frozenset[str] | None = None,
 ) -> _Run:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -462,6 +526,8 @@ async def _run_package(
     try:
         if not preconditions:
             for index, check in enumerate(package.checks):
+                if only_checks is not None and check.check_id not in only_checks:
+                    continue
                 copy_root = root / f"{index:03d}-{_safe_name(check.check_id)}"
                 try:
                     executions.append(
@@ -475,6 +541,8 @@ async def _run_package(
                             unprotected=unprotected_names,
                             env=env,
                             interpreter=interpreter,
+                            bindings=bindings,
+                            tier=(check_tiers or {}).get(check.check_id),
                         )
                     )
                 finally:
@@ -516,8 +584,17 @@ async def admit_check_package(
     interpreter: str | None = None,
     interpreter_source: str | None = None,
     reject_prose_only_checks: bool = False,
+    reject_unsafe_checks: bool = False,
+    check_tiers: Mapping[str, CheckTier | str] | None = None,
 ) -> AdmissionResult:
     """Run the whole package on isolated copies of the pinned base checkout.
+
+    With ``reject_unsafe_checks`` a model-written check that breaks a static
+    admission rule (``boundary/admission_rules.py``: dynamic import or exec of
+    workspace files, exec/eval of workspace content, network use) makes the
+    package ``rejected`` (``unsafe_check:<rule>:<check_id>``) before any
+    command runs; such a check's tier is ``C``. ``check_tiers`` (check id to
+    tier) is recorded on each check and in the receipt.
 
     ``env`` replaces the process environment of every check (default: this
     process's environment); ``interpreter`` replaces a bare ``python3`` or
@@ -534,6 +611,11 @@ async def admit_check_package(
     ``rejected``; any other indeterminate check is ``indeterminate``; otherwise
     ``admitted``.
     """
+    prose = prose_only_checks(package) if reject_prose_only_checks else ()
+    unsafe = unsafe_checks(package) if reject_unsafe_checks else ()
+    tiers = {key: CheckTier(value).value for key, value in (check_tiers or {}).items()}
+    tiers.update({check_id: CheckTier.C.value for check_id in prose})
+    tiers.update({check_id: CheckTier.C.value for check_id, _rule in unsafe})
     run = await _run_package(
         package,
         base_checkout,
@@ -544,10 +626,11 @@ async def admit_check_package(
         unprotected_names=unprotected_names,
         env=env,
         interpreter=interpreter,
-        extra_preconditions=tuple(
-            f"{PROSE_ONLY_CHECK_REASON}:{check_id}"
-            for check_id in (prose_only_checks(package) if reject_prose_only_checks else ())
+        extra_preconditions=(
+            *(f"{PROSE_ONLY_CHECK_REASON}:{check_id}" for check_id in prose),
+            *(f"{UNSAFE_CHECK_REASON}:{rule}:{check_id}" for check_id, rule in unsafe),
         ),
+        check_tiers=tiers,
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]
@@ -557,7 +640,7 @@ async def admit_check_package(
     reasons.extend(
         f"{c.reason}:{c.check_id}" for c in undecided if c.reason != "protected_bytes_mutated"
     )
-    if any(reason.startswith(f"{PROSE_ONLY_CHECK_REASON}:") for reason in run.preconditions):
+    if prose or unsafe:
         verdict = PackageVerdict.REJECTED
     elif run.preconditions or mutated:
         verdict = PackageVerdict.INDETERMINATE
@@ -581,6 +664,7 @@ async def admit_check_package(
         completed_at=run.completed_at,
         interpreter=interpreter,
         interpreter_source=interpreter_source,
+        check_tiers=tiers or None,
     )
 
 
@@ -595,8 +679,17 @@ async def verify_candidate(
     env: Mapping[str, str] | None = None,
     interpreter: str | None = None,
     interpreter_source: str | None = None,
+    bindings: Mapping[str, Binding] | None = None,
+    only_checks: Sequence[str] | None = None,
+    check_tiers: Mapping[str, CheckTier | str] | None = None,
 ) -> CandidateVerification:
     """Run the unchanged frozen package on a candidate checkout.
+
+    ``bindings`` (check id to late binding) are written next to the oracle
+    harness in each check's controller directory; an oracle check without one
+    runs through its frozen default binding. ``only_checks`` restricts the run
+    to those check ids (checks of unverified criteria are not run).
+    ``check_tiers`` is recorded on each check and in the receipt.
 
     Every check must exit 0. A reproduction check fails only when it exits
     non-zero with its ``failure_signature``; a non-zero exit without it (setup,
@@ -607,6 +700,7 @@ async def verify_candidate(
     check is ``indeterminate``; otherwise ``pass``. ``artifact_tree_digest`` is the candidate identity that the
     selector revalidates.
     """
+    tiers = {key: CheckTier(value).value for key, value in (check_tiers or {}).items()}
     run = await _run_package(
         package,
         candidate_checkout,
@@ -617,6 +711,12 @@ async def verify_candidate(
         unprotected_names=unprotected_names,
         env=env,
         interpreter=interpreter,
+        bindings=bindings,
+        check_tiers=tiers,
+        only_checks=None if only_checks is None else frozenset(only_checks),
+        extra_preconditions=(
+            ("no_checks",) if only_checks is not None and not only_checks else ()
+        ),
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]
@@ -647,4 +747,98 @@ async def verify_candidate(
         completed_at=run.completed_at,
         interpreter=interpreter,
         interpreter_source=interpreter_source,
+        check_tiers=tiers or None,
+        bindings=(
+            {check_id: binding.to_dict() for check_id, binding in sorted(bindings.items())}
+            if bindings
+            else None
+        ),
+    )
+
+
+BINDING_ADMISSION_TIMEOUT_SECONDS = 120
+
+
+class BindingAdmission(BaseModel, frozen=True):
+    """One base run of a frozen oracle through a late (worker-declared) binding.
+
+    A reproduction oracle must fail on the base through that binding, with its
+    frozen failure signature; a preservation oracle must pass. Otherwise the
+    binding is invalid: it would let the candidate "pass" through code that
+    already behaved this way before the worker (``binding_passes_on_base``), or
+    it points at code whose base behavior the oracle cannot describe
+    (``binding_fails_on_base``). A timeout is indeterminate
+    (``binding_admission_timeout``); there is exactly one run and no retry.
+    """
+
+    schema_version: Literal["ouroboros.binding_admission.v1"] = "ouroboros.binding_admission.v1"
+    package_sha256: str
+    check_id: str
+    criterion_key: str
+    binding: dict[str, Any]
+    base_tree_digest: str
+    valid: bool
+    indeterminate: bool
+    reason: str
+    execution: CheckExecution
+
+
+async def admit_binding(
+    package: CheckPackage,
+    check_id: str,
+    binding: Binding,
+    base_checkout: Path,
+    *,
+    timeout_seconds: int = BINDING_ADMISSION_TIMEOUT_SECONDS,
+    unprotected_names: frozenset[str] = DEFAULT_UNPROTECTED_NAMES,
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
+) -> BindingAdmission:
+    """Run one oracle check through ``binding`` on an isolated base copy (no model call)."""
+    oracle = package.oracle_for(check_id)
+    if oracle is None:
+        raise ValueError(f"{check_id} is not an oracle check")
+    check = next(item for item in package.checks if item.check_id == check_id)
+    base = base_checkout.resolve()
+    root = Path(tempfile.mkdtemp(prefix="ouroboros-binding-"))
+    try:
+        base_digest = manifest_digest(tree_manifest(base, unprotected_names=unprotected_names))
+        execution = await _execute_check(
+            package,
+            check,
+            base,
+            root / f"000-{_safe_name(check_id)}",
+            timeout_seconds,
+            on_base=True,
+            unprotected=unprotected_names,
+            env=env,
+            interpreter=interpreter,
+            bindings={check_id: binding},
+            tier=CheckTier.A_PRIME.value,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    if execution.status is CheckStatus.EXPECTED:
+        valid, indeterminate, reason = True, False, "binding_admitted_on_base"
+    elif execution.timed_out:
+        valid, indeterminate, reason = False, True, "binding_admission_timeout"
+    elif execution.status is CheckStatus.VIOLATED:
+        valid, indeterminate = False, False
+        reason = (
+            "binding_invalid:binding_passes_on_base"
+            if check.role is CheckRole.REPRODUCTION
+            else "binding_invalid:binding_fails_on_base"
+        )
+    else:
+        valid, indeterminate, reason = False, True, f"binding_admission_{execution.reason}"
+    return BindingAdmission(
+        package_sha256=package.sha256,
+        check_id=check_id,
+        criterion_key=oracle.criterion_key,
+        binding=binding.to_dict(),
+        base_tree_digest=base_digest,
+        valid=valid,
+        indeterminate=indeterminate,
+        reason=reason,
+        execution=execution,
     )
