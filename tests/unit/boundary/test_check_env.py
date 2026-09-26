@@ -65,22 +65,11 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-async def test_product_admission_hides_credentials_from_checks(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    for key, value in SECRETS.items():
-        monkeypatch.setenv(key, value)
-    seed = _seed("add(2, 3) returns 5")
-    package = _preservation_package(seed)
-
-    # The library default keeps the caller's environment (a harness may need it).
-    unscrubbed = await admit_check_package(package, repo)
-    assert unscrubbed.verdict.value == "rejected"
-
+async def _prepare(seed, package, repo: Path, tmp_path: Path):
     store = EventStore("sqlite+aiosqlite:///:memory:")
     await store.initialize()
     try:
-        state = await prepare_check_package(
+        return await prepare_check_package(
             seed,
             event_store=store,
             constructor=FakeConstructor(_ok(package)),
@@ -93,11 +82,54 @@ async def test_product_admission_hides_credentials_from_checks(
         )
     finally:
         await store.close()
+
+
+async def test_product_admission_hides_credentials_from_checks(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credential hiding only; independent of which interpreter is detected."""
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    for key, value in SECRETS.items():
+        monkeypatch.setenv(key, value)
+    seed = _seed("add(2, 3) returns 5")
+    package = _preservation_package(seed)
+
+    # The library default keeps the caller's environment (a harness may need it),
+    # so the same check sees the secrets and is rejected there.
+    unscrubbed = await admit_check_package(package, repo)
+    assert unscrubbed.verdict.value == "rejected"
+
+    state = await _prepare(seed, package, repo, tmp_path)
+    assert state.admitted, state.failure_reason
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX venv layout")
+@pytest.mark.parametrize("active", [True, False], ids=["active_venv", "python3_fallback"])
+async def test_product_admission_records_the_detected_interpreter(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active: bool
+) -> None:
+    """Interpreter selection follows VIRTUAL_ENV (the detector's only env input)."""
+    for key, value in SECRETS.items():
+        monkeypatch.setenv(key, value)
+    if active:
+        venv = tmp_path / "active-env"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python3").symlink_to(sys.executable)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+    else:
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    seed = _seed("add(2, 3) returns 5")
+    state = await _prepare(seed, _preservation_package(seed), repo, tmp_path)
+
+    expected = "active_venv" if active else "python3_fallback"
+    # Admitted means the credential check passed under either interpreter.
     assert state.admitted, state.failure_reason
     assert state.admission is not None
-    assert state.admission.interpreter_source == "python3_fallback"
+    assert state.admission.interpreter_source == expected
+    if active:
+        assert state.admission.interpreter == str(venv / "bin" / "python3")
     summary = state.admission.event_summary()
-    assert summary["interpreter_source"] == "python3_fallback"
+    assert summary["interpreter_source"] == expected
     assert "interpreter" not in summary  # the absolute path stays in the stored receipt
 
 
