@@ -697,7 +697,8 @@ async def _run_orchestrator(
         project_fallback_dir: Directory to stand in for the Seed file's folder
             when the Seed itself does not say where it belongs.
         check_package: ``--check-package`` / ``--no-check-package``; ``None``
-            defers to ``OUROBOROS_CHECK_PACKAGE`` and ``boundary.check_package``.
+            defers to ``OUROBOROS_CHECK_PACKAGE``, ``boundary.check_package``, and
+            the randomized default (``ouroboros.boundary.rollout``).
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
@@ -1216,8 +1217,10 @@ def workflow(
             "--check-package/--no-check-package",
             help=(
                 "Before the worker starts, build executable checks from the acceptance "
-                "criteria, admit them on the current tree, and verify the result against "
-                "them. Default: boundary.check_package in config (off)."
+                "criteria, admit them on the current tree, and let them decide the "
+                "criteria they cover. Default: OUROBOROS_CHECK_PACKAGE, then "
+                "boundary.check_package in config, then this installation's randomized "
+                "arm (off when telemetry is off). --no-check-package opts out."
             ),
         ),
     ] = None,

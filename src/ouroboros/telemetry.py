@@ -856,6 +856,32 @@ def distinct_id() -> str:
     return str(state["distinct_id"])
 
 
+def rollout_identity() -> str | None:
+    """The anonymous ID a randomized product default may be keyed on, or None.
+
+    Read-only: unlike ``distinct_id`` it never mints, repairs, or writes
+    telemetry.json. Returns None when telemetry is disabled, when no valid
+    identity exists on disk, or when the installation has not been shown the
+    current notice (``notice_version``), because that notice is what discloses
+    randomized defaults. Never raises.
+    """
+    try:
+        if not is_enabled():
+            return None
+        with _lock:
+            cached = _state_cache
+        state = cached if cached is not None else _read_valid_state(_state_path())
+        if state is None:
+            return None
+        if state.get("notice_shown") is not True:
+            return None
+        if _recorded_notice_version(state) < _NOTICE_VERSION:
+            return None
+        return str(state["distinct_id"])
+    except Exception:
+        return None
+
+
 def _is_allowed_scalar(value: Any) -> bool:
     """Whether a property value is a plain scalar within the size bound.
 
@@ -1448,6 +1474,7 @@ __all__ = [
     "capture_tool_call",
     "distinct_id",
     "flush",
+    "rollout_identity",
     "is_enabled",
     "set_context",
     "capture_subagent_dispatch",

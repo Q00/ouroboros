@@ -33,7 +33,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +60,10 @@ from ouroboros.boundary.package import (
     seed_digest,
     write_check_package,
 )
+from ouroboros.boundary.rollout import (
+    CheckPackageAssignment,
+    resolve_check_package_assignment,
+)
 from ouroboros.boundary.selection import (
     ArtifactRef,
     SelectionDecision,
@@ -74,7 +77,6 @@ if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.persistence.event_store import EventStore
 
-CHECK_PACKAGE_ENV = "OUROBOROS_CHECK_PACKAGE"
 _FEEDBACK_TAIL_CHARS = 400
 _COUNTEREXAMPLE_TAIL_CHARS = 1500
 
@@ -98,21 +100,13 @@ class CheckPackageSettings:
     check_timeout_seconds: int = 120
     max_construction_attempts: int = 2
     policy: RegenerationPolicy = RegenerationPolicy.PRODUCT
+    assignment: CheckPackageAssignment | None = None
 
     @property
     def attempts(self) -> int:
         if self.policy is RegenerationPolicy.STUDY:
             return 1
         return max(1, self.max_construction_attempts)
-
-
-def _parse_switch(value: str) -> bool | None:
-    normalized = value.strip().lower()
-    if normalized in {"on", "1", "true", "yes"}:
-        return True
-    if normalized in {"off", "0", "false", "no"}:
-        return False
-    return None
 
 
 def _load_boundary_config() -> Any:
@@ -122,28 +116,27 @@ def _load_boundary_config() -> Any:
 
 
 def resolve_check_package_settings(cli_value: bool | None = None) -> CheckPackageSettings:
-    """Resolve the switch: CLI flag, then ``OUROBOROS_CHECK_PACKAGE``, then config.
+    """Resolve the arm (``boundary/rollout.py``) and the budgets for one run.
 
-    Budgets always come from ``boundary`` in config. An unreadable config
-    leaves the feature off unless the CLI or environment turns it on.
+    Precedence: CLI flag, then ``OUROBOROS_CHECK_PACKAGE``, then
+    ``boundary.check_package`` in config, then the installation's randomized
+    arm; ``off`` when none applies. Budgets always come from ``boundary`` in
+    config. An unreadable config contributes no setting (and disables
+    telemetry, so no randomized arm either).
     """
     try:
         config = _load_boundary_config()
-        configured = config.check_package == "on"
+        configured = config.check_package
         budgets: dict[str, Any] = {
             "constructor_timeout_seconds": config.constructor_timeout_seconds,
             "check_timeout_seconds": config.check_timeout_seconds,
             "max_construction_attempts": config.max_construction_attempts,
         }
     except Exception:
-        configured = False
+        configured = None
         budgets = {}
-    enabled = cli_value
-    if enabled is None:
-        enabled = _parse_switch(os.environ.get(CHECK_PACKAGE_ENV, ""))
-    if enabled is None:
-        enabled = configured
-    return CheckPackageSettings(enabled=enabled, **budgets)
+    assignment = resolve_check_package_assignment(cli_value, configured=configured)
+    return CheckPackageSettings(enabled=assignment.enabled, assignment=assignment, **budgets)
 
 
 def default_store_dir(execution_id: str) -> Path:

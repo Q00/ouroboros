@@ -455,7 +455,10 @@ def test_switch_precedence_cli_then_env_then_config(monkeypatch: pytest.MonkeyPa
         )
     )
     with patch("ouroboros.boundary.run_wiring._load_boundary_config", return_value=config.boundary):
-        assert resolve_check_package_settings(None).enabled is False
+        settings = resolve_check_package_settings(None)
+        assert settings.enabled is False
+        assert settings.assignment is not None
+        assert settings.assignment.source.value == "user_forced_off"
         monkeypatch.setenv("OUROBOROS_CHECK_PACKAGE", "on")
         settings = resolve_check_package_settings(None)
         assert settings.enabled is True and settings.max_construction_attempts == 3
@@ -464,12 +467,29 @@ def test_switch_precedence_cli_then_env_then_config(monkeypatch: pytest.MonkeyPa
         assert resolve_check_package_settings(True).enabled is True
 
 
+def test_unset_switch_without_telemetry_falls_back_to_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.config.models import BoundaryConfig
+
+    monkeypatch.delenv("OUROBOROS_CHECK_PACKAGE", raising=False)
+    with patch(
+        "ouroboros.boundary.run_wiring._load_boundary_config", return_value=BoundaryConfig()
+    ):
+        settings = resolve_check_package_settings(None)
+    assert settings.enabled is False
+    assert settings.assignment is not None
+    assert settings.assignment.source.value == "fallback"
+
+
 def test_config_accepts_yaml_boolean_spelling() -> None:
     from ouroboros.config.models import BoundaryConfig, OuroborosConfig
 
     assert BoundaryConfig.model_validate({"check_package": True}).check_package == "on"
     assert BoundaryConfig.model_validate({"check_package": False}).check_package == "off"
-    assert OuroborosConfig().boundary.check_package == "off"
+    assert BoundaryConfig.model_validate({"check_package": "off"}).check_package == "off"
+    # Unset means "use the randomized default", which differs from an explicit off.
+    assert OuroborosConfig().boundary.check_package is None
 
 
 SEED_DATA = {
