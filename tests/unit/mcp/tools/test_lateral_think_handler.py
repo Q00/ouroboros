@@ -26,6 +26,7 @@ from ouroboros.mcp.host_context import (
     use_mcp_host_context,
 )
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
+from ouroboros.mcp.tools.fanout import FanoutRegistry
 from ouroboros.mcp.tools.subagent import (
     continue_interview_after_lateral_persona_synthesis,
     lateral_persona_panel_metadata_from_capability_definitions,
@@ -1192,6 +1193,26 @@ async def test_research_flag_adds_evidence_contract_to_payloads() -> None:
     assert all("do not fabricate sources" in prompt for prompt in prompts)
     contexts = [p["context"] for p in meta["payloads"]]
     assert all(ctx["mode"] == "decision" and ctx["research"] is True for ctx in contexts)
+
+
+@pytest.mark.asyncio
+async def test_plugin_decision_fanout_registers_reentry_id() -> None:
+    registry = FanoutRegistry()
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode", opencode_mode="plugin", fanout_registry=registry
+    )
+    result = await handler.handle(
+        {
+            "problem_context": "SQLite vs Postgres",
+            "current_approach": "undecided",
+            "mode": "decision",
+            "session_id": "session-1",
+        }
+    )
+    assert result.is_ok
+    fanout_id = result.unwrap().meta["fanout_id"]
+    assert fanout_id.startswith("fanout_")
+    assert registry.load(fanout_id) is not None
 
 
 @pytest.mark.asyncio
