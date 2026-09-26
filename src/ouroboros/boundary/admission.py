@@ -127,6 +127,8 @@ class AdmissionResult(BaseModel, frozen=True):
     checks: tuple[CheckExecution, ...]
     started_at: datetime
     completed_at: datetime
+    interpreter: str | None = None
+    interpreter_source: str | None = None
 
     def event_summary(self) -> dict[str, Any]:
         """Return the journal payload: statuses and digests, no argv or output."""
@@ -149,6 +151,8 @@ class CandidateVerification(BaseModel, frozen=True):
     checks: tuple[CheckExecution, ...]
     started_at: datetime
     completed_at: datetime
+    interpreter: str | None = None
+    interpreter_source: str | None = None
 
     def event_summary(self) -> dict[str, Any]:
         """Return the journal payload: statuses and digests, no argv or output."""
@@ -156,6 +160,19 @@ class CandidateVerification(BaseModel, frozen=True):
 
 
 _JOURNAL_EXCLUDED_CHECK_FIELDS = frozenset({"argv", "output_tail"})
+# Optional receipt fields: omitted when unset (callers that pass no
+# interpreter keep byte-identical receipts), and the interpreter's absolute
+# path stays in the stored receipt only, never in the journal.
+_OPTIONAL_RECEIPT_FIELDS = ("interpreter", "interpreter_source")
+_JOURNAL_EXCLUDED_RECEIPT_FIELDS = frozenset({"interpreter"})
+
+
+def _receipt_dump(receipt: BaseModel) -> dict[str, Any]:
+    data = receipt.model_dump(mode="json")
+    for key in _OPTIONAL_RECEIPT_FIELDS:
+        if data.get(key) is None:
+            data.pop(key, None)
+    return data
 
 
 def _journal_safe(receipt: BaseModel) -> dict[str, Any]:
@@ -165,7 +182,9 @@ def _journal_safe(receipt: BaseModel) -> dict[str, Any]:
     reasons, and digests only. The complete receipt (argv, output tails) is a
     separately stored artifact, see ``write_receipt``.
     """
-    data = receipt.model_dump(mode="json")
+    data = _receipt_dump(receipt)
+    for key in _JOURNAL_EXCLUDED_RECEIPT_FIELDS:
+        data.pop(key, None)
     data["checks"] = [
         {key: value for key, value in check.items() if key not in _JOURNAL_EXCLUDED_CHECK_FIELDS}
         for check in data["checks"]
@@ -176,7 +195,7 @@ def _journal_safe(receipt: BaseModel) -> dict[str, Any]:
 def write_receipt(receipt: AdmissionResult | CandidateVerification, directory: Path) -> Path:
     """Write a complete receipt to ``<directory>/<sha256>.json`` (create-only)."""
     directory.mkdir(parents=True, exist_ok=True)
-    data = canonical_json_bytes(receipt.model_dump(mode="json"))
+    data = canonical_json_bytes(_receipt_dump(receipt))
     target = directory / f"{sha256_bytes(data)}.json"
     if not target.exists():
         with open(target, "xb") as handle:
@@ -194,23 +213,40 @@ class _Completed:
     duration: float
 
 
-def _command_env() -> dict[str, str]:
-    env = os.environ.copy()
+def _command_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ if base is None else base)
     # Same rule as mechanical verification: a nested-server sentinel must not
     # leak into the checked process.
     env.pop("_OUROBOROS_NESTED", None)
     return env
 
 
-async def _run_argv(argv: Sequence[str], cwd: Path, timeout: int) -> _Completed:
+_PYTHON_ARGV0 = frozenset({"python3", "python"})
+
+
+def _resolved_argv(argv: Sequence[str], interpreter: str | None) -> tuple[str, ...]:
+    """Replace a bare ``python3``/``python`` with ``interpreter`` when one is given."""
+    if interpreter and argv and argv[0] in _PYTHON_ARGV0:
+        return (interpreter, *argv[1:])
+    return tuple(argv)
+
+
+async def _run_argv(
+    argv: Sequence[str],
+    cwd: Path,
+    timeout: int,
+    *,
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
+) -> _Completed:
     """Run ``argv`` without a shell; kill its whole process group on timeout."""
     started = time.monotonic()
     posix = sys.platform != "win32"
     try:
         process = await asyncio.create_subprocess_exec(
-            *argv,
+            *_resolved_argv(argv, interpreter),
             cwd=cwd,
-            env=_command_env(),
+            env=_command_env(env),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -330,6 +366,8 @@ async def _execute_check(
     *,
     on_base: bool,
     unprotected: frozenset[str],
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
 ) -> CheckExecution:
     copy_checkout(source, copy_root)
     protected = tree_manifest(copy_root, unprotected_names=unprotected)
@@ -338,7 +376,7 @@ async def _execute_check(
     digest_before = manifest_digest(protected)
     cwd = copy_root / check.cwd
     if cwd.is_dir():
-        completed = await _run_argv(check.argv, cwd, timeout)
+        completed = await _run_argv(check.argv, cwd, timeout, env=env, interpreter=interpreter)
     else:
         completed = _Completed(None, b"", b"", False, f"cwd missing: {check.cwd}", 0.0)
     after = tree_manifest(copy_root, unprotected_names=unprotected)
@@ -398,6 +436,8 @@ async def _run_package(
     keep_copies: bool,
     on_base: bool,
     unprotected_names: frozenset[str],
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
 ) -> _Run:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -428,6 +468,8 @@ async def _run_package(
                             timeout_seconds,
                             on_base=on_base,
                             unprotected=unprotected_names,
+                            env=env,
+                            interpreter=interpreter,
                         )
                     )
                 finally:
@@ -465,8 +507,16 @@ async def admit_check_package(
     work_dir: Path | None = None,
     keep_copies: bool = False,
     unprotected_names: frozenset[str] = DEFAULT_UNPROTECTED_NAMES,
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
+    interpreter_source: str | None = None,
 ) -> AdmissionResult:
     """Run the whole package on isolated copies of the pinned base checkout.
+
+    ``env`` replaces the process environment of every check (default: this
+    process's environment); ``interpreter`` replaces a bare ``python3`` or
+    ``python`` in a check's argv, and it and ``interpreter_source`` are
+    recorded in the receipt.
 
     Verdict rules, in order: a precondition failure (package path collides with
     the checkout, scratch overlaps it, a pinned base file differs, or there are
@@ -483,6 +533,8 @@ async def admit_check_package(
         keep_copies=keep_copies,
         on_base=True,
         unprotected_names=unprotected_names,
+        env=env,
+        interpreter=interpreter,
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]
@@ -512,6 +564,8 @@ async def admit_check_package(
         checks=run.checks,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        interpreter=interpreter,
+        interpreter_source=interpreter_source,
     )
 
 
@@ -523,6 +577,9 @@ async def verify_candidate(
     work_dir: Path | None = None,
     keep_copies: bool = False,
     unprotected_names: frozenset[str] = DEFAULT_UNPROTECTED_NAMES,
+    env: Mapping[str, str] | None = None,
+    interpreter: str | None = None,
+    interpreter_source: str | None = None,
 ) -> CandidateVerification:
     """Run the unchanged frozen package on a candidate checkout.
 
@@ -543,6 +600,8 @@ async def verify_candidate(
         keep_copies=keep_copies,
         on_base=False,
         unprotected_names=unprotected_names,
+        env=env,
+        interpreter=interpreter,
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]
@@ -571,4 +630,6 @@ async def verify_candidate(
         checks=run.checks,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        interpreter=interpreter,
+        interpreter_source=interpreter_source,
     )

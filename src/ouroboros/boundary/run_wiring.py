@@ -50,6 +50,11 @@ from ouroboros.boundary.admission import (
     verify_candidate,
     write_receipt,
 )
+from ouroboros.boundary.check_env import (
+    CheckInterpreter,
+    resolve_check_interpreter,
+    scrubbed_check_environment,
+)
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import (
     CheckPackage,
@@ -156,6 +161,7 @@ class BoundaryRunState:
     failure_reason: str | None
     store_dir: Path
     package_path: Path | None = None
+    interpreter: CheckInterpreter | None = None
 
     @property
     def admitted(self) -> bool:
@@ -250,6 +256,9 @@ async def prepare_check_package(
     admission: AdmissionResult | None = None
     package_path: Path | None = None
     failure_reason: str | None = None
+    # Model-written checks run with a scrubbed environment and the project's
+    # interpreter when one exists (boundary/check_env.py).
+    interpreter = resolve_check_interpreter(base)
 
     for attempt in range(1, settings.attempts + 1):
         boundary_id = f"{execution_id}/check_package/v{attempt}"
@@ -268,7 +277,12 @@ async def prepare_check_package(
             package_path = write_check_package(package, store / "packages")
             await ledger.record_package_frozen(boundary_id, package, seed=seed)
             admission = await admit_check_package(
-                package, base, timeout_seconds=settings.check_timeout_seconds
+                package,
+                base,
+                timeout_seconds=settings.check_timeout_seconds,
+                env=scrubbed_check_environment(),
+                interpreter=interpreter.path,
+                interpreter_source=interpreter.source,
             )
             write_receipt(admission, store / "receipts")
             await ledger.record_admission(boundary_id, admission)
@@ -317,6 +331,7 @@ async def prepare_check_package(
         failure_reason=failure_reason,
         store_dir=store,
         package_path=package_path if admitted else None,
+        interpreter=interpreter,
     )
 
 
@@ -357,8 +372,14 @@ async def verify_check_package(
         tree_digest=tree_digest(candidate),
         seed_digest=package.seed_digest,
     )
+    interpreter = state.interpreter or resolve_check_interpreter(candidate)
     verification = await verify_candidate(
-        package, candidate, timeout_seconds=settings.check_timeout_seconds
+        package,
+        candidate,
+        timeout_seconds=settings.check_timeout_seconds,
+        env=scrubbed_check_environment(),
+        interpreter=interpreter.path,
+        interpreter_source=interpreter.source,
     )
     receipt = write_receipt(verification, state.store_dir / "receipts")
     await ledger.record_candidate_verification(state.boundary_id, verification)
@@ -402,6 +423,11 @@ def render_preparation(state: BoundaryRunState) -> list[str]:
         package = state.package
         roles = ", ".join(f"{check.check_id} ({check.role.value})" for check in package.checks)
         lines.append(f"Package {package.sha256[:16]} admitted on the base: {roles}")
+        if state.interpreter is not None:
+            lines.append(
+                f"Checks run with {state.interpreter.path} ({state.interpreter.source}) "
+                "and a scrubbed environment"
+            )
         if package.uncovered:
             lines.append(
                 f"Uncovered criteria: {len(package.uncovered)} of {len(package.criterion_keys)}"

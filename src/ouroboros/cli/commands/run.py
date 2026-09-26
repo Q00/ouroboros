@@ -1158,7 +1158,11 @@ def workflow(
                 "criteria, admit them on the current tree, and let them decide the "
                 "criteria they cover. Default: OUROBOROS_CHECK_PACKAGE, then "
                 "boundary.check_package in config, then this installation's randomized "
-                "arm (off when telemetry is off). --no-check-package opts out."
+                "arm (off when telemetry is off). --no-check-package opts out. The checks "
+                "are model-written Python scripts. They run on throwaway copies of the "
+                "project with the project's interpreter, a per-check timeout, and "
+                "credential-like environment variables removed, but without an OS "
+                "sandbox: they can read files you can read and use the network."
             ),
         ),
     ] = None,
