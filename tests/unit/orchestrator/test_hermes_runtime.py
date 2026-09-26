@@ -15,7 +15,11 @@ from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.hermes_runtime as hermes_runtime_module
-from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime, _parse_quiet_output
+from ouroboros.orchestrator.hermes_runtime import (
+    HermesCliRuntime,
+    _parse_quiet_output,
+    _resolve_hermes_profile,
+)
 from ouroboros.router import Resolved, ResolveRequest, SkillDispatchRouter
 
 _EXPECTED_CWD = str(Path("/tmp/project").resolve())
@@ -165,6 +169,78 @@ class TestHermesCliRuntime:
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
         assert runtime._llm_backend == "opencode"
+
+    def test_explicit_runtime_profile_wins_over_host_profile(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_profile = tmp_path / ".hermes" / "profiles" / "astraia"
+        host_profile.mkdir(parents=True)
+        (host_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(host_profile))
+
+        assert _resolve_hermes_profile("worker") == "worker"
+
+    def test_infers_runtime_profile_from_hermes_home(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_profile = tmp_path / ".hermes" / "profiles" / "astraia"
+        host_profile.mkdir(parents=True)
+        (host_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(host_profile))
+
+        assert _resolve_hermes_profile(None) == "astraia"
+
+    def test_infers_runtime_profile_with_profile_scoped_home(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_profile = tmp_path / ".hermes" / "profiles" / "astraia"
+        profile_home = host_profile / "home"
+        profile_home.mkdir(parents=True)
+        (host_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(profile_home))
+        monkeypatch.setenv("HERMES_REAL_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(host_profile))
+
+        assert _resolve_hermes_profile(None) == "astraia"
+
+    def test_infers_runtime_profile_from_canonical_host_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        host_profile = tmp_path / ".hermes" / "profiles" / "astraia"
+        host_profile.mkdir(parents=True)
+        (host_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.chdir(host_profile)
+
+        assert _resolve_hermes_profile(None) == "astraia"
+
+    def test_does_not_infer_runtime_profile_from_arbitrary_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.chdir(project)
+
+        assert _resolve_hermes_profile(None) is None
 
     @staticmethod
     def _clear_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -943,6 +1019,28 @@ class TestHermesCliRuntime:
         assert messages[0].content == "Finished work"
         assert messages[0].resume_handle is not None
         assert messages[0].resume_handle.native_session_id == "20260413_120000_deadbeef"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_passes_runtime_profile_before_chat(self) -> None:
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            cwd="/tmp/project",
+            runtime_profile="astraia",
+        )
+        process = _FakeProcess("Completed\n")
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            _ = [message async for message in runtime.execute_task("Do the thing")]
+
+        assert mock_exec.call_args.args[:4] == (
+            "hermes",
+            "--profile",
+            "astraia",
+            "chat",
+        )
 
     @pytest.mark.asyncio
     async def test_execute_task_falls_through_on_recoverable_dispatch_failure(

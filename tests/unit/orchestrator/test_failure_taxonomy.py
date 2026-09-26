@@ -140,6 +140,7 @@ class TestHardPreconditionClassification:
             ("missing required tool terraform", {}),
             ("Missing access to the deployment account", {}),
             ("environment variable is not configured", {}),
+            ("Hermes isn't configured yet -- no API keys or providers found.", {}),
             ("", {"failure_class": "BLOCKED"}),
             ("", {"details": {"status": "FORBIDDEN"}}),
             ("", {"errorType": "PermissionDenied"}),

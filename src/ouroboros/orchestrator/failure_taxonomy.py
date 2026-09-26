@@ -81,6 +81,8 @@ _HARD_PRECONDITION_PATTERNS = tuple(
         r"\b(?:tool|access|authority|credential|credentials|configuration|config|"
         r"environment variable|env var) (?:is |are )?(?:required|unavailable|"
         r"not available|not configured)\b",
+        r"\b(?:hermes|agent) (?:isn t|is not) configured\b",
+        r"\bno api keys? or providers? found\b",
     )
 )
 _MAX_HARD_PRECONDITION_METADATA_MAPPINGS = 32

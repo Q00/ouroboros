@@ -147,6 +147,7 @@ def _create_hermes_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 
     return HermesCliRuntime(
         cli_path=request.cli_path or get_hermes_cli_path(),
+        runtime_profile=get_runtime_profile(),
         startup_output_timeout_seconds=request.startup_output_timeout_seconds,
         stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
         **_runtime_kwargs(request),
