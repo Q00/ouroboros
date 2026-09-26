@@ -31,7 +31,7 @@ Packages and full receipts are stored under ``<store_dir>/packages`` and
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
@@ -56,10 +56,12 @@ from ouroboros.boundary.admission import (
 )
 from ouroboros.boundary.binding import CheckTier, TierAssignment
 from ouroboros.boundary.binding_flow import (
+    BoundVerification,
     DeclaredBindingResult,
     admission_tiers,
     assign_tiers,
     bindings_payload,
+    retire_revealed,
     snapshot_base,
     verify_with_bindings,
 )
@@ -70,7 +72,7 @@ from ouroboros.boundary.check_env import (
 )
 from ouroboros.boundary.constructor import ALL_CRITERIA_UNCOVERED
 from ouroboros.boundary.ledger import BoundaryLedger
-from ouroboros.boundary.oracle import repair_lines
+from ouroboros.boundary.oracle import apply_reveals, first_failing_heldout, repair_lines
 from ouroboros.boundary.package import (
     CheckPackage,
     seed_criterion_keys,
@@ -392,12 +394,15 @@ def _counterexamples(verification: CandidateVerification) -> tuple[Counterexampl
     )
 
 
-def _unverified_everywhere(state: BoundaryRunState) -> dict[str, CriterionVerdict]:
-    reason = f"no_admitted_package:{state.failure_reason or 'unknown'}"
-    return {
-        key: CriterionVerdict(key, PackageCriterionStatus.UNCOVERED, CheckTier.U, reason)
-        for key in state.criterion_keys
-    }
+UNAVAILABLE_VERDICT = "unavailable"
+
+
+def unavailable_line(state: BoundaryRunState) -> str:
+    """The one line a run prints when no package was admitted."""
+    return (
+        f"Check package unavailable ({state.failure_reason or 'no_admitted_package'}); "
+        "legacy verification decided this run."
+    )
 
 
 def _base_manifest(state: BoundaryRunState) -> dict[str, str] | None:
@@ -415,24 +420,27 @@ async def verify_check_package(
     settings: CheckPackageSettings,
     declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
     base_run_cache: dict[str, Any] | None = None,
+    revealed: Mapping[str, Collection[str]] | None = None,
 ) -> BoundaryVerdict:
     """Bind, then run the unchanged package on the candidate; record everything.
 
     ``declared_entry_points`` maps a criterion key to the worker's declared
-    ``entry_points`` (typed evidence). Order: final bindings
+    ``entry_points`` (typed evidence). ``revealed`` maps a check id to the
+    held-out case ids already shown to the worker in a repair message; they
+    are retired from held-out statistics. Order: final bindings
     (``boundary.binding.recorded``), candidate verification (plus one R3
     re-run of transiently indeterminate checks), selection.
+
+    Without an admitted package the verdict is ``unavailable`` with no
+    per-criterion verdicts: the run falls back to the legacy verifier exactly
+    as if the check package were off (user decision, 2026-09-27).
     """
     if state.package is None or state.admission is None:
-        verdicts = _unverified_everywhere(state)
         return BoundaryVerdict(
-            verdict=ArtifactVerdict.UNVERIFIED.value,
+            verdict=UNAVAILABLE_VERDICT,
             reasons=(state.failure_reason or "no_admitted_package",),
             boundary_id=state.boundary_id,
             package_sha256=None,
-            criteria={key: item.status for key, item in verdicts.items()},
-            verdicts=verdicts,
-            artifact_verdict=ArtifactVerdict.UNVERIFIED,
         )
     ledger = BoundaryLedger(event_store)
     package = state.package
@@ -470,6 +478,9 @@ async def verify_check_package(
         assignments,
         timeout_seconds=settings.check_timeout_seconds,
         **run_options,
+    )
+    bound = BoundVerification(
+        retire_revealed(bound.first, revealed), retire_revealed(bound.rerun, revealed)
     )
     receipt: Path | None = None
     for run in (bound.first, bound.rerun):
@@ -522,12 +533,24 @@ async def verify_check_package(
     )
 
 
-def repair_message(verdict: BoundaryVerdict, criterion_key: str) -> str | None:
-    """Counterexample repair text for one failing criterion, or ``None``.
+@dataclass(frozen=True, slots=True)
+class RepairPlan:
+    """The repair message for one failing criterion, and the case it reveals (if any)."""
 
-    Visible cases are shown in full; held-out cases only as a count, so the
-    held-out verdict keeps its meaning after a repair. For a worker-declared
-    binding (tier A') the message names the binding the check ran through.
+    message: str
+    revealed_check_id: str | None = None
+    revealed_case_id: str | None = None
+
+
+def plan_repair(verdict: BoundaryVerdict, criterion_key: str) -> RepairPlan | None:
+    """Counterexample repair for one failing criterion, or ``None``.
+
+    Visible cases are shown in full. When the criterion failed only on
+    held-out cases, exactly one failing held-out case is revealed (input,
+    expected and observed output) and named in the plan, so the caller can
+    retire it (``boundary.oracle.case_revealed``); the other held-out cases
+    stay hidden and are counted. For a worker-declared binding (tier A') the
+    message names the binding the check ran through.
     """
     item = verdict.verdicts.get(criterion_key)
     if item is None or item.status is not PackageCriterionStatus.FAIL:
@@ -546,18 +569,49 @@ def repair_message(verdict: BoundaryVerdict, criterion_key: str) -> str | None:
         )
     elif item.binding is not None:
         lines.append(f"It called {item.binding.get('symbol')}.")
+    results = {
+        check_id: verdict.oracle_results[check_id]
+        for check_id in item.check_ids
+        if verdict.oracle_results.get(check_id)
+    }
+    reveal: tuple[str, str] | None = None
+    failing = [
+        case
+        for result in results.values()
+        for case in result.get("cases") or ()
+        if not case.get("passed")
+    ]
+    if failing and all(case.get("held_out") for case in failing):
+        for check_id, result in results.items():
+            case = first_failing_heldout(result)
+            if case is not None:
+                reveal = (check_id, str(case.get("case_id")))
+                results[check_id] = apply_reveals(result, [reveal[1]]) or result
+                lines.append(
+                    "Every failing case was held out; one of them is revealed below "
+                    "(it no longer counts as held out)."
+                )
+                break
     shown = False
-    for check_id in item.check_ids:
-        result = verdict.oracle_results.get(check_id)
-        if result:
-            counter = repair_lines(result)
-            lines.extend(counter)
-            shown = shown or bool(counter)
+    for result in results.values():
+        counter = repair_lines(result)
+        lines.extend(counter)
+        shown = shown or bool(counter)
     if not shown:
         for example in verdict.counterexamples:
             if example.check_id in item.check_ids and example.output_tail.strip():
                 lines.append(example.output_tail.strip()[-600:])
-    return "\n".join(lines)
+    return RepairPlan(
+        "\n".join(lines),
+        reveal[0] if reveal else None,
+        reveal[1] if reveal else None,
+    )
+
+
+def repair_message(verdict: BoundaryVerdict, criterion_key: str) -> str | None:
+    """``plan_repair(...).message``; the caller must record a reveal it shows."""
+    plan = plan_repair(verdict, criterion_key)
+    return None if plan is None else plan.message
 
 
 def render_preparation(state: BoundaryRunState) -> list[str]:
@@ -579,10 +633,7 @@ def render_preparation(state: BoundaryRunState) -> list[str]:
                 f"Uncovered criteria: {len(package.uncovered)} of {len(package.criterion_keys)}"
             )
     else:
-        lines.append(
-            f"No admitted package ({state.failure_reason}); the run continues and every "
-            "criterion will be reported unverified."
-        )
+        lines.append(f"No admitted package ({state.failure_reason}).")
     return lines
 
 

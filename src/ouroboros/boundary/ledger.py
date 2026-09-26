@@ -40,6 +40,7 @@ from ouroboros.boundary.events import (
     BINDING_RECORDED,
     BOUNDARY_AGGREGATE_TYPE,
     CANDIDATE_VERIFIED,
+    CASE_REVEALED,
     CONSTRUCTION_FAILED,
     PACKAGE_FROZEN,
     SELECTION_DECIDED,
@@ -49,6 +50,7 @@ from ouroboros.boundary.events import (
     admission_completed_event,
     binding_recorded_event,
     candidate_verified_event,
+    case_revealed_event,
     construction_failed_event,
     package_frozen_event,
     selection_decided_event,
@@ -300,6 +302,51 @@ class BoundaryLedger:
                 "final bindings already recorded", details={"boundary_id": boundary_id}
             )
         event = binding_recorded_event(boundary_id, package_sha256=package_sha256, payload=payload)
+        await self._store.append(event)
+        return event
+
+    async def record_case_revealed(
+        self,
+        boundary_id: str,
+        *,
+        package_sha256: str,
+        check_id: str,
+        criterion_key: str,
+        case_id: str,
+        root_ac_index: int | None = None,
+        retry_attempt: int | None = None,
+    ) -> BaseEvent:
+        """Record that one held-out case was revealed to the worker (once per case)."""
+        events = await self.events(boundary_id)
+        frozen = _first(events, PACKAGE_FROZEN)
+        if frozen is None or frozen.data.get("package_sha256") != package_sha256:
+            raise BoundaryOrderError(
+                "a reveal must cite the boundary's frozen package",
+                details={"boundary_id": boundary_id},
+            )
+        if _first(events, ACTOR_STARTED) is None:
+            raise BoundaryOrderError(
+                "a case is revealed only to a started worker",
+                details={"boundary_id": boundary_id},
+            )
+        if any(
+            event.type == CASE_REVEALED
+            and event.data.get("check_id") == check_id
+            and event.data.get("case_id") == case_id
+            for event in events
+        ):
+            raise BoundaryOrderError(
+                "case already revealed", details={"boundary_id": boundary_id, "case_id": case_id}
+            )
+        event = case_revealed_event(
+            boundary_id,
+            package_sha256=package_sha256,
+            check_id=check_id,
+            criterion_key=criterion_key,
+            case_id=case_id,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+        )
         await self._store.append(event)
         return event
 

@@ -249,9 +249,14 @@ async def test_wrong_declared_implementation_fails_and_the_repair_names_the_bind
     assert message is not None
     assert "declared entry point: function mathutils.mix" in message
     assert '"a": "start"' in message
-    assert "mix(start=0, end=10, weight=0.5): expected 5, observed 5.0" not in message  # passes
-    assert "held-out case(s) also failed" in message  # held-out inputs withheld
-    assert "2.5" not in message
+    assert "mix(start=0, end=10, weight=0.5)" not in message  # the stated case passes
+    # Only held-out cases failed: exactly one is revealed, with input,
+    # expected and observed output.
+    assert (
+        "- revealed held-out case: mix(start=2, end=4, weight=0.25): expected 2.5, observed 3.0"
+        in message
+    )
+    assert "held-out case(s) also failed" not in message
 
 
 async def test_no_declared_binding_is_unverified_and_an_invalid_one_indeterminate(
@@ -369,3 +374,158 @@ async def test_each_late_binding_has_exactly_one_base_run(
         base_run_cache=cache,
     )
     assert runs == ["oracle_2", "oracle_2"]
+
+
+async def test_reveal_one_held_out_case_and_retire_it(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    from ouroboros.boundary.acceptance import criterion_verdicts
+    from ouroboros.boundary.binding_flow import retire_revealed
+    from ouroboros.boundary.events import CASE_REVEALED
+    from ouroboros.boundary.ledger import BoundaryLedger, BoundaryOrderError
+    from ouroboros.boundary.run_wiring import plan_repair
+
+    seed, state = await _prepare(store, repo, tmp_path)
+    # clamp is fixed for the stated case only: both held-out cases fail?
+    # The stated case (15, 0, 10) passes; the held-out (-3, -2, 4) fails.
+    _write(repo, {"mathutils.py": "def clamp(value, low, high):\n    return min(high, value)\n"})
+    keys = seed_criterion_keys(seed)
+    # A repair-time verification (the gate's path): no journal writes.
+    from ouroboros.boundary.binding_flow import assign_tiers, verify_with_bindings
+    from ouroboros.boundary.run_wiring import BoundaryVerdict
+
+    assignments, _results = await assign_tiers(
+        state.package, artifact=repo, base=state.base_snapshot
+    )
+    subset = {"oracle_1": assignments["oracle_1"]}
+    bound = await verify_with_bindings(state.package, repo, subset)
+    verdicts = criterion_verdicts(state.package, bound.effective, assignments=subset)
+    verdict = BoundaryVerdict(
+        verdict="fail",
+        reasons=(),
+        boundary_id=state.boundary_id,
+        package_sha256=state.package.sha256,
+        verdicts=verdicts,
+        oracle_results={
+            c.check_id: c.oracle_result for c in bound.effective.checks if c.oracle_result
+        },
+    )
+    item = verdict.verdicts[keys[0]]
+    assert item.status is PackageCriterionStatus.FAIL and item.failed_heldout_only
+    plan = plan_repair(verdict, keys[0])
+    assert plan is not None and (plan.revealed_check_id, plan.revealed_case_id) == (
+        "oracle_1",
+        "held",
+    )
+    assert (
+        "revealed held-out case: clamp(value=-3, low=-2, high=4): expected -2, observed -3"
+        in plan.message
+    )
+
+    ledger = BoundaryLedger(store)
+    await ledger.record_case_revealed(
+        state.boundary_id,
+        package_sha256=state.package.sha256,
+        check_id="oracle_1",
+        criterion_key=keys[0],
+        case_id="held",
+        root_ac_index=0,
+        retry_attempt=0,
+    )
+    with pytest.raises(BoundaryOrderError):  # once per case
+        await ledger.record_case_revealed(
+            state.boundary_id,
+            package_sha256=state.package.sha256,
+            check_id="oracle_1",
+            criterion_key=keys[0],
+            case_id="held",
+        )
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, state.boundary_id)
+    revealed_event = next(e for e in events if e.type == CASE_REVEALED)
+    assert revealed_event.data["case_id"] == "held" and "args" not in revealed_event.data
+
+    # Retired: the case no longer counts as held out in later verdicts and events.
+    again = await verify_check_package(
+        state,
+        event_store=store,
+        candidate_checkout=repo,
+        settings=CheckPackageSettings(True),
+        revealed={"oracle_1": {"held"}},
+    )
+    retired = again.verdicts[keys[0]]
+    assert retired.status is PackageCriterionStatus.FAIL and not retired.failed_heldout_only
+    case = next(c for c in again.oracle_results["oracle_1"]["cases"] if c["case_id"] == "held")
+    assert case["held_out"] is False and case["revealed"] is True
+    latest = [
+        e
+        for e in await store.replay(BOUNDARY_AGGREGATE_TYPE, state.boundary_id)
+        if e.type == CANDIDATE_VERIFIED
+    ][-1]
+    journal_case = next(
+        c for c in latest.data["checks"][0]["oracle_result"]["cases"] if c["case_id"] == "held"
+    )
+    assert journal_case == {"case_id": "held", "held_out": False, "passed": False, "revealed": True}
+    # A second repair shows the retired case as visible and reveals nothing new.
+    second = plan_repair(again, keys[0])
+    assert second is not None and second.revealed_case_id is None
+    assert retire_revealed(None, {"oracle_1": {"held"}}) is None
+    assert criterion_verdicts  # imported API stays available
+
+
+def test_only_one_of_several_failing_held_out_cases_is_revealed() -> None:
+    from ouroboros.boundary.acceptance import CriterionVerdict
+    from ouroboros.boundary.oracle import apply_reveals, failed_heldout_only
+    from ouroboros.boundary.run_wiring import BoundaryVerdict, plan_repair
+
+    result = {
+        "cases": [
+            {"case_id": "stated", "held_out": False, "passed": True, "detail": ""},
+            {
+                "case_id": "h1",
+                "held_out": True,
+                "passed": False,
+                "detail": "f(1): expected 2, observed 9",
+            },
+            {
+                "case_id": "h2",
+                "held_out": True,
+                "passed": False,
+                "detail": "f(3): expected 4, observed 9",
+            },
+            {
+                "case_id": "h3",
+                "held_out": True,
+                "passed": False,
+                "detail": "f(5): expected 6, observed 9",
+            },
+        ]
+    }
+    verdict = BoundaryVerdict(
+        verdict="fail",
+        reasons=(),
+        boundary_id="b",
+        package_sha256="0" * 64,
+        verdicts={
+            "k": CriterionVerdict(
+                "k",
+                PackageCriterionStatus.FAIL,
+                CheckTier.A_PRIME,
+                "reproduction_still_failing",
+                ("o1",),
+                True,
+                {"symbol": "m.f", "call_kind": "function", "arg_map": {}},
+                "declared",
+            )
+        },
+        oracle_results={"o1": result},
+    )
+    plan = plan_repair(verdict, "k")
+    assert plan is not None and plan.revealed_case_id == "h1"
+    assert "It called your declared entry point: function m.f." in plan.message
+    assert "- revealed held-out case: f(1): expected 2, observed 9" in plan.message
+    assert "f(3)" not in plan.message and "f(5)" not in plan.message
+    assert "- 2 held-out case(s) also failed" in plan.message
+    # Retiring h1 leaves two failing held-out cases and one failing visible case.
+    retired = apply_reveals(result, ["h1"])
+    assert not failed_heldout_only(retired)
+    assert sum(1 for c in retired["cases"] if c["held_out"]) == 2

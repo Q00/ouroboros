@@ -392,8 +392,8 @@ async def test_study_policy_never_regenerates(store, repo: Path, tmp_path: Path)
     verdict = await verify_check_package(
         state, event_store=store, candidate_checkout=repo, settings=CheckPackageSettings(True)
     )
-    # No admitted package: every criterion is unverified, never a pass.
-    assert verdict.verdict == "unverified"
+    # No admitted package: the run falls back to the legacy verifier.
+    assert verdict.verdict == "unavailable" and verdict.verdicts == {}
 
 
 async def test_ledger_keeps_one_seal_per_boundary_id(store, repo: Path, tmp_path: Path) -> None:
@@ -887,3 +887,48 @@ async def test_reconciliation_must_follow_a_verification_and_is_single(
         await ledger.record_acceptance_reconciled(
             state.boundary_id, package_sha256=package.sha256, reconciliation={}
         )
+
+
+def _failing_constructor_factory(reason: str) -> Any:
+    def factory(**_kwargs: Any) -> Any:
+        class _Constructor:
+            async def construct(self, seed: Seed, base: Path, *, feedback=()):
+                return ConstructionOutcome(None, reason, INPUT_DIGEST, "fake")
+
+        return _Constructor()
+
+    return factory
+
+
+@pytest.mark.parametrize("legacy_passes", [True, False])
+async def test_cli_outage_falls_back_to_the_legacy_verdict(
+    tmp_path: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy_passes: bool,
+) -> None:
+    # Constructor outage: no package is admitted, so zero checks exist. The
+    # run must not exit 0 unless the legacy verifier passed it.
+    run = _run_cli(
+        tmp_path,
+        repo,
+        check_package=True,
+        constructor_cls=_failing_constructor_factory("constructor_timeout"),
+        worker_edit=None,
+        monkeypatch=monkeypatch,
+        run_success=legacy_passes,
+    )
+    if legacy_passes:
+        store, _runner, _seen = await run
+        await store.close()
+    else:
+        with pytest.raises(typer.Exit) as exit_info:
+            await run
+        assert exit_info.value.exit_code == 1
+    import re
+
+    raw = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", raw).split())
+    assert "Check package unavailable (constructor_timeout)" in text
+    assert "legacy verification decided this run" in text

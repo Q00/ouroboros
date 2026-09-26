@@ -11,6 +11,9 @@ Event Types (aggregate_type ``boundary``, aggregate_id = boundary id):
         version was replaced by a later version before any worker bound to it
     boundary.binding.recorded - after the worker stopped: the tier and binding
         of every check (late bindings are data; no code, no cases)
+    boundary.oracle.case_revealed - one held-out case was shown to the worker
+        in a repair message and is retired from held-out statistics (case id
+        only; the inputs stay out of the journal)
 
 Payloads never carry generated file contents, check argv, or check output, so
 the shared journal does not expose check code or counterexamples. The package
@@ -38,6 +41,7 @@ SELECTION_DECIDED = "boundary.selection.decided"
 SUPERSEDED = "boundary.check_package.superseded"
 ACCEPTANCE_RECONCILED = "boundary.acceptance.reconciled"
 BINDING_RECORDED = "boundary.binding.recorded"
+CASE_REVEALED = "boundary.oracle.case_revealed"
 
 
 def _event(boundary_id: str, event_type: str, data: dict[str, Any]) -> BaseEvent:
@@ -137,3 +141,28 @@ def binding_recorded_event(
 ) -> BaseEvent:
     """Tiers and bindings of every check, recorded after the worker stopped."""
     return _event(boundary_id, BINDING_RECORDED, {"package_sha256": package_sha256, **payload})
+
+
+def case_revealed_event(
+    boundary_id: str,
+    *,
+    package_sha256: str,
+    check_id: str,
+    criterion_key: str,
+    case_id: str,
+    root_ac_index: int | None = None,
+    retry_attempt: int | None = None,
+) -> BaseEvent:
+    """A held-out case revealed in a repair message (case id, never its values)."""
+    return _event(
+        boundary_id,
+        CASE_REVEALED,
+        {
+            "package_sha256": package_sha256,
+            "check_id": check_id,
+            "criterion_key": criterion_key,
+            "case_id": case_id,
+            "root_ac_index": root_ac_index,
+            "retry_attempt": retry_attempt,
+        },
+    )

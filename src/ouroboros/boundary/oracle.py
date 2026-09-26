@@ -320,6 +320,7 @@ def journal_safe_oracle_result(result: Mapping[str, Any] | None) -> dict[str, An
                 "case_id": case.get("case_id"),
                 "held_out": bool(case.get("held_out")),
                 "passed": bool(case.get("passed")),
+                **({"revealed": True} if case.get("revealed") else {}),
             }
             for case in result.get("cases") or ()
         ],
@@ -332,6 +333,40 @@ def failed_heldout_only(result: Mapping[str, Any] | None) -> bool:
         return False
     failing = [case for case in result.get("cases") or () if not case.get("passed")]
     return bool(failing) and all(case.get("held_out") for case in failing)
+
+
+def apply_reveals(
+    result: Mapping[str, Any] | None, revealed: Iterable[str]
+) -> dict[str, Any] | None:
+    """A copy of ``result`` in which the revealed cases are no longer held out.
+
+    A held-out case whose input and expected output were shown to the worker
+    in a repair message is retired: it is marked ``revealed`` and stops
+    counting as held out (``failed_heldout_only`` and every later held-out
+    statistic). The other held-out cases are unchanged.
+    """
+    if result is None:
+        return None
+    ids = set(revealed)
+    cases = [
+        {**case, "held_out": False, "revealed": True}
+        if case.get("case_id") in ids and case.get("held_out")
+        else dict(case)
+        for case in result.get("cases") or ()
+    ]
+    return {**result, "cases": cases}
+
+
+def first_failing_heldout(result: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The first failing held-out case, when every failing case is held out."""
+    if not failed_heldout_only(result):
+        return None
+    assert result is not None
+    return next(
+        dict(case)
+        for case in result.get("cases") or ()
+        if not case.get("passed") and case.get("held_out")
+    )
 
 
 def repair_lines(result: Mapping[str, Any] | None, *, limit: int = 5) -> list[str]:
@@ -347,7 +382,8 @@ def repair_lines(result: Mapping[str, Any] | None, *, limit: int = 5) -> list[st
             hidden += 1
             continue
         if len(lines) < limit:
-            lines.append(f"- {case.get('detail') or case.get('case_id')}")
+            prefix = "revealed held-out case: " if case.get("revealed") else ""
+            lines.append(f"- {prefix}{case.get('detail') or case.get('case_id')}")
     if hidden:
         lines.append(
             f"- {hidden} held-out case(s) also failed (inputs withheld; they test the "
@@ -702,7 +738,9 @@ __all__ = [
     "OracleSpec",
     "bindings_text",
     "case_in_text",
+    "apply_reveals",
     "failed_heldout_only",
+    "first_failing_heldout",
     "failure_signature_for",
     "is_oracle_file",
     "journal_safe_oracle_result",

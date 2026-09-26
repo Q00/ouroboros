@@ -27,7 +27,7 @@ then indeterminate, ``base_snapshot_mismatch``).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -53,6 +53,7 @@ from ouroboros.boundary.binding import (
     script_check_tier,
     validate_declared_binding_static,
 )
+from ouroboros.boundary.oracle import apply_reveals
 from ouroboros.boundary.oracle_build import criterion_text
 from ouroboros.boundary.package import CheckPackage, seed_criterion_keys
 from ouroboros.boundary.tree import copy_checkout, tree_digest, tree_manifest
@@ -389,6 +390,24 @@ async def verify_with_bindings(
     return BoundVerification(first, rerun)
 
 
+def retire_revealed(
+    verification: CandidateVerification | None,
+    revealed: Mapping[str, Collection[str]] | None,
+) -> CandidateVerification | None:
+    """``verification`` with revealed held-out cases retired (``apply_reveals``)."""
+    if verification is None or not revealed:
+        return verification
+    checks = tuple(
+        check.model_copy(
+            update={"oracle_result": apply_reveals(check.oracle_result, revealed[check.check_id])}
+        )
+        if check.check_id in revealed and check.oracle_result
+        else check
+        for check in verification.checks
+    )
+    return verification.model_copy(update={"checks": checks})
+
+
 def bindings_payload(
     assignments: Mapping[str, TierAssignment],
     results: Mapping[str, DeclaredBindingResult],
@@ -415,6 +434,7 @@ __all__ = [
     "admission_tiers",
     "assign_tiers",
     "bindings_payload",
+    "retire_revealed",
     "snapshot_base",
     "validate_declared_binding",
     "verify_with_bindings",
