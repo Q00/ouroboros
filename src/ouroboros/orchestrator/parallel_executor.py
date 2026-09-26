@@ -9187,6 +9187,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                     ac_index=ac_index,
                 )
+            if fat_harness_error is not None and getattr(self, "check_package_gate", None):
+                # Check package on: the legacy verdict is advisory (kept on the result).
+                fat_harness_error = None
             result_final_message = final_message
             if fat_harness_error is not None:
                 success = False
@@ -9875,6 +9878,8 @@ Respond with either ATOMIC or the structured JSON object only.
         records that the result still needs confirmation. Verification never
         resurrects a failed worker result.
         """
+        if (gate := getattr(self, "check_package_gate", None)) is not None:
+            result = await gate(seed=seed, ac_index=ac_index, result=result)
         if not self._run_verify_commands:
             return result
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
