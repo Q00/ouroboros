@@ -168,6 +168,8 @@ class TestHardPreconditionClassification:
             "configuration migration returned a transient network error",
             "tool output was incomplete",
             "processed 401 records successfully",
+            "another agent is not configured for this optional feature",
+            "temporary provider response: no API key or provider found",
         ],
     )
     def test_nearby_non_preconditions_remain_retryable(self, content: str) -> None:

@@ -212,22 +212,7 @@ class TestHermesCliRuntime:
 
         assert _resolve_hermes_profile(None) == "astraia"
 
-    def test_infers_runtime_profile_from_canonical_host_cwd(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        host_profile = tmp_path / ".hermes" / "profiles" / "astraia"
-        host_profile.mkdir(parents=True)
-        (host_profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
-        monkeypatch.delenv("HERMES_HOME", raising=False)
-        monkeypatch.chdir(host_profile)
-
-        assert _resolve_hermes_profile(None) == "astraia"
-
-    def test_does_not_infer_runtime_profile_from_arbitrary_cwd(
+    def test_does_not_infer_runtime_profile_without_hermes_home(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,

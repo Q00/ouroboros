@@ -88,14 +88,8 @@ def _resolve_hermes_profile(explicit: str | None) -> str | None:
 
     hermes_home = os.environ.get("HERMES_HOME", "").strip()
     if hermes_home:
-        inherited = _profile_name_from_home(hermes_home)
-        if inherited is not None:
-            return inherited
-
-    try:
-        return _profile_name_from_home(Path.cwd())
-    except OSError:
-        return None
+        return _profile_name_from_home(hermes_home)
+    return None
 
 
 def _resolve_timeout_override(
