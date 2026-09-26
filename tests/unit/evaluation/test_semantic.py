@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import ArtifactBundle, EvaluationContext, FileArtifact
 from ouroboros.evaluation.semantic import (
@@ -160,6 +160,60 @@ class TestBuildEvaluationPrompt:
 
 class TestParseSemanticResponse:
     """Tests for response parsing."""
+
+    @pytest.mark.parametrize("ac_compliance", [True, False])
+    def test_preserves_boolean_compliance(self, ac_compliance: bool) -> None:
+        response = json.dumps(
+            {
+                "score": 0.95,
+                "ac_compliance": ac_compliance,
+                "goal_alignment": 0.9,
+                "drift_score": 0.0,
+                "uncertainty": 0.05,
+                "reasoning": "Compliance must preserve the reported boolean",
+            }
+        )
+
+        result = parse_semantic_response(response)
+
+        assert result.is_ok
+        assert result.value.ac_compliance is ac_compliance
+
+    @pytest.mark.parametrize(
+        "ac_compliance",
+        ["false", "true", "", 0, 1, 0.0, 1.0, None, [], [False], {}, {"value": False}],
+        ids=[
+            "string-false",
+            "string-true",
+            "empty-string",
+            "integer-zero",
+            "integer-one",
+            "float-zero",
+            "float-one",
+            "null",
+            "empty-array",
+            "nonempty-array",
+            "empty-object",
+            "nonempty-object",
+        ],
+    )
+    def test_rejects_non_boolean_compliance(self, ac_compliance: object) -> None:
+        response = json.dumps(
+            {
+                "score": 0.95,
+                "ac_compliance": ac_compliance,
+                "goal_alignment": 0.9,
+                "drift_score": 0.0,
+                "uncertainty": 0.05,
+                "reasoning": "A malformed approval must be a validation error",
+            }
+        )
+
+        result = parse_semantic_response(response)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert result.error.field == "ac_compliance"
 
     def test_valid_json_response(self) -> None:
         """Parse valid JSON response."""
