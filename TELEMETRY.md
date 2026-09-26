@@ -103,22 +103,26 @@ the finished workspace).
 | `check_package_arm` | `on`, `off` |
 | `check_package_assignment` | `randomized`, `user_forced_on`, `user_forced_off`, `fallback` |
 | `check_package_status` | `admitted`, `rejected`, `construction_failed`, `not_run` |
-| `package_verdict` | `pass`, `fail`, `indeterminate`, `none` |
+| `package_verdict` | `pass`, `fail`, `indeterminate`, `unverified`, `none` |
 | `legacy_verdict` | `accept`, `reject`, `none` |
 | `reconciliation` | `agree`, `package_accepted_over_legacy_reject`, `package_rejected_over_legacy_accept`, `fallback_to_legacy`, `none` |
 | `legacy_failure_class` | `evidence_missing`, `evidence_form_mismatch`, `fabrication_suspected`, `scope_creep`, `stall`, `blocked`, `transcript_missing_infrastructure`, `accepted`, `other`, `none` |
 | `legacy_failure_class_count` | `0`, `1`, `2`, `3+` |
+| `unverified_count` | `0`, `1`, `2`, `3+` |
+| `check_tier_summary` | `A:<n>,A_prime:<n>,U:<n>`, each `<n>` one of `0`, `1`, `2`, `3+` (64 values) |
 
 - `check_package_status` describes the package the worker was bound to:
   `admitted` (a package passed admission on the starting tree, possibly after
   a regenerated version replaced a rejected one), `rejected` (the last package
   built was not admitted), `construction_failed` (the last attempt built no
   package, or preparation failed), `not_run` (arm `off` or a resumed session).
-- `package_verdict` is the admitted package's verdict on the finished
-  workspace; `none` when no admitted package was verified (including an
-  execution path that never consults the package, such as a single-criterion
-  Seed with `orchestrator.execution_mode: legacy`), `indeterminate` also when
-  the verification itself failed.
+- `package_verdict` is the package's verdict on the finished workspace, by
+  precedence: `fail` if a verified criterion failed, else `indeterminate` if a
+  criterion could not be decided, else `pass` if at least one criterion
+  passed, else `unverified` (no criterion could be checked, including a run
+  with no admitted package); `none` when the package was not consulted (for
+  example a single-criterion Seed with `orchestrator.execution_mode: legacy`),
+  `indeterminate` also when the verification itself failed.
 - `legacy_verdict` is the verdict of the per-criterion verifier that decides
   without the package: `accept` or `reject` for the run, `none` when the run
   ended before a verdict (cancelled, paused, or an orchestrator error).
@@ -135,6 +139,15 @@ the finished workspace).
   without one of these classes, `none` when there is no legacy verdict.
   `legacy_failure_class_count` buckets how many criteria the legacy verifier
   rejected. Both are recorded in both arms, so the `off` arm is the baseline.
+  With the arm `on` the legacy verifier only annotates; these two properties
+  are its annotation.
+- `unverified_count` buckets how many criteria the package could not verify
+  (no executable check, or no binding reaching the implementation); an
+  unverified criterion never counts as a pass. `check_tier_summary` buckets
+  how many criteria were checked through the constructor's default entry
+  point (`A`), through the entry point the worker declared (`A_prime`), or
+  not at all (`U`). Both are recorded only when the package decided the run
+  (arm `on`).
 
 ### Changelog
 
@@ -148,8 +161,9 @@ the finished workspace).
   boundary becomes a randomized default (50/50 by anonymous ID, `off` without
   telemetry). `workflow_outcome` for `command=run` gains `check_package_arm`,
   `check_package_assignment`, `check_package_status`, `package_verdict`,
-  `legacy_verdict`, `reconciliation`, `legacy_failure_class`, and
-  `legacy_failure_class_count` (closed values only). The first-run notice now
+  `legacy_verdict`, `reconciliation`, `legacy_failure_class`,
+  `legacy_failure_class_count`, `unverified_count`, and `check_tier_summary`
+  (closed values only). The first-run notice now
   names randomized defaults and research use, and `notice_version` in
   `telemetry.json` re-displays it once to installs that saw an earlier notice.
   CLI `ooo run` outcomes, which were recorded as `command=extension_job`, are
@@ -201,7 +215,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), check_package_arm, check_package_assignment, check_package_status, package_verdict, legacy_verdict, reconciliation, legacy_failure_class, legacy_failure_class_count (`run` only; closed enums, see [Randomized defaults](#randomized-defaults)), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), check_package_arm, check_package_assignment, check_package_status, package_verdict, legacy_verdict, reconciliation, legacy_failure_class, legacy_failure_class_count, unverified_count, check_tier_summary (`run` only; closed enums, see [Randomized defaults](#randomized-defaults)), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
