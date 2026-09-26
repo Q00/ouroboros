@@ -17,6 +17,11 @@ import sys
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.evidence.command_replay import (
+    replay_candidate,
+    replay_commands,
+    select_replay_candidates,
+)
 from ouroboros.orchestrator.evidence.harness_observation import (
     CommandObservation,
     WorkspaceObservation,
@@ -30,11 +35,8 @@ from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
 )
 from ouroboros.orchestrator.evidence.test_reexecution import (
-    MAX_REEXECUTED_COMMANDS,
     confined_test_invocation,
-    reexecute_test_commands,
     safe_test_invocation,
-    select_test_reexecution_commands,
 )
 
 # Verbatim from the Django dev run (django__django-14580, claude-sonnet-4-6):
@@ -279,7 +281,7 @@ class TestDjangoDevRunRegression:
             _bash_result("c2", tool_result_text="Ran 578 tests in 12.0s\nOK"),
         )
 
-    def test_reported_runner_commands_are_selected(self, tmp_path: Path) -> None:
+    def test_transcript_runs_are_selected_not_reported_commands(self, tmp_path: Path) -> None:
         workspace = _django_workspace(tmp_path)
         final = json.dumps(
             {
@@ -288,28 +290,30 @@ class TestDjangoDevRunRegression:
             }
         )
 
-        selected = select_test_reexecution_commands(
+        selected = select_replay_candidates(
             final_message=final, messages=self._transcript(), task_cwd=str(workspace)
         )
 
-        # Piped transcript runs stay unselected; the reported runs are selected.
-        assert selected == (DJANGO_WRITER, DJANGO_MIGRATIONS)
+        # Both piped transcript runs replay the same runner command (the output
+        # filters are dropped), selected once; the reported DJANGO_WRITER was
+        # never run in the transcript, so it is not a candidate.
+        assert [candidate.core_command for candidate in selected] == [DJANGO_MIGRATIONS]
 
-    def test_command_valued_claim_is_selected_and_capped(self, tmp_path: Path) -> None:
+    def test_claim_text_is_never_selected(self, tmp_path: Path) -> None:
         workspace = _django_workspace(tmp_path)
         final = json.dumps(
             {
                 "tests_passed": [DJANGO_WRITER_QUIET],
-                "commands_run": [DJANGO_WRITER, DJANGO_MIGRATIONS, "python /tmp/repro.py"],
+                "commands_run": [DJANGO_WRITER, "python /tmp/repro.py"],
             }
         )
 
-        selected = select_test_reexecution_commands(
+        selected = select_replay_candidates(
             final_message=final, messages=self._transcript(), task_cwd=str(workspace)
         )
 
-        assert selected == (DJANGO_WRITER_QUIET, DJANGO_WRITER, DJANGO_MIGRATIONS)
-        assert len(selected) == MAX_REEXECUTED_COMMANDS
+        # Only the runner the transcript shows; no claimed command is selected.
+        assert [candidate.core_command for candidate in selected] == [DJANGO_MIGRATIONS]
 
     def test_absolute_container_path_claim_is_not_selected_on_the_host(
         self, tmp_path: Path
@@ -317,12 +321,11 @@ class TestDjangoDevRunRegression:
         workspace = _django_workspace(tmp_path)
         final = json.dumps({"tests_passed": [DJANGO_ABSOLUTE]})
 
-        assert (
-            select_test_reexecution_commands(
-                final_message=final, messages=self._transcript(), task_cwd=str(workspace)
-            )
-            == ()
+        selected = select_replay_candidates(
+            final_message=final, messages=self._transcript(), task_cwd=str(workspace)
         )
+
+        assert DJANGO_ABSOLUTE not in [candidate.core_command for candidate in selected]
 
     def test_reexecuted_django_run_backs_the_command_claim(self, tmp_path: Path) -> None:
         observation = build_observation_message(
@@ -374,35 +377,42 @@ class TestExecution:
         return root
 
     async def test_django_runner_runs_as_direct_argv(self, tmp_path: Path) -> None:
-        workspace = self._workspace(tmp_path)
+        workspace = self._workspace(tmp_path / "ws")
         command = f"{sys.executable} tests/runtests.py migrations"
+        candidate = replay_candidate(command, str(workspace))
+        assert candidate is not None
 
-        runs = await reexecute_test_commands(
-            (command,), cwd=str(workspace), env={"PATH": "/usr/bin:/bin"}, timeout_seconds=60
+        runs = await replay_commands(
+            (candidate,),
+            workspace=str(workspace),
+            env={"PATH": "/usr/bin:/bin"},
+            timeout_seconds=60,
         )
 
         assert len(runs) == 1 and runs[0].succeeded
-        assert f"cwd={workspace.resolve()}" in runs[0].output_tail
+        # It ran in a copy of the workspace, not in the workspace itself.
+        assert f"cwd={workspace.resolve()}" not in runs[0].output_tail
+        assert "ouroboros-replay-" in runs[0].output_tail
         assert "args=migrations" in runs[0].output_tail
 
     async def test_cd_prefix_changes_only_the_working_directory(self, tmp_path: Path) -> None:
-        workspace = self._workspace(tmp_path)
+        workspace = self._workspace(tmp_path / "ws")
         marker = tmp_path / "marker"
         command = f"cd tests && {sys.executable} runtests.py migrations"
 
-        selected = select_test_reexecution_commands(
+        selected = select_replay_candidates(
             final_message=json.dumps({"tests_passed": [command]}),
-            messages=(_bash_call("ls"), _bash_result()),
+            messages=(_bash_call(command), _bash_result()),
             task_cwd=str(workspace),
         )
-        assert selected == (command,)
-        runs = await reexecute_test_commands(
-            selected, cwd=str(workspace), env={"PATH": "/usr/bin:/bin"}, timeout_seconds=60
+        assert [candidate.core_command for candidate in selected] == [command]
+        runs = await replay_commands(
+            selected, workspace=str(workspace), env={"PATH": "/usr/bin:/bin"}, timeout_seconds=60
         )
 
         assert len(runs) == 1 and runs[0].succeeded
         assert runs[0].command == command
-        assert f"cwd={(workspace / 'tests').resolve()}" in runs[0].output_tail
+        assert "/workspace/tests\n" in runs[0].output_tail
         assert not marker.exists()
 
     async def test_escaping_or_compound_cd_is_never_executed(self, tmp_path: Path) -> None:
@@ -415,9 +425,11 @@ class TestExecution:
             f"cd tests; touch {marker}",
         )
 
-        runs = await reexecute_test_commands(
-            commands, cwd=str(workspace), env={"PATH": "/usr/bin:/bin"}, timeout_seconds=30
+        assert all(replay_candidate(command, str(workspace)) is None for command in commands)
+        selected = select_replay_candidates(
+            final_message=json.dumps({"commands_run": list(commands)}),
+            messages=tuple(_bash_call(command, f"c{i}") for i, command in enumerate(commands)),
+            task_cwd=str(workspace),
         )
-
-        assert runs == ()
+        assert selected == ()
         assert not marker.exists()

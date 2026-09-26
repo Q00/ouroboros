@@ -1,9 +1,9 @@
-"""Harness re-execution of claimed test commands backs ``tests_passed``.
+"""Harness replay of transcript test commands backs ``tests_passed``.
 
 The transcript verifier needs runtime output that proves a test run passed.
 Codex completions without an ``exit_code`` or with truncated output leave a
-real ``pytest`` run unprovable; the harness re-runs the command itself and
-judges its own exit status and output by the same rules.
+real ``pytest`` run unprovable; the harness replays the command the transcript
+shows in a copy of the workspace and judges its own exit status.
 """
 
 from __future__ import annotations
@@ -16,6 +16,13 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.evidence.command_replay import (
+    MAX_REPLAYED_COMMANDS,
+    ReplayCandidate,
+    replay_candidate,
+    replay_commands,
+    select_replay_candidates,
+)
 from ouroboros.orchestrator.evidence.harness_observation import (
     CommandObservation,
     WorkspaceObservation,
@@ -26,11 +33,8 @@ from ouroboros.orchestrator.evidence.test_detection import (
     _runtime_messages_support_test_claim,
 )
 from ouroboros.orchestrator.evidence.test_reexecution import (
-    MAX_REEXECUTED_COMMANDS,
-    reexecute_test_commands,
     safe_test_argv,
     safe_test_invocation,
-    select_test_reexecution_commands,
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
@@ -69,41 +73,37 @@ def _codex_unprovable_transcript() -> tuple[AgentMessage, ...]:
     )
 
 
+def _cores(candidates: tuple[ReplayCandidate, ...]) -> tuple[str, ...]:
+    return tuple(candidate.core_command for candidate in candidates)
+
+
 class TestSelection:
-    def test_no_claims_or_no_evidence_selects_nothing(self) -> None:
+    def test_no_claims_or_no_evidence_selects_nothing(self, tmp_path: Path) -> None:
+        cwd = str(tmp_path)
+        assert select_replay_candidates(final_message=None, messages=(), task_cwd=cwd) == ()
+        assert select_replay_candidates(final_message="not json", messages=(), task_cwd=cwd) == ()
         assert (
-            select_test_reexecution_commands(final_message=None, messages=(), task_cwd=None) == ()
-        )
-        assert (
-            select_test_reexecution_commands(final_message="not json", messages=(), task_cwd=None)
-            == ()
-        )
-        assert (
-            select_test_reexecution_commands(
+            select_replay_candidates(
                 final_message=json.dumps({"files_touched": ["a.py"]}),
-                messages=(),
-                task_cwd=None,
+                messages=_codex_unprovable_transcript(),
+                task_cwd=cwd,
             )
             == ()
         )
 
-    def test_already_proven_claim_is_not_reexecuted(self, tmp_path: Path) -> None:
+    def test_already_proven_claim_is_not_replayed(self, tmp_path: Path) -> None:
         messages = (
             _bash_call(TEST_COMMAND),
             _bash_result(exit_code=0, output="1 passed in 0.01s"),
         )
-        final = json.dumps({"tests_passed": [TEST_COMMAND]})
+        final = json.dumps({"tests_passed": [TEST_COMMAND], "commands_run": [TEST_COMMAND]})
 
         assert (
-            select_test_reexecution_commands(
-                final_message=final, messages=messages, task_cwd=str(tmp_path)
-            )
+            select_replay_candidates(final_message=final, messages=messages, task_cwd=str(tmp_path))
             == ()
         )
 
-    def test_unprovable_claim_selects_the_claim_and_transcript_commands(
-        self, tmp_path: Path
-    ) -> None:
+    def test_unprovable_claim_selects_only_linked_transcript_commands(self, tmp_path: Path) -> None:
         final = json.dumps(
             {
                 "tests_passed": [TEST_COMMAND],
@@ -111,25 +111,53 @@ class TestSelection:
             }
         )
 
-        selected = select_test_reexecution_commands(
+        selected = select_replay_candidates(
             final_message=final,
             messages=_codex_unprovable_transcript(),
             task_cwd=str(tmp_path),
         )
 
-        # The claim itself first, then reported test commands, then the
-        # unwrapped transcript command; non-test commands and duplicates drop.
-        assert selected == (TEST_COMMAND, "pytest -q")
+        # Only the unwrapped transcript command: claim text ("pytest -q",
+        # "ls -la") is never a candidate, whatever it says.
+        assert _cores(selected) == (TEST_COMMAND,)
 
-    def test_selection_is_capped(self, tmp_path: Path) -> None:
-        commands = [f"pytest -q tests/test_{index}.py" for index in range(6)]
-        final = json.dumps({"tests_passed": ["tests/test_x.py::test_y"], "commands_run": commands})
+    def test_linked_commands_come_before_recognized_test_runs(self, tmp_path: Path) -> None:
+        messages = (
+            _bash_call("make check", "c1"),
+            _bash_result("c1"),
+            _bash_call("pytest -q tests/test_a.py", "c2"),
+            _bash_result("c2"),
+            _bash_call("ls -la", "c3"),
+            _bash_result("c3"),
+        )
+        final = json.dumps({"tests_passed": ["make check", "tests/test_a.py::test_x"]})
 
-        selected = select_test_reexecution_commands(
-            final_message=final, messages=(_bash_call("ls"), _bash_result()), task_cwd=str(tmp_path)
+        selected = select_replay_candidates(
+            final_message=final, messages=messages, task_cwd=str(tmp_path)
         )
 
-        assert len(selected) == MAX_REEXECUTED_COMMANDS
+        # "make check" is linked to a claim; the pytest run is a recognized
+        # test run the node-id rules can judge; "ls -la" is neither.
+        assert _cores(selected) == ("make check", "pytest -q tests/test_a.py")
+
+    def test_selection_is_capped(self, tmp_path: Path) -> None:
+        commands = [f"make test-{index}" for index in range(6)]
+        messages = tuple(
+            message
+            for index, command in enumerate(commands)
+            for message in (_bash_call(command, f"c{index}"), _bash_result(f"c{index}"))
+        )
+        # A transcript-present commands_run claim is already proven without
+        # replay; the unrecognized-runner tests_passed claims are not.
+        final = json.dumps({"tests_passed": commands, "commands_run": commands})
+
+        selected = select_replay_candidates(
+            final_message=final, messages=messages, task_cwd=str(tmp_path)
+        )
+
+        assert len(selected) == MAX_REPLAYED_COMMANDS
+        # Most recent first.
+        assert _cores(selected) == ("make test-5", "make test-4", "make test-3")
 
 
 class TestSafeArgv:
@@ -177,17 +205,23 @@ class TestSafeArgv:
         assert safe_test_invocation('FLAG="$(id)" pytest -q') is None
 
 
+def _candidate(command: str, workspace: Path) -> ReplayCandidate:
+    candidate = replay_candidate(command, str(workspace))
+    assert candidate is not None, command
+    return candidate
+
+
 class TestReexecution:
     async def test_records_exit_status_and_output(self, tmp_path: Path) -> None:
         (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
         python = sys.executable
 
-        runs = await reexecute_test_commands(
+        runs = await replay_commands(
             (
-                f"{python} -m pytest -q -p no:cacheprovider test_ok.py",
-                f"{python} -m pytest -q -p no:cacheprovider test_absent.py",
+                _candidate(f"{python} -m pytest -q -p no:cacheprovider test_ok.py", tmp_path),
+                _candidate(f"{python} -m pytest -q -p no:cacheprovider test_absent.py", tmp_path),
             ),
-            cwd=str(tmp_path),
+            workspace=str(tmp_path),
             env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
             timeout_seconds=60,
         )
@@ -198,7 +232,7 @@ class TestReexecution:
         assert runs[0].succeeded and not runs[1].succeeded
 
     async def test_env_prefixed_command_runs_with_the_delta_applied(self, tmp_path: Path) -> None:
-        """The round-2 repro: an accepted env-prefixed claim must actually run."""
+        """The round-2 repro: an env-prefixed transcript command must actually run."""
         (tmp_path / "test_env.py").write_text(
             "import os\n\ndef test_env():\n    assert os.environ['REEXEC_FLAG'] == 'yes'\n",
             encoding="utf-8",
@@ -206,16 +240,16 @@ class TestReexecution:
         python = sys.executable
         command = f"REEXEC_FLAG=yes {python} -m pytest -q -p no:cacheprovider test_env.py"
 
-        selected = select_test_reexecution_commands(
+        selected = select_replay_candidates(
             final_message=json.dumps({"tests_passed": [command]}),
-            messages=(_bash_call("ls"), _bash_result()),
+            messages=(_bash_call(command), _bash_result()),
             task_cwd=str(tmp_path),
         )
-        assert selected == (command,)
+        assert _cores(selected) == (command,)
 
-        runs = await reexecute_test_commands(
+        runs = await replay_commands(
             selected,
-            cwd=str(tmp_path),
+            workspace=str(tmp_path),
             env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
             timeout_seconds=60,
         )
@@ -225,9 +259,9 @@ class TestReexecution:
         assert runs[0].succeeded
 
     async def test_timeout_is_recorded_not_raised(self, tmp_path: Path) -> None:
-        runs = await reexecute_test_commands(
-            ("sleep 5",),
-            cwd=str(tmp_path),
+        runs = await replay_commands(
+            (_candidate("sleep 5", tmp_path),),
+            workspace=str(tmp_path),
             env={"PATH": "/usr/bin:/bin"},
             timeout_seconds=0.2,
         )
@@ -239,22 +273,14 @@ class TestReexecution:
     async def test_injection_text_is_never_executed(self, tmp_path: Path) -> None:
         """The blocker regression: substitution text must not run at all."""
         marker = tmp_path / "harness_escape_marker"
-        selected = select_test_reexecution_commands(
-            final_message=json.dumps(
-                {"tests_passed": ['pytest -q "$(touch harness_escape_marker)"']}
-            ),
-            messages=(_bash_call("ls"), _bash_result()),
+        command = 'pytest -q "$(touch harness_escape_marker)"'
+        selected = select_replay_candidates(
+            final_message=json.dumps({"tests_passed": [command]}),
+            messages=(_bash_call(command), _bash_result()),
             task_cwd=str(tmp_path),
         )
         assert selected == ()
-
-        runs = await reexecute_test_commands(
-            ('pytest -q "$(touch harness_escape_marker)"',),
-            cwd=str(tmp_path),
-            env={"PATH": "/usr/bin:/bin"},
-            timeout_seconds=30,
-        )
-        assert runs == ()
+        assert replay_candidate(command, str(tmp_path)) is None
         assert not marker.exists()
 
 
