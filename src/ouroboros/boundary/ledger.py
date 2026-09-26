@@ -37,6 +37,7 @@ from ouroboros.boundary.events import (
     ACCEPTANCE_RECONCILED,
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
+    BINDING_RECORDED,
     BOUNDARY_AGGREGATE_TYPE,
     CANDIDATE_VERIFIED,
     CONSTRUCTION_FAILED,
@@ -46,6 +47,7 @@ from ouroboros.boundary.events import (
     acceptance_reconciled_event,
     actor_started_event,
     admission_completed_event,
+    binding_recorded_event,
     candidate_verified_event,
     construction_failed_event,
     package_frozen_event,
@@ -267,6 +269,40 @@ class BoundaryLedger:
         await self._store.append(event)
         return event
 
+    async def record_bindings(
+        self, boundary_id: str, *, package_sha256: str, payload: dict[str, Any]
+    ) -> BaseEvent:
+        """Record every check's tier and binding once the worker has stopped.
+
+        Refused unless the frozen, admitted package is cited and an actor
+        (the worker) was recorded as started on this boundary: a late binding
+        exists only after the oracle hash and the dispatch. A ``final``
+        record is single and must precede the candidate verification it
+        governs; ``repair`` records (per repair attempt) may repeat.
+        """
+        events = await self.events(boundary_id)
+        frozen = _first(events, PACKAGE_FROZEN)
+        if frozen is None or frozen.data.get("package_sha256") != package_sha256:
+            raise BoundaryOrderError(
+                "bindings must cite the boundary's frozen package",
+                details={"boundary_id": boundary_id},
+            )
+        if _first(events, ADMISSION_COMPLETED) is None or _first(events, ACTOR_STARTED) is None:
+            raise BoundaryOrderError(
+                "bindings are recorded only after admission and the worker start",
+                details={"boundary_id": boundary_id},
+            )
+        if payload.get("phase") == "final" and any(
+            event.type == BINDING_RECORDED and event.data.get("phase") == "final"
+            for event in events
+        ):
+            raise BoundaryOrderError(
+                "final bindings already recorded", details={"boundary_id": boundary_id}
+            )
+        event = binding_recorded_event(boundary_id, package_sha256=package_sha256, payload=payload)
+        await self._store.append(event)
+        return event
+
     async def record_candidate_verification(
         self, boundary_id: str, verification: CandidateVerification
     ) -> BaseEvent:
@@ -301,16 +337,37 @@ class BoundaryLedger:
         return event
 
     async def record_acceptance_reconciled(
-        self, boundary_id: str, *, package_sha256: str, reconciliation: dict[str, Any]
+        self, boundary_id: str, *, package_sha256: str | None, reconciliation: dict[str, Any]
     ) -> BaseEvent:
-        """Persist the per-criterion acceptance decision once, after verification."""
+        """Persist the per-criterion acceptance decision once, after verification.
+
+        With a package it must cite a verification of the frozen package, or
+        the final bindings when no check could run (every criterion
+        unverified). Without one (``package_sha256`` is ``None``) the boundary
+        must be sealed as ``construction_failed`` and a worker must have
+        started on it.
+        """
         events = await self.events(boundary_id)
-        verified = _first(events, CANDIDATE_VERIFIED)
-        if verified is None or verified.data.get("package_sha256") != package_sha256:
-            raise BoundaryOrderError(
-                "acceptance must cite a verification of the frozen package",
-                details={"boundary_id": boundary_id},
-            )
+        if package_sha256 is None:
+            if _first(events, CONSTRUCTION_FAILED) is None or _first(events, ACTOR_STARTED) is None:
+                raise BoundaryOrderError(
+                    "a package-less decision needs a construction_failed seal and a worker",
+                    details={"boundary_id": boundary_id},
+                )
+        else:
+            cited = [
+                event
+                for event in events
+                if event.type in {CANDIDATE_VERIFIED, BINDING_RECORDED}
+                and event.data.get("package_sha256") == package_sha256
+            ]
+            if not any(event.type == CANDIDATE_VERIFIED for event in cited) and not any(
+                event.data.get("phase") == "final" for event in cited
+            ):
+                raise BoundaryOrderError(
+                    "acceptance must cite a verification of the frozen package",
+                    details={"boundary_id": boundary_id},
+                )
         if _first(events, ACCEPTANCE_RECONCILED) is not None:
             raise BoundaryOrderError(
                 "acceptance already reconciled", details={"boundary_id": boundary_id}
@@ -353,4 +410,14 @@ def verify_boundary_order(events: Sequence[BaseEvent]) -> tuple[str, ...]:
                 not admissions or position[id(admissions[0])] > position[id(event)]
             ):
                 violations.append("actor started before admission")
+        if event.type == BINDING_RECORDED:
+            if frozen_sha is None or event.data.get("package_sha256") != frozen_sha:
+                violations.append(f"{event.type} does not cite the frozen package")
+            started = [e for e in events if e.type == ACTOR_STARTED]
+            if not started or position[id(started[0])] > position[id(event)]:
+                violations.append("bindings recorded before the worker started")
+    finals = [e for e in events if e.type == BINDING_RECORDED and e.data.get("phase") == "final"]
+    verified = [e for e in events if e.type == CANDIDATE_VERIFIED]
+    if finals and verified and position[id(finals[0])] > position[id(verified[-1])]:
+        violations.append("final bindings recorded after the candidate verification")
     return tuple(violations)

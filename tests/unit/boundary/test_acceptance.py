@@ -30,6 +30,7 @@ PASS = PackageCriterionStatus.PASS
 FAIL = PackageCriterionStatus.FAIL
 INDETERMINATE = PackageCriterionStatus.INDETERMINATE
 UNCOVERED = PackageCriterionStatus.UNCOVERED
+UNVERIFIED = PackageCriterionStatus.UNVERIFIED
 
 
 def _seed() -> Seed:
@@ -167,9 +168,23 @@ def test_package_fail_rejects_a_criterion_the_existing_verifier_accepted() -> No
     assert not result.run_accepted
 
 
-@pytest.mark.parametrize("status", [INDETERMINATE, UNCOVERED])
 @pytest.mark.parametrize("outcome, terminal", [("failed", "failed"), ("succeeded", "completed")])
-def test_indeterminate_or_uncovered_keeps_the_existing_verdict(
+def test_indeterminate_rejects_whatever_the_existing_verdict(outcome: str, terminal: str) -> None:
+    result = reconcile_acceptance(
+        ("k1",),
+        {"k1": INDETERMINATE},
+        {0: _outcome(0, outcome, terminal)},
+        existing_run_accepted=terminal == "completed",
+    )
+    (decision,) = result.decisions
+    assert decision.governed_by is Governor.CHECK_PACKAGE
+    assert not decision.accepted and not result.run_accepted
+    assert result.verdict.value == "indeterminate"
+
+
+@pytest.mark.parametrize("status", [UNVERIFIED, UNCOVERED])
+@pytest.mark.parametrize("outcome, terminal", [("failed", "failed"), ("succeeded", "completed")])
+def test_unverified_accepts_whatever_the_existing_verdict_and_is_never_a_pass(
     status: PackageCriterionStatus, outcome: str, terminal: str
 ) -> None:
     result = reconcile_acceptance(
@@ -179,8 +194,12 @@ def test_indeterminate_or_uncovered_keeps_the_existing_verdict(
         existing_run_accepted=terminal == "completed",
     )
     (decision,) = result.decisions
-    assert decision.governed_by is Governor.EXISTING_VERIFIER
-    assert decision.accepted is (outcome == "succeeded")
+    assert decision.governed_by is Governor.CHECK_PACKAGE
+    assert decision.accepted and decision.unverified and result.run_accepted
+    # Unverified is never a pass: no verified pass, artifact verdict unverified.
+    assert result.verified_pass_count == 0
+    assert result.verdict.value == "unverified"
+    assert result.to_dict()["unverified_count"] == 1
 
 
 @pytest.mark.parametrize(
@@ -198,19 +217,23 @@ def test_package_pass_cannot_accept_a_criterion_nobody_attempted(
     existing = {} if prior is None else {0: prior}
     result = reconcile_acceptance(("k1",), {"k1": PASS}, existing, existing_run_accepted=False)
     (decision,) = result.decisions
-    assert not decision.accepted and decision.governed_by is Governor.EXISTING_VERIFIER
+    assert not decision.accepted and decision.governed_by is Governor.EXECUTION
     assert not result.run_accepted
 
 
-def test_uncovered_criterion_failing_keeps_the_run_failed() -> None:
+def test_one_verified_pass_and_the_rest_unverified_is_an_accepted_pass() -> None:
     result = reconcile_acceptance(
         ("k1", "k2"),
         {"k1": PASS, "k2": UNCOVERED},
         {0: _outcome(0, "failed"), 1: _outcome(1, "failed")},
         existing_run_accepted=False,
     )
-    assert [d.accepted for d in result.decisions] == [True, False]
-    assert not result.run_accepted
+    assert [d.accepted for d in result.decisions] == [True, True]
+    assert result.run_accepted and result.verdict.value == "pass"
+    assert result.verified_pass_count == 1 and len(result.unverified) == 1
+    lines = render_reconciliation(result)
+    assert "Verified: 1 of 2 passed; unverified: 1" in lines[-2]
+    assert lines[-1].startswith("- unverified AC 2:")
 
 
 def test_completed_run_without_per_criterion_records_counts_as_accepted() -> None:

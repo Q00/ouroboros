@@ -30,6 +30,7 @@ from ouroboros.boundary.events import (
     ACCEPTANCE_RECONCILED,
     ACTOR_STARTED,
     ADMISSION_COMPLETED,
+    BINDING_RECORDED,
     BOUNDARY_AGGREGATE_TYPE,
     CANDIDATE_VERIFIED,
     CONSTRUCTION_FAILED,
@@ -391,7 +392,8 @@ async def test_study_policy_never_regenerates(store, repo: Path, tmp_path: Path)
     verdict = await verify_check_package(
         state, event_store=store, candidate_checkout=repo, settings=CheckPackageSettings(True)
     )
-    assert verdict.verdict == "indeterminate"
+    # No admitted package: every criterion is unverified, never a pass.
+    assert verdict.verdict == "unverified"
 
 
 async def test_ledger_keeps_one_seal_per_boundary_id(store, repo: Path, tmp_path: Path) -> None:
@@ -696,11 +698,12 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
         PACKAGE_FROZEN,
         ADMISSION_COMPLETED,
         ACTOR_STARTED,
+        BINDING_RECORDED,
         CANDIDATE_VERIFIED,
         SELECTION_DECIDED,
         ACCEPTANCE_RECONCILED,
     ]
-    verified = (await store.replay(BOUNDARY_AGGREGATE_TYPE, f"{execution_id}/check_package/v1"))[3]
+    verified = (await store.replay(BOUNDARY_AGGREGATE_TYPE, f"{execution_id}/check_package/v1"))[4]
     assert verified.data["verdict"] == "pass"
     assert _check_package_meta(seen) == {
         "check_package_arm": "on",

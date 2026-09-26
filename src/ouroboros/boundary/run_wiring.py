@@ -31,14 +31,19 @@ Packages and full receipts are stored under ``<store_dir>/packages`` and
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.boundary.acceptance import (
+    ArtifactVerdict,
+    CriterionVerdict,
     PackageCriterionStatus,
-    package_criterion_statuses,
+    artifact_verdict,
+    criterion_verdicts,
 )
 from ouroboros.boundary.admission import (
     AdmissionResult,
@@ -50,6 +55,15 @@ from ouroboros.boundary.admission import (
     verify_candidate,
     write_receipt,
 )
+from ouroboros.boundary.binding import CheckTier, TierAssignment
+from ouroboros.boundary.binding_flow import (
+    DeclaredBindingResult,
+    admission_tiers,
+    assign_tiers,
+    bindings_payload,
+    snapshot_base,
+    verify_with_bindings,
+)
 from ouroboros.boundary.check_env import (
     CheckInterpreter,
     resolve_check_interpreter,
@@ -57,8 +71,10 @@ from ouroboros.boundary.check_env import (
 )
 from ouroboros.boundary.constructor import ALL_CRITERIA_UNCOVERED
 from ouroboros.boundary.ledger import BoundaryLedger
+from ouroboros.boundary.oracle import repair_lines
 from ouroboros.boundary.package import (
     CheckPackage,
+    seed_criterion_keys,
     seed_digest,
     write_check_package,
 )
@@ -163,6 +179,9 @@ class BoundaryRunState:
     store_dir: Path
     package_path: Path | None = None
     interpreter: CheckInterpreter | None = None
+    criterion_keys: tuple[str, ...] = ()
+    base_snapshot: Path | None = None
+    base_manifest_path: Path | None = None
 
     @property
     def admitted(self) -> bool:
@@ -193,11 +212,18 @@ class BoundaryVerdict:
     receipt_path: Path | None = None
     uncovered: tuple[str, ...] = field(default_factory=tuple)
     criteria: dict[str, PackageCriterionStatus] = field(default_factory=dict)
+    verdicts: dict[str, CriterionVerdict] = field(default_factory=dict)
+    artifact_verdict: ArtifactVerdict | None = None
+    assignments: dict[str, TierAssignment] = field(default_factory=dict)
+    binding_results: dict[str, DeclaredBindingResult] = field(default_factory=dict)
+    oracle_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
         """JSON-safe summary for run output (no check code, no argv)."""
         return {
             "verdict": self.verdict,
+            "artifact_verdict": self.artifact_verdict.value if self.artifact_verdict else None,
+            "tiers": {key: item.tier.value for key, item in self.verdicts.items()},
             "reasons": list(self.reasons),
             "boundary_id": self.boundary_id,
             "package_sha256": self.package_sha256,
@@ -263,6 +289,10 @@ async def prepare_check_package(
 
     for attempt in range(1, settings.attempts + 1):
         boundary_id = f"{execution_id}/check_package/v{attempt}"
+        persist = getattr(constructor, "persist_partials_to", None)
+        if persist is not None:
+            # Each criterion's oracle is kept as soon as it is produced.
+            persist(store / "partial" / f"v{attempt}")
         outcome = await constructor.construct(seed, base, feedback=feedback)
         package, admission, package_path = outcome.package, None, None
         if package is None:
@@ -285,6 +315,8 @@ async def prepare_check_package(
                 interpreter=interpreter.path,
                 interpreter_source=interpreter.source,
                 reject_prose_only_checks=True,
+                reject_unsafe_checks=True,
+                check_tiers=admission_tiers(package, seed, base),
             )
             write_receipt(admission, store / "receipts")
             await ledger.record_admission(boundary_id, admission)
@@ -324,6 +356,11 @@ async def prepare_check_package(
         execution_id, [bound], workspace=worker_workspace, runtime=runtime_label
     )
     admitted = admission is not None and admission.verdict is PackageVerdict.ADMITTED
+    snapshot: tuple[Path, Path] | None = None
+    if admitted and package is not None and any(not o.default_resolves for o in package.oracles):
+        # A late binding is validated against the base after the worker has
+        # stopped; keep the base outside every checkout until then.
+        snapshot = snapshot_base(base, store)
     return BoundaryRunState(
         execution_id=execution_id,
         boundary_id=bound,
@@ -336,6 +373,9 @@ async def prepare_check_package(
         store_dir=store,
         package_path=package_path if admitted else None,
         interpreter=interpreter,
+        criterion_keys=seed_criterion_keys(seed),
+        base_snapshot=snapshot[0] if snapshot else None,
+        base_manifest_path=snapshot[1] if snapshot else None,
     )
 
 
@@ -353,20 +393,46 @@ def _counterexamples(verification: CandidateVerification) -> tuple[Counterexampl
     )
 
 
+def _unverified_everywhere(state: BoundaryRunState) -> dict[str, CriterionVerdict]:
+    reason = f"no_admitted_package:{state.failure_reason or 'unknown'}"
+    return {
+        key: CriterionVerdict(key, PackageCriterionStatus.UNCOVERED, CheckTier.U, reason)
+        for key in state.criterion_keys
+    }
+
+
+def _base_manifest(state: BoundaryRunState) -> dict[str, str] | None:
+    if state.base_manifest_path is None or not state.base_manifest_path.is_file():
+        return None
+    data = json.loads(state.base_manifest_path.read_text("utf-8"))
+    return data if isinstance(data, dict) else None
+
+
 async def verify_check_package(
     state: BoundaryRunState,
     *,
     event_store: EventStore,
     candidate_checkout: Path,
     settings: CheckPackageSettings,
+    declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
 ) -> BoundaryVerdict:
-    """Run the unchanged package on the candidate and record verdict and selection."""
+    """Bind, then run the unchanged package on the candidate; record everything.
+
+    ``declared_entry_points`` maps a criterion key to the worker's declared
+    ``entry_points`` (typed evidence). Order: final bindings
+    (``boundary.binding.recorded``), candidate verification (plus one R3
+    re-run of transiently indeterminate checks), selection.
+    """
     if state.package is None or state.admission is None:
+        verdicts = _unverified_everywhere(state)
         return BoundaryVerdict(
-            verdict=CandidateVerdict.INDETERMINATE.value,
+            verdict=ArtifactVerdict.UNVERIFIED.value,
             reasons=(state.failure_reason or "no_admitted_package",),
             boundary_id=state.boundary_id,
             package_sha256=None,
+            criteria={key: item.status for key, item in verdicts.items()},
+            verdicts=verdicts,
+            artifact_verdict=ArtifactVerdict.UNVERIFIED,
         )
     ledger = BoundaryLedger(event_store)
     package = state.package
@@ -377,45 +443,120 @@ async def verify_check_package(
         seed_digest=package.seed_digest,
     )
     interpreter = state.interpreter or resolve_check_interpreter(candidate)
-    verification = await verify_candidate(
+    run_options = {
+        "env": scrubbed_check_environment(),
+        "interpreter": interpreter.path,
+        "interpreter_source": interpreter.source,
+    }
+    assignments, results = await assign_tiers(
+        package,
+        artifact=candidate,
+        base=state.base_snapshot,
+        declared=declared_entry_points,
+        base_manifest=_base_manifest(state),
+        expected_base_digest=state.admission.base_tree_digest,
+        admitted_tiers=state.admission.check_tiers,
+        run_options={"env": run_options["env"], "interpreter": run_options["interpreter"]},
+    )
+    await ledger.record_bindings(
+        state.boundary_id,
+        package_sha256=package.sha256,
+        payload=bindings_payload(assignments, results, phase="final"),
+    )
+    bound = await verify_with_bindings(
         package,
         candidate,
+        assignments,
         timeout_seconds=settings.check_timeout_seconds,
-        env=scrubbed_check_environment(),
-        interpreter=interpreter.path,
-        interpreter_source=interpreter.source,
+        **run_options,
     )
-    receipt = write_receipt(verification, state.store_dir / "receipts")
-    await ledger.record_candidate_verification(state.boundary_id, verification)
-    decision = select_incumbent(
-        incumbent=ArtifactRef(
-            artifact_id=f"{state.execution_id}:base",
-            tree_digest=state.admission.base_tree_digest,
-            seed_digest=package.seed_digest,
-        ),
-        candidate=candidate_ref,
-        package=package,
-        admission=state.admission,
-        verification=verification,
-        candidate_checkout=candidate,
-    )
-    await ledger.record_selection(state.boundary_id, decision)
-    criteria = package_criterion_statuses(
+    receipt: Path | None = None
+    for run in (bound.first, bound.rerun):
+        if run is not None:
+            receipt = write_receipt(run, state.store_dir / "receipts")
+            await ledger.record_candidate_verification(state.boundary_id, run)
+    verification = bound.effective
+    decision: SelectionDecision | None = None
+    if verification is not None:
+        decision = select_incumbent(
+            incumbent=ArtifactRef(
+                artifact_id=f"{state.execution_id}:base",
+                tree_digest=state.admission.base_tree_digest,
+                seed_digest=package.seed_digest,
+            ),
+            candidate=candidate_ref,
+            package=package,
+            admission=state.admission,
+            verification=verification,
+            candidate_checkout=candidate,
+        )
+        await ledger.record_selection(state.boundary_id, decision)
+    verdicts = criterion_verdicts(
         package,
         verification,
-        candidate_identity_ok=decision.reason is not SelectionReason.CANDIDATE_IDENTITY_MISMATCH,
+        assignments=assignments,
+        candidate_identity_ok=decision is None
+        or decision.reason is not SelectionReason.CANDIDATE_IDENTITY_MISMATCH,
     )
+    overall = artifact_verdict(item.status for item in verdicts.values())
     return BoundaryVerdict(
-        verdict=verification.verdict.value,
-        reasons=verification.reasons,
+        verdict=overall.value,
+        reasons=verification.reasons if verification is not None else ("no_bound_checks",),
         boundary_id=state.boundary_id,
         package_sha256=package.sha256,
-        counterexamples=_counterexamples(verification),
+        counterexamples=_counterexamples(verification) if verification is not None else (),
         selection=decision,
         receipt_path=receipt,
         uncovered=tuple(item.criterion_key for item in package.uncovered),
-        criteria=criteria,
+        criteria={key: item.status for key, item in verdicts.items()},
+        verdicts=verdicts,
+        artifact_verdict=overall,
+        assignments=assignments,
+        binding_results=results,
+        oracle_results={
+            check.check_id: check.oracle_result
+            for check in (verification.checks if verification is not None else ())
+            if check.oracle_result
+        },
     )
+
+
+def repair_message(verdict: BoundaryVerdict, criterion_key: str) -> str | None:
+    """Counterexample repair text for one failing criterion, or ``None``.
+
+    Visible cases are shown in full; held-out cases only as a count, so the
+    held-out verdict keeps its meaning after a repair. For a worker-declared
+    binding (tier A') the message names the binding the check ran through.
+    """
+    item = verdict.verdicts.get(criterion_key)
+    if item is None or item.status is not PackageCriterionStatus.FAIL:
+        return None
+    lines = ["The frozen check package failed this criterion on your workspace."]
+    if item.tier is CheckTier.A_PRIME and item.binding is not None:
+        lines.append(
+            "It called your declared entry point: "
+            f"{item.binding.get('call_kind')} {item.binding.get('symbol')}"
+            + (
+                f" with arg_map {json.dumps(item.binding.get('arg_map'), sort_keys=True)}"
+                if item.binding.get("arg_map")
+                else ""
+            )
+            + "."
+        )
+    elif item.binding is not None:
+        lines.append(f"It called {item.binding.get('symbol')}.")
+    shown = False
+    for check_id in item.check_ids:
+        result = verdict.oracle_results.get(check_id)
+        if result:
+            counter = repair_lines(result)
+            lines.extend(counter)
+            shown = shown or bool(counter)
+    if not shown:
+        for example in verdict.counterexamples:
+            if example.check_id in item.check_ids and example.output_tail.strip():
+                lines.append(example.output_tail.strip()[-600:])
+    return "\n".join(lines)
 
 
 def render_preparation(state: BoundaryRunState) -> list[str]:
@@ -438,8 +579,8 @@ def render_preparation(state: BoundaryRunState) -> list[str]:
             )
     else:
         lines.append(
-            f"No admitted package ({state.failure_reason}); the run continues and its "
-            "check verdict will be indeterminate."
+            f"No admitted package ({state.failure_reason}); the run continues and every "
+            "criterion will be reported unverified."
         )
     return lines
 
@@ -447,10 +588,18 @@ def render_preparation(state: BoundaryRunState) -> list[str]:
 def render_verdict(verdict: BoundaryVerdict) -> list[str]:
     """Plain-text lines: verdict first, then each counterexample."""
     lines = [f"Check package verdict: {verdict.verdict}"]
+    if verdict.verdicts:
+        tiers = ", ".join(
+            f"{key}: {item.status.value} (tier {item.tier.label})"
+            for key, item in verdict.verdicts.items()
+        )
+        lines.append(f"Criteria: {tiers}")
     if verdict.selection is not None:
         outcome = "accepted" if verdict.selection.replaced else "not accepted"
         lines.append(f"Candidate {outcome} ({verdict.selection.reason.value})")
-    if verdict.verdict != CandidateVerdict.PASS.value and verdict.reasons:
+    if verdict.verdict not in (CandidateVerdict.PASS.value, ArtifactVerdict.UNVERIFIED.value) and (
+        verdict.reasons
+    ):
         lines.append(f"Reasons: {', '.join(verdict.reasons)}")
     for example in verdict.counterexamples:
         lines.append(
