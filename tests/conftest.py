@@ -5,11 +5,41 @@ import inspect
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
 import pytest
 import pytest_asyncio
+
+
+@pytest.fixture(scope="session")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build one wheel for packaging-contract tests that inspect its contents.
+
+    The wheel is an immutable artifact for the duration of a test session;
+    rebuilding it in each test only repeats a 20–30 second subprocess.
+    """
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv not on PATH; wheel packaging tests require a build")
+    output = tmp_path_factory.mktemp("built-wheel")
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(output)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"uv build failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    wheels = list(output.glob("*.whl"))
+    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+    return wheels[0]
+
 
 # In CI, GITHUB_ACTIONS env var causes Typer to set force_terminal=True on
 # Rich Console (see typer/rich_utils.py:75-78). This makes Rich emit ANSI

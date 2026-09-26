@@ -40,10 +40,11 @@ class _ToolAdapter:
 class _SlowToolAdapter:
     def __init__(self):
         self.calls = 0
+        self.release = asyncio.Event()
 
     async def call_tool(self, _tool_name, _arguments=None):
         self.calls += 1
-        await asyncio.sleep(10)
+        await self.release.wait()
 
 
 class _ResourceAdapter:

@@ -55,27 +55,25 @@ class TestVerificationModels:
         with pytest.raises(Exception):
             a.ac_index = 1  # type: ignore[misc]
 
-    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
-    def test_spec_assertion_requires_raw_non_negative_integer_index(
-        self,
-        invalid_index: object,
-    ) -> None:
-        with pytest.raises(ValidationError):
-            SpecAssertion.model_validate(
-                {
-                    "ac_index": invalid_index,
-                    "ac_text": "Create config",
-                    "tier": "t2_structural",
-                }
-            )
-
-    @pytest.mark.parametrize("invalid_index", [True, False, "0", "1", 0.0, 1.0, 1.5, -1])
+    @pytest.mark.parametrize(
+        ("model", "invalid_index"),
+        [
+            (SpecAssertion, invalid_index)
+            for invalid_index in (True, False, "0", "1", 0.0, 1.0, 1.5, -1)
+        ]
+        + [
+            (ACVerificationReport, invalid_index)
+            for invalid_index in (True, False, "0", "1", 0.0, 1.0, 1.5, -1)
+        ],
+        ids=lambda value: value.__name__ if isinstance(value, type) else repr(value),
+    )
     def test_ac_report_requires_raw_non_negative_integer_index(
         self,
+        model: type[SpecAssertion] | type[ACVerificationReport],
         invalid_index: object,
     ) -> None:
         with pytest.raises(ValidationError):
-            ACVerificationReport.model_validate(
+            model.model_validate(
                 {
                     "ac_index": invalid_index,
                     "ac_text": "Create config",
