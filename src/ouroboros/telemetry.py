@@ -293,6 +293,8 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "reconciliation",
         "legacy_failure_class",
         "legacy_failure_class_count",
+        "unverified_count",
+        "check_tier_summary",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -324,7 +326,7 @@ _CHECK_PACKAGE_PROPERTY_VALUES: dict[str, frozenset[str]] = {
         {"randomized", "user_forced_on", "user_forced_off", "fallback"}
     ),
     "check_package_status": frozenset({"admitted", "rejected", "construction_failed", "not_run"}),
-    "package_verdict": frozenset({"pass", "fail", "indeterminate", "none"}),
+    "package_verdict": frozenset({"pass", "fail", "indeterminate", "unverified", "none"}),
     "legacy_verdict": frozenset({"accept", "reject", "none"}),
     "reconciliation": frozenset(
         {
@@ -337,6 +339,14 @@ _CHECK_PACKAGE_PROPERTY_VALUES: dict[str, frozenset[str]] = {
     ),
     "legacy_failure_class": _LEGACY_FAILURE_CLASSES | {"none", "accepted", "other"},
     "legacy_failure_class_count": frozenset({"0", "1", "2", "3+"}),
+    "unverified_count": frozenset({"0", "1", "2", "3+"}),
+    # "A:<n>,A_prime:<n>,U:<n>" with each n in 0, 1, 2, 3+ (64 values).
+    "check_tier_summary": frozenset(
+        f"A:{a},A_prime:{b},U:{u}"
+        for a in ("0", "1", "2", "3+")
+        for b in ("0", "1", "2", "3+")
+        for u in ("0", "1", "2", "3+")
+    ),
 }
 _OTHER_LEGACY_FAILURE_CLASS = "other"
 _SERVICE_ACTIVE_KEYS = frozenset(

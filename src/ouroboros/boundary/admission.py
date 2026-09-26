@@ -614,7 +614,7 @@ async def admit_check_package(
     prose = prose_only_checks(package) if reject_prose_only_checks else ()
     unsafe = unsafe_checks(package) if reject_unsafe_checks else ()
     tiers = {key: CheckTier(value).value for key, value in (check_tiers or {}).items()}
-    tiers.update({check_id: CheckTier.C.value for check_id in prose})
+    tiers.update(dict.fromkeys(prose, CheckTier.C.value))
     tiers.update({check_id: CheckTier.C.value for check_id, _rule in unsafe})
     run = await _run_package(
         package,
@@ -714,9 +714,7 @@ async def verify_candidate(
         bindings=bindings,
         check_tiers=tiers,
         only_checks=None if only_checks is None else frozenset(only_checks),
-        extra_preconditions=(
-            ("no_checks",) if only_checks is not None and not only_checks else ()
-        ),
+        extra_preconditions=(("no_checks",) if only_checks is not None and not only_checks else ()),
     )
     mutated, reasons = _mutation_reasons(run)
     reasons = [*run.preconditions, *reasons]

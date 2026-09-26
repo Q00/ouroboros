@@ -60,6 +60,28 @@ def _count_bucket(count: int) -> str:
     return "3+" if count >= 3 else str(max(0, count))
 
 
+TIER_SUMMARY_TIERS = ("A", "A_prime", "U")
+
+
+def tier_summary_value(counts: dict[str, int]) -> str:
+    """``check_tier_summary``: bucketed counts of tiers A, A' and U (closed set)."""
+    return ",".join(f"{tier}:{_count_bucket(counts.get(tier, 0))}" for tier in TIER_SUMMARY_TIERS)
+
+
+def legacy_failure_class_from_annotations(legacy: dict[int, Any]) -> tuple[str, str]:
+    """``(class, count bucket)`` from the legacy verdicts the authority annotated."""
+    rejected = sorted(
+        index
+        for index, item in legacy.items()
+        if item.outcome == "failed" and item.terminal_status == "failed"
+    )
+    if not rejected:
+        return "other", "0"
+    raw = legacy[rejected[0]].failure_class
+    first = raw.lower() if isinstance(raw, str) else ""
+    return (first if first in _FAILURE_CLASS_VALUES else "other"), _count_bucket(len(rejected))
+
+
 def legacy_failure_class_from_events(
     events: Iterable[Any], *, session_id: str | None
 ) -> tuple[str, str]:
@@ -303,6 +325,12 @@ class CheckPackageRun:
                 "the existing verifier decided the run."
             ]
         lines = [] if outcome.verdict is None else render_verdict(outcome.verdict)
+        repairs = [entry for entry in self.authority.gate.log if entry["status"] == "fail"]
+        if repairs:
+            lines.append(
+                f"Repairs driven by check package counterexamples: {len(repairs)} "
+                "(the legacy verifier triggered none)."
+            )
         reconciliation = outcome.reconciliation
         if reconciliation is not None:
             from ouroboros.boundary.acceptance import render_reconciliation
@@ -310,8 +338,8 @@ class CheckPackageRun:
             lines.extend(render_reconciliation(reconciliation))
             if reconciliation.run_accepted and not outcome.legacy_run_accepted:
                 lines.append(
-                    "The check package accepted the criteria the existing verifier rejected; "
-                    "the existing verdict is kept as advisory."
+                    "The check package accepted criteria the legacy verifier rejected; "
+                    "the legacy verdict is advisory only."
                 )
             elif outcome.legacy_run_accepted and not reconciliation.run_accepted:
                 lines.append("The finished workspace fails the frozen check package.")
@@ -368,19 +396,33 @@ class CheckPackageRun:
             "legacy_verdict": legacy_verdict,
             "reconciliation": self._reconciliation(legacy_verdict),
         }
-        meta.update(
-            await legacy_failure_dimensions(
-                event_store,
-                execution_id=execution_id,
-                session_id=session_id,
-                legacy_verdict=legacy_verdict,
+        outcome = self.authority.outcome if self.authority is not None else None
+        if outcome is not None and outcome.legacy and legacy_verdict == "reject":
+            failure_class, count = legacy_failure_class_from_annotations(outcome.legacy)
+            meta.update(
+                {"legacy_failure_class": failure_class, "legacy_failure_class_count": count}
             )
-        )
+        else:
+            meta.update(
+                await legacy_failure_dimensions(
+                    event_store,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    legacy_verdict=legacy_verdict,
+                )
+            )
+        reconciliation = outcome.reconciliation if outcome is not None else None
+        if reconciliation is not None:
+            meta["unverified_count"] = _count_bucket(len(reconciliation.unverified))
+            meta["check_tier_summary"] = tier_summary_value(reconciliation.tiers)
         return meta
 
 
 __all__ = [
+    "TIER_SUMMARY_TIERS",
     "CheckPackageRun",
+    "legacy_failure_class_from_annotations",
+    "tier_summary_value",
     "legacy_failure_class_from_events",
     "legacy_failure_dimensions",
 ]

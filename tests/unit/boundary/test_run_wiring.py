@@ -714,6 +714,8 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
         "reconciliation": "agree",
         "legacy_failure_class": "accepted",
         "legacy_failure_class_count": "0",
+        "unverified_count": "0",
+        "check_tier_summary": "A:1,A_prime:0,U:0",
     }
     await store.close()
 

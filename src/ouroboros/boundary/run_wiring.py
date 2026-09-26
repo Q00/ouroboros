@@ -52,7 +52,6 @@ from ouroboros.boundary.admission import (
     CheckStatus,
     PackageVerdict,
     admit_check_package,
-    verify_candidate,
     write_receipt,
 )
 from ouroboros.boundary.binding import CheckTier, TierAssignment

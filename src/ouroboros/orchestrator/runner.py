@@ -10348,6 +10348,9 @@ class OrchestratorRunner:
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
             usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
         )
+        if (install := getattr(self.acceptance_authority, "install", None)) is not None:
+            # Check package on: it drives repairs; the legacy verifier is advisory.
+            install(parallel_executor)
 
         raw_published_pause_owner = tracker.progress.get("pause_owner")
         if (

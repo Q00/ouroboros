@@ -150,7 +150,7 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-async def test_s4_first_attempt_is_rejected_and_the_criterion_goes_to_the_legacy_verifier(
+async def test_s4_first_attempt_is_rejected_and_the_criterion_is_reported_unverified(
     repo: Path, tmp_path: Path
 ) -> None:
     seed = _seed()
@@ -190,7 +190,8 @@ async def test_s4_first_attempt_is_rejected_and_the_criterion_goes_to_the_legacy
         assert "prose_only_check:repro_1" in constructor.calls[1]
         assert state.admitted is False and state.failure_reason == ALL_CRITERIA_UNCOVERED
 
-        # After the worker, the legacy verifier decides: the run result is untouched.
+        # After the worker the criterion is unverified (never a pass); the
+        # legacy verdict is advisory, and the attempted run stays accepted.
         authority = CheckPackageAuthority(
             state, settings, event_store=store, candidate_checkout=repo
         )
@@ -207,7 +208,11 @@ async def test_s4_first_attempt_is_rejected_and_the_criterion_goes_to_the_legacy
             failure_count=0,
         )
         assert await authority(seed=seed, execution_id="exec_s4", parallel_result=legacy) is legacy
-        assert authority.outcome is not None and authority.outcome.package_decided is False
+        assert authority.outcome is not None and authority.outcome.reconciliation is not None
+        (decision,) = authority.outcome.reconciliation.decisions
+        assert decision.accepted and decision.unverified
+        assert authority.outcome.reconciliation.verified_pass_count == 0
+        assert authority.outcome.verdict.verdict == "unverified"
     finally:
         await store.close()
 
