@@ -119,9 +119,10 @@ the finished workspace).
 - `package_verdict` is the package's verdict on the finished workspace, by
   precedence: `fail` if a verified criterion failed, else `indeterminate` if a
   criterion could not be decided, else `pass` if at least one criterion
-  passed, else `unverified` (no criterion could be checked, including a run
-  with no admitted package); `none` when the package was not consulted (for
-  example a single-criterion Seed with `orchestrator.execution_mode: legacy`),
+  passed, else `unverified` (no criterion could be checked); `none` when the
+  package was not consulted: no package was admitted (the run is then the
+  legacy run), or the execution path never consults it (for example a
+  single-criterion Seed with `orchestrator.execution_mode: legacy`);
   `indeterminate` also when the verification itself failed.
 - `legacy_verdict` is the verdict of the per-criterion verifier that decides
   without the package: `accept` or `reject` for the run, `none` when the run
@@ -129,9 +130,9 @@ the finished workspace).
 - `reconciliation` compares the two for the run: `agree` (the package decided
   at least one criterion and the run verdict equals the legacy verdict),
   `package_accepted_over_legacy_reject`, `package_rejected_over_legacy_accept`,
-  `fallback_to_legacy` (arm `on`, but the package decided no criterion:
-  nothing admitted, indeterminate, or every criterion uncovered), `none`
-  (arm `off` or package not run).
+  `fallback_to_legacy` (arm `on`, but no package was admitted, so the legacy
+  verifier decided the run exactly as in arm `off`; `check_package_status`
+  then says why), `none` (arm `off` or package not run).
 - `legacy_failure_class` is the worker failure class the legacy verifier
   recorded for the first rejected criterion in criterion order (the class
   names of the orchestrator's failure taxonomy, lower-cased); `accepted` when

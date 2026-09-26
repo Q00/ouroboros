@@ -54,7 +54,12 @@ from ouroboros.boundary.acceptance import (
     reconcile_acceptance,
 )
 from ouroboros.boundary.binding import declared_entry_points
-from ouroboros.boundary.binding_flow import assign_tiers, bindings_payload, verify_with_bindings
+from ouroboros.boundary.binding_flow import (
+    assign_tiers,
+    bindings_payload,
+    retire_revealed,
+    verify_with_bindings,
+)
 from ouroboros.boundary.check_env import resolve_check_interpreter, scrubbed_check_environment
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import seed_criterion_keys
@@ -64,7 +69,7 @@ from ouroboros.boundary.run_wiring import (
     CheckPackageSettings,
     _base_manifest,
     _counterexamples,
-    repair_message,
+    plan_repair,
     verify_check_package,
 )
 
@@ -290,7 +295,7 @@ class CheckPackageGate:
             timeout_seconds=authority.settings.check_timeout_seconds,
             **options,
         )
-        verification = bound.effective
+        verification = retire_revealed(bound.effective, authority.revealed)
         verdicts = criterion_verdicts(package, verification, assignments=subset)
         item = verdicts[key]
         await BoundaryLedger(authority.event_store).record_bindings(
@@ -325,7 +330,22 @@ class CheckPackageGate:
                 if check.oracle_result
             },
         )
-        message = repair_message(partial, key) or PACKAGE_REJECTION_ERROR
+        plan = plan_repair(partial, key)
+        message = plan.message if plan is not None else PACKAGE_REJECTION_ERROR
+        if plan is not None and plan.revealed_check_id and plan.revealed_case_id:
+            # Only held-out cases failed: one of them is now shown to the
+            # worker and retired from held-out statistics for this run.
+            authority.revealed.setdefault(plan.revealed_check_id, set()).add(plan.revealed_case_id)
+            await BoundaryLedger(authority.event_store).record_case_revealed(
+                state.boundary_id,
+                package_sha256=package.sha256,
+                check_id=plan.revealed_check_id,
+                criterion_key=key,
+                case_id=plan.revealed_case_id,
+                root_ac_index=ac_index,
+                retry_attempt=getattr(result, "retry_attempt", 0),
+            )
+            self.log[-1]["revealed_case_id"] = plan.revealed_case_id
         digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:12]
         return replace(
             result,
@@ -362,6 +382,8 @@ class CheckPackageAuthority:
         # worker could turn a failing criterion into an unverified one by
         # omitting entry_points after a counterexample.
         self.declared: dict[str, list[Any]] = {}
+        # Held-out cases revealed in a repair message, per check id.
+        self.revealed: dict[str, set[str]] = {}
 
     def remember_declaration(self, key: str, entries: list[Any]) -> list[Any]:
         """Record ``entries`` for ``key`` when present; return the declaration in force."""
@@ -435,7 +457,12 @@ class CheckPackageAuthority:
                 settings=self._settings,
                 declared_entry_points=declared,
                 base_run_cache=self.base_runs,
+                revealed=self.revealed,
             )
+            if verdict.package_sha256 is None:
+                # No admitted package: the legacy result stands untouched.
+                self.outcome = AuthorityOutcome(legacy_accepted, verdict=verdict, legacy=legacy)
+                return parallel_result
             reconciliation = reconcile_acceptance(
                 keys,
                 verdict.verdicts,

@@ -423,3 +423,116 @@ async def test_omitting_entry_points_after_a_counterexample_does_not_withdraw_th
     item = authority.outcome.verdict.verdicts[keys[1]]
     assert (item.status, item.tier) == (PackageCriterionStatus.FAIL, CheckTier.A_PRIME)
     assert not decided.all_succeeded
+
+
+class _FailingConstructor:
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    async def construct(self, seed: Seed, base: Path, *, feedback=()) -> ConstructionOutcome:
+        return ConstructionOutcome(None, "constructor_timeout", "1" * 64, "fake")
+
+
+class _EmptyStore:
+    async def query_events(self, **_kwargs: Any) -> list[Any]:
+        return []
+
+
+@pytest.mark.parametrize(("terminal", "legacy"), [("completed", "accept"), ("failed", "reject")])
+async def test_outage_falls_back_to_the_legacy_path(
+    store: EventStore,
+    repo: Path,
+    tmp_path: Path,
+    terminal: str,
+    legacy: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constructor outage: zero checks admitted. Nothing is installed on the
+    # runner, so the executor and the terminal status are the legacy ones;
+    # the run exits 0 only when the legacy verifier passed it.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "ouroboros.boundary.run_wiring.default_store_dir",
+        lambda execution_id: tmp_path / "store" / execution_id,
+    )
+    runner = SimpleNamespace(acceptance_authority=None)
+    run = CheckPackageRun(
+        CheckPackageSettings(
+            enabled=True,
+            max_construction_attempts=2,
+            assignment=CheckPackageAssignment(Arm.ON, AssignmentSource.RANDOMIZED),
+        )
+    )
+    lines = await run.prepare(
+        runner,
+        _seed(),
+        event_store=store,
+        execution_id="exec_outage",
+        worker_dir=repo,
+        runtime_backend="codex",
+        model=None,
+        resume=False,
+        constructor_factory=_FailingConstructor,
+    )
+    assert runner.acceptance_authority is None and run.authority is None
+    assert any("No admitted package (constructor_timeout)" in line for line in lines)
+    assert run.render_outcome() == [
+        "Check package unavailable (constructor_timeout); legacy verification decided this run."
+    ]
+    meta = await run.outcome_meta(
+        _EmptyStore(),
+        execution_id="exec_outage",
+        session_id="s",
+        terminal_status=terminal,  # type: ignore[arg-type]
+    )
+    assert meta["check_package_status"] == "construction_failed"
+    assert meta["reconciliation"] == "fallback_to_legacy"
+    assert meta["package_verdict"] == "none"
+    assert meta["legacy_verdict"] == legacy
+    assert "unverified_count" not in meta and "check_tier_summary" not in meta
+    # The executor gets no gate: its prompt and retry loop are the legacy ones.
+    executor = _executor(repo)
+    assert not hasattr(executor, "check_package_gate")
+
+
+async def test_held_out_only_failure_reveals_one_case_and_retires_it(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    from ouroboros.boundary.events import BOUNDARY_AGGREGATE_TYPE, CASE_REVEALED
+
+    seed, authority = await _authority(store, repo, tmp_path)
+    # mix passes the stated case (0, 10, 0.5 -> 5) and fails the held-out one.
+    (repo / "mathutils.py").write_text(
+        FIXED + "\ndef mix(start, end, weight):\n    return start + end * weight\n"
+    )
+    attempt = _legacy_rejected(1, entry=MIX_ENTRY)
+    gated = await authority.gate(seed=seed, ac_index=1, result=attempt)
+    assert gated.success is False
+    repair = gated.check_package_repair
+    assert "declared entry point: function mathutils.mix" in repair
+    assert (
+        "- revealed held-out case: mix(start=2, end=4, weight=0.25): expected 2.5, observed 3.0"
+        in repair
+    )
+    assert authority.revealed == {"oracle_2": {"held"}}
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    reveal = [e for e in events if e.type == CASE_REVEALED]
+    assert [(e.data["check_id"], e.data["case_id"], e.data["root_ac_index"]) for e in reveal] == [
+        ("oracle_2", "held", 1)
+    ]
+    # A second attempt that still fails reveals nothing new (the case is visible now).
+    again = await authority.gate(seed=seed, ac_index=1, result=replace(attempt, retry_attempt=1))
+    assert "revealed held-out case: mix(start=2, end=4, weight=0.25)" in again.check_package_repair
+    events = await store.replay(BOUNDARY_AGGREGATE_TYPE, authority.state.boundary_id)
+    assert len([e for e in events if e.type == CASE_REVEALED]) == 1
+    # Final verdict: the retired case no longer counts as held out.
+    parallel = ParallelExecutionResult(
+        results=(_legacy_rejected(0), replace(attempt, retry_attempt=1)),
+        success_count=2,
+        failure_count=0,
+    )
+    await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    keys = seed_criterion_keys(seed)
+    final = authority.outcome.verdict.verdicts[keys[1]]
+    assert final.status is PackageCriterionStatus.FAIL and final.failed_heldout_only is False

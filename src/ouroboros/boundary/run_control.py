@@ -30,6 +30,7 @@ from ouroboros.boundary.run_wiring import (
     render_preparation,
     render_verdict,
     resolve_check_package_settings,
+    unavailable_line,
 )
 
 if TYPE_CHECKING:
@@ -239,6 +240,12 @@ class CheckPackageRun:
                 "the existing verifier decides this run.",
             ]
         self.state = state
+        if not state.admitted:
+            # No admitted package: this run is the legacy run, exactly as with
+            # the check package off (user decision, 2026-09-27). Nothing is
+            # installed on the runner; telemetry keeps the failure status and
+            # reports reconciliation=fallback_to_legacy.
+            return [*lines, *render_preparation(state)]
         self.authority = CheckPackageAuthority(
             state, self.settings, event_store=event_store, candidate_checkout=worker_dir
         )
@@ -312,6 +319,8 @@ class CheckPackageRun:
     def render_outcome(self) -> list[str]:
         """Lines describing what the package decided (empty when it did not run)."""
         if self.authority is None:
+            if self.state is not None and not self.state.admitted:
+                return [unavailable_line(self.state)]
             return []
         outcome = self.authority.outcome
         if outcome is None:
