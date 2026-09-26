@@ -3062,6 +3062,92 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_passes_source_interview_from_seed_metadata(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Runner forwards the Seed-owned link without deriving another identity."""
+        linked_seed = sample_seed.model_copy(
+            update={
+                "metadata": sample_seed.metadata.model_copy(
+                    update={"interview_id": "interview_runner_source"}
+                )
+            }
+        )
+        tracker = SessionTracker.create(
+            "exec_interview_link",
+            linked_seed.metadata.seed_id,
+            session_id="orch_interview_link",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                linked_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+            assert create_session.await_args.kwargs["interview_id"] == ("interview_runner_source")
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_omits_absent_source_interview_for_legacy_repository(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A legacy Seed and narrow repository double keep their old call shape."""
+        tracker = SessionTracker.create(
+            "exec_legacy_link",
+            sample_seed.metadata.seed_id,
+            session_id="orch_legacy_link",
+        )
+
+        async def legacy_create_session(
+            *,
+            execution_id: str,
+            seed_id: str,
+            session_id: str,
+            seed_goal: str,
+            runtime_backend: str,
+            llm_backend: str,
+            execution_contract: object,
+            project_identity: object,
+            project_workspace: str,
+        ) -> Result[SessionTracker, object]:
+            assert execution_id == tracker.execution_id
+            assert seed_id == sample_seed.metadata.seed_id
+            assert session_id == tracker.session_id
+            return Result.ok(tracker)
+
+        with patch.object(
+            runner._session_repo,
+            "create_session",
+            new=legacy_create_session,
+        ):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+
+        try:
+            assert result.is_ok
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
     async def test_prepare_session_publishes_matching_project_anchor_and_contract(
         self,
         mock_adapter: MagicMock,

@@ -2744,3 +2744,199 @@ def test_picker_unicode_whitespace_is_not_a_running_acknowledgement(tmp_path) ->
     runs = list_recent_executions(db, limit=1)
 
     assert [(run["status"], run["completed_count"]) for run in runs] == [("paused", 1)]
+
+
+async def _append_linked_run(
+    store: EventStore,
+    *,
+    execution_id: str,
+    session_id: str,
+    interview_id: object = "interview-linked",
+    include_link: bool = True,
+) -> None:
+    payload: dict[str, object] = {"execution_id": execution_id, "seed_id": "seed-c1"}
+    if include_link:
+        payload["interview_id"] = interview_id
+    await store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data=payload,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_tail_reads_only_explicitly_linked_interview_from_real_sqlite(
+    tmp_path,
+) -> None:
+    """Execution/session lookup share one exact subordinate interview query."""
+    db = tmp_path / "linked-interview.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await store.append(
+            BaseEvent(
+                type="interview.started",
+                aggregate_type="interview",
+                aggregate_id="interview-linked",
+                data={"initial_context": "linked"},
+            )
+        )
+        await store.append(
+            BaseEvent(
+                type="interview.started",
+                aggregate_type="interview",
+                aggregate_id="interview-unrelated",
+                data={"initial_context": "must not leak"},
+            )
+        )
+        await store.append(
+            BaseEvent(
+                type="interview.future.unsupported",
+                aggregate_type="interview",
+                aggregate_id="interview-linked",
+                data={"must": "not widen the whitelist"},
+            )
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-linked",
+            session_id="orch-linked",
+        )
+    finally:
+        await store.close()
+
+    for selected_id in ("exec-linked", "orch-linked"):
+        events = EventTail(db, selected_id).fetch_new()
+        assert [(event["aggregate_id"], event["event_type"]) for event in events] == [
+            ("interview-linked", "interview.started"),
+            ("orch-linked", "orchestrator.session.started"),
+        ]
+        assert all("aggregate_id" in event for event in events)
+        assert "interview-unrelated" not in {event["aggregate_id"] for event in events}
+        assert "interview.future.unsupported" not in {event["event_type"] for event in events}
+
+
+@pytest.mark.asyncio
+async def test_event_tail_allows_one_interview_to_feed_multiple_isolated_runs(
+    tmp_path,
+) -> None:
+    db = tmp_path / "shared-interview.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await store.append(
+            BaseEvent(
+                type="interview.completed",
+                aggregate_type="interview",
+                aggregate_id="interview-shared",
+                data={"total_rounds": 3},
+            )
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-first",
+            session_id="orch-first",
+            interview_id="interview-shared",
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-second",
+            session_id="orch-second",
+            interview_id="interview-shared",
+        )
+    finally:
+        await store.close()
+
+    first = EventTail(db, "exec-first").fetch_new()
+    second = EventTail(db, "exec-second").fetch_new()
+    assert {event["aggregate_id"] for event in first} == {
+        "interview-shared",
+        "orch-first",
+    }
+    assert {event["aggregate_id"] for event in second} == {
+        "interview-shared",
+        "orch-second",
+    }
+
+
+@pytest.mark.asyncio
+async def test_event_tail_legacy_start_does_not_infer_a_standalone_interview(
+    tmp_path,
+) -> None:
+    db = tmp_path / "legacy-no-link.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await store.append(
+            BaseEvent(
+                type="interview.started",
+                aggregate_type="interview",
+                aggregate_id="interview-same-seed-name",
+                data={"seed_id": "seed-c1"},
+            )
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-legacy",
+            session_id="orch-legacy",
+            include_link=False,
+        )
+    finally:
+        await store.close()
+
+    events = EventTail(db, "exec-legacy").fetch_new()
+    assert [(event["aggregate_id"], event["event_type"]) for event in events] == [
+        ("orch-legacy", "orchestrator.session.started")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_link", [None, "", "  ", " interview-padded", 3])
+async def test_event_tail_rejects_malformed_authoritative_interview_link(
+    tmp_path,
+    invalid_link: object,
+) -> None:
+    db = tmp_path / "invalid-interview-link.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await _append_linked_run(
+            store,
+            execution_id="exec-invalid",
+            session_id="orch-invalid",
+            interview_id=invalid_link,
+        )
+    finally:
+        await store.close()
+
+    with pytest.raises(PickerIndexContractError, match="invalid interview link"):
+        EventTail(db, "exec-invalid").fetch_new()
+
+
+@pytest.mark.asyncio
+async def test_event_tail_rejects_conflicting_start_links_for_one_run(tmp_path) -> None:
+    db = tmp_path / "conflicting-interview-links.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await _append_linked_run(
+            store,
+            execution_id="exec-conflict",
+            session_id="orch-conflict-a",
+            interview_id="interview-a",
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-conflict",
+            session_id="orch-conflict-b",
+            interview_id="interview-b",
+        )
+    finally:
+        await store.close()
+
+    for selected_id in ("exec-conflict", "orch-conflict-a", "orch-conflict-b"):
+        with pytest.raises(PickerIndexContractError, match="conflicting interview links"):
+            EventTail(db, selected_id).fetch_new()

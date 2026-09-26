@@ -8644,10 +8644,19 @@ class OrchestratorRunner:
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:
-                if (
-                    "acceptance_root_indices"
-                    in inspect.signature(self._session_repo.create_session).parameters
+                create_session_parameters = inspect.signature(
+                    self._session_repo.create_session
+                ).parameters
+                accepts_extra_session_metadata = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in create_session_parameters.values()
+                )
+                interview_id = getattr(seed.metadata, "interview_id", None)
+                if interview_id is not None and (
+                    "interview_id" in create_session_parameters or accepts_extra_session_metadata
                 ):
+                    create_session_kwargs["interview_id"] = interview_id
+                if "acceptance_root_indices" in create_session_parameters:
                     create_session_kwargs["acceptance_root_indices"] = range(
                         len(seed.acceptance_criteria)
                     )

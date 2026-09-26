@@ -106,6 +106,31 @@ def _add_cross_namespace_collision(path) -> None:
         conn.close()
 
 
+def _add_linked_interview(path) -> None:
+    """Add the production aggregate namespace and one explicit C1 source link."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("ALTER TABLE events ADD COLUMN aggregate_type TEXT")
+        conn.execute(
+            "UPDATE events SET aggregate_type = 'session', "
+            "payload = json_set(payload, '$.interview_id', 'interview-http') "
+            "WHERE event_type = 'orchestrator.session.started'"
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_type, aggregate_id, event_type, payload) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "interview",
+                "interview-http",
+                "interview.response.recorded",
+                json.dumps({"round_number": 2}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @contextmanager
 def _running_server(db_path) -> Iterator[object]:
     server, thread = serve_background(db_path=str(db_path), host="127.0.0.1", port=0)
@@ -218,6 +243,43 @@ def test_normal_sse_emits_preflight_batch_once_then_new_events(tmp_path) -> None
     second_payload = json.loads(second_line.removeprefix(b"data: "))
     assert "node-http" not in json.dumps(first_payload)
     assert "node-http" in json.dumps(second_payload)
+
+
+def test_snapshot_and_sse_share_linked_interview_read_only_projection(tmp_path) -> None:
+    db = tmp_path / "linked-http.db"
+    _make_events_db(db, contract="valid")
+    _add_linked_interview(db)
+
+    with _running_server(db) as server:
+        host, port = server.server_address
+        snapshot_status, snapshot_headers, snapshot_body = _get(
+            host, port, "/snapshot?run=exec-http"
+        )
+        conn = http.client.HTTPConnection(host, port, timeout=2.0)
+        try:
+            conn.request("GET", "/events?run=exec-http")
+            response = conn.getresponse()
+            assert response.status == 200
+            sse_line = response.readline()
+            assert response.readline() == b"\n"
+        finally:
+            conn.close()
+
+    assert snapshot_status == 200
+    assert snapshot_headers["Content-Type"] == "text/html; charset=utf-8"
+    snapshot_html = snapshot_body.decode("utf-8")
+    streamed = json.loads(sse_line.removeprefix(b"data: "))
+    expected = {
+        "interview_id": "interview-http",
+        "status": "active",
+        "round": 2,
+        "total_rounds": None,
+        "last_event": "interview.response.recorded",
+    }
+    assert streamed["meta"]["interview"] == expected
+    for value in ("interview-http", "active", "interview.response.recorded"):
+        assert value in snapshot_html
+    assert 'method:"POST"' not in snapshot_html
 
 
 def test_stream_contract_loss_closes_without_handler_traceback(tmp_path, monkeypatch) -> None:

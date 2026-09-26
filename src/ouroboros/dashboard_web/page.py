@@ -91,6 +91,10 @@ _PAGE_TEMPLATE = """<!doctype html>
   #m-frugality { color: var(--muted); }
   #m-frugality-evidence { color: var(--muted); }
   .empty { color: var(--muted); font-size: 11px; padding: 8px 12px; }
+  #interview-panel { margin: 0 18px 18px; padding: 10px 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 11px; }
+  #interview-panel strong { color: var(--text); font-size: 12px; margin-right: 10px; }
+  #interview-panel .interview-status { color: var(--executing); text-transform: uppercase; }
   .st-pending  .col-head { color: var(--pending); }
   .st-executing .col-head { color: var(--executing); }
   .st-completed .col-head { color: var(--completed); }
@@ -114,7 +118,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   <div id="legend"></div>
 </header>
 <main id="run-list" hidden></main>
-<main id="detail-view" hidden><div id="board"></div></main>
+<main id="detail-view" hidden><div id="interview-panel" hidden><strong>Interview</strong><span id="interview-detail"></span></div><div id="board"></div></main>
 <script>
 const COLS = [
   ["pending", "To Do"], ["executing", "In Progress"],
@@ -140,8 +144,27 @@ function fmtTokens(n) {
   return Math.round(v) + " tok";
 }
 
+function renderInterview(interview) {
+  const panel = document.getElementById("interview-panel");
+  const detail = document.getElementById("interview-detail");
+  if (!interview || !interview.status) {
+    panel.hidden = true;
+    detail.textContent = "";
+    return;
+  }
+  const parts = [`<span class="interview-status">${esc(interview.status)}</span>`];
+  if (interview.round != null) parts.push(`round ${esc(interview.round)}`);
+  if (interview.total_rounds != null) parts.push(`${esc(interview.total_rounds)} rounds`);
+  if (interview.phase) parts.push(esc(interview.phase));
+  if (interview.error) parts.push(esc(interview.error));
+  if (interview.last_event) parts.push(`last: ${esc(interview.last_event)}`);
+  detail.innerHTML = parts.join(" · ");
+  panel.hidden = false;
+}
+
 function render(board) {
   const { meta, columns, providers } = board;
+  renderInterview(meta && meta.interview);
   document.getElementById("m-progress").textContent =
     (meta.total ? `${meta.completed}/${meta.total} ACs` : "");
   document.getElementById("m-phase").textContent =
@@ -215,6 +238,7 @@ function setView(detail, runId) {
     document.getElementById("m-tokens").textContent = "";
     document.getElementById("m-frugality").textContent = "";
     document.getElementById("m-frugality-evidence").textContent = "";
+    renderInterview(null);
     document.getElementById("legend").innerHTML = "";
   }
 }
