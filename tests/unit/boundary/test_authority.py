@@ -302,6 +302,7 @@ async def test_outcome_meta_when_preparation_failed_or_the_hook_never_ran(
     store: EventStore, repo: Path, tmp_path: Path
 ) -> None:
     run = _run(True, AssignmentSource.RANDOMIZED)
+    run.attempted = True
     run.preparation_error = "OSError"
     meta = await _meta(run, "completed")
     assert meta["check_package_status"] == "construction_failed"
@@ -310,6 +311,7 @@ async def test_outcome_meta_when_preparation_failed_or_the_hook_never_ran(
 
     _seed_value, authority = await _authority(store, repo, tmp_path)
     run = _run(True, AssignmentSource.USER_FORCED_ON)
+    run.attempted = True
     run.state = authority._state  # noqa: SLF001 - test wiring
     run.authority = authority  # installed, but the runner never called it
     meta = await _meta(run, "completed")

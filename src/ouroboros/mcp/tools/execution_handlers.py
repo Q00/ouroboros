@@ -18,6 +18,7 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.boundary.run_control import CheckPackageRun
 from ouroboros.config.loader import (
     default_execution_efficiency_mode,
     get_auto_evaluate_enabled,
@@ -1663,6 +1664,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
+                check_package = CheckPackageRun.resolve().bind(
+                    runner,
+                    event_store,
+                    Path(workspace.effective_cwd) if workspace else resolved_cwd,
+                    effective_runtime_backend,
+                )
                 if not is_resume:
                     prepared = await runner.prepare_session(
                         seed,
@@ -1812,6 +1819,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
                         else:
+                            await check_package.prepare_bound(_seed, _tracker.execution_id)
                             result = await _runner.execute_precreated_session(
                                 seed=_seed,
                                 tracker=_tracker,
@@ -2034,6 +2042,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"{execution_preferences.frugality_assurance.value}\n"
                 )
                 message += _run_only_verification_text(tracker.session_id)
+                message += "".join(f"{line}\n" for line in check_package.render_outcome())
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
@@ -2079,6 +2088,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 }
                 if success is not None:
                     meta["success"] = success
+                meta.update(await check_package.meta_for(tracker, session_status))
                 if synchronous and session_status in {
                     SessionStatus.FAILED,
                     SessionStatus.CANCELLED,

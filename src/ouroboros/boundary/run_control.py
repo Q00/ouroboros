@@ -125,9 +125,10 @@ class CheckPackageRun:
     settings: CheckPackageSettings
     state: BoundaryRunState | None = None
     authority: CheckPackageAuthority | None = None
+    attempted: bool = False
     skipped_reason: str | None = None
     preparation_error: str | None = None
-    notes: list[str] = field(default_factory=list)
+    _binding: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def resolve(cls, cli_value: bool | None = None) -> CheckPackageRun:
@@ -176,6 +177,7 @@ class CheckPackageRun:
         if resume or not execution_id:
             self.skipped_reason = "resume"
             return ["Check package is not applied on resume; the session keeps its boundary."]
+        self.attempted = True
         if constructor_factory is None:
             from ouroboros.boundary.constructor import CheckConstructor
 
@@ -222,12 +224,61 @@ class CheckPackageRun:
         return [*lines, *render_preparation(state)]
 
     # ------------------------------------------------------------------
+    # Compact entry points for the MCP ``execute_seed`` handler
+
+    def bind(
+        self, runner: Any, event_store: EventStore, worker_dir: Path, runtime_backend: str
+    ) -> CheckPackageRun:
+        """Remember the handler's runner and workspace for ``prepare_bound``."""
+        from ouroboros.config.loader import resolve_execution_model
+
+        self._binding = {
+            "runner": runner,
+            "event_store": event_store,
+            "worker_dir": worker_dir,
+            "runtime_backend": runtime_backend,
+            "model": resolve_execution_model(runtime_backend),
+        }
+        return self
+
+    async def prepare_bound(self, seed: Seed, execution_id: str) -> None:
+        """``prepare`` for a fresh run with the bound context; lines go to the log."""
+        binding = self._binding
+        lines = await self.prepare(
+            binding["runner"],
+            seed,
+            event_store=binding["event_store"],
+            execution_id=execution_id,
+            worker_dir=binding["worker_dir"],
+            runtime_backend=binding["runtime_backend"],
+            model=binding["model"],
+            resume=False,
+        )
+        for line in lines:
+            log.info("boundary.run_control.prepared", execution_id=execution_id, line=line)
+
+    async def meta_for(self, tracker: Any, session_status: Any) -> dict[str, str]:
+        """``outcome_meta`` for a finished MCP run; empty while it is still running."""
+        status = getattr(session_status, "value", None)
+        if not isinstance(status, str):
+            return {}
+        try:
+            return await self.outcome_meta(
+                self._binding["event_store"],
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+                terminal_status=status,
+            )
+        except Exception:  # noqa: BLE001 - enrichment must not fail the tool result
+            return {}
+
+    # ------------------------------------------------------------------
     # Outcome
 
     @property
     def status(self) -> str:
         """``check_package_status`` (TELEMETRY.md)."""
-        if not self.enabled or self.skipped_reason is not None:
+        if not self.enabled or not self.attempted:
             return "not_run"
         if self.preparation_error is not None or self.state is None:
             return "construction_failed"
