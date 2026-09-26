@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -101,6 +102,36 @@ def test_exhausted_ac_is_attributed_to_its_last_verify_cause() -> None:
     assert _derive(events) == "verify_workspace_mutated"
 
 
+def test_latest_verify_cause_follows_durable_event_order() -> None:
+    when = datetime(2026, 9, 21, tzinfo=UTC)
+
+    def failed(event_id: str, cause: str) -> BaseEvent:
+        return BaseEvent(
+            type="execution.verify.failed",
+            aggregate_type="execution",
+            aggregate_id=EXECUTION,
+            id=event_id,
+            timestamp=when,
+            data={
+                "session_id": SESSION,
+                "execution_id": EXECUTION,
+                "ac_index": 0,
+                "verify_cause": cause,
+            },
+        )
+
+    earlier = failed("a" * 32, "exit_nonzero")
+    later = failed("z" * 32, "timeout")
+    exhausted = _execution_event(
+        "execution.ac.recovery_exhausted",
+        root_ac_index=0,
+        last_failure_class="EVIDENCE_MISSING",
+    )
+
+    assert _derive([earlier, later, exhausted]) == "verify_timeout"
+    assert _derive([later, earlier, exhausted]) == "verify_timeout"
+
+
 def test_exhausted_ac_without_verify_cause_uses_audited_failure_class() -> None:
     events = [
         _execution_event(
@@ -139,6 +170,120 @@ def test_verify_attributed_exhaustion_outranks_unattributed_sibling() -> None:
         ),
     ]
     assert _derive(events) == "verify_exit_nonzero"
+
+
+def test_blocked_dependency_cascade_does_not_outvote_root_failure() -> None:
+    events = [
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="failed"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=0,
+            last_failure_class="unknown",
+        ),
+    ]
+    for ac_index in (1, 2, 3):
+        events.extend(
+            [
+                _execution_event(
+                    "execution.ac.attempt_judged",
+                    root_ac_index=ac_index,
+                    outcome="blocked",
+                ),
+                _execution_event(
+                    "execution.ac.recovery_exhausted",
+                    root_ac_index=ac_index,
+                    last_failure_class="BLOCKED",
+                ),
+            ]
+        )
+    assert _derive(events) == "worker_failed"
+
+
+def test_latest_judgement_controls_dependency_cascade_attribution() -> None:
+    events = [
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="blocked"),
+        _execution_event("execution.ac.attempt_judged", root_ac_index=0, outcome="failed"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=0,
+            last_failure_class="EVIDENCE_MISSING",
+        ),
+        _execution_event("execution.ac.attempt_judged", root_ac_index=1, outcome="blocked"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=1,
+            last_failure_class="BLOCKED",
+        ),
+    ]
+    assert _derive(events) == "worker_evidence_missing"
+
+
+def test_same_instant_judgements_follow_durable_id_order() -> None:
+    """Equal-timestamp judgements resolve by event id, not iterable order.
+
+    The durable store orders equal timestamps by id (event_store.query_events:
+    timestamp, id), so the higher-id judgement is the latest one. With a
+    failed root judgement (id=z) and a blocked one (id=a) at the same instant,
+    plus a blocked sibling exhaustion, the root must attribute to the failed
+    judgement regardless of the order the events arrive in.
+    """
+    when = datetime(2026, 9, 20, tzinfo=UTC)
+
+    def judged(event_id: str, outcome: str) -> BaseEvent:
+        return BaseEvent(
+            type="execution.ac.attempt_judged",
+            aggregate_type="execution",
+            aggregate_id=EXECUTION,
+            id=event_id,
+            timestamp=when,
+            data={
+                "session_id": SESSION,
+                "execution_id": EXECUTION,
+                "root_ac_index": 0,
+                "outcome": outcome,
+            },
+        )
+
+    shared = [
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=0,
+            last_failure_class="EVIDENCE_MISSING",
+        ),
+        _execution_event("execution.ac.attempt_judged", root_ac_index=1, outcome="blocked"),
+        _execution_event(
+            "execution.ac.recovery_exhausted",
+            root_ac_index=1,
+            last_failure_class="BLOCKED",
+        ),
+    ]
+    failed_later_by_id = judged("z" * 32, "failed")
+    blocked_earlier_by_id = judged("a" * 32, "blocked")
+
+    ascending = _derive([blocked_earlier_by_id, failed_later_by_id, *shared])
+    descending = _derive([failed_later_by_id, blocked_earlier_by_id, *shared])
+
+    assert ascending == descending == "worker_evidence_missing"
+
+
+def test_every_exhausted_ac_blocked_remains_dependency_blocked() -> None:
+    events = []
+    for ac_index in (0, 1):
+        events.extend(
+            [
+                _execution_event(
+                    "execution.ac.attempt_judged",
+                    root_ac_index=ac_index,
+                    outcome="blocked",
+                ),
+                _execution_event(
+                    "execution.ac.recovery_exhausted",
+                    root_ac_index=ac_index,
+                    last_failure_class="BLOCKED",
+                ),
+            ]
+        )
+    assert _derive(events) == "dependency_blocked"
 
 
 def test_orchestrator_exception_is_runtime_error() -> None:
