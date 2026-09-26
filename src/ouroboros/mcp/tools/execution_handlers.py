@@ -56,6 +56,7 @@ from ouroboros.mcp.tools.job_observer import (
     append_job_observer_inline_handoff,
     build_job_observer_contract,
 )
+from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
 from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta, launch_error
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -550,6 +551,12 @@ def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
     if reason is not None:
         metadata["pause_reason"] = reason
     return metadata
+
+
+# Terminal run statuses whose meta carries the ``ac_passed``/``ac_total`` tally.
+_TALLIED_SESSION_STATUSES = frozenset(
+    {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
+)
 
 
 def _classify_synchronous_execution_status(
@@ -2091,6 +2098,14 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     meta.update(failure_meta)
                     message += f"Failure Cause: {failure_meta['failure_cause']}\n"
+                if synchronous and session_status in _TALLIED_SESSION_STATUSES:
+                    meta.update(
+                        await derive_run_ac_tally(
+                            event_store,
+                            session_id=tracker.session_id,
+                            execution_id=tracker.execution_id,
+                        )
+                    )
                 if session_status == SessionStatus.PAUSED:
                     meta["paused"] = True
                     meta.update(pause_metadata)

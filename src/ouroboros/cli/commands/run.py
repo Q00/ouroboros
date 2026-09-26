@@ -613,6 +613,7 @@ async def _record_cli_run_outcome(
     outcome id is fresh per invocation because ``--resume`` reuses the
     execution id and each attempt is its own outcome. Never raises.
     """
+    from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
 
@@ -651,6 +652,16 @@ async def _record_cli_run_outcome(
                         session_id=session_id,
                         execution_id=execution_id,
                         session_status=session_status,
+                    )
+                )
+            except Exception:
+                pass
+        if session_id is not None:
+            # Same enrichment rule: the tally never blocks the outcome.
+            try:
+                result_meta.update(
+                    await derive_run_ac_tally(
+                        event_store, session_id=session_id, execution_id=execution_id
                     )
                 )
             except Exception:

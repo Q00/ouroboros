@@ -285,3 +285,39 @@ async def test_run_orchestrator_records_and_flushes_non_success_outcomes(
     assert capture.call_args.kwargs["terminal_status"] == expected_status
     assert capture.call_args.kwargs["result_meta"]["success"] is False
     flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("success", "status", "terminal"),
+    [(True, SessionStatus.COMPLETED, "completed"), (False, SessionStatus.FAILED, "failed")],
+)
+async def test_terminal_run_carries_ac_tally(
+    success: bool, status: SessionStatus, terminal: str
+) -> None:
+    """The CLI outcome carries the same ac_passed/ac_total pair as an MCP job."""
+    with (
+        patch("ouroboros.telemetry.capture_job_outcome") as capture,
+        patch(
+            "ouroboros.mcp.tools.run_failure_meta.derive_run_failure_meta",
+            new_callable=AsyncMock,
+            return_value=_FAILURE_META,
+        ),
+        patch(
+            "ouroboros.mcp.tools.run_ac_tally.derive_run_ac_tally",
+            new_callable=AsyncMock,
+            return_value={"ac_passed": 3, "ac_total": 4},
+        ) as tally,
+    ):
+        await _record_cli_run_outcome(
+            Result.ok(_exec_result(success=success)),
+            event_store=MagicMock(),
+            session_repo=_session_repo(status),
+            execution_id="exec-local",
+            session_id="sess-local",
+        )
+
+    tally.assert_awaited_once_with(ANY, session_id="sess-test", execution_id="exec-test")
+    forwarded = capture.call_args.kwargs["result_meta"]
+    assert capture.call_args.kwargs["terminal_status"] == terminal
+    assert (forwarded["ac_passed"], forwarded["ac_total"]) == (3, 4)
