@@ -209,6 +209,10 @@ _EXTENSION_TOOL_NAME = "ouroboros_extension_tool"
 
 _JOB_FUNNEL: dict[str, str] = {
     "execute_seed": "run",
+    # The CLI ``ooo run`` records its terminal outcome under this job type
+    # (cli/commands/run.py:_record_cli_run_outcome); without it the CLI rows
+    # folded to ``extension_job`` instead of counting as ``run``.
+    "run": "run",
     "evolve_step": "evolve",
     "auto": "auto",
     "evaluate": "evaluate",
@@ -281,6 +285,14 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "verified",
         "failure_reason_code",
         "failure_cause",
+        "check_package_arm",
+        "check_package_assignment",
+        "check_package_status",
+        "package_verdict",
+        "legacy_verdict",
+        "reconciliation",
+        "legacy_failure_class",
+        "legacy_failure_class_count",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -288,6 +300,45 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "ci",
     }
 )
+# Check-package rollout dimensions on a ``command=run`` workflow_outcome
+# (TELEMETRY.md, "What is sent"). Producer: ouroboros/boundary/rollout.py,
+# which builds the values into the run's result_meta. Every key has a closed
+# value set; a value outside it is dropped here, except
+# ``legacy_failure_class``, which folds to ``other``. The failure classes are
+# ``orchestrator/failure_taxonomy.FailureClass`` values, lower-cased (SSOT
+# pairing, checked by tests/unit/test_telemetry.py); edit both together.
+_LEGACY_FAILURE_CLASSES = frozenset(
+    {
+        "evidence_missing",
+        "evidence_form_mismatch",
+        "fabrication_suspected",
+        "scope_creep",
+        "stall",
+        "blocked",
+        "transcript_missing_infrastructure",
+    }
+)
+_CHECK_PACKAGE_PROPERTY_VALUES: dict[str, frozenset[str]] = {
+    "check_package_arm": frozenset({"on", "off"}),
+    "check_package_assignment": frozenset(
+        {"randomized", "user_forced_on", "user_forced_off", "fallback"}
+    ),
+    "check_package_status": frozenset({"admitted", "rejected", "construction_failed", "not_run"}),
+    "package_verdict": frozenset({"pass", "fail", "indeterminate", "none"}),
+    "legacy_verdict": frozenset({"accept", "reject", "none"}),
+    "reconciliation": frozenset(
+        {
+            "agree",
+            "package_accepted_over_legacy_reject",
+            "package_rejected_over_legacy_accept",
+            "fallback_to_legacy",
+            "none",
+        }
+    ),
+    "legacy_failure_class": _LEGACY_FAILURE_CLASSES | {"none", "accepted", "other"},
+    "legacy_failure_class_count": frozenset({"0", "1", "2", "3+"}),
+}
+_OTHER_LEGACY_FAILURE_CLASS = "other"
 _SERVICE_ACTIVE_KEYS = frozenset(
     {
         "service",
@@ -1188,9 +1239,29 @@ def capture_job_outcome(
                 properties["failure_cause"] = (
                     raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
                 )
+        if command == "run":
+            properties.update(_check_package_properties(meta))
         capture("workflow_outcome", properties)
     except Exception:
         pass
+
+
+def _check_package_properties(meta: dict[str, Any]) -> dict[str, str]:
+    """Fold producer-supplied check-package dimensions to their closed sets.
+
+    Only values the run's producer stamped are forwarded; nothing is derived
+    here, so a run whose producer did not stamp them carries none of them.
+    """
+    properties: dict[str, str] = {}
+    for key, allowed in _CHECK_PACKAGE_PROPERTY_VALUES.items():
+        value = meta.get(key)
+        if not isinstance(value, str):
+            continue
+        if value in allowed:
+            properties[key] = value
+        elif key == "legacy_failure_class":
+            properties[key] = _OTHER_LEGACY_FAILURE_CLASS
+    return properties
 
 
 def capture_cli_command(subcommand: str | None) -> None:

@@ -828,6 +828,88 @@ class TestCapture:
         assert "failure_cause" not in sent[0]["properties"]
         assert "failure_reason_code" not in sent[0]["properties"]
 
+    def test_cli_run_job_type_counts_as_run(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome("exec:1", "run", terminal_status="completed")
+        telemetry.flush(timeout=2.0)
+
+        assert sent[0]["properties"]["command"] == "run"
+
+    def test_run_outcome_forwards_closed_check_package_dimensions(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        dimensions = {
+            "check_package_arm": "on",
+            "check_package_assignment": "randomized",
+            "check_package_status": "admitted",
+            "package_verdict": "pass",
+            "legacy_verdict": "reject",
+            "reconciliation": "package_accepted_over_legacy_reject",
+            "legacy_failure_class": "evidence_form_mismatch",
+            "legacy_failure_class_count": "1",
+        }
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="completed",
+            result_meta={"success": True, **dimensions},
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert {key: props[key] for key in dimensions} == dimensions
+        assert set(props) <= telemetry._WORKFLOW_OUTCOME_KEYS
+
+    def test_unaudited_check_package_values_are_dropped_or_folded(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "run",
+            terminal_status="failed",
+            result_meta={
+                "check_package_arm": "maybe",
+                "check_package_status": "/Users/private/project",
+                "package_verdict": 1,
+                "reconciliation": "agree",
+                "legacy_failure_class": "EVIDENCE_FORM_MISMATCH: pytest /Users/private",
+                "legacy_failure_class_count": 7,
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        for key in (
+            "check_package_arm",
+            "check_package_status",
+            "package_verdict",
+            "legacy_failure_class_count",
+        ):
+            assert key not in props
+        assert props["reconciliation"] == "agree"
+        assert props["legacy_failure_class"] == "other"
+        assert "private" not in json.dumps(sent[0])
+
+    def test_check_package_dimensions_only_on_run_outcomes(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "evaluate",
+            terminal_status="completed",
+            result_meta={"final_approved": True, "check_package_arm": "on"},
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert "check_package_arm" not in sent[0]["properties"]
+
+    def test_legacy_failure_classes_mirror_the_failure_taxonomy(self) -> None:
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        assert {item.value.lower() for item in FailureClass} == telemetry._LEGACY_FAILURE_CLASSES
+        assert telemetry._CHECK_PACKAGE_PROPERTY_VALUES["legacy_failure_class"] == (
+            telemetry._LEGACY_FAILURE_CLASSES | {"none", "accepted", "other"}
+        )
+
     def test_runtime_drift_keeps_closed_kind_only(
         self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
     ) -> None:

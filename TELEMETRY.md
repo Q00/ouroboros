@@ -16,6 +16,9 @@ tool arguments, environment variables, account data, or project identifiers.
 3. **Research use.** Anonymous aggregate statistics derived from the existing
    events may be published in research publications. See
    [Research use](#research-use).
+4. **Randomized product defaults.** Some product defaults are assigned at
+   random per anonymous installation so that the default with better outcomes
+   can be kept. See [Randomized defaults](#randomized-defaults).
 
 **Counting rules:**
 
@@ -32,7 +35,9 @@ for activity metrics, even when a host repeats a command or starts multiple MCP 
 
 **Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID,
 stable across sessions for lifecycle analysis and derived from nothing about the
-machine or user. Delete the file to reset it; opt out to stop collection.
+machine or user. Delete the file to reset it; opt out to stop collection. The
+same file records `notice_shown` and `notice_version`, the version of the notice
+last displayed; an older version shows the updated notice once.
 
 **Change policy:** scope expansions are recorded below, ship in a new
 minor/major version with a fresh notice, and default off. Scope reductions do
@@ -42,17 +47,20 @@ not require users to acknowledge a new notice.
 
 Anonymous aggregate statistics derived from the existing telemetry events may
 be published in research publications (papers, technical reports) about
-coding-agent reliability and verification. Research use adds no events and no
-properties; it is a new purpose for the data already listed under
-[What is sent](#what-is-sent).
+coding-agent reliability and verification, including comparisons between the
+arms of a [randomized product default](#randomized-defaults). Research use
+itself adds no events and no properties; it is a purpose for the data listed
+under [What is sent](#what-is-sent).
 
 - **Aggregates only.** Only aggregate counts and rates are published. Any cell
   covering fewer than 10 distinct anonymous IDs is pooled into "other" or
   withheld. No raw event rows leave the analytics store.
 - **Populations.** Only these events may be analyzed for research:
   `workflow_outcome` (for example `command`, `terminal_status`, `verified`,
-  `failure_reason_code`, and `failure_cause`) and `ac_verify_failed`
-  (`cause`), each with its `runtime_backend`, `app_version`, and `os`.
+  `failure_reason_code`, `failure_cause`, and the check-package dimensions
+  listed under [Randomized defaults](#randomized-defaults)) and
+  `ac_verify_failed` (`cause`), each with its `runtime_backend`,
+  `app_version`, and `os`.
 - **Collection window.** Research use applies from the first release
   containing notice v3 (the next release after v0.54.6; version:
   `<filled in at release>`) until this section is changed. Events collected
@@ -66,6 +74,66 @@ properties; it is a new purpose for the data already listed under
   [GitHub issue](https://github.com/Q00/ouroboros/issues). You can opt out at
   any time with any control under [How to opt out](#how-to-opt-out).
 
+### Randomized defaults
+
+A product default under evaluation is assigned per installation, at random,
+so that its effect can be measured against the previous behavior. One default
+is under evaluation today: the check package boundary of `ooo run` (checks
+built from the acceptance criteria before the worker starts, then run against
+the finished workspace).
+
+- **Assignment.** The arm is a deterministic function of the anonymous ID in
+  `~/.ouroboros/telemetry.json`: a SHA-256 digest of a fixed experiment key and
+  the ID, split 50/50 into `on` and `off`. The same installation always gets
+  the same arm. Nothing about the machine or user enters the digest.
+- **No telemetry, no randomization.** When telemetry is disabled, when no
+  anonymous ID exists yet, or when the installation has not been shown the
+  current notice, the arm is `off` (the previous behavior) and recorded as
+  `fallback`. Installs that send no telemetry are never assigned at random.
+- **Your setting wins.** `ooo run --check-package` / `--no-check-package`,
+  `OUROBOROS_CHECK_PACKAGE=on|off`, or `boundary.check_package: on|off` in
+  `~/.ouroboros/config.yaml` always override the assignment, in that order of
+  precedence, and are recorded as `user_forced_on` or `user_forced_off`.
+- **What is recorded.** A terminal `ooo run` (CLI or MCP) adds the enumerated
+  properties below to its `workflow_outcome` row. Values only: never the
+  checks, the criteria, commands, paths, or output.
+
+| Property | Values |
+|---|---|
+| `check_package_arm` | `on`, `off` |
+| `check_package_assignment` | `randomized`, `user_forced_on`, `user_forced_off`, `fallback` |
+| `check_package_status` | `admitted`, `rejected`, `construction_failed`, `not_run` |
+| `package_verdict` | `pass`, `fail`, `indeterminate`, `none` |
+| `legacy_verdict` | `accept`, `reject`, `none` |
+| `reconciliation` | `agree`, `package_accepted_over_legacy_reject`, `package_rejected_over_legacy_accept`, `fallback_to_legacy`, `none` |
+| `legacy_failure_class` | `evidence_missing`, `evidence_form_mismatch`, `fabrication_suspected`, `scope_creep`, `stall`, `blocked`, `transcript_missing_infrastructure`, `accepted`, `other`, `none` |
+| `legacy_failure_class_count` | `0`, `1`, `2`, `3+` |
+
+- `check_package_status` describes the package the worker was bound to:
+  `admitted` (a package passed admission on the starting tree, possibly after
+  a regenerated version replaced a rejected one), `rejected` (packages were
+  built but none was admitted), `construction_failed` (no package could be
+  built, or preparation failed), `not_run` (arm `off`, a resumed session, or
+  an execution path the package does not govern).
+- `package_verdict` is the admitted package's verdict on the finished
+  workspace; `none` when no admitted package was verified.
+- `legacy_verdict` is the verdict of the per-criterion verifier that decides
+  without the package: `accept` or `reject` for the run, `none` when the run
+  ended before a verdict (cancelled, paused, or an orchestrator error).
+- `reconciliation` compares the two for the run: `agree` (the package decided
+  at least one criterion and the run verdict equals the legacy verdict),
+  `package_accepted_over_legacy_reject`, `package_rejected_over_legacy_accept`,
+  `fallback_to_legacy` (arm `on`, but the package decided no criterion:
+  nothing admitted, indeterminate, or every criterion uncovered), `none`
+  (arm `off` or package not run).
+- `legacy_failure_class` is the worker failure class the legacy verifier
+  recorded for the first rejected criterion in criterion order (the class
+  names of the orchestrator's failure taxonomy, lower-cased); `accepted` when
+  the legacy verifier accepted the run, `other` for a rejected criterion
+  without one of these classes, `none` when there is no legacy verdict.
+  `legacy_failure_class_count` buckets how many criteria the legacy verifier
+  rejected. Both are recorded in both arms, so the `off` arm is the baseline.
+
 ### Changelog
 
 - v1 (2026-08): initial contract.
@@ -74,6 +142,16 @@ properties; it is a new purpose for the data already listed under
   attribution, recovery actions, and subagent dispatch data; added daily
   deduplication for retained command and service activity.
 - v3 (2026-09): research-use purpose added; no new events or properties.
+- v4 (2026-09): randomized product defaults. The `ooo run` check package
+  boundary becomes a randomized default (50/50 by anonymous ID, `off` without
+  telemetry). `workflow_outcome` for `command=run` gains `check_package_arm`,
+  `check_package_assignment`, `check_package_status`, `package_verdict`,
+  `legacy_verdict`, `reconciliation`, `legacy_failure_class`, and
+  `legacy_failure_class_count` (closed values only). The first-run notice now
+  names randomized defaults and research use, and `notice_version` in
+  `telemetry.json` re-displays it once to installs that saw an earlier notice.
+  CLI `ooo run` outcomes, which were recorded as `command=extension_job`, are
+  now recorded as `command=run`.
 
 ## How to opt out
 
@@ -121,7 +199,7 @@ use. Each row below is the exact property set accepted by the serializer.
 | `subagent_dispatch` | A session used subagent fan-out — at most one row per user/day/phase/fanout_kind | phase (`emitted`/`submitted`/`unknown`), fanout_kind, runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=mcp) | A retained lifecycle MCP command succeeds/is accepted, or any MCP command fails/is blocked | command, service, status (`succeeded`, `accepted`, `failed`, `rejected`, `blocked`), error_type (exception failures only), origin (`command=seed` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
 | `command_run` (service=cli) | A direct non-internal `ooo <command>` is invoked | command, service (`cli`), status (`invoked`), app_version, os, ci, `$insert_id` |
-| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), runtime_backend, app_version, os, ci, `$insert_id` |
+| `workflow_outcome` | A background workflow, a terminal `ooo run`, or direct evaluation reaches a terminal result inside Ouroboros (a paused run is not terminal and emits nothing) | command, terminal_status, verified, failure_reason_code (non-success only), failure_cause (non-success `run` only; closed enum, see below), check_package_arm, check_package_assignment, check_package_status, package_verdict, legacy_verdict, reconciliation, legacy_failure_class, legacy_failure_class_count (`run` only; closed enums, see [Randomized defaults](#randomized-defaults)), runtime_backend, app_version, os, ci, `$insert_id` |
 | `runtime_drift` | A frozen runtime authority input (Codex config, CLI executable, dispatch registry, profile routing) is observed to have changed after the runtime initialized; the run continues on the re-baselined input | kind (closed enum: `codex_config`/`cli_executable`/`skill_dispatcher`/`mcp_handler_registry`/`skill_dispatch_registry`/`profile_routing`/`baseline_unavailable`/`attestation_timeout`/`unknown`), runtime_backend, app_version, os, ci |
 | `ac_verify_failed` | The orchestrator's deterministic AC verify gate rejects an attempt (`run_verify_commands` enabled) | cause (closed enum: `invalid_contract`/`artifacts_missing`/`artifacts_missing_found_elsewhere`/`environment_unverifiable`/`timeout`/`exit_nonzero`/`output_assertion_unmatched`/`workspace_mutated`/`unknown`), runtime_backend, app_version, os, ci |
 
