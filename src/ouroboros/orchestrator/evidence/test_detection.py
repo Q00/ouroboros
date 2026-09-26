@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 import re
+import shlex
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
@@ -23,11 +25,15 @@ from ouroboros.orchestrator.evidence.harness_observation import (
 )
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
+    _is_django_test_subcommand,
     _is_python_executable,
     _looks_like_test_command,
     _looks_like_unittest_command,
     _normalized_command_claim_aliases,
+    _project_test_runner_script,
     _runtime_command_evidence_aliases,
+    _split_leading_cd,
+    _strip_env_prefix,
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
 )
@@ -513,6 +519,30 @@ _FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh"
 
 
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
+_PYTHON_MODULE_NAME = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_PYTHON_FROM_IMPORT_RE = re.compile(rf"\bfrom\s+({_PYTHON_MODULE_NAME})\s+import\b")
+_PYTHON_IMPORT_RE = re.compile(
+    rf"(?:^|[\s;\"'(])import\s+({_PYTHON_MODULE_NAME}(?:\s*,\s*{_PYTHON_MODULE_NAME})*)"
+)
+
+
+def _python_imported_module_files(command: str) -> list[str]:
+    """Return workspace file candidates for modules an inline Python program imports.
+
+    ``python3 -c "from mathutils import clamp; assert ..."`` exercises
+    ``mathutils.py`` as directly as ``python3 mathutils.py`` does, but names it
+    only as a module. Each absolute import ``a.b`` maps to ``a/b.py`` and
+    ``a/b/__init__.py``; the caller still requires one candidate to be a real
+    workspace file, so a stdlib import (``import os``) anchors nothing.
+    """
+    modules: list[str] = [match.group(1) for match in _PYTHON_FROM_IMPORT_RE.finditer(command)]
+    for match in _PYTHON_IMPORT_RE.finditer(command):
+        modules.extend(name.strip() for name in match.group(1).split(","))
+    candidates: list[str] = []
+    for module in modules:
+        base = module.replace(".", "/")
+        candidates.extend((f"{base}.py", f"{base}/__init__.py"))
+    return candidates
 
 
 def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
@@ -556,6 +586,8 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
         # Skip pure version-ish tokens such as ``2.0`` (no letter anywhere).
         if any(ch.isalpha() for ch in match.group(0))
     ]
+    if any(_is_python_executable(token) for token in tokens):
+        invoked.extend(_python_imported_module_files(command))
     return tuple(dict.fromkeys(invoked))
 
 
@@ -693,7 +725,15 @@ def _harness_reexecution_supports_test_claim(
     own subprocess (``evidence/test_reexecution.py``), so they are held to the
     same tests: a zero exit, runtime output that proves tests ran and passed,
     and a command that targets the claimed test.
+
+    A unittest-style dotted test label (``migrations.test_writer``, optionally
+    followed by a ``(N tests)`` count) is its own claim form, matched against
+    the labels a re-executed unittest-style runner was given (see
+    ``_reexecuted_runner_label_covers``); it is not a file claim.
     """
+    label = None if _looks_like_test_command(value) else _dotted_test_label_claim(value)
+    if label is not None and _reexecuted_runner_label_covers(label, messages):
+        return True
     # A node-id or file claim (rather than the command itself) must name a
     # test file this run actually produced or touched. Re-running a suite the
     # harness found in the workspace proves those tests pass, not that the
@@ -718,6 +758,164 @@ def _harness_reexecution_supports_test_claim(
                 chunk_test_proof_text=run.output_tail,
                 messages=messages,
                 task_cwd=task_cwd,
+            ):
+                return True
+    return False
+
+
+# A trailing, parenthesised test count that workers copy from a runner's
+# "Ran N tests" summary, as in ``migrations.test_writer (49 tests)``. Only a
+# trailing annotation is stripped; anything else keeps the claim unrecognized.
+_TEST_COUNT_ANNOTATION_RE = re.compile(r"\s*\(\s*\d+\s+tests?\s*\)$")
+_DOTTED_TEST_LABEL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# Shell meaning in a re-executed command's text; label extraction refuses it.
+_LABEL_COMMAND_FORBIDDEN_CHARACTERS = frozenset("`$;|&<>(){}\n\r")
+# Options of unittest-style runners (Django ``runtests.py``, ``manage.py
+# test``, ``django-admin test``, ``python -m unittest``) that neither take a
+# non-numeric value nor narrow which tests run. A numeric value (``-v 2``,
+# ``--parallel 4``) is never a label, so it needs no special handling.
+_LABEL_RUNNER_FLAG_OPTIONS = frozenset(
+    {
+        "-v",
+        "--verbosity",
+        "-b",
+        "--buffer",
+        "-c",
+        "--catch",
+        "-f",
+        "--failfast",
+        "--locals",
+        "--durations",
+        "-q",
+        "--quiet",
+        "--noinput",
+        "--no-input",
+        "--keepdb",
+        "-r",
+        "--reverse",
+        "-d",
+        "--debug-sql",
+        "--debug-mode",
+        "--parallel",
+        "--shuffle",
+        "--timing",
+        "--no-faulthandler",
+        "--force-color",
+        "--no-color",
+        "--traceback",
+        "--pdb",
+    }
+)
+# Options whose (non-label) value is the next argument unless given as ``=``.
+_LABEL_RUNNER_VALUE_OPTIONS = frozenset({"--settings", "--pythonpath", "--testrunner"})
+
+
+def _dotted_test_label_claim(value: str) -> str | None:
+    """Return the unittest-style dotted test label a claim names, or None.
+
+    ``migrations``, ``migrations.test_writer (49 tests)`` and
+    ``migrations.test_writer.WriterTests.test_x`` are labels. A path, a pytest
+    node id, a ``.py`` file name, or text around the label is not.
+    """
+    text = _TEST_COUNT_ANNOTATION_RE.sub("", value.strip(), count=1)
+    if not _DOTTED_TEST_LABEL_RE.fullmatch(text):
+        return None
+    if text.rsplit(".", 1)[-1].lower() == "py":
+        return None
+    return text
+
+
+def _unittest_style_runner_arguments(parts: Sequence[str]) -> Sequence[str] | None:
+    """Return the arguments after a unittest-style runner, or None.
+
+    Recognized runners take dotted test labels: Django's ``runtests.py``,
+    ``manage.py test``, ``django-admin test``, ``python -m django test``, and
+    ``python -m unittest`` (not ``discover``, which takes none). SymPy's
+    ``bin/test`` and ``bin/doctest`` take file paths and keywords, not dotted
+    labels, so they are not label runners.
+    """
+    if _is_django_test_subcommand(parts):
+        return parts[2:] if parts[0] == "django-admin" else parts[4:]
+    script = _project_test_runner_script(parts)
+    if script is not None:
+        index = 1 if _is_python_executable(parts[0]) else 0
+        name = PurePosixPath(script).name
+        if name == "runtests.py":
+            return parts[index + 1 :]
+        if name == "manage.py":
+            return parts[index + 2 :]
+        return None
+    if len(parts) >= 3 and _is_python_executable(parts[0]) and parts[1:3] == ["-m", "unittest"]:
+        arguments = parts[3:]
+        if arguments and arguments[0] == "discover":
+            return None
+        return arguments
+    return None
+
+
+def _unittest_style_runner_labels(command: str) -> tuple[str, ...]:
+    """Return the dotted test labels a unittest-style runner command was given.
+
+    Empty when the command is not such a runner, carries shell syntax, has an
+    option that narrows the selection (``-k``, ``--tag``, ``--start-at``, ...)
+    or one this parser does not know, or names no dotted label. Positional
+    paths are not labels and are ignored.
+    """
+    leading_cd = _split_leading_cd(command)
+    text = leading_cd[1] if leading_cd is not None else command.strip()
+    if any(char in _LABEL_COMMAND_FORBIDDEN_CHARACTERS for char in text):
+        return ()
+    try:
+        parts = _strip_env_prefix(shlex.split(text))
+    except ValueError:
+        return ()
+    if not parts:
+        return ()
+    arguments = _unittest_style_runner_arguments(parts)
+    if arguments is None:
+        return ()
+    labels: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument.startswith("-"):
+            name = argument.split("=", 1)[0]
+            if re.fullmatch(r"-v\d", name):
+                continue
+            if name in _LABEL_RUNNER_FLAG_OPTIONS:
+                continue
+            if name in _LABEL_RUNNER_VALUE_OPTIONS:
+                skip_value = "=" not in argument
+                continue
+            return ()
+        if _DOTTED_TEST_LABEL_RE.fullmatch(argument):
+            labels.append(argument)
+    return tuple(labels)
+
+
+def _reexecuted_runner_label_covers(label: str, messages: tuple[AgentMessage, ...]) -> bool:
+    """Return True when a re-executed unittest-style runner run covers ``label``.
+
+    The run must have exited 0 (not timed out), its output must prove tests
+    ran and passed, and one of its test labels must equal ``label`` or be a
+    dotted-prefix ancestor of it: a passing ``migrations.test_writer`` run
+    covers ``migrations.test_writer.WriterTests.test_x``, never the reverse
+    and never ``migrations.test_writer2``.
+    """
+    for message in messages:
+        observation = observation_from_message(message)
+        if observation is None:
+            continue
+        for run in observation.command_runs:
+            if not run.succeeded or not _looks_like_test_command(run.command):
+                continue
+            if not _text_proves_test_execution_success(run.output_tail):
+                continue
+            if any(
+                label == run_label or label.startswith(run_label + ".")
+                for run_label in _unittest_style_runner_labels(run.command)
             ):
                 return True
     return False

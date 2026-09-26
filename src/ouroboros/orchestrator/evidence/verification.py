@@ -14,6 +14,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_support_messages_for_field,
     _workspace_relative_file_claim,
 )
+from ouroboros.orchestrator.evidence.command_replay import replayed_command_supports_claim
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import (
     is_harness_observation_message,
@@ -138,6 +139,10 @@ def _verify_atomic_evidence_against_runtime_messages(
                     continue
                 if _harness_observation_supports_command_claim(value, support_messages):
                     continue
+                # Replay-first: a transcript command linked to this claim
+                # exited 0 when the harness replayed it in a workspace copy.
+                if replayed_command_supports_claim(value, support_messages):
+                    continue
                 if _runtime_messages_have_masked_test_command_form(
                     value,
                     field_messages,
@@ -183,6 +188,8 @@ def _verify_atomic_evidence_against_runtime_messages(
                     messages=support_messages,
                     task_cwd=workspace_cwd,
                 ):
+                    continue
+                if replayed_command_supports_claim(value, support_messages):
                     continue
                 # Functional-verification tier: while the verify gate is
                 # active, a non-test claim that IS a transcript-backed,
