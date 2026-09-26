@@ -6,23 +6,95 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import re
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.boundary.binding import entry_points_request
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.ac_classification import _scoped_evidence_record_for_ac
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.parallel_executor_models import ACExecutionResult
 from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.retry_hints import build_ac_retry_prompt, failure_class_for_result
-from tests.unit.orchestrator.test_parallel_executor import (
-    _FinalMessageRuntime,
-    _make_replaying_event_store,
-)
+
+
+def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
+    """An async event-store mock that replays previously appended events."""
+    event_store = AsyncMock()
+    appended: list[BaseEvent] = []
+
+    async def _append(event: BaseEvent) -> None:
+        appended.append(event)
+
+    async def _replay(aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+        return [
+            event
+            for event in appended
+            if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+        ]
+
+    event_store.append.side_effect = _append
+    event_store.replay.side_effect = _replay
+    return event_store, appended
+
+
+class _FinalMessageRuntime:
+    """A runtime that replays scripted tool messages, then one final message."""
+
+    runtime_backend = "opencode"
+    working_directory = "/tmp/project"
+    permission_mode = "acceptEdits"
+
+    def __init__(
+        self,
+        final_message: str,
+        *,
+        native_session_id: str,
+        support_messages: tuple[AgentMessage, ...] = (),
+    ) -> None:
+        self._final_message = final_message
+        self._native_session_id = native_session_id
+        self._support_messages = support_messages
+        self.last_prompt: str | None = None
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ) -> Any:
+        del tools, system_prompt, resume_session_id
+        self.last_prompt = prompt
+        for message in self._support_messages:
+            if message.tool_name in {"Edit", "Write"} and "subtype" not in message.data:
+                message = replace(
+                    message,
+                    data={
+                        **message.data,
+                        "subtype": "success",
+                        "runtime_event_type": "tool.completed",
+                    },
+                )
+            yield message
+        yield AgentMessage(
+            type="result",
+            content=self._final_message,
+            data={"subtype": "success"},
+            resume_handle=RuntimeHandle(
+                backend=resume_handle.backend if resume_handle is not None else "opencode",
+                kind="implementation_session",
+                native_session_id=self._native_session_id,
+                cwd="/tmp/project",
+                metadata={},
+            ),
+        )
+
 
 EVIDENCE = (
     "```json\n"

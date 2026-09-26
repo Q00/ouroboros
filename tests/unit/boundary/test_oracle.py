@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -111,6 +112,11 @@ def _package(
     )
 
 
+def _oracle_result(check: Any) -> dict[str, Any]:
+    assert check.oracle_result is not None
+    return check.oracle_result
+
+
 def _repo(root: Path, files: dict[str, str]) -> Path:
     root.mkdir(parents=True)
     for path, text in files.items():
@@ -189,11 +195,11 @@ async def test_tier_a_bugfix_admits_then_passes_or_fails_with_a_counterexample(
     fixed = _repo(tmp_path / "fixed", {"mathutils.py": FIXED})
     passed = await verify_candidate(package, fixed)
     assert passed.verdict is CandidateVerdict.PASS
-    assert passed.checks[0].oracle_result["binding_source"] == "default"
+    assert _oracle_result(passed.checks[0])["binding_source"] == "default"
 
     wrong = await verify_candidate(package, base)
     assert wrong.verdict is CandidateVerdict.FAIL
-    result = wrong.checks[0].oracle_result
+    result = _oracle_result(wrong.checks[0])
     assert "clamp(value=15, low=0, high=10): expected 10, observed 15" in [
         c["detail"] for c in result["cases"]
     ]
@@ -225,7 +231,7 @@ async def test_a_missing_target_is_the_expected_failure_on_the_base(tmp_path: Pa
     )
     admission = await admit_check_package(package, base)
     assert admission.verdict is PackageVerdict.ADMITTED
-    assert admission.checks[0].oracle_result["resolve"] == "missing"
+    assert _oracle_result(admission.checks[0])["resolve"] == "missing"
 
 
 async def test_an_unrelated_import_error_is_never_a_detected_failure(tmp_path: Path) -> None:
@@ -234,7 +240,7 @@ async def test_an_unrelated_import_error_is_never_a_detected_failure(tmp_path: P
     admission = await admit_check_package(package, base)
     assert admission.verdict is PackageVerdict.INDETERMINATE
     assert admission.checks[0].reason == "failure_signature_absent"
-    assert admission.checks[0].oracle_result["resolve"] == "import_error"
+    assert _oracle_result(admission.checks[0])["resolve"] == "import_error"
 
 
 async def test_workspace_code_editing_the_check_files_is_detected(
@@ -279,7 +285,7 @@ async def test_import_time_monkeypatch_cannot_reach_the_comparison(
     candidate = _repo(tmp_path / "cand", {"mathutils.py": forge + BUGGY})
     result = await verify_candidate(package, candidate)
     assert result.verdict is CandidateVerdict.FAIL
-    oracle_result = result.checks[0].oracle_result
+    oracle_result = _oracle_result(result.checks[0])
     assert [c["passed"] for c in oracle_result["cases"]] == [True, False, False]
     assert failed_heldout_only(oracle_result)
     shown = repair_lines(oracle_result)
@@ -324,7 +330,7 @@ async def test_late_binding_to_new_code_is_admitted_on_the_base(tmp_path: Path) 
     )
     assert result.verdict is CandidateVerdict.PASS
     assert result.checks[0].tier == "A_prime"
-    assert result.checks[0].binding["symbol"] == "limits.limit"
+    assert (result.checks[0].binding or {}).get("symbol") == "limits.limit"
     assert result.bindings == {"oracle_1": binding.to_dict()}
 
 
