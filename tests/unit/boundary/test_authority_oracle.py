@@ -390,3 +390,36 @@ async def test_the_gate_decides_each_attempt_once(
     assert runs == [1]
     assert first.success is False and again.success is False
     assert again.check_package_repair == first.check_package_repair
+
+
+async def test_omitting_entry_points_after_a_counterexample_does_not_withdraw_the_binding(
+    store: EventStore, repo: Path, tmp_path: Path
+) -> None:
+    # Found by smoke s3c: after a counterexample the worker kept its wrong
+    # implementation and simply stopped declaring entry_points, which turned
+    # the failing criterion into an unverified one (exit 0).
+    seed, authority = await _authority(store, repo, tmp_path)
+    (repo / "mathutils.py").write_text(FIXED + BAD_MIX)
+    executor = _executor(repo)
+    authority.install(executor)
+    calls: list[int] = []
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        calls.append(1)
+        entry = MIX_ENTRY if len(calls) == 1 else None  # later attempts declare nothing
+        return [replace(_legacy_rejected(1, entry=entry), retry_attempt=len(calls) - 1)]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    results = await _batch(executor, seed, [1])
+    assert [entry["status"] for entry in authority.gate.log] == ["fail"] * len(calls)
+    assert results[0].success is False
+    parallel = ParallelExecutionResult(
+        results=(_legacy_rejected(0), results[0]),
+        success_count=1,
+        failure_count=1,
+    )
+    decided = await authority(seed=seed, execution_id="exec_oracle", parallel_result=parallel)
+    keys = seed_criterion_keys(seed)
+    item = authority.outcome.verdict.verdicts[keys[1]]
+    assert (item.status, item.tier) == (PackageCriterionStatus.FAIL, CheckTier.A_PRIME)
+    assert not decided.all_succeeded

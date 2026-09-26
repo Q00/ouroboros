@@ -269,7 +269,7 @@ class CheckPackageGate:
         ]
         if not check_ids:
             return result
-        entries = _declared_from(result)
+        entries = authority.remember_declaration(key, _declared_from(result))
         options = authority.run_options()
         assignments, results = await assign_tiers(
             package,
@@ -357,6 +357,17 @@ class CheckPackageAuthority:
         self.installed = False
         # One base run per late binding across repair attempts and the end.
         self.base_runs: dict[str, Any] = {}
+        # The worker's latest declared entry point per criterion. A later
+        # attempt that declares nothing does not withdraw it: otherwise a
+        # worker could turn a failing criterion into an unverified one by
+        # omitting entry_points after a counterexample.
+        self.declared: dict[str, list[Any]] = {}
+
+    def remember_declaration(self, key: str, entries: list[Any]) -> list[Any]:
+        """Record ``entries`` for ``key`` when present; return the declaration in force."""
+        if entries:
+            self.declared[key] = list(entries)
+        return self.declared.get(key, [])
 
     @property
     def state(self) -> BoundaryRunState:
@@ -412,8 +423,10 @@ class CheckPackageAuthority:
             keys = seed_criterion_keys(seed)
             for result in getattr(parallel_result, "results", ()) or ():
                 index = getattr(result, "ac_index", -1)
-                entries = _declared_from(result)
-                if entries and 0 <= index < len(keys):
+                if not 0 <= index < len(keys):
+                    continue
+                entries = self.remember_declaration(keys[index], _declared_from(result))
+                if entries:
                     declared = {**declared, keys[index]: entries}
             verdict = await verify_check_package(
                 self._state,
