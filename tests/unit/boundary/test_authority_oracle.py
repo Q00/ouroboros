@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -242,7 +243,7 @@ async def test_package_fail_drives_repair_and_names_the_declared_binding(
         prompts.append(dict(kwargs.get("retry_prompts") or {}))
         if len(prompts) == 2:
             (repo / "mathutils.py").write_text(FIXED + GOOD_MIX)  # the repair
-        result = _legacy_rejected(1, entry=MIX_ENTRY)
+        result = replace(_legacy_rejected(1, entry=MIX_ENTRY), retry_attempt=len(prompts) - 1)
         return [result]
 
     executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
@@ -366,3 +367,26 @@ def test_tier_summary_value_is_a_closed_bucketed_enum() -> None:
         {"check_tier_summary": "A:9,A_prime:0,U:0", "unverified_count": "7"}
     )
     assert dropped == {}
+
+
+async def test_the_gate_decides_each_attempt_once(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import authority as authority_module
+
+    seed, authority = await _authority(store, repo, tmp_path)
+    (repo / "mathutils.py").write_text(FIXED + BAD_MIX)
+    runs: list[int] = []
+    real = authority_module.verify_with_bindings
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        runs.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(authority_module, "verify_with_bindings", counted)
+    attempt = _legacy_rejected(1, entry=MIX_ENTRY)
+    first = await authority.gate(seed=seed, ac_index=1, result=attempt)
+    again = await authority.gate(seed=seed, ac_index=1, result=attempt)  # a settlement path
+    assert runs == [1]
+    assert first.success is False and again.success is False
+    assert again.check_package_repair == first.check_package_repair

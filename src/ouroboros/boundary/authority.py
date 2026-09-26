@@ -224,10 +224,28 @@ class CheckPackageGate:
     def __init__(self, authority: CheckPackageAuthority) -> None:
         self._authority = authority
         self.log: list[dict[str, Any]] = []
+        # One decision per attempt: settlement paths hand the same attempt to
+        # the gate again; they get the stored decision, not a new verification.
+        self._decided: dict[tuple[int, int], dict[str, Any] | None] = {}
 
     async def __call__(self, *, seed: Seed, ac_index: int, result: Any) -> Any:
+        attempt = (ac_index, int(getattr(result, "retry_attempt", 0) or 0))
+        if attempt in self._decided:
+            stored = self._decided[attempt]
+            return result if stored is None or not result.success else replace(result, **stored)
         try:
-            return await self._decide(ac_index, result)
+            decided = await self._decide(ac_index, result)
+            if decided is result:
+                self._decided[attempt] = None
+            elif getattr(decided, "check_package_repair", None):
+                self._decided[attempt] = {
+                    "success": False,
+                    "outcome": decided.outcome,
+                    "error": decided.error,
+                    "check_package_repair": decided.check_package_repair,
+                    "check_package_failure_class": decided.check_package_failure_class,
+                }
+            return decided
         except Exception as exc:  # noqa: BLE001 - the gate must never fail an attempt by itself
             log.warning("boundary.gate.failed", ac_index=ac_index, error_type=type(exc).__name__)
             return result
@@ -262,6 +280,7 @@ class CheckPackageGate:
             expected_base_digest=state.admission.base_tree_digest,
             admitted_tiers=state.admission.check_tiers,
             run_options={"env": options["env"], "interpreter": options["interpreter"]},
+            base_run_cache=authority.base_runs,
         )
         subset = {check_id: assignments[check_id] for check_id in check_ids}
         bound = await verify_with_bindings(
@@ -336,6 +355,8 @@ class CheckPackageAuthority:
         self.outcome: AuthorityOutcome | None = None
         self.gate = CheckPackageGate(self)
         self.installed = False
+        # One base run per late binding across repair attempts and the end.
+        self.base_runs: dict[str, Any] = {}
 
     @property
     def state(self) -> BoundaryRunState:
@@ -400,6 +421,7 @@ class CheckPackageAuthority:
                 candidate_checkout=self._candidate,
                 settings=self._settings,
                 declared_entry_points=declared,
+                base_run_cache=self.base_runs,
             )
             reconciliation = reconcile_acceptance(
                 keys,
