@@ -127,7 +127,11 @@ def script_rule_violations(source: str) -> tuple[str, ...]:
             last = name.rsplit(".", 1)[-1] if name else ""
             if isinstance(node.func, ast.Attribute):
                 last = node.func.attr
-            if last in _PATH_LOADERS or last in _NAME_IMPORTERS and (not node.args or not _is_literal(node.args[0])):
+            if (
+                last in _PATH_LOADERS
+                or last in _NAME_IMPORTERS
+                and (not node.args or not _is_literal(node.args[0]))
+            ):
                 found.add(RULE_DYNAMIC_IMPORT)
             elif name in _EXEC_BUILTINS and (not node.args or not _is_literal(node.args[0])):
                 found.add(RULE_EXEC)
