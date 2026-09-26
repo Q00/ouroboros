@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 from ouroboros import telemetry
-from ouroboros.config.loader import get_telemetry_enabled
+from ouroboros.config.loader import get_telemetry_enabled, telemetry_opt_out_in_env
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +214,30 @@ class TestOptOut:
         telemetry.capture("command_run", {"command": "run"})
         telemetry.flush(timeout=1.0)
         assert events == []
+
+
+class TestTelemetryOptOutInEnv:
+    """The env half of the telemetry opt-out contract, persisted by setup."""
+
+    def test_do_not_track_truthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "off")
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_1_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        assert telemetry_opt_out_in_env() is False
+
+    def test_unset_env_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is False
 
 
 class TestDistinctId:
