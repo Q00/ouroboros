@@ -28,6 +28,8 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_DIRECT_INDEX_SCOPE_SQL,
     PICKER_DIRECT_SCOPE_SQL,
     PICKER_GAP_INDEX,
+    PICKER_INTERVIEW_ROOT_INDEX,
+    PICKER_INTERVIEW_ROOT_TABLE,
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_EVENT_TYPES,
@@ -601,6 +603,81 @@ def _fetch_latest_progress_rows(
                     )
                 rows_by_rowid[int(row["rowid"])] = row
     return list(rows_by_rowid.values())
+
+
+def list_recent_interviews(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:
+    """List root metadata only; Interview panels and event streams are separate.
+
+    A maximum of 100 registry entries and two identity pointers per entry are
+    read. No history walk, aggregate scan, or invalid-row replacement occurs.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("Interview limit must be an integer from 1 to 100")
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return []
+    conn = _connect_readonly(path)
+    try:
+        conn.execute("BEGIN")
+        missing = frozenset(PICKER_CONTRACT_NAMES) - matching_picker_contract(conn)
+        if missing:
+            raise PickerIndexContractError(missing)
+        if (
+            conn.execute(
+                f"SELECT 1 FROM events INDEXED BY {PICKER_GAP_INDEX} "
+                f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise PickerIndexContractError(
+                frozenset(), detail="contains unprojected relevant events"
+            )
+        roots = conn.execute(
+            f"SELECT event_rowid, interview_id FROM {PICKER_INTERVIEW_ROOT_TABLE} "
+            "ORDER BY event_rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        result = []
+        for root in roots:
+            identity = root["interview_id"]
+            pointers = conn.execute(
+                f"SELECT event_rowid FROM {PICKER_INTERVIEW_ROOT_TABLE} "
+                f"INDEXED BY {PICKER_INTERVIEW_ROOT_INDEX} WHERE interview_id = ? LIMIT 2",
+                (identity,),
+            ).fetchall()
+            if len(pointers) != 1:
+                raise PickerIndexContractError(
+                    frozenset(), detail="ambiguous Interview root identity"
+                )
+            event = conn.execute(
+                "SELECT aggregate_type, aggregate_id, event_type, payload FROM events WHERE rowid = ?",
+                (root["event_rowid"],),
+            ).fetchone()
+            payload = _decode_payload(event["payload"]) if event is not None else None
+            if (
+                event is None
+                or event["aggregate_type"] != "interview"
+                or event["event_type"] != "interview.started"
+                or event["aggregate_id"] != identity
+                or not isinstance(identity, str)
+                or not identity.strip(RUNTIME_STATUS_ASCII_WHITESPACE)
+                or not isinstance(payload, dict)
+            ):
+                raise PickerIndexContractError(
+                    frozenset(), detail="Interview root pointer mismatch"
+                )
+            # Only identity metadata is exposed; no interview text is copied.
+            result.append(
+                {
+                    "family": "interview",
+                    "interview_id": identity,
+                    "root_event_rowid": root["event_rowid"],
+                }
+            )
+        return result
+    finally:
+        conn.close()
 
 
 def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:

@@ -277,3 +277,70 @@ def test_stream_contract_loss_closes_without_handler_traceback(tmp_path, monkeyp
     assert errors == []
     assert opened == 1
     assert closed == 1
+
+
+async def test_interview_roots_actual_eventstore_http(tmp_path) -> None:
+    from ouroboros.events.interview import interview_started
+    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.picker_indexes import PICKER_INTERVIEW_ROOT_INDEX
+
+    db = tmp_path / "interview-http.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(interview_started("pre-run", "private text is not a picker field"))
+    await store.close()
+    with _running_server(db) as server:
+        host, port = server.server_address
+        status, _, body = _get(host, port, "/api/interviews?limit=1")
+        assert status == 200
+        assert json.loads(body) == {
+            "interviews": [
+                {"family": "interview", "interview_id": "pre-run", "root_event_rowid": 1}
+            ]
+        }
+        assert _get(host, port, "/api/interviews?limit=101")[0] == 400
+        assert _get(host, port, "/api/interviews?limit=oops")[0] == 400
+        assert json.loads(_get(host, port, "/api/runs")[2]) == {"runs": []}
+        with sqlite3.connect(db) as conn:
+            conn.execute(f"DROP INDEX {PICKER_INTERVIEW_ROOT_INDEX}")
+        status, _, body = _get(host, port, "/api/interviews")
+        assert status == 503
+        assert json.loads(body)["error"] == "picker_index_contract_unavailable"
+
+
+async def test_unlinked_interview_collision_is_absent_from_snapshot_and_sse(tmp_path) -> None:
+    from ouroboros.events.base import BaseEvent
+    from ouroboros.events.interview import interview_started
+    from ouroboros.persistence.event_store import EventStore
+
+    db = tmp_path / "unlinked-interview.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="shared",
+            data={"execution_id": "exec-shared"},
+        )
+    )
+    await store.append(interview_started("shared", "PRIVATE CONTEXT"))
+    await store.close()
+    with _running_server(db) as server:
+        host, port = server.server_address
+        status, _, body = _get(host, port, "/snapshot?run=exec-shared")
+        assert status == 200
+        assert b"PRIVATE CONTEXT" not in body
+        conn = http.client.HTTPConnection(host, port, timeout=2)
+        try:
+            conn.request("GET", "/events?run=exec-shared")
+            response = conn.getresponse()
+            assert response.status == 200
+            batch = response.readline()
+            assert (
+                json.loads(batch.removeprefix(b"data: "))["meta"]["execution_id"] == "exec-shared"
+            )
+            assert b"interview.started" not in batch
+            assert b"PRIVATE CONTEXT" not in batch
+        finally:
+            conn.close()
