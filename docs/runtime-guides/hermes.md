@@ -89,6 +89,25 @@ orchestrator:
   hermes_cli_path: ~/.local/bin/hermes
 ```
 
+When Ouroboros is hosted from a canonical named Hermes profile directory
+(`~/.hermes/profiles/<name>`), worker subprocesses inherit that profile. This
+keeps the host's provider credentials and model configuration available after
+Ouroboros moves execution into an isolated worktree.
+
+Set an explicit backend profile when the worker should use a different Hermes
+profile:
+
+```yaml
+orchestrator:
+  runtime_backend: hermes
+  runtime_profile:
+    backend_profile: worker
+```
+
+Explicit configuration takes precedence over host-profile inheritance. Outside
+a canonical Hermes profile directory, leaving `runtime_profile` unset preserves
+the existing `hermes chat ...` behavior without a profile flag.
+
 ## Technical Details
 
 ### Session Management

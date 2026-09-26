@@ -437,6 +437,23 @@ class TestCreateAgentRuntime:
         assert runtime._skill_dispatcher is mock_dispatcher
         assert runtime._llm_backend == "codex"
 
+    def test_create_hermes_runtime_propagates_runtime_profile(self) -> None:
+        """The factory forwards the backend-native profile to Hermes."""
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_runtime_profile",
+                return_value="astraia",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+        ):
+            runtime = create_agent_runtime(backend="hermes", cwd="/tmp/project")
+
+        assert isinstance(runtime, HermesCliRuntime)
+        assert runtime._runtime_profile == "astraia"
+
     def test_create_hermes_runtime_accepts_stream_timeout_overrides(self) -> None:
         """MCP seed execution can disable Hermes quiet-stream guards explicitly."""
         with patch(
