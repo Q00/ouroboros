@@ -17,6 +17,7 @@ import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.fanout import FanoutRegistry
 
 # ---------------------------------------------------------------------------
 # Shared mock helper for plugin I/O
@@ -218,10 +219,14 @@ class TestInterviewHandlerSubagentDispatch:
         monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
 
     @pytest.fixture
-    def handler(self):
+    def handler(self, tmp_path):
         from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 
-        return InterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+        return InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=FanoutRegistry(tmp_path / "fanout"),
+        )
 
     async def test_start_returns_subagent(self, handler) -> None:
         result = await handler.handle(
@@ -233,11 +238,17 @@ class TestInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_interview"
         assert "Build a web app" in payload["prompt"]
-        assert "## Question-first Advisory Fanout" in payload["prompt"]
+        assert "## Factual Research Snapshot" in payload["prompt"]
         assert result.value.meta["question_advisory_recommended"] is True
+        assert result.value.meta["question_advisory_strategy"] == "plugin_child_factual_snapshot"
+        assert result.value.meta["question_advisory_request"]["phase"] == "start"
+        assert [
+            item["context"]["lane_id"] for item in result.value.meta["question_advisory_subagents"]
+        ] == ["code_context", "web_context"]
+        assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
         assert (
-            result.value.meta["question_advisory_strategy"]
-            == "plugin_child_question_first_advisory"
+            payload["context"]["question_advisory"]["question_advisory_fanout_id"]
+            == (result.value.meta["question_advisory_fanout_id"])
         )
 
     async def test_answer_returns_subagent(self, handler) -> None:
@@ -251,6 +262,11 @@ class TestInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_interview"
         assert "Use Python" in payload["prompt"]
+        assert payload["context"]["initial_context"] == "test context"
+        assert "## Original Research Subject" in payload["prompt"]
+        assert "test context" in payload["prompt"]
+        assert result.value.meta["question_advisory_request"]["phase"] == "answer"
+        assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
 
     async def test_resume_returns_subagent(self, handler) -> None:
         result = await handler.handle(
@@ -259,7 +275,82 @@ class TestInterviewHandlerSubagentDispatch:
             }
         )
         assert result.is_ok
-        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_interview"
+        payload = result.value.meta["_subagent"]
+        assert payload["tool_name"] == "ouroboros_interview"
+        assert payload["context"]["initial_context"] == "test context"
+        assert "## Original Research Subject" in payload["prompt"]
+        assert "test context" in payload["prompt"]
+        assert result.value.meta["question_advisory_request"]["phase"] == "resume_pending"
+        assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
+
+    @pytest.mark.parametrize(
+        "arguments, expected_phase",
+        [
+            ({"session_id": "sess-123", "answer": "Use Python"}, "answer"),
+            ({"session_id": "sess-123"}, "resume_pending"),
+        ],
+    )
+    async def test_complete_plugin_cache_hit_emits_no_factual_children(
+        self, handler, monkeypatch, arguments, expected_phase
+    ) -> None:
+        import ouroboros.mcp.tools.question_advisory as advisory
+
+        cached = {
+            lane: {
+                "contract_id": f"fanout:{lane}",
+                "lane_id": lane,
+                "published_at": "2026-08-24T00:00:00+00:00",
+            }
+            for lane in ("code_context", "web_context")
+        }
+        monkeypatch.setattr(advisory, "interview_baseline_by_lane", lambda *_a, **_k: cached)
+        monkeypatch.setattr(advisory, "recent_findings_by_lane", lambda *_a, **_k: {})
+        handler.findings_store = object()
+
+        result = await handler.handle(arguments)
+
+        assert result.is_ok
+        assert result.value.meta["question_advisory_cached_lanes"] == cached
+        assert "question_advisory_subagents" not in result.value.meta
+        assert "question_advisory_fanout_id" not in result.value.meta
+        child_advisory = result.value.meta["_subagent"]["context"]["question_advisory"]
+        assert child_advisory["question_advisory_cached_lanes"] == cached
+        assert "question_advisory_subagents" not in child_advisory
+        assert "question_advisory_fanout_id" not in child_advisory
+        assert result.value.meta["action"] == ("answer" if expected_phase == "answer" else "resume")
+
+    @pytest.mark.parametrize(
+        "arguments, expected_phase",
+        [
+            ({"session_id": "sess-123", "answer": "Use Python"}, "answer"),
+            ({"session_id": "sess-123"}, "resume_pending"),
+        ],
+    )
+    async def test_partial_plugin_cache_repairs_only_missing_lane(
+        self, handler, monkeypatch, arguments, expected_phase
+    ) -> None:
+        import ouroboros.mcp.tools.question_advisory as advisory
+
+        cached = {
+            "code_context": {
+                "contract_id": "fanout:code",
+                "lane_id": "code_context",
+                "published_at": "2026-08-24T00:00:00+00:00",
+            }
+        }
+        monkeypatch.setattr(advisory, "interview_baseline_by_lane", lambda *_a, **_k: cached)
+        monkeypatch.setattr(advisory, "recent_findings_by_lane", lambda *_a, **_k: {})
+        handler.findings_store = object()
+
+        result = await handler.handle(arguments)
+
+        assert result.is_ok
+        assert result.value.meta["question_advisory_request"]["phase"] == expected_phase
+        assert result.value.meta["question_advisory_cached_lanes"] == cached
+        assert [
+            item["context"]["lane_id"] for item in result.value.meta["question_advisory_subagents"]
+        ] == ["web_context"]
+        assert result.value.meta["question_advisory_fanout_id"].startswith("fanout_")
 
 
 # ---------------------------------------------------------------------------

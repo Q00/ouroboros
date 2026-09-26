@@ -92,6 +92,7 @@ _ELIGIBLE_LANE_IDS = frozenset({"code_context", "data_context"})
 #: characters.
 _RECENT_FINDINGS_MAX_ENTRIES = 20
 _INTERVIEW_BASELINE_LANE_IDS = frozenset({"code_context", "web_context"})
+_INTERVIEW_BASELINE_PHASES = frozenset({"start", "answer", "resume_pending"})
 
 
 def interview_baseline_by_lane(
@@ -100,11 +101,13 @@ def interview_baseline_by_lane(
     session_id: str,
     now: datetime | None = None,
 ) -> dict[str, dict]:
-    """Return this interview's newest fresh start-turn factual snapshot.
+    """Return this interview's newest fresh factual snapshot for every lane.
 
-    The server-authored synthesis provenance supplies session and phase identity;
-    child prose never grants reuse authority. A missing, stale, malformed, or
-    incomplete artifact simply falls back to normal factual fan-out.
+    The server-authored synthesis provenance supplies session and lifecycle
+    identity; child prose never grants reuse authority. Start artifacts and
+    later answer/resume repairs are eligible, so a repaired lane joins the
+    still-fresh lanes from the earlier snapshot on the next lookup. A missing,
+    stale, malformed, or incomplete artifact simply falls back to factual fan-out.
     """
     if findings_store is None or not session_id:
         return {}
@@ -117,6 +120,7 @@ def interview_baseline_by_lane(
         )
     except (ArtifactStoreError, OSError):
         return {}
+    baseline: dict[str, dict] = {}
     for candidate in published:
         try:
             fetched = findings_store.fetch(candidate.contract_id)
@@ -128,7 +132,10 @@ def interview_baseline_by_lane(
         provenance = body.get("provenance")
         if not isinstance(provenance, dict):
             continue
-        if provenance.get("session_id") != session_id or provenance.get("phase") != "start":
+        if (
+            provenance.get("session_id") != session_id
+            or provenance.get("phase") not in _INTERVIEW_BASELINE_PHASES
+        ):
             continue
         result = body.get("result")
         outputs = result.get("aggregated_outputs") if isinstance(result, dict) else None
@@ -139,18 +146,15 @@ def interview_baseline_by_lane(
             for entry in outputs
             if isinstance(entry, dict) and entry.get("lane_id") in _INTERVIEW_BASELINE_LANE_IDS
         }
-        lanes = carried & _INTERVIEW_BASELINE_LANE_IDS
-        if not lanes:
-            continue
-        return {
-            lane_id: {
+        for lane_id in sorted(carried - baseline.keys()):
+            baseline[lane_id] = {
                 "contract_id": candidate.contract_id,
                 "lane_id": lane_id,
                 "published_at": candidate.published_at.isoformat(),
             }
-            for lane_id in sorted(lanes)
-        }
-    return {}
+        if baseline.keys() >= _INTERVIEW_BASELINE_LANE_IDS:
+            break
+    return baseline
 
 
 def _eligible_lane_ids(body: Any) -> set[str]:

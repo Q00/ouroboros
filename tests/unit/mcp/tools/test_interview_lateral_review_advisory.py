@@ -260,29 +260,16 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     assert advisory["question"] == "What edge case remains?"
     assert advisory["phase"] == "answer"
     assert advisory["user_question_first"] is True
-    assert advisory["allowed_capabilities"] == [
-        "inspect_code",
-        "web_research",
-        "run_lateral_review",
-        "read_data",
-    ]
+    assert advisory["allowed_capabilities"] == ["inspect_code", "web_research"]
     assert {lane["lane_id"] for lane in advisory["lanes"]} == {
         "code_context",
         "web_context",
-        "data_context",
-        "ambiguity_contrarian",
-        "answer_simplifier",
-        "architecture_implications",
     }
     assert advisory["code_investigation_request"]["question"] == "What edge case remains?"
     advisory_subagents = result.value.meta["question_advisory_subagents"]
     assert [subagent["context"]["lane_id"] for subagent in advisory_subagents] == [
         "code_context",
         "web_context",
-        "data_context",
-        "ambiguity_contrarian",
-        "answer_simplifier",
-        "architecture_implications",
     ]
     assert result.value.meta["question_advisory_preserve_content"] is True
     content_text = result.value.content[0].text
@@ -340,13 +327,13 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
 
     assert result.is_ok
     meta = result.value.meta
-    # Advisory lanes are still attached...
-    assert len(meta["question_advisory_subagents"]) == _ADVISORY_LANE_COUNT
-    # ...but now stamped so the Codex host fans them out itself.
+    assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
+        "code_context",
+        "web_context",
+    ]
     assert meta["question_advisory_dispatch_mode"] == "host_driven"
     assert meta["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert meta["question_advisory_host_action"] == "spawn_subagents"
-    # Advisory lanes correlate by lane_id (persona is None on some lanes).
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
     assert "subagent_orchestration_instruction" in meta
 
@@ -586,8 +573,9 @@ def test_host_driven_advisory_payloads_reach_the_response_text() -> None:
 
     block = text.partition("```json\n")[2].partition("\n```")[0]
     assert json.loads(block) == payloads
-    # Requiredness is visible, so a host knows which absences block completion.
-    assert "data_context" in text
+    assert "Required to complete: code_context, web_context" in text
+    assert "data_context" not in text
+    assert "ambiguity_contrarian" not in text
     assert "undispatched" in text
 
 

@@ -306,6 +306,7 @@ _interview_question_advisory_request_schema = (
 interview_code_investigation_answer_contract = (
     _interview_schemas.interview_code_investigation_answer_contract
 )
+interview_web_reference_answer_contract = _interview_schemas.interview_web_reference_answer_contract
 
 
 @lru_cache(maxsize=1)
@@ -2203,6 +2204,7 @@ __all__ = [
     "LateralPersonaMetadata",
     "LateralPersonaPanelMetadata",
     "build_capability_graph",
+    "interview_web_reference_answer_contract",
     "deserialize_code_investigation_request_metadata",
     "extract_capability_input_schema",
     "lookup_ouroboros_tool_capability_metadata",

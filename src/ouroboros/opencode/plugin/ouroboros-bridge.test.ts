@@ -27,6 +27,7 @@ import {
   id,
   isRalphOwnedSession,
   isNestedRalphDispatch,
+  mergeDispatchSources,
   markRalphChild,
   notify,
   num,
@@ -518,6 +519,56 @@ describe("parseMetadata", () => {
 
     expect(out.subs.length).toBe(1)
     expect(out.subs[0].tool).toBe("ouroboros_interview")
+  })
+})
+
+describe("mergeDispatchSources", () => {
+  test("plugin interview child and factual metadata lanes dispatch together", () => {
+    const primary = parse(JSON.stringify({
+      session_id: "sess-1",
+      _subagent: {
+        tool_name: "ouroboros_interview",
+        title: "Interview: start",
+        prompt: "Ask the first question",
+      },
+    }))
+    const factual = parseMetadata({
+      question_advisory_preserve_content: true,
+      question_advisory_fanout_id: "fanout_combined",
+      question_advisory_result_correlation_key: "context.lane_id",
+      question_advisory_subagents: [
+        { tool_name: "ouroboros_interview", title: "Code", prompt: "inspect" },
+        { tool_name: "ouroboros_interview", title: "Web", prompt: "search" },
+      ],
+    })
+
+    const merged = mergeDispatchSources(primary, factual)
+
+    expect(merged.subs.map((sub) => sub.title)).toEqual([
+      "Interview: start",
+      "Code",
+      "Web",
+    ])
+    expect(merged.responseShape).toEqual({
+      session_id: "sess-1",
+      question_advisory_fanout_id: "fanout_combined",
+      question_advisory_result_correlation_key: "context.lane_id",
+    })
+    expect(merged.preserveContent).toBe(false)
+  })
+
+  test("combined dispatch remains bounded by MAX_FANOUT", () => {
+    const primary = parse(JSON.stringify({
+      _subagent: { tool_name: "ouroboros_interview", prompt: "interview" },
+    }))
+    const factual = parseMetadata({
+      question_advisory_subagents: Array.from(
+        { length: MAX_FANOUT },
+        (_, index) => ({ tool_name: "ouroboros_interview", prompt: `lane-${index}` }),
+      ),
+    })
+
+    expect(mergeDispatchSources(primary, factual).subs).toHaveLength(MAX_FANOUT)
   })
 })
 
@@ -1632,6 +1683,45 @@ describe("bridge appends declare themselves", () => {
     const text = readText(output)
     expectDeclaredAfter(text, QUESTION)
     expect(text).toContain("[Ouroboros] Dispatched 1 subagent.")
+  })
+
+  test("combined plugin dispatch renders factual fan-out identity", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = {
+      content: [{ type: "text", text: JSON.stringify({
+        session_id: "sess-1",
+        _subagent: {
+          tool_name: "ouroboros_interview",
+          title: "Interview: start",
+          prompt: "Ask the first question.",
+        },
+      }) }],
+      metadata: {
+        question_advisory_fanout_id: "fanout_combined",
+        question_advisory_result_correlation_key: "context.lane_id",
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: web_context",
+            prompt: "Search for references.",
+          },
+        ],
+      },
+    }
+
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_declared" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("[Ouroboros] Dispatched 2 subagents.")
+    expect(text).toContain('"question_advisory_fanout_id": "fanout_combined"')
+    expect(text).toContain('"question_advisory_result_correlation_key": "context.lane_id"')
+    expect((output.metadata as Record<string, any>).ouroboros_response_shape).toEqual({
+      session_id: "sess-1",
+      question_advisory_fanout_id: "fanout_combined",
+      question_advisory_result_correlation_key: "context.lane_id",
+    })
   })
 
   test("the dedupe path declares", async () => {

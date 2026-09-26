@@ -4996,34 +4996,95 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "trigger": "runtime_has_no_native_parallel_subagent_primitive",
     }
     assert fanout["synthesis_contract"] == {
-        "output_shape": "answer_advisory",
-        "max_options": 3,
-        "include_recommended_draft": True,
+        "output_shape": "factual_context",
+        "cache_scope": "same_interview_start_snapshot",
+        "requires_delta_check": True,
         "preserve_user_agency": True,
-        "forward_to_mcp_only_after_user_or_auto_confirm": True,
     }
     assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
     assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
     assert fanout["response_payload_refs"]["synthesis_owner"] == "parent_session"
-    assert "Show the MCP interview question to the user first" in fanout["runtime_instruction"]
+    assert "full cache hit emits no advisory" in fanout["runtime_instruction"]
+    assert "generic no-op prose is invalid" in fanout["runtime_instruction"]
 
     lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
-    assert set(lane_by_id) == {
-        "code_context",
-        "web_context",
-        "data_context",
-        "ambiguity_contrarian",
-        "answer_simplifier",
-        "architecture_implications",
+    assert set(lane_by_id) == {"code_context", "web_context"}
+    assert lane_by_id["code_context"] == {
+        "lane_id": "code_context",
+        "purpose": "Build or refresh repo-local facts that constrain the interview.",
+        "capability": "inspect_code",
+        "required": True,
     }
-    assert lane_by_id["code_context"]["capability"] == "inspect_code"
     assert lane_by_id["web_context"]["capability"] == "web_research"
-    assert lane_by_id["data_context"]["capability"] == "read_data"
-    # Required because its no-op answer always exists; see #1754.
-    assert lane_by_id["data_context"]["required"] is True
-    assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
-    assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
-    assert lane_by_id["architecture_implications"]["persona"] == "architect"
+    assert lane_by_id["web_context"]["required"] is True
+    web_contract = lane_by_id["web_context"]["answer_contract"]
+    assert web_contract["contract_id"] == "web_reference_reconnaissance.v1"
+    web_schema = web_contract["response_model_schema"]
+    Draft202012Validator.check_schema(web_schema)
+    source_evidence_schema = web_contract["source_evidence_schema"]
+    Draft202012Validator.check_schema(source_evidence_schema)
+
+    valid = {
+        "question_identity": "interview-question:0123456789abcdef",
+        "lane_id": "web_context",
+        "status": "references_found",
+        "search_queries": ["agent interview research primary sources"],
+        "references": [
+            {
+                "title": "Official documentation",
+                "url": "https://example.com/docs",
+                "source_type": "official",
+                "relevance": "Defines the primary behavior.",
+                "verified_at": "2026-08-24T00:00:00Z",
+            },
+            {
+                "title": "Research paper",
+                "url": "https://example.org/paper",
+                "source_type": "research",
+                "relevance": "Provides supporting evidence.",
+                "verified_at": "2026-08-24T00:00:00Z",
+            },
+        ],
+    }
+    validator = Draft202012Validator(web_schema)
+    assert list(validator.iter_errors(valid)) == []
+    generic_noop = {
+        "lane_id": "web_context",
+        "finding": "External research is unnecessary.",
+    }
+    assert list(validator.iter_errors(generic_noop))
+    missing_primary = {
+        **valid,
+        "references": [
+            {**valid["references"][1], "url": "https://example.org/paper-1"},
+            {**valid["references"][1], "url": "https://example.org/paper-2"},
+        ],
+    }
+    assert list(validator.iter_errors(missing_primary))
+    valid_source_evidence = {
+        "attested_by": "parent_runtime",
+        "search_queries": list(valid["search_queries"]),
+        "search_attempts": [
+            {
+                "query": query,
+                "outcome": "results_found",
+                "result_urls": [reference["url"] for reference in valid["references"]],
+            }
+            for query in valid["search_queries"]
+        ],
+        "fetched_sources": [
+            {
+                "url": reference["url"],
+                "http_status": 200,
+                "source_type": reference["source_type"],
+                "verified_at": reference["verified_at"],
+            }
+            for reference in valid["references"]
+        ],
+    }
+    assert (
+        list(Draft202012Validator(source_evidence_schema).iter_errors(valid_source_evidence)) == []
+    )
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:
@@ -5042,10 +5103,10 @@ def test_question_advisory_request_model_validates_parent_runtime_payload() -> N
         "ambiguity_score": 0.35,
         "milestone": "progress",
         "user_question_first": True,
-        "advisory_goal": "help_human_answer_interview_question",
+        "advisory_goal": "build_reusable_factual_interview_context",
         "parallel_preference": fanout["parallel_preference"],
         "sequential_fallback": dict(fanout["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "allowed_capabilities": ["inspect_code", "web_research"],
         "lanes": list(fanout["lanes"]),
         "synthesis_contract": dict(fanout["synthesis_contract"]),
         "code_investigation_request": {

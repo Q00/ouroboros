@@ -33,6 +33,7 @@ from ouroboros.core.disposable_memory import (
     DisposableResultStatus,
     DisposableResultSummary,
 )
+from ouroboros.core.owner_only import ensure_directory_no_symlinks
 from ouroboros.persistence.artifact_errors import (
     ArtifactContractConflictError,
     ArtifactIntegrityError,
@@ -142,17 +143,17 @@ class ArtifactStore:
     ) -> ArtifactStore:
         """Build the RFC-standard store below one project root."""
         return cls(
-            project_dir.expanduser().resolve() / ".ouroboros" / "artifacts",
+            Path(os.path.abspath(project_dir.expanduser())) / ".ouroboros" / "artifacts",
             max_artifact_bytes=max_artifact_bytes,
         )
 
     def initialize(self) -> None:
         """Create the database and its one table idempotently."""
-        self.root.mkdir(parents=True, exist_ok=True)
         try:
+            ensure_directory_no_symlinks(self.root, mode=0o777)
             with closing(self._connect_for_write()) as connection, connection:
                 connection.execute(_SCHEMA)
-        except sqlite3.Error as exc:
+        except (OSError, sqlite3.Error) as exc:
             raise ArtifactStoreError(
                 "Artifact database could not be initialized",
                 operation="write",
