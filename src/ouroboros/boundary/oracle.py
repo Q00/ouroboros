@@ -369,6 +369,7 @@ compares each observation with the frozen expectation here, in a process that
 never imports workspace code.
 """
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -529,10 +530,18 @@ def _cli_argv(symbol, params, arg_map, args):
     return prefix + [positional[index] for index in sorted(positional)] + flags
 
 
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _equal(expected, observed, approx):
-    if approx is not None and isinstance(expected, (int, float)) and not isinstance(expected, bool):
-        return (isinstance(observed, (int, float)) and not isinstance(observed, bool)
-                and abs(float(observed) - float(expected)) <= approx)
+    if approx is not None and _number(expected):
+        return _number(observed) and abs(float(observed) - float(expected)) <= approx
+    if _number(expected) and _number(observed) and (
+            isinstance(expected, float) or isinstance(observed, float)):
+        # Float arithmetic: 2 + 6 * 0.1 is 2.6000000000000005. A tolerance of
+        # a few ulps keeps an exact decimal expectation meaningful.
+        return math.isclose(float(observed), float(expected), rel_tol=1e-9, abs_tol=1e-12)
     if isinstance(expected, list) and isinstance(observed, list):
         return len(expected) == len(observed) and all(
             _equal(e, o, approx) for e, o in zip(expected, observed))

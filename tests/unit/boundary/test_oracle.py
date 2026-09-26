@@ -442,3 +442,30 @@ def test_oracle_data_that_breaks_the_schema_is_a_construction_error(base: Path) 
                 {"case_id": "c", "args": {"other": 1}, "expect": {"kind": "returns", "value": 1}}
             ],
         )
+
+
+async def test_float_results_compare_within_a_few_ulps(tmp_path: Path) -> None:
+    base = _repo(tmp_path / "base", {"mathutils.py": "def mix(a, b, t):\n    return a\n"})
+    seed = _seed("mix(a, b, t) interpolates linearly")
+    cases = [
+        {
+            "case_id": "c",
+            "args": {"a": 2, "b": 8, "t": 0.1},
+            "expect": {"kind": "returns", "value": 2.6},
+        },
+        {
+            "case_id": "d",
+            "args": {"a": 0, "b": 3, "t": 0.1},
+            "expect": {"kind": "returns", "value": 0.3},
+        },
+    ]
+    package = _package(seed, base, symbol="mathutils.mix", params=("a", "b", "t"), cases=cases)
+    fixed = _repo(
+        tmp_path / "fixed", {"mathutils.py": "def mix(a, b, t):\n    return a + (b - a) * t\n"}
+    )
+    result = await verify_candidate(package, fixed)
+    assert result.verdict is CandidateVerdict.PASS  # 0 + 3 * 0.1 is 0.30000000000000004
+    off = _repo(
+        tmp_path / "off", {"mathutils.py": "def mix(a, b, t):\n    return a + (b - a) * t + 1e-6\n"}
+    )
+    assert (await verify_candidate(package, off)).verdict is CandidateVerdict.FAIL
