@@ -321,8 +321,14 @@ class AnthropicAdapter:
         }
 
         if supports_sampling_and_prefill:
-            kwargs["temperature"] = config.temperature
-            kwargs["top_p"] = config.top_p
+            # anthropic>=1.0 removed the typed ``temperature``/``top_p``
+            # parameters from ``messages.create`` (TypeError when passed);
+            # ``extra_body`` merges them into the request JSON with exactly
+            # the wire shape the typed parameters produced on 0.x.
+            kwargs["extra_body"] = {
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+            }
 
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)

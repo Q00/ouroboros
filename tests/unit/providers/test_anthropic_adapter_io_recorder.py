@@ -571,7 +571,7 @@ async def test_complete_records_top_p_and_stop_sequences_in_journal_extra() -> N
     fake_client.messages.create.assert_awaited_once()
     kwargs = fake_client.messages.create.await_args.kwargs
     assert kwargs["system"] == "sys a\n\nsys b"
-    assert kwargs["top_p"] == 0.7
+    assert kwargs["extra_body"]["top_p"] == 0.7
     assert kwargs["stop_sequences"] == ["STOP"]
 
 
@@ -643,6 +643,7 @@ async def test_complete_omits_unsupported_fable_mythos_fields_for_effort(
     assert "budget_tokens" not in kwargs
     assert "temperature" not in kwargs
     assert "top_p" not in kwargs
+    assert "extra_body" not in kwargs
     assert {"role": "assistant", "content": "{"} not in kwargs["messages"]
     assert "valid JSON object" in kwargs["system"]
 
