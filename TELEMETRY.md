@@ -111,12 +111,14 @@ the finished workspace).
 
 - `check_package_status` describes the package the worker was bound to:
   `admitted` (a package passed admission on the starting tree, possibly after
-  a regenerated version replaced a rejected one), `rejected` (packages were
-  built but none was admitted), `construction_failed` (no package could be
-  built, or preparation failed), `not_run` (arm `off`, a resumed session, or
-  an execution path the package does not govern).
+  a regenerated version replaced a rejected one), `rejected` (the last package
+  built was not admitted), `construction_failed` (the last attempt built no
+  package, or preparation failed), `not_run` (arm `off` or a resumed session).
 - `package_verdict` is the admitted package's verdict on the finished
-  workspace; `none` when no admitted package was verified.
+  workspace; `none` when no admitted package was verified (including an
+  execution path that never consults the package, such as a single-criterion
+  Seed with `orchestrator.execution_mode: legacy`), `indeterminate` also when
+  the verification itself failed.
 - `legacy_verdict` is the verdict of the per-criterion verifier that decides
   without the package: `accept` or `reject` for the run, `none` when the run
   ended before a verdict (cancelled, paused, or an orchestrator error).
@@ -291,6 +293,13 @@ Collection is triggered only at these audited call sites:
   exactly one MCP request outcome, including validation and security failures;
 - [`src/ouroboros/mcp/job_manager.py`](src/ouroboros/mcp/job_manager.py) —
   durable background-job terminal outcomes;
+- [`src/ouroboros/cli/commands/run.py`](src/ouroboros/cli/commands/run.py):
+  the terminal `workflow_outcome` of a CLI `ooo run`;
+- [`src/ouroboros/boundary/run_control.py`](src/ouroboros/boundary/run_control.py):
+  builds the check-package dimensions that the CLI run and the MCP
+  `execute_seed` result carry into `workflow_outcome` (values only), and
+  [`src/ouroboros/boundary/rollout.py`](src/ouroboros/boundary/rollout.py)
+  assigns the randomized arm;
 - [`src/ouroboros/mcp/telemetry_boundary.py`](src/ouroboros/mcp/telemetry_boundary.py) —
   the shared boundary module: the adapter's per-request observation wrapper,
   the job-terminal observer `job_manager.py` calls into, and the direct

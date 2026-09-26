@@ -601,6 +601,7 @@ async def _record_cli_run_outcome(
     session_repo: "SessionRepository",
     execution_id: str | None,
     session_id: str | None,
+    check_package_run: Any = None,
 ) -> None:
     """Emit one durable ``workflow_outcome`` for a terminal ``ooo run``.
 
@@ -611,7 +612,9 @@ async def _record_cli_run_outcome(
     emits nothing (its resume will). A non-success outcome carries the closed
     ``failure_cause`` derived from durable executor evidence, never prose. The
     outcome id is fresh per invocation because ``--resume`` reuses the
-    execution id and each attempt is its own outcome. Never raises.
+    execution id and each attempt is its own outcome. ``check_package_run``
+    (``boundary/run_control.py``) adds the enumerated check-package
+    dimensions. Never raises.
     """
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
@@ -651,6 +654,19 @@ async def _record_cli_run_outcome(
                         session_id=session_id,
                         execution_id=execution_id,
                         session_status=session_status,
+                    )
+                )
+            except Exception:
+                pass
+        if check_package_run is not None:
+            try:
+                result_meta.update(
+                    await check_package_run.outcome_meta(
+                        event_store,
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        terminal_status=terminal_status,
+                        verdict_available=result.is_ok,
                     )
                 )
             except Exception:
@@ -862,7 +878,8 @@ async def _run_orchestrator(
     if dashboard_url:
         print_info(f"Live Dashboard: {dashboard_url}")
 
-    boundary_run = await _prepare_check_package_boundary(
+    check_package_run = await _prepare_check_package_boundary(
+        runner,
         seed,
         check_package,
         event_store=event_store,
@@ -907,16 +924,13 @@ async def _run_orchestrator(
             session_repo=session_repo,
             execution_id=execution_id,
             session_id=session_id_for_run,
+            check_package_run=check_package_run,
         )
-        boundary_verdict = await _verify_check_package_boundary(boundary_run, event_store)
+        for line in check_package_run.render_outcome():
+            console.print(line)
         if result.is_ok:
             res = result.value
-            run_succeeded = res.success
-            if boundary_run is not None:
-                run_succeeded = await _reconcile_check_package_boundary(
-                    boundary_run, boundary_verdict, seed=seed, event_store=event_store, res=res
-                )
-            if run_succeeded:
+            if res.success:
                 print_success("Execution completed successfully!")
                 print_info(f"Session ID: {res.session_id}")
                 print_info(f"Messages processed: {res.messages_processed}")
@@ -962,8 +976,7 @@ async def _run_orchestrator(
             else:
                 print_error("Execution failed")
                 print_info(f"Session ID: {res.session_id}")
-                if not res.success:  # else the check package lines above give the reason
-                    console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
+                console.print(f"[dim]Error: {res.final_message[:200]}[/dim]")
                 raise typer.Exit(1)
         else:
             print_error(f"Orchestrator error: {result.error}")
@@ -983,6 +996,7 @@ async def _run_orchestrator(
 
 
 async def _prepare_check_package_boundary(
+    runner: Any,
     seed: "Seed",
     cli_value: bool | None,
     *,
@@ -993,111 +1007,35 @@ async def _prepare_check_package_boundary(
     runtime_backend: str,
     execution_model: str | None,
 ) -> Any:
-    """Freeze and admit a check package before the worker starts (opt-in).
+    """Resolve the check-package arm and, when on, prepare the package before dispatch.
 
-    Returns ``(state, settings)`` or ``None`` when the feature is off. With the
-    feature off nothing here calls a model or writes an event.
+    Returns the run's ``CheckPackageRun``. With the arm ``off`` nothing here
+    calls a model, writes an event, or changes the runner. With it ``on`` the
+    package is frozen and admitted before the worker starts, and the runner
+    gets the acceptance authority that decides covered criteria before the
+    terminal status is persisted.
     """
-    from ouroboros.boundary.run_wiring import resolve_check_package_settings
-
-    settings = resolve_check_package_settings(cli_value)
-    if not settings.enabled:
-        return None
-    if resume_session or execution_id is None:
-        print_warning("Check package is not applied on resume; the session keeps its boundary.")
-        return None
-    from ouroboros.boundary.constructor import CheckConstructor
     from ouroboros.boundary.ledger import BoundaryOrderError
-    from ouroboros.boundary.run_wiring import prepare_check_package, render_preparation
+    from ouroboros.boundary.run_control import CheckPackageRun
 
-    print_info("Check package: constructing checks from the acceptance criteria (read-only)...")
-    constructor = CheckConstructor(
-        runtime_backend=runtime_backend,
-        model=execution_model,
-        timeout_seconds=settings.constructor_timeout_seconds,
-    )
+    check_package_run = CheckPackageRun.resolve(cli_value)
     try:
-        state = await prepare_check_package(
+        lines = await check_package_run.prepare(
+            runner,
             seed,
             event_store=event_store,
-            constructor=constructor,
             execution_id=execution_id,
-            base_checkout=worker_dir,
-            worker_workspace=worker_dir,
-            runtime_label=runtime_backend,
-            settings=settings,
+            worker_dir=worker_dir,
+            runtime_backend=runtime_backend,
+            model=execution_model,
+            resume=bool(resume_session),
         )
     except BoundaryOrderError as exc:
         print_error(f"Check package refused the worker start: {exc}")
         raise typer.Exit(1) from exc
-    for line in render_preparation(state):
+    for line in lines:
         print_info(line)
-    return state, settings
-
-
-async def _verify_check_package_boundary(boundary_run: Any, event_store: Any) -> Any:
-    """Verify the finished workspace against the frozen package; return the verdict."""
-    if boundary_run is None:
-        return None
-    from ouroboros.boundary.run_wiring import render_verdict, verify_check_package
-
-    state, settings = boundary_run
-    try:
-        verdict = await verify_check_package(
-            state,
-            event_store=event_store,
-            candidate_checkout=state.base_checkout,
-            settings=settings,
-        )
-    except Exception as exc:  # noqa: BLE001 - verification must not hide the run result
-        print_warning(f"Check package verification could not run: {exc}")
-        return None
-    printer = {"pass": print_success, "fail": print_error}.get(verdict.verdict, print_warning)
-    for index, line in enumerate(render_verdict(verdict)):
-        (printer if index == 0 else console.print)(line)
-    return verdict
-
-
-async def _reconcile_check_package_boundary(
-    boundary_run: Any, verdict: Any, *, seed: "Seed", event_store: Any, res: Any
-) -> bool:
-    """Return whether the run is accepted, with the package authoritative per criterion.
-
-    A criterion the admitted package covers is decided by the package (pass
-    accepts, fail with a counterexample rejects); the existing verifier's
-    verdict is kept as advisory. Uncovered or indeterminate criteria keep the
-    existing verdict. Without a verified package the existing result stands.
-    """
-    if verdict is None:
-        return bool(res.success)
-    from ouroboros.boundary.acceptance import render_reconciliation
-    from ouroboros.boundary.run_wiring import reconcile_check_package_acceptance
-
-    state, _settings = boundary_run
-    try:
-        reconciliation = await reconcile_check_package_acceptance(
-            state,
-            verdict,
-            seed=seed,
-            event_store=event_store,
-            existing_run_accepted=bool(res.success),
-        )
-    except Exception as exc:  # noqa: BLE001 - reconciliation must not hide the run result
-        print_warning(f"Check package acceptance could not be reconciled: {exc}")
-        return bool(res.success) and verdict.verdict != "fail"
-    if reconciliation is None:
-        return bool(res.success)
-    for line in render_reconciliation(reconciliation):
-        console.print(line)
-    if reconciliation.run_accepted and not res.success:
-        print_info(
-            "The check package accepted every criterion the existing verifier rejected; "
-            "the existing verdict is advisory. Session status in the journal stays "
-            f"as the existing harness recorded it. Advisory: {res.final_message[:300]}"
-        )
-    elif res.success and not reconciliation.run_accepted:
-        print_error("The finished workspace fails the frozen check package.")
-    return reconciliation.run_accepted
+    return check_package_run
 
 
 @app.command()

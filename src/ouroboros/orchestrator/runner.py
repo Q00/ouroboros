@@ -982,6 +982,9 @@ class OrchestratorRunner:
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Optional acceptance authority (ouroboros.boundary.authority), set after
+        # construction; see its call site in _execute_parallel.
+        self.acceptance_authority: Any | None = None
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
             efficiency_mode is not None or frugality_assurance is not None
@@ -10439,6 +10442,13 @@ class OrchestratorRunner:
                 messages_processed=parallel_result.total_messages,
                 start_time=start_time,
                 expected_root_indices=range(len(seed.acceptance_criteria)),
+            )
+
+        if self.acceptance_authority is not None:
+            # May replace covered root results before the terminal plan is built,
+            # so the durable acceptance and session status carry its decision.
+            parallel_result = await self.acceptance_authority(
+                seed=seed, execution_id=exec_id, parallel_result=parallel_result
             )
 
         # Calculate duration

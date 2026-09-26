@@ -37,11 +37,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.boundary.acceptance import (
-    AcceptanceReconciliation,
     PackageCriterionStatus,
-    load_existing_outcomes,
     package_criterion_statuses,
-    reconcile_acceptance,
 )
 from ouroboros.boundary.admission import (
     AdmissionResult,
@@ -56,7 +53,6 @@ from ouroboros.boundary.admission import (
 from ouroboros.boundary.ledger import BoundaryLedger
 from ouroboros.boundary.package import (
     CheckPackage,
-    seed_criterion_keys,
     seed_digest,
     write_check_package,
 )
@@ -395,38 +391,6 @@ async def verify_check_package(
         uncovered=tuple(item.criterion_key for item in package.uncovered),
         criteria=criteria,
     )
-
-
-async def reconcile_check_package_acceptance(
-    state: BoundaryRunState,
-    verdict: BoundaryVerdict,
-    *,
-    seed: Seed,
-    event_store: EventStore,
-    existing_run_accepted: bool,
-) -> AcceptanceReconciliation | None:
-    """Decide each criterion with the package as the authority where it covers it.
-
-    Returns ``None`` when no admitted package was verified; the existing
-    verdict then stands unchanged. Otherwise reads the run's final acceptance
-    decisions, reconciles them with ``verdict.criteria`` (see
-    ``boundary/acceptance.py``), and records ``boundary.acceptance.reconciled``.
-    """
-    if verdict.package_sha256 is None or not verdict.criteria:
-        return None
-    existing = await load_existing_outcomes(event_store, state.execution_id)
-    reconciliation = reconcile_acceptance(
-        seed_criterion_keys(seed),
-        verdict.criteria,
-        existing,
-        existing_run_accepted=existing_run_accepted,
-    )
-    await BoundaryLedger(event_store).record_acceptance_reconciled(
-        state.boundary_id,
-        package_sha256=verdict.package_sha256,
-        reconciliation=reconciliation.to_dict(),
-    )
-    return reconciliation
 
 
 def render_preparation(state: BoundaryRunState) -> list[str]:

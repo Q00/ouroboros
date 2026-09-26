@@ -19,9 +19,10 @@ advisory. A package pass cannot resurrect a criterion the existing harness
 never judged (blocked, invalid, cancelled, or missing), because there is no
 worker attempt to accept.
 
-This module reconciles; it does not rewrite the session's durable terminal
-status, which the runner persisted before the package ran. The decision is
-recorded as ``boundary.acceptance.reconciled`` on the boundary aggregate.
+This module only decides. ``boundary/authority.py`` applies the decision
+inside the runner, before the terminal acceptance plan and the session status
+are persisted, and records it as ``boundary.acceptance.reconciled`` on the
+boundary aggregate.
 """
 
 from __future__ import annotations

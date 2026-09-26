@@ -21,7 +21,6 @@ from ouroboros.boundary import (
     seed_digest,
     verify_boundary_order,
 )
-from ouroboros.boundary.acceptance import ExistingOutcome
 from ouroboros.boundary.constructor import (
     CHECK_DIR,
     ConstructionOutcome,
@@ -515,6 +514,29 @@ def _fake_exec(success: bool = True) -> SimpleNamespace:
     )
 
 
+def _parallel_result(legacy_success: bool) -> Any:
+    from ouroboros.orchestrator.parallel_executor_models import (
+        ACExecutionOutcome,
+        ACExecutionResult,
+        ParallelExecutionResult,
+    )
+
+    outcome = ACExecutionOutcome.SUCCEEDED if legacy_success else ACExecutionOutcome.FAILED
+    return ParallelExecutionResult(
+        results=(
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="add(2, 3) returns 5",
+                success=legacy_success,
+                outcome=outcome,
+                error=None if legacy_success else "evidence form mismatch",
+            ),
+        ),
+        success_count=1 if legacy_success else 0,
+        failure_count=0 if legacy_success else 1,
+    )
+
+
 async def _run_cli(
     tmp_path: Path,
     project: Path,
@@ -525,8 +547,14 @@ async def _run_cli(
     monkeypatch: pytest.MonkeyPatch,
     seen: dict[str, Any] | None = None,
     run_success: bool = True,
-    existing: dict[int, ExistingOutcome] | None = None,
 ) -> tuple[EventStore, MagicMock, dict[str, Any]]:
+    """Drive ``_run_orchestrator`` with a runner double that honors the hook contract.
+
+    The double calls ``runner.acceptance_authority`` the way
+    ``OrchestratorRunner._execute_parallel`` does: once, on the executor's
+    result (legacy verdict ``run_success``), and reports the returned
+    result's ``all_succeeded`` as the run's success.
+    """
     monkeypatch.delenv("OUROBOROS_CHECK_PACKAGE", raising=False)
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
     seen = {} if seen is None else seen
@@ -539,16 +567,26 @@ async def _run_cli(
         seen["events_at_dispatch"] = [event.type for event in rows]
         if worker_edit is not None:
             (project / "calc.py").write_text(worker_edit)
-        return Result.ok(_fake_exec(run_success))
-
-    async def load_existing(_store: Any, _execution_id: str) -> dict[int, ExistingOutcome]:
-        return dict(existing or {})
+        parallel_result = _parallel_result(run_success)
+        if runner.acceptance_authority is not None:
+            parallel_result = await runner.acceptance_authority(
+                seed=kwargs["seed"],
+                execution_id=kwargs["execution_id"],
+                parallel_result=parallel_result,
+            )
+        seen["parallel_result"] = parallel_result
+        return Result.ok(_fake_exec(parallel_result.all_succeeded))
 
     runner = MagicMock()
+    runner.acceptance_authority = None
     runner.execute_seed = AsyncMock(side_effect=execute_seed)
     seen["runner"] = runner
     seed_file = project / "seed.yaml"
     seed_file.write_text("goal: ignored\n")
+
+    def capture(_job_id: str, job_type: str, **kwargs: Any) -> None:
+        seen["telemetry"] = {"job_type": job_type, **kwargs}
+
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=SEED_DATA),
         patch("ouroboros.orchestrator.create_agent_runtime"),
@@ -559,7 +597,7 @@ async def _run_cli(
             "ouroboros.boundary.run_wiring.default_store_dir",
             side_effect=lambda execution_id: tmp_path / "store" / execution_id,
         ),
-        patch("ouroboros.boundary.run_wiring.load_existing_outcomes", load_existing),
+        patch("ouroboros.telemetry.capture_job_outcome", side_effect=capture),
     ):
         await _run_orchestrator(
             seed_file, no_qa=True, project_dir=project, check_package=check_package
@@ -578,6 +616,11 @@ def _constructor_factory(script: str, calls: list[dict[str, Any]]) -> Any:
         return _Constructor()
 
     return factory
+
+
+def _check_package_meta(seen: dict[str, Any]) -> dict[str, Any]:
+    meta = seen["telemetry"]["result_meta"]
+    return {key: value for key, value in meta.items() if key not in {"success"}}
 
 
 async def test_cli_flag_off_adds_no_model_call_and_no_event(
@@ -600,6 +643,7 @@ async def test_cli_flag_off_adds_no_model_call_and_no_event(
     assert calls == []
     assert seen["events_at_dispatch"] == []
     assert set(seen["kwargs"]) == {"seed", "execution_id", "session_id", "parallel"}
+    assert runner.acceptance_authority is None
     assert not (tmp_path / "store").exists()
     # No boundary aggregate exists anywhere in the journal.
     async with store._engine.connect() as conn:  # noqa: SLF001 - test-only read
@@ -610,6 +654,17 @@ async def test_cli_flag_off_adds_no_model_call_and_no_event(
             {"t": BOUNDARY_AGGREGATE_TYPE},
         )
         assert rows.scalar() == 0
+    # Without telemetry the unset switch is the fallback arm, recorded as such.
+    assert _check_package_meta(seen) == {
+        "check_package_arm": "off",
+        "check_package_assignment": "fallback",
+        "check_package_status": "not_run",
+        "package_verdict": "none",
+        "legacy_verdict": "accept",
+        "reconciliation": "none",
+        "legacy_failure_class": "accepted",
+        "legacy_failure_class_count": "0",
+    }
     await store.close()
 
 
@@ -647,12 +702,23 @@ async def test_cli_flag_on_admits_before_dispatch_and_verifies_after(
     ]
     verified = (await store.replay(BOUNDARY_AGGREGATE_TYPE, f"{execution_id}/check_package/v1"))[3]
     assert verified.data["verdict"] == "pass"
+    assert _check_package_meta(seen) == {
+        "check_package_arm": "on",
+        "check_package_assignment": "user_forced_on",
+        "check_package_status": "admitted",
+        "package_verdict": "pass",
+        "legacy_verdict": "accept",
+        "reconciliation": "agree",
+        "legacy_failure_class": "accepted",
+        "legacy_failure_class_count": "0",
+    }
     await store.close()
 
 
 async def test_cli_flag_on_exits_non_zero_when_the_candidate_fails(
     tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    seen: dict[str, Any] = {}
     with pytest.raises(typer.Exit) as exit_info:
         await _run_cli(
             tmp_path,
@@ -661,8 +727,18 @@ async def test_cli_flag_on_exits_non_zero_when_the_candidate_fails(
             constructor_cls=_constructor_factory(BUGFIX_SCRIPT, []),
             worker_edit=None,
             monkeypatch=monkeypatch,
+            seen=seen,
         )
     assert exit_info.value.exit_code == 1
+    # The legacy verifier accepted the unchanged (still buggy) tree; the
+    # package's counterexample rejects it, and the durable result says so.
+    (result,) = seen["parallel_result"].results
+    assert result.success is False and result.outcome.value == "failed"
+    assert seen["telemetry"]["terminal_status"] == "failed"
+    meta = _check_package_meta(seen)
+    assert meta["package_verdict"] == "fail"
+    assert meta["legacy_verdict"] == "accept"
+    assert meta["reconciliation"] == "package_rejected_over_legacy_accept"
 
 
 async def test_cli_refuses_to_dispatch_into_a_leaking_workspace(
@@ -685,9 +761,6 @@ async def test_cli_refuses_to_dispatch_into_a_leaking_workspace(
     assert seen["runner"].execute_seed.await_count == 0
 
 
-_REJECTED = {0: ExistingOutcome(0, "failed", "failed", "failed")}
-
-
 async def test_cli_package_pass_overrides_an_evidence_form_rejection(
     tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -700,7 +773,6 @@ async def test_cli_package_pass_overrides_an_evidence_form_rejection(
         worker_edit=FIXED,
         monkeypatch=monkeypatch,
         run_success=False,
-        existing=_REJECTED,
     )  # no typer.Exit: the run is accepted
     boundary_id = f"{seen['kwargs']['execution_id']}/check_package/v1"
     events = await store.replay(BOUNDARY_AGGREGATE_TYPE, boundary_id)
@@ -713,12 +785,22 @@ async def test_cli_package_pass_overrides_an_evidence_form_rejection(
     assert criterion["package_status"] == "pass"
     assert criterion["existing_outcome"] == "failed"
     assert verify_boundary_order(events) == ()
+    # The runner receives the reconciled result, so the terminal status it
+    # persists (and the telemetry terminal_status) is the reconciled one.
+    (result,) = seen["parallel_result"].results
+    assert result.success is True and result.outcome.value == "succeeded"
+    assert seen["telemetry"]["terminal_status"] == "completed"
+    meta = _check_package_meta(seen)
+    assert meta["legacy_verdict"] == "reject"
+    assert meta["reconciliation"] == "package_accepted_over_legacy_reject"
+    assert meta["legacy_failure_class"] == "other"  # no recovery record in this double
     await store.close()
 
 
 async def test_cli_package_fail_keeps_a_rejected_run_failed(
     tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    seen: dict[str, Any] = {}
     with pytest.raises(typer.Exit) as exit_info:
         await _run_cli(
             tmp_path,
@@ -728,9 +810,10 @@ async def test_cli_package_fail_keeps_a_rejected_run_failed(
             worker_edit=None,
             monkeypatch=monkeypatch,
             run_success=False,
-            existing=_REJECTED,
+            seen=seen,
         )
     assert exit_info.value.exit_code == 1
+    assert _check_package_meta(seen)["reconciliation"] == "agree"
 
 
 async def test_cli_flag_off_keeps_a_rejected_run_failed(
@@ -739,8 +822,12 @@ async def test_cli_flag_off_keeps_a_rejected_run_failed(
     from ouroboros.config.models import BoundaryConfig
 
     calls: list[dict[str, Any]] = []
+    seen: dict[str, Any] = {}
     with (
-        patch("ouroboros.boundary.run_wiring._load_boundary_config", return_value=BoundaryConfig()),
+        patch(
+            "ouroboros.boundary.run_wiring._load_boundary_config",
+            return_value=BoundaryConfig(check_package="off"),
+        ),
         pytest.raises(typer.Exit) as exit_info,
     ):
         await _run_cli(
@@ -751,10 +838,14 @@ async def test_cli_flag_off_keeps_a_rejected_run_failed(
             worker_edit=FIXED,
             monkeypatch=monkeypatch,
             run_success=False,
-            existing=_REJECTED,
+            seen=seen,
         )
     assert exit_info.value.exit_code == 1
     assert calls == []
+    meta = _check_package_meta(seen)
+    assert meta["check_package_assignment"] == "user_forced_off"
+    assert meta["legacy_verdict"] == "reject"
+    assert meta["reconciliation"] == "none"
 
 
 async def test_reconciliation_must_follow_a_verification_and_is_single(

@@ -1553,6 +1553,128 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy_success", [False, True])
+    async def test_acceptance_authority_decides_before_the_terminal_plan(
+        self,
+        legacy_success: bool,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """An installed acceptance authority sees the executor's result once and
+        the runner persists the result it returns: the durable acceptance plan,
+        the session status, and the returned success all carry its decision."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        tracker = SessionTracker.create(
+            f"execution-authority-{legacy_success}",
+            seed.metadata.seed_id,
+            session_id=f"session-authority-{legacy_success}",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        legacy = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=legacy_success,
+                    outcome=(
+                        ACExecutionOutcome.SUCCEEDED
+                        if legacy_success
+                        else ACExecutionOutcome.FAILED
+                    ),
+                ),
+            ),
+            success_count=1 if legacy_success else 0,
+            failure_count=0 if legacy_success else 1,
+        )
+        decided = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=not legacy_success,
+                    outcome=(
+                        ACExecutionOutcome.FAILED
+                        if legacy_success
+                        else ACExecutionOutcome.SUCCEEDED
+                    ),
+                ),
+            ),
+            success_count=0 if legacy_success else 1,
+            failure_count=1 if legacy_success else 0,
+        )
+        seen: list[Any] = []
+
+        async def authority(*, seed: Seed, execution_id: str, parallel_result: Any) -> Any:
+            seen.append((execution_id, parallel_result))
+            return decided
+
+        runner.acceptance_authority = authority
+        mark_completed = AsyncMock(return_value=Result.ok(True))
+        mark_failed = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=legacy),
+            ),
+            patch.object(runner._session_repo, "mark_completed", mark_completed),
+            patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert seen == [(tracker.execution_id, legacy)]
+        assert result.is_ok and result.value.success is (not legacy_success)
+        persisted = mark_failed if legacy_success else mark_completed
+        persisted.assert_awaited_once()
+        (plan,) = persisted.await_args.kwargs["acceptance_finalizations"]
+        assert plan["accepted"] is (not legacy_success)
+        assert plan["outcome"] == ("failed" if legacy_success else "succeeded")
+        (mark_completed if legacy_success else mark_failed).assert_not_awaited()
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
     async def test_parallel_pause_consumes_pre_effect_durable_pause_policy(
         self,
         mock_adapter: MagicMock,
