@@ -61,6 +61,7 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.telemetry_env import telemetry_opt_out_in_env
 from ouroboros.config.untrusted_env import is_untrusted_env_denied_key
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
@@ -1564,9 +1565,7 @@ def get_telemetry_enabled() -> bool:
     back on merely because the full application config could not be
     constructed.
     """
-    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
-        return False
-    if _env_flag("OUROBOROS_TELEMETRY") is False:
+    if telemetry_opt_out_in_env():
         return False
     config_path = get_config_dir() / "config.yaml"
     # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid

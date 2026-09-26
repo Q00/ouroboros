@@ -2759,7 +2759,11 @@ def _setup_codex(
     preserve_existing_llm: bool = False,
 ) -> bool:
     """Configure Ouroboros for the Codex runtime."""
-    from ouroboros.config.loader import ensure_config_dir, get_default_config
+    from ouroboros.config.loader import (
+        ensure_config_dir,
+        get_default_config,
+        telemetry_opt_out_in_env,
+    )
     from ouroboros.config.models import get_config_dir, get_default_credentials
 
     codex_home = resolve_codex_home()
@@ -2817,6 +2821,16 @@ def _setup_codex(
         llm_config = _ensure_mapping_section(config_dict, "llm")
         if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
             llm_config["backend"] = "codex"
+
+        if telemetry_opt_out_in_env():
+            # Codex launches the MCP server with only the registered env block,
+            # so a process-level opt-out (DO_NOT_TRACK / OUROBOROS_TELEMETRY=0)
+            # would not reach later sessions. Persist it in the config the MCP
+            # server loads instead of relying on the caller's environment.
+            if "telemetry" in config_dict and not isinstance(config_dict["telemetry"], dict):
+                raise ValueError("Invalid non-mapping 'telemetry' section in config.yaml.")
+            telemetry_config = _ensure_mapping_section(config_dict, "telemetry")
+            telemetry_config["enabled"] = False
 
         if fresh_config:
             _neutralize_fresh_codex_model_defaults(config_dict)
