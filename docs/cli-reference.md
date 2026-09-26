@@ -1284,6 +1284,42 @@ orchestrator:
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
 
+### `mcp doctor`
+
+Run fast, read-only environment diagnostics. The default command does not
+start a server:
+
+```bash
+ouroboros mcp doctor
+ouroboros mcp doctor --json
+```
+
+Use the opt-in local stdio probe when the environment checks pass but an MCP
+host still cannot discover Ouroboros:
+
+```bash
+ouroboros mcp doctor --probe-local-stdio
+```
+
+The probe launches this installation's own server with the current Python
+interpreter in isolated mode, with a temporary home and working directory.
+It loads the production server composition directly, bypassing shell profiles,
+project dotenv files, update checks, and normal CLI startup. Network and child
+command execution are disabled inside the probe. It reports stable stages for local
+startup/stdio transport, protocol discovery, and expected tool recognition.
+It lists tools but never calls one. The child uses stdio only, has telemetry
+disabled, does not read configured MCP launch commands, and cannot modify the
+user's Ouroboros configuration, EventStore, or PID registry. The temporary
+child and its isolated state are cleaned up on both success and failure.
+Transport success is observed before protocol discovery, and a cleanup failure
+causes the probe to fail even when tool discovery succeeded.
+
+This first diagnostic increment does not probe configured or third-party MCP
+servers, execute arbitrary launchers, open a network transport, inventory the
+whole machine, invoke an LLM, or repair the installation. A failed probe is a
+normal Doctor failure: all emitted stages remain visible and the command exits
+with status 1.
+
 ### `mcp info`
 
 Show MCP server information and available tools.

@@ -12,13 +12,15 @@ import importlib.metadata
 import json
 from pathlib import Path
 import sys
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.mcp_doctor import (
     CheckResult,
+    _probe_local_stdio,
     check_claude_agent_sdk_import,
     check_codex_oauth_auth,
     check_event_store,
@@ -29,6 +31,8 @@ from ouroboros.cli.commands.mcp_doctor import (
     check_platform,
     check_python_version,
 )
+from ouroboros.core.types import Result
+from ouroboros.mcp.types import TransportType
 from ouroboros.package_profiles import UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
 
 # ---------------------------------------------------------------------------
@@ -605,7 +609,277 @@ class TestPidIsAlive:
 # ---------------------------------------------------------------------------
 
 
+def _fake_probe_client(
+    adapter,
+    captured: dict[str, object],
+    *,
+    enter_error: Exception | None = None,
+    exit_error: Exception | None = None,
+):
+    """Return an adapter factory with explicit connection and cleanup results."""
+
+    def create_client(*, max_retries):
+        captured["max_retries"] = max_retries
+
+        async def connect(config):
+            captured["config"] = config
+            if enter_error is not None:
+                adapter.transport_entered = False
+                return Result.err(enter_error)
+            adapter.transport_entered = True
+            return Result.ok(None)
+
+        async def disconnect():
+            captured["cleaned_up"] = True
+            return Result.err(exit_error) if exit_error else Result.ok(None)
+
+        adapter.connect = AsyncMock(side_effect=connect)
+        adapter.disconnect = AsyncMock(side_effect=disconnect)
+        return adapter
+
+    return create_client
+
+
+def _successful_probe_adapter(*tool_names: str):
+    adapter = MagicMock()
+    adapter.server_snapshot = SimpleNamespace(protocol_version="2025-06-18")
+    adapter.protocol_version = "2025-06-18"
+    adapter.list_tools = AsyncMock(
+        return_value=Result.ok(tuple(SimpleNamespace(name=tool_name) for tool_name in tool_names))
+    )
+    adapter.call_tool = AsyncMock()
+    return adapter
+
+
+class TestLocalStdioProbe:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("host_platform", ["darwin", "win32"])
+    async def test_uses_exact_local_stdio_command_on_supported_host_families(
+        self, host_platform, monkeypatch
+    ):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter("ouroboros_interview", "ouroboros_run")
+        monkeypatch.setenv("OUROBOROS_MCP_COMMAND", "do-not-execute --configured-command")
+
+        with (
+            patch.object(sys, "platform", host_platform),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+                _fake_probe_client(adapter, captured),
+            ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._expected_ouroboros_tool_names",
+                return_value=frozenset({"ouroboros_interview", "ouroboros_run"}),
+            ),
+        ):
+            results = await _probe_local_stdio()
+
+        config = captured["config"]
+        assert config.command == sys.executable
+        assert config.args[:3] == ("-I", "-B", "-c")
+        assert "os.chdir(" in config.args[3]
+        assert "_serve_local_stdio_probe" in config.args[3]
+        assert "do-not-execute" not in config.args[3]
+        assert config.transport is TransportType.STDIO
+        assert config.url is None
+        assert "OUROBOROS_MCP_COMMAND" not in config.env
+        assert config.env["HOME"] == config.env["USERPROFILE"]
+        assert captured["max_retries"] == 1
+        assert captured["cleaned_up"] is True
+        assert [result.status for result in results] == ["pass", "pass", "pass"]
+        adapter.list_tools.assert_awaited_once_with()
+        adapter.call_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startup_failure_is_staged_and_fail_closed(self):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter("ouroboros_interview")
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+            _fake_probe_client(
+                adapter,
+                captured,
+                enter_error=OSError("child could not start"),
+            ),
+        ):
+            results = await _probe_local_stdio()
+
+        assert [result.name for result in results] == [
+            "local_stdio_startup_transport",
+            "local_stdio_protocol_discovery",
+            "local_stdio_tool_recognition",
+        ]
+        assert [result.status for result in results] == ["fail", "fail", "fail"]
+        assert "child could not start" in results[0].message
+        assert all(result.remediation for result in results)
+        adapter.list_tools.assert_not_awaited()
+        adapter.call_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_discovery_snapshot_stops_before_tool_listing(self):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter("ouroboros_interview")
+        adapter.server_snapshot = None
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+            _fake_probe_client(adapter, captured),
+        ):
+            results = await _probe_local_stdio()
+
+        assert [result.status for result in results] == ["pass", "fail", "fail"]
+        assert results[1].name == "local_stdio_protocol_discovery"
+        assert "no snapshot" in results[1].message
+        assert captured["cleaned_up"] is True
+        adapter.list_tools.assert_not_awaited()
+        adapter.call_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_list_tools_failure_is_distinct_and_cleans_up(self):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter()
+        adapter.list_tools.return_value = Result.err(RuntimeError("tools/list unavailable"))
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+            _fake_probe_client(adapter, captured),
+        ):
+            results = await _probe_local_stdio()
+
+        assert [result.status for result in results] == ["pass", "pass", "fail"]
+        assert results[2].name == "local_stdio_tool_recognition"
+        assert "tools/list unavailable" in results[2].message
+        assert results[2].remediation
+        assert captured["cleaned_up"] is True
+        adapter.call_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_expected_tool_fails_without_invoking_any_tool(self):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter("ouroboros_interview")
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+                _fake_probe_client(adapter, captured),
+            ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._expected_ouroboros_tool_names",
+                return_value=frozenset({"ouroboros_interview", "ouroboros_run"}),
+            ),
+        ):
+            results = await _probe_local_stdio()
+
+        assert [result.status for result in results] == ["pass", "pass", "fail"]
+        assert "ouroboros_run" in results[2].message
+        assert captured["cleaned_up"] is True
+        adapter.call_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_turns_probe_into_lifecycle_failure(self):
+        captured: dict[str, object] = {}
+        adapter = _successful_probe_adapter("ouroboros_interview")
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor.MCPClientAdapter",
+                _fake_probe_client(
+                    adapter,
+                    captured,
+                    exit_error=RuntimeError("child reap failed"),
+                ),
+            ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._expected_ouroboros_tool_names",
+                return_value=frozenset({"ouroboros_interview"}),
+            ),
+        ):
+            results = await _probe_local_stdio()
+
+        assert captured["cleaned_up"] is True
+        assert [result.status for result in results] == ["fail", "fail", "fail"]
+        assert "child reap failed" in results[0].message
+        adapter.call_tool.assert_not_awaited()
+
+
 class TestDoctorCommand:
+    def test_default_does_not_launch_local_probe(self):
+        app = _make_app()
+        passing = CheckResult(name="existing", status="pass", message="ok")
+        probe = AsyncMock()
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
+                [lambda: passing],
+            ),
+            patch("ouroboros.cli.commands.mcp_doctor._probe_local_stdio", probe),
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 0
+        assert "local_stdio" not in result.output
+        probe.assert_not_awaited()
+
+    def test_exact_opt_in_flag_adds_probe_results_and_preserves_json(self):
+        app = _make_app()
+        passing = CheckResult(name="existing", status="pass", message="ok")
+        probe_results = [
+            CheckResult(
+                name="local_stdio_startup_transport",
+                status="pass",
+                message="connected",
+            ),
+            CheckResult(
+                name="local_stdio_protocol_discovery",
+                status="pass",
+                message="negotiated",
+            ),
+            CheckResult(
+                name="local_stdio_tool_recognition",
+                status="pass",
+                message="recognized",
+            ),
+        ]
+        probe = AsyncMock(return_value=probe_results)
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
+                [lambda: passing],
+            ),
+            patch("ouroboros.cli.commands.mcp_doctor._probe_local_stdio", probe),
+        ):
+            result = runner.invoke(app, ["--probe-local-stdio", "--json"])
+
+        assert result.exit_code == 0
+        assert [item["name"] for item in json.loads(result.output)] == [
+            "existing",
+            "local_stdio_startup_transport",
+            "local_stdio_protocol_discovery",
+            "local_stdio_tool_recognition",
+        ]
+        probe.assert_awaited_once_with()
+
+    def test_probe_failure_uses_existing_exit_one_behavior(self):
+        app = _make_app()
+        passing = CheckResult(name="existing", status="pass", message="ok")
+        probe = AsyncMock(
+            return_value=[
+                CheckResult(
+                    name="local_stdio_startup_transport",
+                    status="fail",
+                    message="broken",
+                    remediation="repair it",
+                )
+            ]
+        )
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
+                [lambda: passing],
+            ),
+            patch("ouroboros.cli.commands.mcp_doctor._probe_local_stdio", probe),
+        ):
+            result = runner.invoke(app, ["--probe-local-stdio", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)[-1]["status"] == "fail"
+
     def test_exits_0_when_all_pass(self):
         app = _make_app()
         all_pass = CheckResult(name="x", status="pass", message="ok")

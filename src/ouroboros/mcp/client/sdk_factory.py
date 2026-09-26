@@ -7,10 +7,19 @@ caching, and MRTR.  This module only translates application transport config.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from ouroboros.mcp.types import MCPServerConfig, TransportType
+
+
+@dataclass(slots=True)
+class TransportLifecycle:
+    """Observed public transport entry, before SDK protocol negotiation."""
+
+    entered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +28,7 @@ class SDKClientResources:
 
     client: Any
     http_client: Any | None = None
+    transport_lifecycle: TransportLifecycle = field(default_factory=TransportLifecycle)
 
 
 def build_sdk_client(config: MCPServerConfig) -> SDKClientResources:
@@ -74,13 +84,25 @@ def build_sdk_client(config: MCPServerConfig) -> SDKClientResources:
     else:  # pragma: no cover - enum construction prevents this in normal use
         raise ValueError(f"Unknown transport: {config.transport}")
 
+    lifecycle = TransportLifecycle()
+
+    @asynccontextmanager
+    async def observed_transport() -> AsyncIterator[Any]:
+        # Client accepts this public Transport context. Entering it establishes
+        # streams; negotiation happens afterwards inside Client.__aenter__.
+        async with target as streams:
+            lifecycle.entered = True
+            yield streams
+
     client = Client(
-        target,
+        observed_transport(),
         mode="auto",
         read_timeout_seconds=config.timeout,
         client_info=Implementation(name="ouroboros", version=ouroboros_version),
     )
-    return SDKClientResources(client=client, http_client=owned_http_client)
+    return SDKClientResources(
+        client=client, http_client=owned_http_client, transport_lifecycle=lifecycle
+    )
 
 
 __all__ = ["SDKClientResources", "build_sdk_client"]
