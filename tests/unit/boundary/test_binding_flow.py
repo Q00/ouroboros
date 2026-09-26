@@ -331,3 +331,41 @@ async def test_transient_indeterminate_checks_are_rerun_once(
     assert verdict.verdicts[keys[0]].status is PackageCriterionStatus.PASS
     types = await _types(store, state.boundary_id)
     assert types.count(CANDIDATE_VERIFIED) == 2  # both receipts kept
+
+
+async def test_each_late_binding_has_exactly_one_base_run(
+    store: EventStore, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ouroboros.boundary import binding_flow
+
+    seed, state = await _prepare(store, repo, tmp_path)
+    _write(repo, {"mathutils.py": FIXED + "\ndef lerp(a, b, t):\n    return a + (b - a) * t\n"})
+    runs: list[str] = []
+    real = binding_flow.admit_binding
+
+    async def counted(*args: Any, **kwargs: Any):
+        runs.append(args[1])
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(binding_flow, "admit_binding", counted)
+    keys = seed_criterion_keys(seed)
+    cache: dict[str, Any] = {}
+    for _attempt in range(3):  # for example two repair attempts, then the final verification
+        await binding_flow.assign_tiers(
+            state.package,
+            artifact=repo,
+            base=state.base_snapshot,
+            declared={keys[1]: [{"symbol": "mathutils.lerp"}]},
+            expected_base_digest=state.admission.base_tree_digest,
+            base_run_cache=cache,
+        )
+    assert runs == ["oracle_2"]
+    # A different declaration is a different late binding: its own single run.
+    await binding_flow.assign_tiers(
+        state.package,
+        artifact=repo,
+        base=state.base_snapshot,
+        declared={keys[1]: [{"symbol": "mathutils.lerp", "arg_map": {"a": 0, "b": 1, "t": 2}}]},
+        base_run_cache=cache,
+    )
+    assert runs == ["oracle_2", "oracle_2"]

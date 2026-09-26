@@ -147,6 +147,7 @@ async def validate_declared_binding(
     expected_base_digest: str | None = None,
     timeout_seconds: int = BINDING_ADMISSION_TIMEOUT_SECONDS,
     run_options: Mapping[str, Any] | None = None,
+    base_run_cache: dict[str, BindingAdmission] | None = None,
 ) -> DeclaredBindingResult:
     """Validate one worker-declared binding for an oracle check.
 
@@ -157,6 +158,10 @@ async def validate_declared_binding(
     the admission's ``base_tree_digest``); a mismatch is indeterminate.
     ``run_options`` are passed to ``admit_binding`` (for example ``env`` and
     ``interpreter`` where the admission executor accepts them).
+    ``base_run_cache`` keeps one base run per (check, binding): a caller that
+    validates the same late binding again (a later repair attempt, then the
+    final verification) reuses it, so each late binding has exactly one base
+    run, with no retry after a timeout.
     """
     oracle = package.oracle_for(check_id)
     if oracle is None:
@@ -182,14 +187,19 @@ async def validate_declared_binding(
                 }
             )
         )
-    admission = await admit_binding(
-        package,
-        check_id,
-        validation.binding,
-        base,
-        timeout_seconds=timeout_seconds,
-        **dict(run_options or {}),
-    )
+    key = f"{check_id}:{json.dumps(validation.binding.to_dict(), sort_keys=True)}"
+    admission = (base_run_cache or {}).get(key)
+    if admission is None:
+        admission = await admit_binding(
+            package,
+            check_id,
+            validation.binding,
+            base,
+            timeout_seconds=timeout_seconds,
+            **dict(run_options or {}),
+        )
+        if base_run_cache is not None:
+            base_run_cache[key] = admission
     if admission.valid:
         return DeclaredBindingResult(
             validation.model_copy(update={"reason": admission.reason}), admission
@@ -217,6 +227,7 @@ async def assign_tiers(
     admitted_tiers: Mapping[str, str] | None = None,
     timeout_seconds: int = BINDING_ADMISSION_TIMEOUT_SECONDS,
     run_options: Mapping[str, Any] | None = None,
+    base_run_cache: dict[str, BindingAdmission] | None = None,
 ) -> tuple[dict[str, TierAssignment], dict[str, DeclaredBindingResult]]:
     """Tier and binding for every check, after the worker has stopped.
 
@@ -268,6 +279,7 @@ async def assign_tiers(
                     expected_base_digest=expected_base_digest,
                     timeout_seconds=timeout_seconds,
                     run_options=run_options,
+                    base_run_cache=base_run_cache,
                 )
             results[check.check_id] = result
         assignment = assign_tier(

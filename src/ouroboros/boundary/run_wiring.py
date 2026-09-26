@@ -414,6 +414,7 @@ async def verify_check_package(
     candidate_checkout: Path,
     settings: CheckPackageSettings,
     declared_entry_points: Mapping[str, Sequence[Any]] | None = None,
+    base_run_cache: dict[str, Any] | None = None,
 ) -> BoundaryVerdict:
     """Bind, then run the unchanged package on the candidate; record everything.
 
@@ -456,6 +457,7 @@ async def verify_check_package(
         expected_base_digest=state.admission.base_tree_digest,
         admitted_tiers=state.admission.check_tiers,
         run_options={"env": run_options["env"], "interpreter": run_options["interpreter"]},
+        base_run_cache=base_run_cache,
     )
     await ledger.record_bindings(
         state.boundary_id,
