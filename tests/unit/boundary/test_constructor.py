@@ -94,7 +94,7 @@ def _constructor(runtime: FakeRuntime, created: list[dict[str, Any]], **kwargs: 
         model="gpt-test",
         runtime_factory=factory,
         system_prompt="SYSTEM",
-        **kwargs,
+        **{"per_criterion": False, **kwargs},
     )
 
 

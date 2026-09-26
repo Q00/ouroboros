@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 import inspect
 import json
 from pathlib import Path
@@ -38,6 +38,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ouroboros.boundary.incremental import construct_pieces, merge_pieces
+from ouroboros.boundary.oracle import is_oracle_file
+from ouroboros.boundary.oracle_build import assemble_package, build_oracle_spec
 from ouroboros.boundary.package import (
     AssertionLink,
     CheckPackage,
@@ -45,7 +48,6 @@ from ouroboros.boundary.package import (
     CheckRole,
     CheckSpec,
     PackageFile,
-    UncoveredObligation,
     canonical_json_bytes,
     seed_criterion_keys,
     seed_digest,
@@ -98,8 +100,14 @@ def _criterion_lines(seed: Seed) -> list[str]:
     return lines
 
 
-def build_constructor_prompt(seed: Seed, feedback: Sequence[str] = ()) -> str:
-    """Render the user message: goal, constraints, numbered criteria, feedback."""
+def build_constructor_prompt(
+    seed: Seed, feedback: Sequence[str] = (), *, criterion: int | None = None
+) -> str:
+    """Render the user message: goal, constraints, numbered criteria, feedback.
+
+    With ``criterion`` (1-based) the message asks for that criterion only;
+    the other criteria are shown for context.
+    """
     parts = [
         "Repository: the current working directory (read-only copy of the base).",
         "",
@@ -113,6 +121,13 @@ def build_constructor_prompt(seed: Seed, feedback: Sequence[str] = ()) -> str:
             "",
             "An earlier package for this Seed was not admitted on the base. Reasons:",
             *(f"- {reason}" for reason in feedback),
+        ]
+    if criterion is not None:
+        parts += [
+            "",
+            f"Write the oracle (or script check, or uncovered entry) for criterion {criterion} "
+            "only; the other criteria are context. Use check ids that start with "
+            f"`c{criterion}_`.",
         ]
     parts += ["", "Reply with the JSON object only."]
     return "\n".join(parts)
@@ -167,6 +182,8 @@ def _criterion_key(keys: Sequence[str], raw: object, where: str) -> str:
 def _check_file_path(raw: object) -> str:
     if not isinstance(raw, str) or not raw.startswith(f"{CHECK_DIR}/"):
         raise CheckPackageError(f"check files must live under {CHECK_DIR}/: {raw!r}")
+    if is_oracle_file(raw):
+        raise CheckPackageError(f"the oracle directory is reserved for product files: {raw!r}")
     return raw
 
 
@@ -177,15 +194,41 @@ def package_from_reply(
     input_digest: str,
     generator: str,
     generated_at: datetime | None = None,
+    base_checkout: Path | None = None,
 ) -> CheckPackage:
     """Map the constructor's JSON reply onto a ``CheckPackage`` for ``seed``.
 
-    Criteria the reply neither links nor lists are added as uncovered with
-    reason ``constructor_omitted``. Raises ``CheckPackageError`` on any schema
-    problem, so the caller records a construction failure.
+    ``oracles`` become frozen oracle checks run by the product harness
+    (``boundary/oracle.py``); ``checks`` are model-written scripts. Criteria
+    the reply neither links nor lists are added as uncovered with reason
+    ``constructor_omitted``. ``base_checkout`` decides whether each oracle's
+    default binding resolves (tier ``A``). Raises ``CheckPackageError`` on any
+    schema problem, so the caller records a construction failure.
     """
     keys = seed_criterion_keys(seed)
     try:
+        oracles = []
+        for raw in reply.get("oracles") or ():
+            number = raw.get("criterion")
+            _criterion_key(keys, number, "oracle")
+            check_id = str(raw.get("check_id") or f"oracle_{number}")
+            if not _CHECK_ID.fullmatch(check_id):
+                raise CheckPackageError(f"invalid check_id: {check_id!r}")
+            oracles.append(
+                (
+                    build_oracle_spec(
+                        seed,
+                        criterion_index=number - 1,
+                        check_id=check_id,
+                        call_kind=str(raw.get("call_kind") or "function"),
+                        params=tuple(str(name) for name in raw.get("params") or ()),
+                        default_binding=dict(raw.get("default_binding") or {}),
+                        cases=list(raw.get("cases") or ()),
+                        base_checkout=base_checkout,
+                    ),
+                    CheckRole(str(raw.get("role"))),
+                )
+            )
         files = tuple(
             PackageFile.from_content(_check_file_path(item.get("path")), str(item["content"]))
             for item in reply.get("files") or ()
@@ -245,21 +288,17 @@ def package_from_reply(
             key = _criterion_key(keys, raw.get("criterion"), "uncovered")
             if key not in linked:
                 uncovered[key] = str(raw.get("reason") or "unspecified").strip() or "unspecified"
-        for key in keys:
-            if key not in linked and key not in uncovered:
-                uncovered[key] = "constructor_omitted"
-        return CheckPackage(
-            seed_digest=seed_digest(seed),
-            criterion_keys=keys,
+        linked |= {spec.criterion_key for spec, _role in oracles}
+        uncovered = {key: reason for key, reason in uncovered.items() if key not in linked}
+        return assemble_package(
+            seed,
             input_digest=input_digest,
-            generated_at=generated_at or datetime.now(UTC),
             generator=generator,
-            checks=tuple(checks),
-            files=files,
-            uncovered=tuple(
-                UncoveredObligation(criterion_key=key, reason=reason)
-                for key, reason in uncovered.items()
-            ),
+            oracles=oracles,
+            script_checks=checks,
+            script_files=files,
+            uncovered=uncovered,
+            generated_at=generated_at,
         )
     except (ValidationError, ValueError, KeyError, TypeError, AttributeError) as exc:
         if isinstance(exc, CheckPackageError):
@@ -290,6 +329,8 @@ class CheckConstructor:
         timeout_seconds: int = DEFAULT_CONSTRUCTOR_TIMEOUT_SECONDS,
         max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
         system_prompt: str | None = None,
+        per_criterion: bool = True,
+        concurrency: int = 3,
     ) -> None:
         self._backend = runtime_backend
         self._model = model
@@ -297,6 +338,13 @@ class CheckConstructor:
         self._timeout = timeout_seconds
         self._max_output_chars = max_output_chars
         self._system_prompt = system_prompt
+        self._per_criterion = per_criterion
+        self._concurrency = concurrency
+        self._partial_dir: Path | None = None
+
+    def persist_partials_to(self, directory: Path | None) -> None:
+        """Write each criterion's reply under ``directory`` as it is produced."""
+        self._partial_dir = directory
 
     @property
     def generator(self) -> str:
@@ -355,7 +403,14 @@ class CheckConstructor:
         *,
         feedback: Sequence[str] = (),
     ) -> ConstructionOutcome:
-        """Run one attempt and return a package or a typed failure reason."""
+        """Run one attempt and return a package or a typed failure reason.
+
+        By default (``per_criterion``) the attempt is incremental: one call
+        per criterion under one shared deadline, each reply kept as produced
+        (``boundary/incremental.py``).
+        """
+        if self._per_criterion:
+            return await self._construct_incremental(seed, base_checkout, feedback=feedback)
         system_prompt = self._system_prompt or load_constructor_system_prompt()
         user_prompt = build_constructor_prompt(seed, feedback)
         base = base_checkout.resolve()
@@ -420,6 +475,7 @@ class CheckConstructor:
                 seed,
                 input_digest=input_digest,
                 generator=generator,
+                base_checkout=base,
             )
         except CheckPackageError as exc:
             return failed(f"constructor_reply_invalid:{exc}", reply_sha)
@@ -431,4 +487,91 @@ class CheckConstructor:
                 # package to decide, and regenerating would not change that.
                 return failed(ALL_CRITERIA_UNCOVERED, reply_sha)
             return failed("constructor_produced_no_checks", reply_sha)
+        return ConstructionOutcome(package, None, input_digest, generator, reply_sha)
+
+    async def _construct_incremental(
+        self,
+        seed: Seed,
+        base_checkout: Path,
+        *,
+        feedback: Sequence[str] = (),
+    ) -> ConstructionOutcome:
+        system_prompt = self._system_prompt or load_constructor_system_prompt()
+        base = base_checkout.resolve()
+        base_before = await asyncio.to_thread(tree_digest, base)
+
+        def input_digest_for(prompt: str, generator: str) -> str:
+            return constructor_input_digest(
+                seed,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                base_tree_digest=base_before,
+                generator=generator,
+            )
+
+        def validate(piece: dict[str, Any]) -> None:
+            package_from_reply(
+                piece,
+                seed,
+                input_digest="0" * 64,
+                generator="validation",
+                base_checkout=base,
+            )
+
+        scratch = Path(tempfile.mkdtemp(prefix="ouroboros-constructor-"))
+        try:
+            view = scratch / "repo"
+            await asyncio.to_thread(copy_checkout, base, view)
+            pieces = await construct_pieces(
+                self,
+                seed,
+                view,
+                system_prompt=system_prompt,
+                prompt_for=lambda number: build_constructor_prompt(
+                    seed, feedback, criterion=number
+                ),
+                input_digest_for=input_digest_for,
+                extract=extract_json_object,
+                validate=validate,
+                partial_dir=self._partial_dir,
+                concurrency=self._concurrency,
+                tools=CONSTRUCTOR_TOOLS,
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        digests = [piece.input_digest for piece in pieces if piece.input_digest]
+        input_digest = sha256_bytes(canonical_json_bytes({"per_criterion": digests}))
+        generator = next(
+            (piece.generator for piece in pieces if piece.status == "ok" and piece.generator),
+            next((piece.generator for piece in pieces if piece.generator), self.generator),
+        )
+        reply_sha = sha256_bytes(canonical_json_bytes([piece.reply_sha256 for piece in pieces]))
+
+        def failed(reason: str) -> ConstructionOutcome:
+            return ConstructionOutcome(None, reason, input_digest, generator, reply_sha)
+
+        if await asyncio.to_thread(tree_digest, base) != base_before:
+            return failed("constructor_mutated_base")
+        if not any(piece.status == "ok" for piece in pieces):
+            if all(piece.status == "timeout" for piece in pieces):
+                return failed("constructor_timeout")
+            first = next(piece for piece in pieces if piece.status != "ok")
+            return failed(first.reason or "constructor_failed")
+        merged, _missing = merge_pieces(pieces)
+        try:
+            package = package_from_reply(
+                merged,
+                seed,
+                input_digest=input_digest,
+                generator=generator,
+                base_checkout=base,
+            )
+        except CheckPackageError as exc:
+            return failed(f"constructor_reply_invalid:{exc}")
+        if not package.checks:
+            if package.uncovered and all(
+                item.reason != "constructor_omitted" for item in package.uncovered
+            ):
+                return failed(ALL_CRITERIA_UNCOVERED)
+            return failed("constructor_produced_no_checks")
         return ConstructionOutcome(package, None, input_digest, generator, reply_sha)
