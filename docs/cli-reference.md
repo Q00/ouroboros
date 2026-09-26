@@ -466,6 +466,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). Default: `OUROBOROS_CHECK_PACKAGE`, then `boundary.check_package` in config, then this installation's randomized default (`off` when telemetry is off; see [TELEMETRY.md](../TELEMETRY.md#randomized-defaults)). The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and credential-like environment variables removed, but without an OS sandbox, so they can read files you can read and use the network. The same switch applies to `ooo run` from a plugin host (`ouroboros_execute_seed`). |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
@@ -488,6 +489,10 @@ ouroboros run seed.yaml --resume orch_abc123
 
 # Skip post-execution QA
 ouroboros run seed.yaml --no-qa
+
+# Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# or boundary.check_package: off in ~/.ouroboros/config.yaml)
+ouroboros run seed.yaml --no-check-package
 
 # Debug output
 ouroboros run seed.yaml --debug
