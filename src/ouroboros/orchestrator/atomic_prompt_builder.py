@@ -273,6 +273,13 @@ class AtomicPromptBuilder:
                 "wrapper. Do not prefix it with [TASK_COMPLETE] or any prose; the "
                 "harness decides success from typed evidence plus the verifier PASS."
             )
+            interfaces = getattr(executor, "check_package_interfaces", None)
+            if interfaces is not None:
+                # Check package on: ask for the optional entry_points evidence.
+                from ouroboros.boundary.binding import entry_points_request
+
+                root_index = parent_ac_index if is_sub_ac else ac_index
+                completion_instruction += entry_points_request(interfaces.get(root_index))
         else:
             completion_instruction = (
                 "Use the available tools to accomplish this task. Report your progress "

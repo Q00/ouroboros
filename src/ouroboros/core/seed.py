@@ -376,6 +376,11 @@ regression test.
 """
 
 
+def format_ambiguity_score(score: float | None) -> str:
+    """Render ``SeedMetadata.ambiguity_score`` for display; ``None`` is "unavailable"."""
+    return "unavailable" if score is None else f"{score:.2f}"
+
+
 class SeedMetadata(BaseModel, frozen=True):
     """Metadata about the Seed generation.
 
@@ -383,7 +388,10 @@ class SeedMetadata(BaseModel, frozen=True):
         seed_id: Unique identifier for this seed.
         version: Schema version for forward compatibility.
         created_at: When this seed was generated.
-        ambiguity_score: The ambiguity score at generation time.
+        ambiguity_score: The ambiguity score at generation time. ``None``
+            records that no score was available (for example a Seed built
+            outside the interview); consumers must treat it as unavailable
+            and never substitute a number.
         gate_forced: Whether Gen-1 generation bypassed the ambiguity gate with
             ``force=True``. ``None`` means the historical or non-Gen-1 path
             did not record a gate decision.
@@ -421,7 +429,7 @@ class SeedMetadata(BaseModel, frozen=True):
     seed_id: str = Field(default_factory=lambda: f"seed_{uuid4().hex[:12]}")
     version: str = Field(default="1.0.0")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    ambiguity_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    ambiguity_score: float | None = Field(default=0.15, ge=0.0, le=1.0)
     gate_forced: bool | None = Field(default=None)
     interview_id: str | None = Field(default=None)
     parent_seed_id: str | None = Field(default=None)

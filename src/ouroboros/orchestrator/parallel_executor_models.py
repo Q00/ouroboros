@@ -103,6 +103,11 @@ class ACExecutionResult:
     # messages that are intentionally not persisted.
     context_summary: ACContextSummary | None = None
     conflict_files: tuple[str, ...] | None = None
+    # Check-package repair (set only when the check package is on): the
+    # counterexample text for the retry prompt, and the failure class that
+    # drives the retry kill criterion instead of the advisory legacy class.
+    check_package_repair: str | None = None
+    check_package_failure_class: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

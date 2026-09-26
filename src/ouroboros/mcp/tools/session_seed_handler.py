@@ -15,6 +15,7 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.session_seed import build_session_context_seed
+from ouroboros.core.seed import format_ambiguity_score
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -81,7 +82,7 @@ def handle_session_context_seed(
         "Seed Generated Successfully (interview-less)\n"
         "============================================\n"
         f"Seed ID: {seed.metadata.seed_id}\n"
-        f"Ambiguity Score: {seed.metadata.ambiguity_score:.2f} "
+        f"Ambiguity Score: {format_ambiguity_score(seed.metadata.ambiguity_score)} "
         "(conservative ceiling — gate was structural, not scored)\n"
         f"Goal: {seed.goal}\n\n"
         "--- Seed YAML ---\n"

@@ -63,6 +63,13 @@ class EvidenceSchema(BaseModel):
             "PR will define an evaluator."
         ),
     )
+    optional: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Evidence field names a leaf result may include. They are kept on the "
+            "scoped record but never required (e.g. 'entry_points')."
+        ),
+    )
 
 
 class ExecutionProfile(BaseModel):

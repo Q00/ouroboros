@@ -156,6 +156,7 @@ url = "http://127.0.0.1:12000/mcp"
 | `drift` | `DriftConfig` | Drift monitoring thresholds |
 | `runtime_controls` | `RuntimeControlsConfig` | Long-running workflow liveness and progress controls |
 | `logging` | `LoggingConfig` | Log level, path, and verbosity |
+| `boundary` | `BoundaryConfig` | Check package boundary of `ooo run` (a randomized default) |
 
 ---
 
@@ -404,6 +405,37 @@ rejects runs with enabled project guidance.
 
 ---
 
+## `boundary`
+
+The check package boundary of `ooo run` (CLI and `ouroboros_execute_seed`):
+before the worker starts, a read-only model call writes executable checks for
+the acceptance criteria; the package is admitted only if every check behaves
+as declared on the current tree. After the worker stops, the package decides
+the criteria it covers, before the session's terminal status is recorded; the
+existing verifier's verdict is kept as advisory for those criteria and decides
+the others.
+
+```yaml
+boundary:
+  check_package: off              # on | off; unset = randomized default
+  constructor_timeout_seconds: 600
+  check_timeout_seconds: 120
+  max_construction_attempts: 2
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `check_package` | `"on"` \| `"off"` \| unset | unset | `on` or `off` fixes the behavior for every run. Unset uses this installation's randomized arm, which is `off` when telemetry is disabled (see [TELEMETRY.md](../TELEMETRY.md#randomized-defaults)). `--check-package/--no-check-package` and `OUROBOROS_CHECK_PACKAGE` take precedence, in that order. A bare YAML `on`/`off` is accepted. |
+| `constructor_timeout_seconds` | `int` (30..3600) | `600` | Wall-clock budget of one constructor call. |
+| `check_timeout_seconds` | `int` (5..1800) | `120` | Per-check timeout during admission and verification. |
+| `max_construction_attempts` | `int` (1..5) | `2` | Package versions tried before the worker starts; a version that is not admitted is superseded by the next. |
+
+Checks are model-written Python scripts. They run on throwaway copies of the
+project, with the project's virtualenv interpreter when one is found (else
+`python3`), a per-check timeout, and only an allowlist of environment variables
+(no credentials). There is no OS sandbox: a check can read files you can read
+and use the network. A project `.env` cannot set `OUROBOROS_CHECK_PACKAGE`.
+
 ## `resilience`
 
 Controls Phase 3 — stagnation detection and lateral thinking.
@@ -649,6 +681,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
+| `OUROBOROS_CHECK_PACKAGE` | `boundary.check_package` | `on` or `off` for the `ooo run` check package boundary; overrides config and the randomized default, and is overridden by `--check-package/--no-check-package`. Not accepted from a project `.env`. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow

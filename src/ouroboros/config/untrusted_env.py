@@ -220,6 +220,10 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Onboarding attribution is an analytics boundary. A cloned repo must
         # not rewrite the surface label used to compare activation cohorts.
         "OUROBOROS_FIRST_COMMAND_SURFACE",
+        # Randomized-default override (boundary/rollout.py): a cloned repo must
+        # not pick the check-package arm, which both changes what runs (model-
+        # written checks execute) and would mislabel the arm's telemetry.
+        "OUROBOROS_CHECK_PACKAGE",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

@@ -209,6 +209,10 @@ _EXTENSION_TOOL_NAME = "ouroboros_extension_tool"
 
 _JOB_FUNNEL: dict[str, str] = {
     "execute_seed": "run",
+    # The CLI ``ooo run`` records its terminal outcome under this job type
+    # (cli/commands/run.py:_record_cli_run_outcome); without it the CLI rows
+    # folded to ``extension_job`` instead of counting as ``run``.
+    "run": "run",
     "evolve_step": "evolve",
     "auto": "auto",
     "evaluate": "evaluate",
@@ -281,6 +285,16 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "verified",
         "failure_reason_code",
         "failure_cause",
+        "check_package_arm",
+        "check_package_assignment",
+        "check_package_status",
+        "package_verdict",
+        "legacy_verdict",
+        "reconciliation",
+        "legacy_failure_class",
+        "legacy_failure_class_count",
+        "unverified_count",
+        "check_tier_summary",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -288,6 +302,53 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "ci",
     }
 )
+# Check-package rollout dimensions on a ``command=run`` workflow_outcome
+# (TELEMETRY.md, "What is sent"). Producer: ouroboros/boundary/rollout.py,
+# which builds the values into the run's result_meta. Every key has a closed
+# value set; a value outside it is dropped here, except
+# ``legacy_failure_class``, which folds to ``other``. The failure classes are
+# ``orchestrator/failure_taxonomy.FailureClass`` values, lower-cased (SSOT
+# pairing, checked by tests/unit/test_telemetry.py); edit both together.
+_LEGACY_FAILURE_CLASSES = frozenset(
+    {
+        "evidence_missing",
+        "evidence_form_mismatch",
+        "fabrication_suspected",
+        "scope_creep",
+        "stall",
+        "blocked",
+        "transcript_missing_infrastructure",
+    }
+)
+_CHECK_PACKAGE_PROPERTY_VALUES: dict[str, frozenset[str]] = {
+    "check_package_arm": frozenset({"on", "off"}),
+    "check_package_assignment": frozenset(
+        {"randomized", "user_forced_on", "user_forced_off", "fallback"}
+    ),
+    "check_package_status": frozenset({"admitted", "rejected", "construction_failed", "not_run"}),
+    "package_verdict": frozenset({"pass", "fail", "indeterminate", "unverified", "none"}),
+    "legacy_verdict": frozenset({"accept", "reject", "none"}),
+    "reconciliation": frozenset(
+        {
+            "agree",
+            "package_accepted_over_legacy_reject",
+            "package_rejected_over_legacy_accept",
+            "fallback_to_legacy",
+            "none",
+        }
+    ),
+    "legacy_failure_class": _LEGACY_FAILURE_CLASSES | {"none", "accepted", "other"},
+    "legacy_failure_class_count": frozenset({"0", "1", "2", "3+"}),
+    "unverified_count": frozenset({"0", "1", "2", "3+"}),
+    # "A:<n>,A_prime:<n>,U:<n>" with each n in 0, 1, 2, 3+ (64 values).
+    "check_tier_summary": frozenset(
+        f"A:{a},A_prime:{b},U:{u}"
+        for a in ("0", "1", "2", "3+")
+        for b in ("0", "1", "2", "3+")
+        for u in ("0", "1", "2", "3+")
+    ),
+}
+_OTHER_LEGACY_FAILURE_CLASS = "other"
 _SERVICE_ACTIVE_KEYS = frozenset(
     {
         "service",
@@ -805,6 +866,32 @@ def distinct_id() -> str:
     return str(state["distinct_id"])
 
 
+def rollout_identity() -> str | None:
+    """The anonymous ID a randomized product default may be keyed on, or None.
+
+    Read-only: unlike ``distinct_id`` it never mints, repairs, or writes
+    telemetry.json. Returns None when telemetry is disabled, when no valid
+    identity exists on disk, or when the installation has not been shown the
+    current notice (``notice_version``), because that notice is what discloses
+    randomized defaults. Never raises.
+    """
+    try:
+        if not is_enabled():
+            return None
+        with _lock:
+            cached = _state_cache
+        state = cached if cached is not None else _read_valid_state(_state_path())
+        if state is None:
+            return None
+        if state.get("notice_shown") is not True:
+            return None
+        if _recorded_notice_version(state) < _NOTICE_VERSION:
+            return None
+        return str(state["distinct_id"])
+    except Exception:
+        return None
+
+
 def _is_allowed_scalar(value: Any) -> bool:
     """Whether a property value is a plain scalar within the size bound.
 
@@ -1188,9 +1275,29 @@ def capture_job_outcome(
                 properties["failure_cause"] = (
                     raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
                 )
+        if command == "run":
+            properties.update(_check_package_properties(meta))
         capture("workflow_outcome", properties)
     except Exception:
         pass
+
+
+def _check_package_properties(meta: dict[str, Any]) -> dict[str, str]:
+    """Fold producer-supplied check-package dimensions to their closed sets.
+
+    Only values the run's producer stamped are forwarded; nothing is derived
+    here, so a run whose producer did not stamp them carries none of them.
+    """
+    properties: dict[str, str] = {}
+    for key, allowed in _CHECK_PACKAGE_PROPERTY_VALUES.items():
+        value = meta.get(key)
+        if not isinstance(value, str):
+            continue
+        if value in allowed:
+            properties[key] = value
+        elif key == "legacy_failure_class":
+            properties[key] = _OTHER_LEGACY_FAILURE_CLASS
+    return properties
 
 
 def capture_cli_command(subcommand: str | None) -> None:
@@ -1224,11 +1331,33 @@ def capture_cli_command(subcommand: str | None) -> None:
 
 _NOTICE = (
     "Ouroboros collects anonymous usage data (commands, versions, success rates - "
-    "never code, prompts, or file contents) to guide improvements and to publish "
-    "aggregate adoption stats.\n"
+    "never code, prompts, or file contents) to guide improvements, to compare "
+    "randomized product defaults, and to publish aggregate statistics, including "
+    "in research publications.\n"
     "Opt out anytime: export OUROBOROS_TELEMETRY=0  |  details: "
     "https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
 )
+
+# Version of the disclosure above; it equals the latest TELEMETRY.md changelog
+# entry that required a fresh notice. ``notice_version`` in telemetry.json
+# records the version a user was last shown. A state whose recorded version is
+# older (or missing, as in every file written before versioning existed) shows
+# the notice once more, so a scope expansion is disclosed to existing installs
+# and not only to new ones. scripts/install.sh carries the same number
+# (``TELEMETRY_NOTICE_VERSION``); edit both together.
+_NOTICE_VERSION = 4
+
+
+def _recorded_notice_version(state: dict[str, Any]) -> int:
+    """The notice version a state records; anything but a real int reads as 0.
+
+    Same fail-toward-disclosure rule as ``notice_shown``: a missing, string,
+    bool, or otherwise corrupted value means "not shown at this version".
+    """
+    value = state.get("notice_version")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 _NOTICE_MARKER_STALE_SECONDS = 10.0
@@ -1300,6 +1429,9 @@ def show_first_run_notice() -> None:
     never actually persisted would be the same silent-non-disclosure
     failure mode this function exists to avoid.
 
+    The notice also prints once more when the state's ``notice_version`` is
+    older than ``_NOTICE_VERSION`` (see ``_recorded_notice_version``).
+
     ``state.get("notice_shown")`` below is a plain truthiness check, which
     is safe because _validate_state (and every candidate constructor --
     _fresh_candidate, _build_repair_candidate) guarantees the field is
@@ -1313,8 +1445,11 @@ def show_first_run_notice() -> None:
         state = _load_state()
         if state is None:
             return
-        if state.get("notice_shown"):
+        if state.get("notice_shown") and _recorded_notice_version(state) >= _NOTICE_VERSION:
             return
+        # A marker left by an earlier notice version is older than
+        # _NOTICE_MARKER_STALE_SECONDS, so the stale-reclaim path below lets
+        # exactly one process re-display the updated notice.
         marker_path = _state_path().with_name("telemetry.notice")
         if not _claim_notice_marker(marker_path):
             return
@@ -1323,6 +1458,7 @@ def show_first_run_notice() -> None:
 
         print(f"\n{_NOTICE}\n", file=sys.stderr)
         state["notice_shown"] = True
+        state["notice_version"] = _NOTICE_VERSION
         _write_state(state)
     except Exception:
         pass
@@ -1348,6 +1484,7 @@ __all__ = [
     "capture_tool_call",
     "distinct_id",
     "flush",
+    "rollout_identity",
     "is_enabled",
     "set_context",
     "capture_subagent_dispatch",

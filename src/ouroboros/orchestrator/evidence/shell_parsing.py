@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 
@@ -31,6 +32,10 @@ def _test_command_invocation(command: str) -> str | None:
     if not normalized:
         return None
 
+    leading_cd = _split_leading_cd(normalized)
+    if leading_cd is not None:
+        return _test_invocation_from_prefix(leading_cd[1])
+
     direct_candidate = _strip_command_output_plumbing(normalized)
     if (
         _has_trailing_output_filter_pipeline(normalized)
@@ -52,6 +57,50 @@ def _test_command_invocation(command: str) -> str | None:
     # wrapper, so look one layer further. Recursion ends when the body is no
     # longer a shell ``-c`` form.
     return _test_command_invocation(body)
+
+
+# Characters that give a bare ``cd <dir> && <cmd>`` any shell meaning beyond
+# "change directory, then run one command". The single ``&&`` is checked
+# separately; any other control operator, redirection, substitution, grouping,
+# or line break keeps the command unrecognized.
+_LEADING_CD_FORBIDDEN_CHARACTERS = frozenset("`$;|<>(){}\n\r")
+
+
+def _split_leading_cd(command: str) -> tuple[str, str] | None:
+    """Return ``(relative_dir, remainder)`` for ``cd <relative-dir> && <cmd>``.
+
+    Recognized only when the whole text is exactly one ``cd`` with one
+    workspace-relative directory, one standalone ``&&`` token, and a remainder
+    free of shell operators. A second ``&&``, ``;``, ``||``, a pipe (including
+    ``| tail``), a redirection, or an absolute, home-relative, or ``..``
+    directory returns None, so such text stays unrecognized as before.
+    """
+    text = command.strip()
+    if text.count("&") != 2 or "&&" not in text:
+        return None
+    if any(char in _LEADING_CD_FORBIDDEN_CHARACTERS for char in text):
+        return None
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if len(parts) < 4 or parts[0] != "cd" or parts[2] != "&&":
+        return None
+    if not _is_workspace_relative_directory(parts[1]):
+        return None
+    remainder = text.split("&&", 1)[1].strip()
+    if not remainder:
+        return None
+    return parts[1], remainder
+
+
+def _is_workspace_relative_directory(value: str) -> bool:
+    """Return True for a lexically workspace-confined relative directory."""
+    if not value or value[0] in {"/", "~", "-"}:
+        return False
+    if any(char in value for char in "\\*?["):
+        return False
+    return ".." not in PurePosixPath(value).parts
 
 
 def _test_command_invocation_allowing_output_plumbing(command: str) -> str | None:
@@ -590,6 +639,8 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         and parts[2] in {"pytest", "unittest"}
     ):
         return _normalized_evidence_text(" ".join(parts))
+    if _is_django_test_subcommand(parts) or _project_test_runner_script(parts) is not None:
+        return _normalized_evidence_text(" ".join(parts))
     executable = Path(parts[0]).name
     if (
         executable in {"gradle", "gradlew", "mvn", "mvnw"}
@@ -597,6 +648,65 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         and any(part in {"test", "check", "verify"} or part.endswith(":test") for part in parts[1:])
     ):
         return _normalized_evidence_text(" ".join(parts))
+    return None
+
+
+def _is_django_test_subcommand(parts: Sequence[str]) -> bool:
+    """Return True for Django's installed ``test`` management command.
+
+    ``django-admin test`` and ``python -m django test``: the executable or
+    module is Django itself and the subcommand, which Django reads from the
+    first argument, is ``test``. Like ``pytest``, the program comes from the
+    environment, so the executable must be the bare name.
+    """
+    if len(parts) >= 2 and parts[0] == "django-admin" and parts[1] == "test":
+        return True
+    return (
+        len(parts) >= 4
+        and _is_python_executable(parts[0])
+        and parts[1:4] == ["-m", "django", "test"]
+    )
+
+
+def _project_test_runner_script(parts: Sequence[str]) -> str | None:
+    """Return the script token when argv runs a project's own test-runner script.
+
+    Recognized by the script's name (and subcommand), never by substring:
+
+    - ``runtests.py`` (Django's ``tests/runtests.py``);
+    - ``manage.py test`` (a Django project's test command);
+    - ``bin/test`` and ``bin/doctest`` (SymPy); the last two path components
+      must be exactly ``bin/test`` or ``bin/doctest`` and the path must be
+      relative, because a bare or absolute ``test`` is the shell builtin or
+      ``/usr/bin/test``.
+
+    The script is either the first argument of a Python interpreter
+    (``python tests/runtests.py``) or argv[0] given as a path
+    (``./tests/runtests.py``); a bare argv[0] would be a PATH lookup, not the
+    project's file. Re-execution additionally requires the script to be a
+    regular file inside the workspace, as an inline program's imported module
+    must be a workspace file to anchor anything.
+    """
+    if len(parts) >= 2 and _is_python_executable(parts[0]):
+        index = 1
+    elif parts and "/" in parts[0]:
+        index = 0
+    else:
+        return None
+    script = parts[index]
+    if not script or script.startswith("-") or "\\" in script:
+        return None
+    path = PurePosixPath(script)
+    if path.name == "runtests.py":
+        return script
+    if path.name == "manage.py":
+        return script if len(parts) > index + 1 and parts[index + 1] == "test" else None
+    if (
+        path.parts[-2:] in {("bin", "test"), ("bin", "doctest")}
+        and not path.is_absolute()
+        and ".." not in path.parts
+    ):
+        return script
     return None
 
 

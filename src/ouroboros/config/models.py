@@ -803,6 +803,39 @@ class SeedConfig(BaseModel, frozen=True):
     verify_command_gate: Literal["warn", "block"] = "warn"
 
 
+class BoundaryConfig(BaseModel, frozen=True):
+    """Pre-dispatch check package for ``ooo run`` (a randomized default).
+
+    Attributes:
+        check_package: ``on`` makes a new ``ooo run`` construct a check package
+            from the Seed's acceptance criteria before the worker starts, admit
+            it on the base checkout, and verify the finished workspace against
+            it. ``off`` leaves the run path unchanged. Unset (default) uses the
+            installation's randomized arm, which is ``off`` without telemetry
+            (``ouroboros.boundary.rollout``).
+        constructor_timeout_seconds: Wall-clock budget of one read-only
+            constructor model call.
+        check_timeout_seconds: Per-check command timeout during admission and
+            candidate verification.
+        max_construction_attempts: Package versions tried before the worker
+            starts. A version that is not admitted is superseded by the next
+            one; 1 means no regeneration.
+    """
+
+    check_package: Literal["off", "on"] | None = None
+    constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
+    check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    max_construction_attempts: int = Field(default=2, ge=1, le=5)
+
+    @field_validator("check_package", mode="before")
+    @classmethod
+    def _yaml_booleans(cls, value: Any) -> Any:
+        # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        return value
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -824,6 +857,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
         seed: Seed-authoring gates applied before execution
+        boundary: Pre-dispatch check package for ``ooo run`` (randomized default)
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -842,6 +876,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     seed: SeedConfig = Field(default_factory=SeedConfig)
+    boundary: BoundaryConfig = Field(default_factory=BoundaryConfig)
 
 
 def get_default_config() -> OuroborosConfig:

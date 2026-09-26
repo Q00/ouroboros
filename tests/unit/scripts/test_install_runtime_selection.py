@@ -1163,7 +1163,8 @@ def test_installer_canonicalizes_uppercase_uuid_in_valid_json(tmp_path: Path) ->
 
 _TELEMETRY_SHAPE_RE = re.compile(
     r'^\{"distinct_id": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", '
-    r'"created_at": "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "notice_shown": (?:true|false)\}\n$'
+    r'"created_at": "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "notice_shown": (?:true|false)'
+    r'(?:, "notice_version": \d+)?\}\n$'
 )
 _TELEMETRY_SKELETON_RE = re.compile(r'"distinct_id": "[^"]*"|"created_at": "[^"]*"')
 
@@ -1250,15 +1251,16 @@ def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_pat
     state_dir = tmp_path / "home" / ".ouroboros"
     state_dir.mkdir(parents=True)
     state = state_dir / "telemetry.json"
-    # notice_shown is pre-set to true: flipping it also needs a write, which
-    # this scenario cannot do, and that's an orthogonal concern from what
-    # this test is checking (event capture using the existing identity).
-    # This is also a literal top-level `true` fixture, so it doubles as the
-    # "notice correctly skipped, no duplicate" regression for the
-    # structural notice_shown check.
+    # notice_shown is pre-set to true at the current notice_version:
+    # flipping it also needs a write, which this scenario cannot do, and
+    # that's an orthogonal concern from what this test is checking (event
+    # capture using the existing identity). This is also a literal top-level
+    # `true` fixture, so it doubles as the "notice correctly skipped, no
+    # duplicate" regression for the structural notice_shown check.
     state.write_text(
         '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", '
-        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true}\n',
+        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true, '
+        f'"notice_version": {_installer_notice_version()}}}\n',
         encoding="utf-8",
     )
     state_dir.chmod(0o500)
@@ -1343,6 +1345,120 @@ def test_installer_shows_notice_when_top_level_value_is_a_string_not_bool(
 
     final_state = json.loads(state.read_text(encoding="utf-8"))
     assert final_state.get("notice_shown") is True
+
+
+def _installer_notice_version() -> int:
+    match = re.search(
+        r"^TELEMETRY_NOTICE_VERSION=(\d+)$", INSTALL_SH.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert match is not None, "TELEMETRY_NOTICE_VERSION not found in install.sh"
+    return int(match.group(1))
+
+
+def test_installer_redisplays_notice_for_state_without_notice_version(tmp_path: Path) -> None:
+    """A state written before notice versioning (``notice_shown: true`` and no
+    ``notice_version``) must see the updated notice once, and the installer
+    must record the version it showed so the next run stays quiet."""
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    top_level_uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    state.write_text(
+        f'{{"distinct_id": "{top_level_uuid}", "created_at": "2020-01-01T00:00:00Z", '
+        '"notice_shown": true}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+    assert "randomized product defaults" in result.stdout
+    final_state = json.loads(state.read_text(encoding="utf-8"))
+    assert final_state.get("notice_shown") is True
+    assert final_state.get("notice_version") == _installer_notice_version()
+    assert final_state.get("distinct_id") == top_level_uuid
+
+
+def test_installer_skips_notice_at_current_notice_version(tmp_path: Path) -> None:
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", '
+        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true, '
+        f'"notice_version": {_installer_notice_version()}}}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "state_text",
+    [
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "notice_shown": true}\n',
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "notice_shown": true, '
+        '"notice_version": 3}\n',
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "notice_shown":false}\n',
+    ],
+)
+def test_installer_notice_version_without_python3(tmp_path: Path, state_text: str) -> None:
+    """The NO_PYTHON3 fallback reads and writes ``notice_version`` with sed:
+    an older or missing version shows the notice and records the current
+    version, and a second call then stays quiet."""
+    home = tmp_path / "home"
+    state_dir = home / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(state_text, encoding="utf-8")
+    no_python_dir = _build_no_python3_path(tmp_path / "no-python-bin")
+    version_line = f"TELEMETRY_NOTICE_VERSION={_installer_notice_version()}\n"
+    driver = tmp_path / "notice-driver.sh"
+    driver.write_text(
+        "#!/bin/bash\nset -u\n"
+        + version_line
+        + _extract_function("_telemetry_distinct_id")
+        + _extract_function("_telemetry_notice")
+        + """
+BOLD=""
+RESET=""
+_telemetry_enabled() { return 0; }
+_blank() { :; }
+_say() { printf '%s\\n' "$*"; }
+_info() { printf '%s\\n' "$*"; }
+_telemetry_notice
+printf 'SECOND-CALL\\n'
+_telemetry_notice
+""",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+    run_env = os.environ.copy()
+    run_env["HOME"] = str(home)
+    run_env["PATH"] = no_python_dir
+    result = subprocess.run(
+        ["/bin/bash", str(driver)], env=run_env, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    first, _, second = result.stdout.partition("SECOND-CALL")
+    assert first.count("Anonymous usage stats help improve Ouroboros") == 1, result.stdout
+    assert "Anonymous usage stats" not in second, result.stdout
+    final_state = json.loads(state.read_text(encoding="utf-8"))
+    assert final_state["notice_shown"] is True
+    assert final_state["notice_version"] == _installer_notice_version()
 
 
 _HOSTILE_UNAME_SCRIPT = (
