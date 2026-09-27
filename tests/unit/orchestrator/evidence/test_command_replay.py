@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.config.exec_sandbox import EXEC_SANDBOX_ENV_VAR
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence import command_replay
 from ouroboros.orchestrator.evidence.command_replay import (
@@ -59,6 +60,8 @@ from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.leaf_dispatcher import LeafDispatcher, LeafDispatchState
 from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.runtime import exec_sandbox
+from ouroboros.runtime.exec_sandbox import SandboxBackend, SandboxUnavailableReason
 
 AC = "Fix add() in calc.py so the project's tests pass"
 PYTHON_BIN = str(Path(sys.executable).parent)
@@ -858,72 +861,126 @@ class TestDevRunStrings:
         assert verdict.passed is False
 
 
+def _require_real_sandbox() -> None:
+    reason = command_replay.replay_unavailable_reason()
+    if reason is not None:
+        pytest.skip(f"execution sandbox unavailable on this host: {reason}")
+
+
 class TestIsolationRecord:
-    async def test_no_replay_without_network_isolation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("backend", "unshare", "reason"),
+        [
+            (None, ("unshare", "--"), SandboxUnavailableReason.SANDBOX_UNAVAILABLE),
+            (SandboxBackend.LANDLOCK, None, SandboxUnavailableReason.NETWORK_ISOLATION_UNAVAILABLE),
+        ],
+    )
+    async def test_nothing_is_replayed_without_the_sandbox(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        real_replay_isolation: None,
+        backend: SandboxBackend | None,
+        unshare: tuple[str, ...] | None,
+        reason: SandboxUnavailableReason,
     ) -> None:
         workspace = _workspace(tmp_path / "ws")
         marker = workspace / "ran"
         _executable(workspace / "run_tests.sh", "#!/bin/sh\ntouch ran\n")
         candidate = replay_candidate("./run_tests.sh", str(workspace))
         assert candidate is not None
-        monkeypatch.setattr(command_replay, "network_isolation_prefix", lambda: None)
+        monkeypatch.setattr(exec_sandbox, "filesystem_backend", lambda: backend)
+        monkeypatch.setattr(exec_sandbox, "_process_has_only_loopback", lambda: False)
+        monkeypatch.setattr(exec_sandbox, "_unshare_prefix", lambda: unshare)
 
         runs = await replay_commands(
             (candidate,), workspace=str(workspace), env=dict(os.environ), timeout_seconds=30
         )
 
         assert runs == ()
-        assert command_replay.replay_unavailable_reason() == REPLAY_SKIPPED_NETWORK
+        assert command_replay.replay_unavailable_reason() == reason.value
         assert not marker.exists()
 
-    async def test_skip_is_recorded_and_claims_keep_transcript_rules(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("live", ["on", "off"])
+    async def test_the_sealed_sandbox_policy_wins_over_the_live_switch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: str
     ) -> None:
         workspace = _workspace(tmp_path / "ws")
-        monkeypatch.setattr(command_replay, "network_isolation_prefix", lambda: None)
+        marker = workspace / "ran"
+        _executable(workspace / "run_tests.sh", "#!/bin/sh\ntouch ran\n")
+        candidate = replay_candidate("./run_tests.sh", str(workspace))
+        assert candidate is not None
+        monkeypatch.setenv(EXEC_SANDBOX_ENV_VAR, live)
+        monkeypatch.setattr(exec_sandbox, "filesystem_backend", lambda: None)
+
+        sealed_on = await replay_commands(
+            (candidate,),
+            workspace=str(workspace),
+            env=dict(os.environ),
+            timeout_seconds=30,
+            sandbox_enabled=True,
+        )
+        sealed_off = await replay_commands(
+            (candidate,),
+            workspace=str(workspace),
+            env=dict(os.environ),
+            timeout_seconds=30,
+            sandbox_enabled=False,
+        )
+
+        # Sealed on without a backend: nothing runs, whatever the live switch says.
+        assert sealed_on == ()
+        assert command_replay.replay_unavailable_reason(True) == "sandbox_unavailable"
+        # Sealed off: the run was confined by nothing, and says so.
+        assert len(sealed_off) == 1 and not sealed_off[0].network_isolated
+        assert not marker.exists()
+
+    async def test_replay_cannot_write_through_inherited_stdin(self, tmp_path: Path) -> None:
+        """The controller's fd 0 (an MCP host's JSON-RPC stream) never reaches a replay."""
+        workspace = _workspace(tmp_path / "ws")
+        outside = tmp_path / "controller_stdin.txt"
+        outside.write_text("keep", encoding="utf-8")
+        _executable(workspace / "run_tests.sh", "#!/bin/sh\necho escaped >&0\nexit 0\n")
+        candidate = replay_candidate("./run_tests.sh", str(workspace))
+        assert candidate is not None
+        saved = os.dup(0)
+        stdin = os.open(outside, os.O_RDWR)
+        try:
+            os.dup2(stdin, 0)
+            runs = await replay_commands(
+                (candidate,), workspace=str(workspace), env=dict(os.environ), timeout_seconds=30
+            )
+        finally:
+            os.dup2(saved, 0)
+            os.close(saved)
+            os.close(stdin)
+
+        assert len(runs) == 1
+        assert outside.read_text(encoding="utf-8") == "keep"
+
+    async def test_skip_is_recorded_and_claims_keep_transcript_rules(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_replay_isolation: None
+    ) -> None:
+        workspace = _workspace(tmp_path / "ws")
+        monkeypatch.setattr(exec_sandbox, "filesystem_backend", lambda: SandboxBackend.LANDLOCK)
+        monkeypatch.setattr(exec_sandbox, "_process_has_only_loopback", lambda: False)
+        monkeypatch.setattr(exec_sandbox, "_unshare_prefix", lambda: None)
 
         verdict, observation = await _dispatch_and_verify(
             workspace, _ran("make test", "c1"), _evidence("make test")
         )
 
         assert observation.command_runs == ()
-        assert observation.replay_skipped == "network_isolation_unavailable"
+        assert observation.replay_skipped == REPLAY_SKIPPED_NETWORK
         message = build_observation_message(observation)
         assert "replay skipped: network_isolation_unavailable" in message.content
         # "make test" passes here, but only a replay could have backed it.
         assert verdict.passed is False
 
-    @pytest.mark.parametrize(
-        ("interfaces", "offline"),
-        [
-            ([(1, "lo")], True),
-            ([(1, "lo"), (2, "eth0")], False),
-            ([], False),
-        ],
-    )
-    def test_linux_process_with_only_loopback_counts_as_isolated(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        real_replay_isolation: None,
-        interfaces: list[tuple[int, str]],
-        offline: bool,
-    ) -> None:
-        monkeypatch.setattr(command_replay.socket, "if_nameindex", lambda: interfaces)
-        monkeypatch.setattr(command_replay.sys, "platform", "linux")
-        monkeypatch.setattr(command_replay.shutil, "which", lambda _name: None)
-
-        probe = command_replay.network_isolation_prefix.__wrapped__  # type: ignore[attr-defined]
-
-        assert command_replay._process_has_only_loopback() is offline
-        assert probe() == (() if offline else None)
-
-    @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS only")
-    async def test_macos_replay_has_no_network(
+    async def test_replay_has_no_network(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_replay_isolation: None
     ) -> None:
-        if command_replay.network_isolation_prefix() is None:
-            pytest.skip("sandbox-exec unavailable in this process")
+        _require_real_sandbox()
         monkeypatch.setenv("PATH", os.pathsep.join([PYTHON_BIN, "/usr/bin", "/bin"]))
         workspace = _workspace(tmp_path / "ws")
         probe = (
@@ -942,7 +999,31 @@ class TestIsolationRecord:
             (candidate,), workspace=str(workspace), env=dict(os.environ), timeout_seconds=30
         )
 
-        assert runs[0].network_isolated and runs[0].succeeded
+        assert runs[0].network_isolated and runs[0].succeeded, runs[0].output_tail
+
+    async def test_a_script_cannot_write_outside_the_copy(
+        self, tmp_path: Path, real_replay_isolation: None
+    ) -> None:
+        _require_real_sandbox()
+        workspace = _workspace(tmp_path / "ws")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside.resolve() / "written_by_replay.txt"
+        _executable(
+            workspace / "run_tests.sh",
+            f"#!/bin/sh\necho copy-ok > copy_write.txt || exit 4\necho escaped > {target}\n",
+        )
+        candidate = replay_candidate("./run_tests.sh", str(workspace))
+        assert candidate is not None
+
+        runs = await replay_commands(
+            (candidate,), workspace=str(workspace), env=dict(os.environ), timeout_seconds=30
+        )
+
+        assert not target.exists()
+        # The write inside the copy succeeded; the denied one failed the script.
+        assert runs[0].returncode not in (0, 4) and not runs[0].succeeded, runs[0].output_tail
+        assert not (workspace / "copy_write.txt").exists()
 
     def test_default_observation_fields_keep_old_constructors_valid(self) -> None:
         run = CommandObservation(command="pytest", returncode=0, output_tail="1 passed")
@@ -1390,12 +1471,10 @@ class TestLinkedLiveTrees:
 
         assert runs == ()
 
-    @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS only")
-    async def test_macos_sandbox_denies_writes_to_linked_trees_and_the_workspace(
+    async def test_sandbox_denies_writes_to_linked_trees_and_the_workspace(
         self, tmp_path: Path, real_replay_isolation: None
     ) -> None:
-        if command_replay.network_isolation_prefix() is None:
-            pytest.skip("sandbox-exec unavailable in this process")
+        _require_real_sandbox()
         workspace = _workspace(tmp_path / "ws")
         venv = self._venv(workspace)
         live_calc = workspace.resolve() / "calc.py"

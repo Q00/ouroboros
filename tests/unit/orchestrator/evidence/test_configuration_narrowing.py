@@ -495,19 +495,22 @@ class TestEndToEnd:
     async def test_replay_scrubs_and_records_inherited_narrowing_variables(
         self, tmp_path: Path
     ) -> None:
+        """The replay environment is an allowlist; narrowing names are recorded."""
         workspace = _workspace(tmp_path / "ws")
         _executable(
             workspace / "check_env.sh",
             "#!/bin/sh\n"
             'test -z "${PYTHONPATH+x}${DJANGO_SETTINGS_MODULE+x}${NODE_OPTIONS+x}'
             '${JEST_CONFIG+x}${GOFLAGS+x}" || exit 7\n'
-            'test "$KEEP" = 1\n',
+            'test -z "${UNLISTED+x}" || exit 8\n'
+            'test "$LANG" = C.UTF-8\n',
         )
         candidate = replay_candidate("./check_env.sh", str(workspace))
         assert candidate is not None
         inherited = {
             "PATH": "/usr/bin:/bin",
-            "KEEP": "1",
+            "LANG": "C.UTF-8",
+            "UNLISTED": "1",
             "PYTHONPATH": "stubs",
             "DJANGO_SETTINGS_MODULE": "alt",
             "NODE_OPTIONS": "--require=./stub.js",

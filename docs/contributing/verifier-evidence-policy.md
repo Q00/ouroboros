@@ -131,32 +131,84 @@ command text a second way. The rules:
   environment's `PATH` (for example `/opt/miniconda3/envs/testbed/bin/python`
   in a SWE-bench image). The denylist below is a second layer.
 - **Isolation.** Each command runs as a direct argv (no shell) in a fresh copy
-  of the workspace, with the verify gate's scrubbed environment plus
-  `PYTHONDONTWRITEBYTECODE=1`, and `execution.verify_command_timeout_seconds`.
-  The narrowing variables (`NARROWING_ENVIRONMENT` and the `JEST_*` and
-  `VITEST_*` families; see "Narrowing" below) are removed from the inherited
-  environment, and each replayed run records the names it removed in
-  `scrubbed_environment`. A replay that needed one of them from the inherited
-  environment (a `manage.py test` relying on `DJANGO_SETTINGS_MODULE`, a Go
-  build relying on `GOFLAGS=-mod=vendor`) can fail; that fails closed.
+  of the workspace, under the execution sandbox (`runtime/exec_sandbox.py`,
+  below), with `execution.verify_command_timeout_seconds`. Its environment is
+  built from scratch: `REPLAY_ENV_PASSTHROUGH` (`PATH`, the locale, `TZ`,
+  Python I/O settings, `HOME`, `USER`, `LOGNAME`, and the variables that
+  locate an installed toolchain: `VIRTUAL_ENV`, `CONDA_PREFIX`,
+  `CONDA_DEFAULT_ENV`, `JAVA_HOME`, `GOPATH`, `GOROOT`, `GOMODCACHE`,
+  `CARGO_HOME`, `RUSTUP_HOME`) is copied from the verify gate's scrubbed
+  environment; `TMPDIR`, `TMP` and `TEMP` point to a per-run temp directory;
+  `PYTHONDONTWRITEBYTECODE=1` is set. Nothing else is inherited. The
+  narrowing variables (`NARROWING_ENVIRONMENT` and the `JEST_*` and
+  `VITEST_*` families; see "Narrowing" below) are never copied, and each
+  replayed run records the ones the inherited environment held in
+  `scrubbed_environment`. A replay that needed an uncopied variable (a
+  `manage.py test` relying on `DJANGO_SETTINGS_MODULE`, a Go build relying on
+  `GOFLAGS=-mod=vendor`) can fail; that fails closed.
   Assignments the command itself makes are kept
   (recorded in `env_delta`); they disable target linkage instead (below).
   `.git` and caches are not copied; `.venv`, `venv`, `node_modules`, `.tox`
   and `.nox` are linked, not copied. A workspace over 50,000 files or 1 GiB is
   not replayed. Absolute workspace paths in the command point at the copy.
-- **Network.** Network access must be denied: `sandbox-exec` on macOS
-  (loopback allowed), an unprivileged network namespace on Linux, or a Linux
-  process that already has only a loopback interface (a container started
-  with `--network none`). Where none of these works, nothing is replayed, the
-  claims keep the transcript-only rules, and the observation records
-  `replay_skipped: network_isolation_unavailable`.
+- **Sandbox.** The command can write only beneath the copy and its per-run
+  temp directory (plus `/dev/null` and a few other character devices); the
+  live workspace, `HOME`, the system temp directory and every other path are
+  read-only to it. Reading and executing are not restricted. On macOS this is
+  `sandbox-exec` with a generated profile that denies `file-write*` outside
+  those roots; on Linux it is Landlock (ABI 3, Linux 6.2, or newer; below
+  it truncation cannot be denied), applied in the child before it execs the
+  command (unprivileged, no mount or user namespace, so it works in
+  containers), plus a seccomp filter for what Landlock does not mediate:
+  changing metadata (the chmod, chown, utime and xattr syscall families, the
+  inode-flag ioctls, io_uring). The filter cannot see paths, so on Linux a
+  replay cannot change metadata inside its copy either (`touch` on an
+  existing file, `shutil.copy2`, cargo's fingerprint timestamps); such a
+  replay fails, which fails closed. The launchers start with a fixed bootstrap environment; the
+  command's environment, including its own assignments such as
+  `LD_PRELOAD=...`, takes effect only when the command itself is exec'd
+  inside the sandbox. The sandbox policy is sealed in the run's
+  execution-semantics contract, so a resume with the switch changed is
+  refused rather than replaying under a different policy. Each backend is
+  probed once per process with a mutation matrix (create, append, truncate,
+  unlink, rename in and out, mkdir, rmdir, symlink, hard link, chmod, fchmod
+  on a read-only descriptor, chown, utime, and where the host supports them
+  xattrs, file flags and inode-flag ioctls): every class the probe can
+  perform unconfined must be denied outside the root when confined, with the
+  outside left unchanged, or the backend is reported unavailable. Reading
+  stays allowed, so the access time the kernel records for a permitted read
+  can change (under `sandbox-exec` too); only a `noatime` mount stops that.
+  The replayed command gets `/dev/null` as stdin, never the controller's
+  own (under an MCP host, its JSON-RPC stream); the process runner does
+  this for verify commands as well. Where no backend works
+  (Windows, a kernel without Landlock ABI 3, an already-sandboxed macOS
+  process),
+  nothing is replayed, the claims keep the transcript-only rules, and the
+  observation records `replay_skipped: sandbox_unavailable`. Under Landlock
+  the command also cannot read `/proc/<pid>/environ`, `mem` or `maps` of the
+  controller or any other process outside its domain (Landlock denies
+  ptrace-mode access across the domain boundary). `sandbox-exec` cannot deny
+  the macOS equivalent (`KERN_PROCARGS2`), so on macOS a replayed command can
+  read the environment of the user's other processes; the replayed command
+  is one the worker already ran with the same access. Effects the command
+  asks another, unconfined process to perform over IPC (a user service
+  manager, a desktop automation service, a container daemon) are outside
+  this boundary.
+- **Network.** Network access must be denied: in the `sandbox-exec` profile
+  on macOS (loopback allowed), by an unprivileged network namespace on Linux
+  (with its loopback interface brought up, so loopback stays available),
+  or not at all when the Linux process already has only a loopback interface
+  (a container started with `--network none`). Unix-domain sockets stay
+  available. Where none of these works, nothing is replayed and the
+  observation records `replay_skipped: network_isolation_unavailable`.
 - **Live paths.** The copy reaches live paths through its links: the linked
-  dependency trees and the targets of copied symlinks. On macOS the sandbox
-  denies writes to them and to the live workspace. Elsewhere their metadata
-  (type, size, mtime and ctime of every entry) is fingerprinted before and
-  after the run, and any change marks it `mutated`; a tree over 250,000
-  entries is not replayed. Writes to other absolute paths outside the copy are
-  not confined.
+  dependency trees and the targets of copied symlinks. They are outside the
+  writable roots, so the sandbox denies writes to them. With the sandbox
+  switched off (`execution.exec_sandbox: false` or `OUROBOROS_EXEC_SANDBOX=off`,
+  unsafe) nothing is confined; replay then fingerprints their metadata (type,
+  size, mtime and ctime of every entry) before and after the run, any change
+  marks it `mutated`, a tree over 250,000 entries is not replayed, and the
+  observation says the network was not isolated.
 - **Success.** Exit 0, no timeout, the transcript's recorded exit (when it
   recorded one) equal to the replay's, and no change to or deletion of a
   pre-existing file (SHA-256 of every file in the copy before and after,

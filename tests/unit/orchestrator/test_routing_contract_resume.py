@@ -556,7 +556,7 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 7
+    assert semantics["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert semantics["verify_shell_identity"] is None or isinstance(
         semantics["verify_shell_identity"], dict
     )
@@ -1004,6 +1004,75 @@ def test_v5_lexical_shell_path_migrates_to_unavailable_identity() -> None:
     migrated = resumed._execution_contract["execution_semantics"]
     assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
     assert migrated["verify_shell_identity"] is None
+
+
+def test_execution_semantics_seal_the_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    confined = _runner()
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "off")
+    unconfined = _runner()
+
+    assert confined._execution_semantics_contract()["exec_sandbox_enabled"] is True
+    assert unconfined._execution_semantics_contract()["exec_sandbox_enabled"] is False
+
+
+@pytest.mark.parametrize(("sealed", "live"), [("on", "off"), ("off", "on")])
+def test_resume_rejects_changed_exec_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, sealed: str, live: str
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", sealed)
+    original = _runner()
+    persisted = original._build_execution_contract(project_identity=original._project_identity())
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(("live", "resumes"), [("on", True), ("off", False)])
+def test_v7_execution_semantics_migrate_to_the_confined_sandbox_policy(
+    monkeypatch: pytest.MonkeyPatch, live: str, resumes: bool
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 7
+    del semantics["exec_sandbox_enabled"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", live)
+    resumed = _runner()
+    if not resumes:
+        # A v7 run resumes confined; a controller switched off is drift.
+        with pytest.raises(OrchestratorError, match="changed execution semantics"):
+            resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+        return
+    resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    migrated = resumed._execution_contract["execution_semantics"]
+    assert migrated["version"] == CURRENT_EXECUTION_SEMANTICS_VERSION
+    assert migrated["exec_sandbox_enabled"] is True
+
+
+def test_v7_sandbox_migration_rejects_unsealed_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_EXEC_SANDBOX", "on")
+    original = _runner()
+    persisted = copy.deepcopy(
+        original._build_execution_contract(project_identity=original._project_identity())
+    )
+    persisted["execution_semantics"]["version"] = 7
+    del persisted["execution_semantics"]["exec_sandbox_enabled"]
+
+    with pytest.raises(OrchestratorError, match="invalid pre-exec-sandbox contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_resume_rejects_changed_verify_shell_authority() -> None:

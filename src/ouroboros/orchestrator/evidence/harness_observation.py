@@ -130,7 +130,8 @@ class WorkspaceObservation:
     complete post-snapshot no longer contains. ``command_runs`` are commands
     the harness replayed in a copy of the workspace, with their real exit status.
     ``replay_skipped`` names why replay did not run although a claim needed it
-    (``network_isolation_unavailable``), or is None.
+    (a ``runtime.exec_sandbox.SandboxUnavailableReason`` value:
+    ``sandbox_unavailable`` or ``network_isolation_unavailable``), or is None.
     """
 
     changed_paths: frozenset[str]

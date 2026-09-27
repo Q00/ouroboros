@@ -10519,11 +10519,11 @@ class TestParallelACExecutor:
         claimed test command in the workspace and the verdict follows what
         that run actually produced.
         """
-        # Replay runs only with network isolation; stand in for an isolated
-        # host so the verdict does not depend on whether this one can isolate.
-        from ouroboros.orchestrator.evidence import command_replay
+        # Replay runs only under the execution sandbox; switch it off so the
+        # verdict does not depend on whether this host has a backend.
+        from ouroboros.config.exec_sandbox import EXEC_SANDBOX_ENV_VAR
 
-        monkeypatch.setattr(command_replay, "network_isolation_prefix", lambda: ())
+        monkeypatch.setenv(EXEC_SANDBOX_ENV_VAR, "off")
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")

@@ -2646,6 +2646,7 @@ class ParallelACExecutor:
         model_router: ModelRouter | None = None,
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
+        exec_sandbox_enabled: bool | None = None,
         verify_command_timeout_seconds: int = 600,
         verify_shell_identity: Mapping[str, object] | None | _AutoVerifyShell = _AUTO_VERIFY_SHELL,
         ac_retry_attempts: int = 0,
@@ -2690,6 +2691,8 @@ class ParallelACExecutor:
                 ``spec.expected_artifacts`` must exist under the run workspace
                 and ``spec.verify_command`` must exit 0 (plus any
                 ``output_assertion``).
+            exec_sandbox_enabled: The runner's sealed execution-sandbox policy
+                for replayed commands; None reads the live switch.
             verify_command_timeout_seconds: Timeout for an AC verify command.
             verify_shell_identity: Canonical Bash path and content digest sealed
                 by the runner. ``None`` keeps verification unavailable for this
@@ -2756,6 +2759,9 @@ class ParallelACExecutor:
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
+        # The runner's sealed execution-sandbox policy for replay; None reads
+        # the live switch (``runtime.exec_sandbox.sandbox_enabled``).
+        self._exec_sandbox_enabled = exec_sandbox_enabled
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
         # AC worker tasks currently executing against the shared workspace.
         # The verify gate reads this to tell "my verify_command wrote" apart
@@ -7121,6 +7127,7 @@ class ParallelACExecutor:
             # Preserve the parent's sealed verification contract across the
             # alternate backend; defaults must not re-enable or lengthen it.
             run_verify_commands=self._run_verify_commands,
+            exec_sandbox_enabled=self._exec_sandbox_enabled,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             # The router's backend-mismatch guard makes it inert on a different
             # backend, so passing it to the alt-harness executor is safe.

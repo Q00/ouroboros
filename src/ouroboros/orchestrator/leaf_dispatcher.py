@@ -945,8 +945,8 @@ class LeafDispatcher:
         deterministic verification is enabled; a run with
         ``run_verify_commands`` off has opted out of harness-side execution.
         Each command runs as a direct argv (never through a shell) in a fresh
-        copy of the workspace, under the verify gate's sanitized environment
-        and timeout (see ``evidence/command_replay.py``).
+        copy of the workspace, under the execution sandbox and the verify
+        gate's timeout (see ``evidence/command_replay.py``).
         """
         if not state.success or not state.final_message or task_cwd is None:
             return observation
@@ -962,9 +962,10 @@ class LeafDispatcher:
         )
         if not candidates:
             return observation
-        skipped = await asyncio.to_thread(replay_unavailable_reason)
+        sandbox_enabled = getattr(executor, "_exec_sandbox_enabled", None)
+        skipped = await asyncio.to_thread(replay_unavailable_reason, sandbox_enabled)
         if skipped is not None:
-            # No network isolation: nothing is replayed, and the claims keep
+            # No execution sandbox: nothing is replayed, and the claims keep
             # the transcript-only rules.
             return replace(observation, replay_skipped=skipped)
         timeout_seconds = getattr(executor, "_verify_command_timeout_seconds", 600)
@@ -973,6 +974,7 @@ class LeafDispatcher:
             workspace=task_cwd,
             env=sanitized_verify_environment(),
             timeout_seconds=float(timeout_seconds),
+            sandbox_enabled=sandbox_enabled,
         )
         if not runs:
             return observation

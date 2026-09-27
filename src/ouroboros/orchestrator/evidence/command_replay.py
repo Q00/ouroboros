@@ -26,29 +26,33 @@ Execution rules (each one fails closed):
   package installs) applied to every program of the same resolution. Every
   other command keeps the transcript-only rules.
 - The command runs as a direct argv, never through a shell, in a fresh copy of
-  the workspace, under the verify gate's sanitized environment and timeout,
-  with ``PYTHONDONTWRITEBYTECODE=1``. At most ``MAX_REPLAYED_COMMANDS``
-  commands per criterion. The narrowing variables
-  (``replay_policy.narrowing_variable``: ``PYTEST_ADDOPTS``, ``PYTHONPATH``,
-  ``DJANGO_SETTINGS_MODULE``, ``NODE_OPTIONS``, ``JEST_*``, ...) are removed
-  from the inherited environment, and each run records the names it removed
-  in ``scrubbed_environment``; the command's own assignments are kept, and
-  they disable target linkage instead.
-- Network access must be denied: ``sandbox-exec`` on macOS, an unprivileged
-  network namespace on Linux, or a Linux process that already has no network
-  interface but loopback (a container run with ``--network none``). Where none
-  of these holds, nothing is replayed (``REPLAY_SKIPPED_NETWORK``).
+  the workspace, under the verify gate's timeout, with
+  ``PYTHONDONTWRITEBYTECODE=1``. At most ``MAX_REPLAYED_COMMANDS`` commands
+  per criterion. Its environment is built from scratch
+  (``REPLAY_ENV_PASSTHROUGH``: ``PATH``, the locale, ``HOME`` and the
+  variables that locate an installed toolchain, copied from the verify gate's
+  sanitized environment) plus the command's own assignments. The narrowing
+  variables (``replay_policy.narrowing_variable``: ``PYTEST_ADDOPTS``,
+  ``PYTHONPATH``, ``DJANGO_SETTINGS_MODULE``, ``NODE_OPTIONS``, ``JEST_*``,
+  ...) are never copied, and each run records the names it left out in
+  ``scrubbed_environment``; the command's own assignments are kept, and they
+  disable target linkage instead.
+- The command runs under the execution sandbox
+  (``ouroboros.runtime.exec_sandbox``): it can write only inside the copy and
+  a per-run temp directory, and has no network. Where the sandbox is
+  unavailable, nothing is replayed and the reason is recorded
+  (``sandbox_unavailable`` or ``REPLAY_SKIPPED_NETWORK``).
 - ``CMD [2>&1] | <filter> ...`` with only output filters after ``CMD``
   (``REPLAY_OUTPUT_FILTERS``) replays ``CMD`` alone and uses its own exit code;
   the filters are never run. Any other shell construct is not replayed.
 - Every pre-existing file in the copy is digested before and after the run. A
   changed or deleted file marks the run ``mutated``, which is never success.
 - Paths the copy reaches outside itself (the linked dependency trees and the
-  targets of copied symlinks) are protected: on macOS the sandbox denies
-  writes to them and to the live workspace; elsewhere their metadata
-  (every entry's type, size, mtime and ctime) is fingerprinted before and
-  after, and any change marks the run ``mutated``. A tree too large to
-  fingerprint is not replayed.
+  targets of copied symlinks) are outside the writable roots, so the sandbox
+  denies writes to them. Only when the sandbox is switched off (unsafe) is
+  their metadata (every entry's type, size, mtime and ctime) fingerprinted
+  before and after instead, any change marking the run ``mutated``; a tree
+  too large to fingerprint is then not replayed.
 
 Linkage between a claim and a replayed command is deliberately narrow. The
 claim, whitespace-normalized, must equal the transcript command or its replayed
@@ -64,19 +68,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import functools
 import hashlib
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
-import socket
 import stat
-import subprocess
-import sys
 import tempfile
 
+from ouroboros.config.exec_sandbox import exec_sandbox_enabled
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -117,6 +118,14 @@ from ouroboros.orchestrator.evidence.test_reexecution import (
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceError, extract_evidence
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.runtime.exec_sandbox import (
+    DEFAULT_ENV_PASSTHROUGH,
+    SandboxBackend,
+    SandboxUnavailable,
+    SandboxUnavailableReason,
+    confine,
+    sandbox_unavailable_reason,
+)
 
 MAX_REPLAYED_COMMANDS = MAX_REEXECUTED_COMMANDS
 
@@ -153,19 +162,27 @@ _SKIPPED_DIRECTORY_NAMES = frozenset(
 # the live trees they point at are protected instead (see ``_replay_one``).
 _LINKED_DIRECTORY_NAMES = frozenset({".venv", "venv", "node_modules", ".tox", ".nox"})
 # Past this many entries a live tree the copy links to cannot be fingerprinted,
-# and the command is not replayed where the platform cannot deny writes to it.
+# and the command is not replayed when the sandbox is switched off.
 MAX_PROTECTED_LINK_ENTRIES = 250_000
-REPLAY_SKIPPED_NETWORK = "network_isolation_unavailable"
-
-# macOS: deny IP traffic except loopback. Unix-domain sockets stay allowed.
-_DARWIN_NETWORK_PROFILE = (
-    "(version 1)(allow default)"
-    "(deny network-outbound (remote ip))"
-    '(allow network-outbound (remote ip "localhost:*"))'
-    "(deny network-inbound (local ip))"
-    '(allow network-inbound (local ip "localhost:*"))'
+REPLAY_SKIPPED_NETWORK = SandboxUnavailableReason.NETWORK_ISOLATION_UNAVAILABLE.value
+# The replay environment: the sandbox defaults plus ``HOME`` and the variables
+# that locate an installed toolchain and its offline caches. The sandbox makes
+# all of them read-only. None of them is a narrowing variable.
+REPLAY_ENV_PASSTHROUGH: tuple[str, ...] = (
+    *DEFAULT_ENV_PASSTHROUGH,
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "JAVA_HOME",
+    "GOPATH",
+    "GOROOT",
+    "GOMODCACHE",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
 )
-_ISOLATION_PROBE_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,57 +543,15 @@ def select_replay_candidates(
     return tuple([*linked, *recognized][:MAX_REPLAYED_COMMANDS])
 
 
-def _process_has_only_loopback() -> bool:
-    """Return True when this process's network namespace has only loopback.
+def replay_unavailable_reason(sandbox_enabled: bool | None = None) -> str | None:
+    """Return why nothing can be replayed on this host, or None when it can.
 
-    The interfaces come from the kernel for the process's own namespace, so a
-    container started with ``--network none`` reports only ``lo``.
+    ``sandbox_enabled`` is the caller's sealed sandbox policy; None reads the
+    live switch.
     """
-    try:
-        names = [name for _index, name in socket.if_nameindex()]
-    except (OSError, AttributeError):
-        return False
-    return bool(names) and all(name == "lo" for name in names)
-
-
-@functools.cache
-def network_isolation_prefix() -> tuple[str, ...] | None:
-    """Return the argv prefix that denies network access, or None.
-
-    ``()`` when a Linux process is already offline (only loopback); otherwise
-    probed once per process by running ``true`` under the mechanism. A
-    platform without a working mechanism (Windows, a Linux host or container
-    without unprivileged user namespaces, an already-sandboxed macOS process)
-    gets None, and nothing is replayed there.
-    """
-    if sys.platform.startswith("linux") and _process_has_only_loopback():
-        return ()
-    if sys.platform == "darwin":
-        executable = shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"
-        prefix: tuple[str, ...] = (executable, "-p", _DARWIN_NETWORK_PROFILE)
-    elif sys.platform.startswith("linux"):
-        executable = shutil.which("unshare") or ""
-        prefix = (executable, "--user", "--map-root-user", "--net", "--")
-    else:
-        return None
-    probe = shutil.which("true") or "/usr/bin/true"
-    if not prefix[0] or not os.path.exists(prefix[0]):
-        return None
-    try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [*prefix, probe],
-            capture_output=True,
-            timeout=_ISOLATION_PROBE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return prefix if result.returncode == 0 else None
-
-
-def replay_unavailable_reason() -> str | None:
-    """Return why nothing can be replayed on this host, or None when it can."""
-    return REPLAY_SKIPPED_NETWORK if network_isolation_prefix() is None else None
+    enabled = exec_sandbox_enabled() if sandbox_enabled is None else sandbox_enabled
+    reason = sandbox_unavailable_reason(deny_network=True, enabled=enabled)
+    return None if reason is None else reason.value
 
 
 def _outside_links(destination: Path) -> tuple[str, ...]:
@@ -673,23 +648,6 @@ def _fingerprint_outside_paths(paths: Sequence[str]) -> _Fingerprint | None:
     return tuple(sorted(entries))
 
 
-def _sandbox_path_literal(path: str) -> str | None:
-    if any(char in path for char in '"\\') or any(ord(char) < 0x20 for char in path):
-        return None
-    return f'"{path}"'
-
-
-def _darwin_write_protected_profile(paths: Sequence[str]) -> str | None:
-    """Return the network profile plus write denial for ``paths``; None if unsafe."""
-    rules = []
-    for path in paths:
-        literal = _sandbox_path_literal(path)
-        if literal is None:
-            return None
-        rules.append(f"(deny file-write* (subpath {literal}))")
-    return _DARWIN_NETWORK_PROFILE + "".join(rules)
-
-
 def protected_digest(root: Path) -> dict[str, str]:
     """Return a SHA-256 digest of every regular file a replay must not change.
 
@@ -729,33 +687,20 @@ async def _replay_one(
     workspace: str,
     env: Mapping[str, str],
     timeout_seconds: float,
-    isolation_prefix: tuple[str, ...],
+    sandbox_enabled: bool,
 ) -> CommandObservation | None:
     source = Path(workspace).resolve()
     scratch = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="ouroboros-replay-"))
     try:
         copy_root = scratch / "workspace"
+        temp_dir = scratch / "tmp"
         if scratch.resolve().is_relative_to(source):
             # A copy inside the workspace would copy itself.
             return None
         outside = await asyncio.to_thread(copy_workspace, source, copy_root)
         if outside is None:
             return None
-        prefix = isolation_prefix
-        outside_before: _Fingerprint | None = None
-        if sys.platform == "darwin" and prefix[1:2] == ("-p",):
-            # The sandbox denies writes to the live workspace and to every
-            # live path the copy links to.
-            profile = _darwin_write_protected_profile((str(source), *outside))
-            if profile is None:
-                return None
-            prefix = (prefix[0], "-p", profile)
-        elif outside:
-            outside_before = await asyncio.to_thread(_fingerprint_outside_paths, outside)
-            if outside_before is None:
-                # Too large to fingerprint and no platform write denial.
-                return None
-        before = await asyncio.to_thread(protected_digest, copy_root)
+        temp_dir.mkdir()
         # Absolute workspace paths in the recorded command point at the copy.
         workspaces = (str(source), workspace.rstrip("/") or "/")
         argv = [
@@ -769,11 +714,32 @@ async def _replay_one(
         # must not narrow what a test runner collects or selects.
         inherited = {key: value for key, value in env.items() if not narrowing_variable(key)}
         scrubbed = tuple(sorted(key for key in env if narrowing_variable(key)))
-        run = await run_with_shell(
-            [*prefix, *argv],
+        confined = confine(
+            argv,
             cwd=str((copy_root / candidate.cwd_relative).resolve()),
+            writable_roots=(str(copy_root),),
+            temp_dir=str(temp_dir),
+            deny_network=True,
+            env_source=inherited,
+            env_passthrough=REPLAY_ENV_PASSTHROUGH,
             # No bytecode caches: they would be writes into linked live trees.
-            env={**inherited, **env_delta, "PYTHONDONTWRITEBYTECODE": "1"},
+            env_set={**env_delta, "PYTHONDONTWRITEBYTECODE": "1"},
+            enabled=sandbox_enabled,
+        )
+        if isinstance(confined, SandboxUnavailable):
+            return None
+        outside_before: _Fingerprint | None = None
+        if confined.backend is SandboxBackend.DISABLED and outside:
+            # Unconfined (unsafe off switch): writes to the live paths the copy
+            # links to can only be detected, not denied.
+            outside_before = await asyncio.to_thread(_fingerprint_outside_paths, outside)
+            if outside_before is None:
+                return None
+        before = await asyncio.to_thread(protected_digest, copy_root)
+        run = await run_with_shell(
+            confined.argv,
+            cwd=confined.cwd,
+            env=confined.env,
             timeout_seconds=timeout_seconds,
         )
         if run.start_error is not None:
@@ -791,7 +757,7 @@ async def _replay_one(
             transcript_command=candidate.transcript_command,
             argv=candidate.argv,
             mutated=mutated,
-            network_isolated=True,
+            network_isolated=confined.network_denied,
             transcript_returncode=candidate.transcript_returncode,
             env_delta=tuple(sorted(candidate.env_delta.items())),
             scrubbed_environment=scrubbed,
@@ -808,17 +774,21 @@ async def replay_commands(
     workspace: str,
     env: Mapping[str, str],
     timeout_seconds: float,
+    sandbox_enabled: bool | None = None,
 ) -> tuple[CommandObservation, ...]:
     """Replay each candidate in its own fresh copy of ``workspace``.
 
-    Nothing runs when network isolation is unavailable
+    Nothing runs when the execution sandbox is unavailable
     (``replay_unavailable_reason``) or for a candidate the allowlist and
-    denylist do not admit.
+    denylist do not admit. ``sandbox_enabled`` is the caller's sealed sandbox
+    policy (the executor's, from the execution-semantics contract); None
+    reads the live switch.
     """
     if not candidates:
         return ()
-    isolation_prefix = await asyncio.to_thread(network_isolation_prefix)
-    if isolation_prefix is None:
+    if sandbox_enabled is None:
+        sandbox_enabled = await asyncio.to_thread(exec_sandbox_enabled)
+    if await asyncio.to_thread(replay_unavailable_reason, sandbox_enabled) is not None:
         return ()
     observations: list[CommandObservation] = []
     for candidate in candidates[:MAX_REPLAYED_COMMANDS]:
@@ -829,7 +799,7 @@ async def replay_commands(
             workspace=workspace,
             env=env,
             timeout_seconds=timeout_seconds,
-            isolation_prefix=isolation_prefix,
+            sandbox_enabled=sandbox_enabled,
         )
         if observation is not None:
             observations.append(observation)
@@ -841,12 +811,12 @@ __all__ = [
     "MAX_COPY_ENTRIES",
     "MAX_PROTECTED_LINK_ENTRIES",
     "MAX_REPLAYED_COMMANDS",
+    "REPLAY_ENV_PASSTHROUGH",
     "REPLAY_OUTPUT_FILTERS",
     "REPLAY_SKIPPED_NETWORK",
     "ReplayCandidate",
     "claim_links_to_command",
     "copy_workspace",
-    "network_isolation_prefix",
     "output_filter_core",
     "protected_digest",
     "replay_candidate",

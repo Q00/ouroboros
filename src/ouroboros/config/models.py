@@ -242,6 +242,11 @@ class ExecutionConfig(BaseModel, frozen=True):
             must exist under the run workspace and ``verify_command`` must exit
             0 (plus any ``output_assertion``). On by default.
         verify_command_timeout_seconds: Timeout for an AC verify command.
+        exec_sandbox: Whether commands the controller runs on its own
+            authority (legacy-verifier replay) are confined by the execution
+            sandbox (``runtime/exec_sandbox.py``). On by default. ``false`` is
+            unsafe: those commands then run unconfined, able to write outside
+            their workspace copy and to use the network.
         ac_retry_attempts: How many times a failed AC is re-dispatched before
             it is marked FAILED (per-AC, excludes stall retries).
         cross_harness_redispatch: Whether a terminally failing AC may be
@@ -276,6 +281,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
+    exec_sandbox: bool = True
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = False
     n_version_tournament: bool = False
