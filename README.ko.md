@@ -457,8 +457,9 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 | `ooo update` | 최신 버전 확인 + 업그레이드 |
 | `ooo brownfield` | 기존 저장소 스캔 + 기본값 관리 |
 | `ooo publish` | Seed를 GitHub Epic/Task 이슈로 발행 |
+| `ooo maintain` | 우로보로스 이슈·PR 검토 및 처리 |
 
-> `ooo publish`는 직접적인 `ouroboros publish` 셸 서브커맨드가 아니라, AI 런타임 세션에서 실행되는 skill/runtime surface이며 내부적으로 `gh` CLI를 사용합니다.
+> `ooo publish`와 `ooo maintain`은 직접적인 `ouroboros` 셸 서브커맨드가 아니라, AI 런타임 세션에서 실행되는 스킬이며 내부적으로 `gh` CLI를 사용합니다.
 
 > Claude Code의 `/run`, `/status`, `/help`, `/config`는 예약 명령입니다.
 > Ouroboros skill을 직접 호출할 때는 `/ouroboros:ouroboros-run`,
