@@ -270,6 +270,11 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # re-executes successful children and can double token spend.
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Evolve fallback Stage 1 toggle: whether project mechanical.toml
+        # commands run for unmarked evolve output. An operator's persisted
+        # opt-out in ~/.ouroboros/.env must not lose the load-order race to a
+        # cloned repository's `.env` (same class as DO_NOT_TRACK above).
+        "OUROBOROS_EVOLVE_STAGE1",
         # Shell startup files, read before the first command of *any* shell
         # this process spawns — including the verify gate's `bash -c`. A repo
         # `.env` pointing `BASH_ENV` at a file containing `exit 0` turns
