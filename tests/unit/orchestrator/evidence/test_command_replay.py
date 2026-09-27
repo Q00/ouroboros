@@ -546,6 +546,10 @@ class TestFabricationNegativeControls:
             # The call and its completion disagree: the failure decides.
             ({"exit_code": 0}, {"exit_code": 1}),
             ({"exit_code": 0}, {"status": "failed"}),
+            # The runtime's authoritative nested exit status disagrees.
+            ({}, {"exit_code": 0, "tool_result": {"meta": {"exit_status": 1}}}),
+            ({}, {"tool_result": {"meta": {"exit_status": "0"}}}),
+            ({}, {"meta": {"exit_status": 2}}),
         ],
     )
     async def test_any_recorded_failure_of_the_run_vetoes_replay(
@@ -580,6 +584,9 @@ class TestFabricationNegativeControls:
             == 3
         )
         assert transcript_exit_status((call, _bash_result("c1")), 0) is None
+        # An audit-only copy of the exit status never counts.
+        audit = _bash_result("c1", tool_result={"meta": {"reported_exit_status": 1}})
+        assert transcript_exit_status((call, audit), 0) is None
 
     async def test_latest_failed_run_is_not_replaced_by_an_earlier_pass(
         self, tmp_path: Path
@@ -1531,6 +1538,9 @@ class TestConfigurationNarrowing:
             # The assignment consumed by an ``env`` wrapper, not by the parser.
             f"nice -n 5 env PYTEST_ADDOPTS=--deselect={DESELECT_ADD} python -m pytest -q "
             "-p no:cacheprovider tests/test_bad.py",
+            # A selection option inside an argparse short-option cluster.
+            "python -m pytest -qk test_other -p no:cacheprovider tests/test_bad.py",
+            "python -m pytest -p no:cacheprovider -qktest_other tests/test_bad.py",
         ],
     )
     async def test_narrowed_run_does_not_back_the_file(self, tmp_path: Path, command: str) -> None:
@@ -1547,6 +1557,23 @@ class TestConfigurationNarrowing:
         # A narrowed run that was replayed passed; it only backs nothing.
         assert all(run.succeeded for run in observation.command_runs)
         assert verdict.passed is False
+
+    def test_short_option_clusters_are_read_as_argparse_reads_them(self) -> None:
+        for argv in (
+            ("pytest", "-qk", "test_other", "tests/test_bad.py"),
+            ("pytest", "-qktest_other", "tests/test_bad.py"),
+            ("pytest", "-vm", "slow", "tests/test_bad.py"),
+            ("python", "-m", "unittest", "-vk", "test_other", "tests.test_bad"),
+        ):
+            assert claim_target_operands(argv) == frozenset(), argv
+        # Flag clusters keep their operands: ``-sv`` is ``-s -v``, not an
+        # option whose value is the test file.
+        assert claim_target_operands(("pytest", "-sv", "tests/test_good.py")) == {
+            "tests/test_good.py"
+        }
+        assert claim_target_operands(("pytest", "-rfE", "tests/test_good.py")) == {
+            "tests/test_good.py"
+        }
 
     async def test_plain_pytest_run_still_backs_its_file(self, tmp_path: Path) -> None:
         workspace = self._narrowing_workspace(tmp_path / "ws")

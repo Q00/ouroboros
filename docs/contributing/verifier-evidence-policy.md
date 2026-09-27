@@ -184,7 +184,8 @@ command text a second way. The rules:
   runner-output rules for it, on replay and on the transcript-only path.
   Where a runner's semantics are unclear, the option is treated as narrowing.
   - an option that excludes or selects tests, in any spelling (`--opt value`,
-    `--opt=value`, `-kvalue`): pytest `--deselect`, `--ignore`,
+    `--opt=value`, `-kvalue`, or inside a short-option cluster such as
+    `-qk expr` for pytest, unittest, Django and project runner scripts): pytest `--deselect`, `--ignore`,
     `--ignore-glob`, `-k`, `-m`; unittest `-k`; Django and project runner
     scripts `-k`, `--tag`, `--exclude-tag`, `--start-at`, `--start-after`;
     and `--exclude*`, `--skip`, `--filter`, `--grep`, `-t`, `-g`, `-e`,
@@ -303,7 +304,12 @@ an import (`python -c "print('import app')"`) and a later import that may
 never run (`raise SystemExit(0); import app`) anchor nothing, and so does a
 `python -c` whose success the line's zero exit does not imply
 (`python3 -c "import app"; true`, `... || true`, a pipeline stage before the
-last).
+last), one whose import path is not the default (the same configuration
+decision as for runners: `-P`, `-I`, or a narrowing variable such as
+`PYTHONPATH` assigned in the command or exported by an earlier call), and one
+run after a change of directory other than a single leading
+`cd <workspace-relative dir> &&`, whose directory then prefixes the module
+path.
 
 ## Failure class semantics
 

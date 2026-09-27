@@ -1322,28 +1322,40 @@ def command_line_assignments(argv: Sequence[str]) -> tuple[str, ...]:
     return (*parts[:index], *assignments)
 
 
-def python_inline_program(argv: Sequence[str]) -> str | None:
-    """Return the program text ``argv`` runs with ``python -c``, or None.
+@dataclass(frozen=True, slots=True)
+class InlinePython:
+    """A ``python -c`` call: its program text and the interpreter options before ``-c``.
+
+    ``options`` holds each short option as ``-X`` (``-Bc`` gives ``-B``), so a
+    consumer can tell whether module resolution departs from the default
+    (``replay_policy.inline_python_alters_imports``).
+    """
+
+    program: str
+    options: frozenset[str]
+
+
+def python_inline_program(argv: Sequence[str]) -> InlinePython | None:
+    """Return the ``python -c`` call ``argv`` makes, or None.
 
     The program is the last one ``program_chain`` resolves (``timeout 5 uv
     run python3 -c ...`` counts), and it must be a Python interpreter whose
-    options, read with the interpreter option tables replay admission uses, end in ``-c``
-    (alone, as the last letter of a flag cluster such as ``-Bc``, or with the
-    program attached as in ``-cCODE``). A script, ``-m`` or an unknown option
-    before any ``-c`` means no inline program.
+    options, read with the interpreter option tables replay admission uses,
+    end in ``-c`` (alone, as the last letter of a flag cluster such as
+    ``-Bc``, or with the program attached as in ``-cCODE``). A script, ``-m``
+    or an unknown option before any ``-c`` means no inline program.
     """
     programs = program_chain(argv)
     if not programs or not _is_python_executable(_program_name(programs[-1][0])):
         return None
     parts = programs[-1]
+    options: set[str] = set()
     index = 1
     while index < len(parts):
         token = parts[index]
-        if token in _PYTHON_FLAGS:
-            index += 1
-            continue
-        if token in _PYTHON_VALUE_OPTIONS:
-            index += 2
+        if token in _PYTHON_FLAGS or token in _PYTHON_VALUE_OPTIONS:
+            options.add(token)
+            index += 2 if token in _PYTHON_VALUE_OPTIONS else 1
             continue
         if not token.startswith("-") or token.startswith("--") or token == "-":
             return None
@@ -1351,9 +1363,9 @@ def python_inline_program(argv: Sequence[str]) -> str | None:
         for position, letter in enumerate(cluster):
             if letter == "c":
                 rest = cluster[position + 1 :]
-                if rest:
-                    return rest
-                return parts[index + 1] if index + 1 < len(parts) else None
+                program = rest or (parts[index + 1] if index + 1 < len(parts) else None)
+                return None if program is None else InlinePython(program, frozenset(options))
+            options.add(f"-{letter}")
             if f"-{letter}" in _PYTHON_VALUE_OPTIONS:
                 break
             if f"-{letter}" not in _PYTHON_FLAGS:
@@ -1362,16 +1374,18 @@ def python_inline_program(argv: Sequence[str]) -> str | None:
     return None
 
 
-# Shell control operators that end one simple command in a compound line.
-def _command_list_tail(command: str) -> list[tuple[tuple[str, ...], str | None]]:
-    """Return the last command list of a shell line: ``(argv, operator before it)`` pairs.
+_DIRECTORY_CHANGING_PROGRAMS = frozenset({"cd", "pushd", "popd"})
+
+
+def _command_lists(command: str) -> list[list[tuple[tuple[str, ...], str | None]]]:
+    """Return a shell line's command lists: ``(argv, operator before it)`` pairs per list.
 
     The line is tokenized with shell quoting; ``;``, ``&``, a newline and
-    parentheses end a list, so only the list after the last of them decides
-    the line's exit status. Inside that list ``&&``, ``||`` and ``|`` join
-    commands and are recorded as the operator before each command. A
-    redirection (``> out``, ``2>&1``, ``<<EOF``) and its target stay with
-    their command. [] when the line cannot be tokenized.
+    parentheses end a list, so only the last list decides the line's exit
+    status. Inside a list ``&&``, ``||`` and ``|`` join commands and are
+    recorded as the operator before each command. A redirection (``> out``,
+    ``2>&1``, ``<<EOF``) and its target stay with their command. [] when the
+    line cannot be tokenized.
     """
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
@@ -1380,7 +1394,7 @@ def _command_list_tail(command: str) -> list[tuple[tuple[str, ...], str | None]]
         tokens = list(lexer)
     except ValueError:
         return []
-    commands: list[tuple[tuple[str, ...], str | None]] = []
+    lists: list[list[tuple[tuple[str, ...], str | None]]] = [[]]
     argv: list[str] = []
     operator: str | None = None
     index = 0
@@ -1393,16 +1407,23 @@ def _command_list_tail(command: str) -> list[tuple[tuple[str, ...], str | None]]
         if "<" in token or ">" in token:
             index += 1  # the redirection's target
             continue
+        if argv:
+            lists[-1].append((tuple(argv), operator))
+        argv = []
         joined = token.replace("\n", "")
         if joined in {"&&", "||", "|", "|&"}:
-            if argv:
-                commands.append((tuple(argv), operator))
-            argv, operator = [], "|" if joined == "|&" else joined
+            operator = "|" if joined == "|&" else joined
             continue
-        commands, argv, operator = [], [], None
+        lists.append([])
+        operator = None
     if argv:
-        commands.append((tuple(argv), operator))
-    return commands
+        lists[-1].append((tuple(argv), operator))
+    return lists
+
+
+def _changes_directory(argv: Sequence[str]) -> bool:
+    """Return True when ``argv`` changes the shell's working directory."""
+    return bool(argv) and _program_name(argv[0]) in _DIRECTORY_CHANGING_PROGRAMS
 
 
 def _commands_implied_by_success(command: str) -> tuple[tuple[str, ...], ...]:
@@ -1415,7 +1436,8 @@ def _commands_implied_by_success(command: str) -> tuple[tuple[str, ...], ...]:
     ``pipefail`` the pipeline's status is its last stage's. ``a; b`` implies
     only ``b``.
     """
-    tail = _command_list_tail(command)
+    lists = _command_lists(command)
+    tail = lists[-1] if lists else []
     implied: list[tuple[str, ...]] = []
     for argv, operator in reversed(tail):
         if operator == "||":

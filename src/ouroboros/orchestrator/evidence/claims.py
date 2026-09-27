@@ -1471,7 +1471,9 @@ def _runtime_message_recorded_exit_status(message: AgentMessage) -> int | None:
     """Return the exit status one message records, or None when it records none.
 
     The same fields ``_runtime_message_has_success_signal`` reads, on the
-    message and on its ``tool_result``. An integer ``exit_code`` is the status.
+    message and on its ``tool_result``, plus the runtime's authoritative
+    ``meta.exit_status``. An integer ``exit_code`` or ``exit_status`` is the
+    status, and a non-integer one is a failure.
     Any failure marker records a failure, returned as the non-zero exit code
     when there is one and as 1 otherwise: ``is_error`` true or not a boolean,
     ``is_error_invalid``, a non-integer ``exit_code``, a ``status`` of
@@ -1506,6 +1508,17 @@ def _runtime_message_recorded_exit_status(message: AgentMessage) -> int | None:
         event = container.get("runtime_event_type")
         if isinstance(event, str) and event.strip().lower().endswith((".failed", ".error")):
             failed = True
+    # ``meta.exit_status`` (on the message or its ``tool_result``) is the
+    # runtime's authoritative exit status; ``reported_exit_status`` is an
+    # audit-only copy and never counts.
+    for container in containers:
+        meta = container.get("meta")
+        if isinstance(meta, dict) and "exit_status" in meta:
+            exit_status = meta["exit_status"]
+            if isinstance(exit_status, bool) or not isinstance(exit_status, int):
+                failed = True
+            else:
+                exit_codes.append(exit_status)
     nonzero = [code for code in exit_codes if code != 0]
     if nonzero:
         return nonzero[0]

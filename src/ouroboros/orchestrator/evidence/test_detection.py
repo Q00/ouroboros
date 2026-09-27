@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Sequence
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -29,14 +30,18 @@ from ouroboros.orchestrator.evidence.replay_policy import (
     alters_configuration,
     claim_target_operands,
     excludes_tests,
+    inline_python_alters_imports,
     narrowing_assignments,
     run_may_back_test_claim,
 )
 from ouroboros.orchestrator.evidence.shell_parsing import (
+    _changes_directory,
+    _command_lists,
     _commands_implied_by_success,
     _has_trailing_output_filter_pipeline,
     _is_django_test_subcommand,
     _is_python_executable,
+    _is_workspace_relative_directory,
     _looks_like_test_command,
     _looks_like_unittest_command,
     _normalized_command_claim_aliases,
@@ -580,7 +585,9 @@ _FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh"
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
 
-def _python_imported_module_files(command: str) -> list[str]:
+def _python_imported_module_files(
+    command: str, inherited_environment: tuple[str, ...] = ()
+) -> list[str]:
     """Return workspace file candidates for the module an inline Python program imports first.
 
     ``python3 -c "from mathutils import clamp; assert ..."`` exercises
@@ -588,24 +595,48 @@ def _python_imported_module_files(command: str) -> list[str]:
     only as a module. The program is the ``-c`` text of a command whose
     success the line's zero exit implies (``_commands_implied_by_success``:
     not ``python3 -c "import app"; true``) and whose resolved program is a
-    Python interpreter (``python_inline_program``). It is
-    parsed, and only an import that is certain to run anchors a module: the
-    first module of the program's first statement, when that statement is an
-    ``import`` or an absolute ``from ... import``. Any later import may never
-    run (``raise SystemExit(0); import app``, or an earlier module that exits
-    while it is imported), and text that merely mentions an import
-    (``print('import app')``) is not an import at all. The module ``a.b`` maps
-    to ``a/b.py`` and ``a/b/__init__.py``; the caller still requires one
-    candidate to be a real workspace file, so a stdlib import (``import os``)
-    anchors nothing.
+    Python interpreter (``python_inline_program``). It is parsed, and only an
+    import that is certain to run anchors a module: the first module of the
+    program's first statement, when that statement is an ``import`` or an
+    absolute ``from ... import``. Any later import may never run (``raise
+    SystemExit(0); import app``, or an earlier module that exits while it is
+    imported), and text that merely mentions an import (``print('import
+    app')``) is not an import at all.
+
+    The module resolves against the working directory, so it anchors nothing
+    when the import path is not the default (``replay_policy.
+    inline_python_alters_imports``: ``PYTHONPATH=...``, ``-P``, ``-I``, from
+    the command or ``inherited_environment``, the narrowing variables earlier
+    calls exported), and when the line changes directory other than by one
+    leading ``cd <workspace-relative dir> &&``, whose directory prefixes the
+    candidates. The module ``a.b`` maps to ``a/b.py`` and ``a/b/__init__.py``;
+    the caller still requires one candidate to be a real workspace file, so a
+    stdlib import (``import os``) anchors nothing.
     """
+    lists = _command_lists(command)
+    base = "."
+    directory_changes = [
+        (list_index, position, argv)
+        for list_index, commands in enumerate(lists)
+        for position, (argv, _) in enumerate(commands)
+        if _changes_directory(argv)
+    ]
+    if directory_changes:
+        (list_index, position, argv), *others = directory_changes
+        leading = list_index == 0 and position == 0 and not others and len(lists) == 1
+        if not leading or len(argv) != 2 or not _is_workspace_relative_directory(argv[1]):
+            return []
+        if len(lists[0]) < 2 or lists[0][1][1] != "&&":
+            return []
+        base = argv[1]
+    environment = (*narrowing_assignments(command), *inherited_environment)
     modules: list[str] = []
     for argv in _commands_implied_by_success(command):
-        program = python_inline_program(argv)
-        if program is None:
+        inline = python_inline_program(argv)
+        if inline is None or inline_python_alters_imports(argv, environment):
             continue
         try:
-            tree = ast.parse(program)
+            tree = ast.parse(inline.program)
         except (SyntaxError, ValueError):
             continue
         first = tree.body[0] if tree.body else None
@@ -615,13 +646,18 @@ def _python_imported_module_files(command: str) -> list[str]:
             modules.append(first.module)
     candidates: list[str] = []
     for module in modules:
-        base = module.replace(".", "/")
-        candidates.extend((f"{base}.py", f"{base}/__init__.py"))
+        path = PurePosixPath(os.path.normpath(os.path.join(base, *module.split("."))))
+        candidates.extend((f"{path}.py", f"{path}/__init__.py"))
     return candidates
 
 
-def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
+def _functional_command_invoked_files(
+    command: str, inherited_environment: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """Return workspace file tokens a verification command exercises.
+
+    ``inherited_environment`` names narrowing variables earlier calls of the
+    leaf exported (see ``_python_imported_module_files``).
 
     The anchor is not the token itself but the backing requirement layered on
     top: at least one referenced file must be proven authored by this run (or
@@ -662,7 +698,7 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
         if any(ch.isalpha() for ch in match.group(0))
     ]
     if any(_is_python_executable(token) for token in tokens):
-        invoked.extend(_python_imported_module_files(command))
+        invoked.extend(_python_imported_module_files(command, inherited_environment))
     return tuple(dict.fromkeys(invoked))
 
 
@@ -690,7 +726,20 @@ def _functional_command_supports_test_claim(
     """
     if _looks_like_test_command(value):
         return False
-    invoked_files = _functional_command_invoked_files(value)
+    # A runtime's shell may keep exports across calls; any narrowing variable
+    # the leaf exported may apply to this command's imports.
+    exported = tuple(
+        sorted(
+            {
+                name
+                for message in messages
+                if message.tool_name == "Bash"
+                for recorded in _runtime_message_command_values(message)
+                for name in _exported_narrowing_variables(recorded)
+            }
+        )
+    )
+    invoked_files = _functional_command_invoked_files(value, exported)
     if not invoked_files:
         return False
     if not any(

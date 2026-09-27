@@ -70,7 +70,8 @@ an option is treated as narrowing:
   ``-k`` and ``-m`` (pytest), ``-k`` (unittest, Django, project runner
   scripts), ``--tag``, ``--exclude-tag`` and ``--start-at``/``--start-after``
   (Django), and the entries of ``_TARGET_EXCLUDING_OPTIONS`` and
-  ``_SHORT_EXCLUDING_OPTIONS``;
+  ``_SHORT_EXCLUDING_OPTIONS``, also inside an argparse short-option cluster
+  (``-qk expr`` is ``-q -k expr``; ``_expand_short_clusters``);
 - pytest ``-o``/``--override-ini`` setting ``addopts``, ``python_files``,
   ``python_classes``, ``python_functions``, ``testpaths`` or
   ``norecursedirs`` (``addopts`` covers ``--deselect``, ``-k`` and ``-m``
@@ -141,6 +142,7 @@ from ouroboros.orchestrator.evidence.shell_parsing import (
     _project_test_runner_script,
     command_line_assignments,
     program_chain,
+    python_inline_program,
 )
 
 # Narrowing classes (``_selection``). ``SELECTION``: an option selects, skips
@@ -500,8 +502,10 @@ _TARGET_FLAG_OPTIONS = frozenset(
         "-race",
     }
 )
-# Django-style runners read ``-v`` as a verbosity level with a value.
+# Django-style runners read ``-v`` as a verbosity level with a value;
+# ``python -m unittest`` reads ``-v`` as a flag.
 _LABEL_RUNNER_VALUE_OPTIONS = frozenset({"-v", "--verbosity"})
+_LABEL_RUNNER_KINDS = frozenset({"django", "test-script"})
 # Runners whose ``-p``/``--pattern`` is a test discovery pattern.
 _PATTERN_RUNNER_KINDS = frozenset({"unittest", "django", "test-script"})
 
@@ -1212,6 +1216,49 @@ def _narrowing_environment(argv: Sequence[str], environment: Sequence[str]) -> b
     return any(narrowing_variable(name) for name in names)
 
 
+# Runners whose short options follow argparse: a cluster such as ``-qk expr``
+# is ``-q`` followed by ``-k expr``.
+_CLUSTERED_SHORT_KINDS = frozenset({"pytest", "unittest", "django", "test-script", "tox", "nox"})
+
+
+def _expand_short_clusters(
+    arguments: Sequence[str], flag_options: set[str], value_options: set[str]
+) -> tuple[str, ...]:
+    """Split argparse short-option clusters into one option per token.
+
+    ``-qk expr`` becomes ``-q -k expr`` and ``-sv`` becomes ``-s -v``. A
+    letter that is not a known flag takes the rest of the cluster as its
+    value (``-qkexpr`` becomes ``-q -kexpr``), as argparse reads it. A token
+    that is itself a known option (``-vv``, ``-ra``) or a known value option
+    with its value attached (``-n4``, ``-rfE``) is kept, and nothing after
+    ``--`` is touched.
+    """
+    expanded: list[str] = []
+    for position, token in enumerate(arguments):
+        if token == "--":
+            expanded.extend(arguments[position:])
+            break
+        if (
+            token.startswith("--")
+            or not token.startswith("-")
+            or len(token) <= 2
+            or token in flag_options
+            or token[:2] in value_options
+            or "=" in token
+        ):
+            expanded.append(token)
+            continue
+        cluster = token[1:]
+        for letter_index, letter in enumerate(cluster):
+            option = f"-{letter}"
+            if option in flag_options:
+                expanded.append(option)
+                continue
+            expanded.append(option + cluster[letter_index + 1 :])
+            break
+    return tuple(expanded)
+
+
 def _selection(
     argv: Sequence[str], environment: Sequence[str]
 ) -> tuple[ResolvedRunner | None, str | None, frozenset[str]]:
@@ -1236,7 +1283,7 @@ def _selection(
     narrowing: str | None = None
     value_options = set(_TARGET_VALUE_OPTIONS)
     flag_options = set(_TARGET_FLAG_OPTIONS)
-    if runner.kind in _PATTERN_RUNNER_KINDS:
+    if runner.kind in _LABEL_RUNNER_KINDS:
         value_options |= _LABEL_RUNNER_VALUE_OPTIONS
         flag_options -= _LABEL_RUNNER_VALUE_OPTIONS
     if runner.kind in _FILTER_OPERAND_KINDS:
@@ -1245,6 +1292,8 @@ def _selection(
     operands: set[str] = set()
     after_separator = False
     arguments = runner.arguments
+    if runner.kind in _CLUSTERED_SHORT_KINDS:
+        arguments = _expand_short_clusters(arguments, flag_options, value_options)
     index = 0
     while index < len(arguments):
         token = arguments[index]
@@ -1295,6 +1344,23 @@ def _selection(
     if narrowing is not None:
         return runner, narrowing, frozenset()
     return runner, None, frozenset(operands)
+
+
+def inline_python_alters_imports(argv: Sequence[str], environment: Sequence[str] = ()) -> bool:
+    """Return True when a ``python -c`` call may import modules from outside the default path.
+
+    The same configuration decision ``_selection`` makes for a runner: an
+    interpreter flag in ``_NARROWING_PYTHON_FLAGS`` (``-P``, ``-I``: the
+    working directory is not on ``sys.path``) or a narrowing variable
+    (``PYTHONPATH``, ...) assigned on the command line or named in
+    ``environment``. False when ``argv`` makes no ``python -c`` call.
+    """
+    inline = python_inline_program(argv)
+    if inline is None:
+        return False
+    return bool(inline.options & _NARROWING_PYTHON_FLAGS) or _narrowing_environment(
+        argv, environment
+    )
 
 
 def excludes_tests(argv: Sequence[str], environment: Sequence[str] = ()) -> bool:
@@ -1369,6 +1435,7 @@ __all__ = [
     "command_line_assignments",
     "environment_roots",
     "excludes_tests",
+    "inline_python_alters_imports",
     "narrowing_assignments",
     "narrowing_variable",
     "outside_known_roots",

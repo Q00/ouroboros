@@ -730,3 +730,30 @@ def test_inline_python_import_after_an_exit_anchors_nothing(tmp_path) -> None:
     verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
     assert verdict.passed is False
     assert any("tests_passed" in reason for reason in verdict.reasons)
+
+
+def test_inline_python_import_resolved_elsewhere_anchors_nothing(tmp_path) -> None:
+    """A changed import path or working directory means ``import app`` may not
+    be the workspace's ``app.py``."""
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    for command in (
+        'env PYTHONPATH=/tmp/elsewhere python3 -P -c "import app"',
+        'PYTHONPATH=/tmp/elsewhere python3 -c "import app"',
+        'export PYTHONPATH=/tmp/elsewhere && python3 -c "import app"',
+        'python3 -I -c "import app"',
+        'python3 -Pc "import app"',
+        'cd /tmp && python3 -c "import app"',
+        'cd sub; python3 -c "import app"',
+        'true && cd sub && python3 -c "import app"',
+    ):
+        assert "app.py" not in _functional_command_invoked_files(command), command
+        verdict = _inline_import_verdict(tmp_path, command, edited="app.py")
+        assert verdict.passed is False, command
+    # A narrowing variable an earlier call exported applies as well.
+    assert "app.py" not in _functional_command_invoked_files(
+        'python3 -c "import app"', ("PYTHONPATH",)
+    )
+    # One leading workspace-relative ``cd`` resolves the module inside it.
+    assert _functional_command_invoked_files('cd pkg && python3 -c "import app"')[:1] == (
+        "pkg/app.py",
+    )
