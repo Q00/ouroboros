@@ -466,6 +466,7 @@ class EventTail:
         self._db_path = Path(db_path).expanduser()
         self._run_id = run_id
         self._cursor = 0
+        self._interview_cursors: dict[str, int] = {}
 
     @property
     def db_path(self) -> Path:
@@ -473,6 +474,7 @@ class EventTail:
 
     def reset(self) -> None:
         self._cursor = 0
+        self._interview_cursors.clear()
 
     def _resolve_cluster(self, conn: sqlite3.Connection) -> _ResolvedRunCluster:
         """Recover the current bounded execution/session cluster for the run."""
@@ -546,6 +548,7 @@ class EventTail:
                     for row in rows:
                         rows_by_rowid[int(row["rowid"])] = row
             if interview_id is not None:
+                interview_cursor = self._interview_cursors.get(interview_id, 0)
                 interview_type_ph = ",".join("?" for _ in _INTERVIEW_EVENT_TYPES)
                 interview_rows = conn.execute(
                     "SELECT rowid, aggregate_id, event_type, payload "
@@ -556,7 +559,7 @@ class EventTail:
                     f"AND event_type IN ({interview_type_ph}) "
                     "ORDER BY rowid "
                     "LIMIT ?",
-                    [self._cursor, interview_id, *_INTERVIEW_EVENT_TYPES, limit],
+                    [interview_cursor, interview_id, *_INTERVIEW_EVENT_TYPES, limit],
                 ).fetchall()
                 for row in interview_rows:
                     rows_by_rowid[int(row["rowid"])] = row
@@ -566,7 +569,17 @@ class EventTail:
 
         events: list[dict[str, Any]] = []
         for row in rows:
-            self._cursor = max(self._cursor, int(row["rowid"]))
+            rowid = int(row["rowid"])
+            if (
+                interview_id is not None
+                and row["aggregate_id"] == interview_id
+                and row["event_type"] in _INTERVIEW_EVENT_TYPES
+            ):
+                self._interview_cursors[interview_id] = max(
+                    self._interview_cursors.get(interview_id, 0), rowid
+                )
+            else:
+                self._cursor = max(self._cursor, rowid)
             payload = row["payload"]
             if isinstance(payload, str):
                 try:

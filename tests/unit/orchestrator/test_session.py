@@ -203,6 +203,25 @@ class TestSessionRepository:
         assert "interview_id" not in event.data
 
     @pytest.mark.asyncio
+    async def test_create_session_preserves_legacy_positional_seed_goal(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Adding the optional interview link does not shift existing positional args."""
+        result = await repository.create_session(
+            "exec_legacy_positional",
+            "seed_legacy_positional",
+            "session_legacy_positional",
+            "Legacy goal text",
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert event.data["seed_goal"] == "Legacy goal text"
+        assert "interview_id" not in event.data
+
+    @pytest.mark.asyncio
     async def test_create_session_persists_explicit_source_interview_link(
         self,
         repository: SessionRepository,
