@@ -212,18 +212,32 @@ def test_registry_scan_is_bounded(tmp_path):
     assert len(facts.records) == runtime.MAX_REGISTRY_ENTRIES
 
 
-def test_registry_root_symlink_is_not_followed(tmp_path):
-    target = tmp_path / "target"
-    target.mkdir()
+def test_registry_symlink_at_each_ancestor_is_not_followed(tmp_path):
+    relative = ("root", "a", ".ouroboros", "mcp-servers")
+    target = tmp_path.joinpath(*relative)
+    target.mkdir(parents=True)
     (target / "123.pid").write_text("PRIVATE_CONTENT", encoding="utf-8")
-    root = tmp_path / "mcp-servers"
-    root.symlink_to(target, target_is_directory=True)
 
-    facts = runtime.collect_registry_facts(root)
+    for index in range(len(relative) + 1):
+        alias = tmp_path / f"linked-{index}"
+        alias.symlink_to(tmp_path.joinpath(*relative[:index]), target_is_directory=True)
+        linked_registry = alias.joinpath(*relative[index:])
+
+        facts = runtime.collect_registry_facts(linked_registry)
+
+        assert facts.status == "not_checked"
+        assert facts.records == ()
+        assert "PRIVATE_CONTENT" not in str(facts)
+        alias.unlink()
+
+
+def test_registry_without_owner_does_not_resolve_home():
+    with patch.object(Path, "home", side_effect=AssertionError("must not read HOME")):
+        facts = runtime.collect_registry_facts()
 
     assert facts.status == "not_checked"
-    assert facts.reason == "symlink"
-    assert facts.records == ()
+    assert facts.reason == "owner_unavailable"
+    assert facts.directory == "~/.ouroboros/mcp-servers"
 
 
 def test_registry_scan_uses_open_directory_handle(tmp_path):
@@ -245,3 +259,4 @@ def test_snapshot_has_no_privacy_sensitive_fields(tmp_path):
     assert "argv" not in rendered
     assert "credential" not in rendered
     assert "/private/sentinel" not in rendered
+    assert str(tmp_path) not in rendered

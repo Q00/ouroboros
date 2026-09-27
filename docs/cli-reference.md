@@ -1169,6 +1169,11 @@ emits typed fields for fixed PATH executable provenance and collisions,
 ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
 PID registry.
 
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
 The command reads no registry contents, process arguments, credentials, or
 environment values other than `PATH`; it does not execute commands, connect to
 the network, or mutate the machine. PATH and registry scans have fixed bounds.

@@ -18,12 +18,18 @@ import stat
 import sys
 from typing import Any, Literal
 
+from ouroboros.core.filesystem_capability import (
+    NoFollowDirectoryChain,
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
+
 MAX_PATH_CHARS = 32_768
 MAX_PATH_ENTRIES = 128
 MAX_REGISTRY_ENTRIES = 128
 MAX_REGISTRY_NAME_CHARS = 64
 MAX_REGISTRY_RECORD_BYTES = 4_096
-_DEFAULT_REGISTRY: Path | None = None
+_REGISTRY_DIRECTORY_LABEL = "~/.ouroboros/mcp-servers"
 _PID_NAME = re.compile(r"^(?P<pid>[1-9][0-9]{0,9})\.pid$")
 
 
@@ -187,39 +193,32 @@ def probe_loopback() -> tuple[LoopbackProbe, ...]:
     return tuple(probes)
 
 
-def _open_owned_registry(directory: Path) -> int:
-    """Open the owned registry directory without following its final two path parts."""
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    directory_flag = getattr(os, "O_DIRECTORY", None)
-    if no_follow is None or directory_flag is None:
+def _open_owned_registry(directory: Path) -> NoFollowDirectoryChain:
+    """Hold a no-follow capability through every registry path component."""
+    if not nofollow_directory_capabilities_available():
         raise NotImplementedError
-    flags = os.O_RDONLY | directory_flag | no_follow
-    parent_fd = os.open(directory.parent, flags)
-    try:
-        return os.open(directory.name, flags, dir_fd=parent_fd)
-    finally:
-        os.close(parent_fd)
+    return open_nofollow_directory_chain(directory)
 
 
 def collect_registry_facts(registry_dir: Path | None = None) -> RegistryFacts:
     """Inspect bounded no-follow metadata for Ouroboros ``<pid>.pid`` records."""
-    try:
-        directory = registry_dir or _DEFAULT_REGISTRY or Path.home() / ".ouroboros" / "mcp-servers"
-    except (OSError, RuntimeError):
+    if registry_dir is None:
         return RegistryFacts(
-            "", 0, MAX_REGISTRY_ENTRIES, False, (), "not_checked", "home_unavailable"
+            _REGISTRY_DIRECTORY_LABEL,
+            0,
+            MAX_REGISTRY_ENTRIES,
+            False,
+            (),
+            "not_checked",
+            "owner_unavailable",
         )
     records: list[RegistryRecord] = []
     entries_seen = 0
     truncated = False
     try:
-        if directory.is_symlink() or directory.parent.is_symlink():
-            return RegistryFacts(
-                str(directory), 0, MAX_REGISTRY_ENTRIES, False, (), "not_checked", "symlink"
-            )
-        directory_fd = _open_owned_registry(directory)
+        directory_chain = _open_owned_registry(registry_dir)
         try:
-            with os.scandir(directory_fd) as iterator:
+            with os.scandir(directory_chain.leaf_fd) as iterator:
                 for entry in iterator:
                     if entries_seen >= MAX_REGISTRY_ENTRIES:
                         truncated = True
@@ -250,10 +249,10 @@ def collect_registry_facts(registry_dir: Path | None = None) -> RegistryFacts:
                     except (OSError, ValueError, OverflowError):
                         continue
         finally:
-            os.close(directory_fd)
+            directory_chain.close()
     except NotImplementedError:
         return RegistryFacts(
-            str(directory),
+            _REGISTRY_DIRECTORY_LABEL,
             0,
             MAX_REGISTRY_ENTRIES,
             False,
@@ -264,7 +263,7 @@ def collect_registry_facts(registry_dir: Path | None = None) -> RegistryFacts:
     except OSError as exc:
         reason = "symlink" if exc.errno == errno.ELOOP else "unavailable"
         return RegistryFacts(
-            str(directory),
+            _REGISTRY_DIRECTORY_LABEL,
             entries_seen,
             MAX_REGISTRY_ENTRIES,
             False,
@@ -274,7 +273,12 @@ def collect_registry_facts(registry_dir: Path | None = None) -> RegistryFacts:
         )
     records.sort(key=lambda record: record.name)
     return RegistryFacts(
-        str(directory), entries_seen, MAX_REGISTRY_ENTRIES, truncated, tuple(records), "available"
+        _REGISTRY_DIRECTORY_LABEL,
+        entries_seen,
+        MAX_REGISTRY_ENTRIES,
+        truncated,
+        tuple(records),
+        "available",
     )
 
 

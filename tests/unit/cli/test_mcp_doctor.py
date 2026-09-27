@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import sys
 from unittest.mock import MagicMock, patch
@@ -783,31 +784,60 @@ def _import_error_for(module_name: str):
     return _side_effect
 
 
-def test_doctor_runtime_json_uses_real_collector(tmp_path: Path):
+def test_doctor_runtime_json_uses_owner_path_without_exposing_home(tmp_path: Path, monkeypatch):
     from ouroboros.cli.commands.mcp import app
 
-    with patch("ouroboros.mcp.machine_runtime._DEFAULT_REGISTRY", tmp_path):
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "123.pid").write_bytes(b"opaque")
+    private_home = tmp_path / "PRIVATE_HOME_SENTINEL"
+    monkeypatch.setenv("HOME", str(private_home))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
         result = runner.invoke(app, ["doctor-runtime", "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert set(payload) == {"path", "loopback", "registry"}
-    assert "PATH" not in json.dumps(payload)
+    assert payload["registry"]["directory"] == "~/.ouroboros/mcp-servers"
+    assert payload["registry"]["records"][0]["pid"] == 123
+    assert str(private_home) not in json.dumps(payload)
     assert all(
         item["status"] in {"available", "unavailable", "not_checked"}
         for item in payload["loopback"]
     )
 
 
-def test_doctor_runtime_human_output_is_readable(tmp_path: Path):
+def test_doctor_runtime_human_output_includes_bounded_path_and_registry_details(
+    tmp_path: Path, monkeypatch
+):
     from ouroboros.cli.commands.mcp import app
 
-    with patch("ouroboros.mcp.machine_runtime._DEFAULT_REGISTRY", tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    registry = tmp_path / "registry"
+    for directory in (first, second):
+        directory.mkdir()
+        executable = directory / "ouroboros"
+        executable.write_text("unused", encoding="utf-8")
+        executable.chmod(0o755)
+    registry.mkdir()
+    (registry / "456.pid").write_bytes(b"opaque")
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(second))))
+
+    with patch("ouroboros.cli.commands.mcp._PID_REGISTRY_DIR", registry):
         result = runner.invoke(app, ["doctor-runtime"])
 
     assert result.exit_code == 0
     assert "Ouroboros MCP Runtime Facts" in result.output
-    assert "registry records" in result.output
+    output = " ".join(result.output.split())
+    assert "PATH candidate: ouroboros ->" in output
+    assert f"{first.name}/ouroboros" in output
+    assert f"{second.name}/ouroboros" in output
+    assert "PATH collision: ouroboros ->" in output
+    assert "registry: available at ~/.ouroboros/mcp-servers" in output
+    assert "registry record: pid=456, name=456.pid" in output
+    assert str(registry) not in output
 
 
 def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
@@ -820,11 +850,27 @@ def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
         if command.callback.__name__ == "doctor_runtime"
     )
     snapshot = SimpleNamespace(
-        path=SimpleNamespace(candidates=(), truncated=False),
+        path=SimpleNamespace(
+            status="not_checked",
+            reason="missing",
+            entries_seen=0,
+            entries_limit=128,
+            candidates=(),
+            collisions={},
+            truncated=False,
+        ),
         loopback=(
             SimpleNamespace(family="ipv4", status="unavailable", port=None, reason="denied"),
         ),
-        registry=SimpleNamespace(records=(), status="available"),
+        registry=SimpleNamespace(
+            directory="~/.ouroboros/mcp-servers",
+            entries_seen=0,
+            entries_limit=128,
+            records=(),
+            status="not_checked",
+            truncated=False,
+            reason="owner_unavailable",
+        ),
     )
     with patch(
         "ouroboros.mcp.machine_runtime.collect_runtime_snapshot",
@@ -834,6 +880,8 @@ def test_doctor_runtime_human_output_includes_unavailable_reason(capsys):
 
     output = capsys.readouterr().out
     assert "loopback ipv4: unavailable (port -, denied)" in output
+    assert "PATH unavailable reason: missing" in output
+    assert "registry unavailable reason: owner_unavailable" in output
 
 
 def test_doctor_runtime_command_is_registered():
