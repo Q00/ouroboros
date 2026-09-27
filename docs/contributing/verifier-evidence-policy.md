@@ -79,9 +79,11 @@ command text a second way. The rules:
   are peeled. Commands linked to an unproven claim come first, then recognized
   test runs that the runner-output rules judge (for example a
   `pytest tests/test_a.py` run behind a `tests/test_a.py::test_x` claim). At
-  most 3 per criterion. The most recent run of a command decides: when the
-  transcript recorded a non-zero exit for it (or a failed tool result), it is
-  not replayed.
+  most 3 per criterion. The most recent run of a command decides: every
+  record of that run counts (the call and each correlated completion), and a
+  failure in any of them (a non-zero or non-integer exit code, `is_error`, a
+  `failed` or `error` status or subtype, a `.failed` runtime event) or
+  records that disagree mean it is not replayed.
 - **Allowlist.** Only these programs are replayed, found after peeling
   wrappers (`timeout`, `stdbuf`, `time`, `nice`, `ionice`, `env`, `nohup`,
   `command`, `exec`, `setsid`) with per-wrapper option tables; an option or
@@ -294,9 +296,11 @@ functional tier does not accept a
 recorded exit that belongs to a pipeline without `pipefail`
 (`./run_tests.sh | tail -5`), since it is the last stage's status, and an
 inline Python program (`python3 -c "from mathutils import clamp; ..."`)
-anchors a workspace module only through a top-level `import` or absolute
-`from ... import` statement of the parsed `-c` program, never through text
-that mentions one (`python -c "print('import app')"`).
+anchors a workspace module only through the import that is certain to run:
+the first module of the parsed `-c` program's first statement, when that
+statement is an `import` or an absolute `from ... import`. Text that mentions
+an import (`python -c "print('import app')"`) and a later import that may
+never run (`raise SystemExit(0); import app`) anchor nothing.
 
 ## Failure class semantics
 

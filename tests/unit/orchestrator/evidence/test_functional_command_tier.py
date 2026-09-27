@@ -13,6 +13,8 @@ verify gate each keep the current rejection.
 from __future__ import annotations
 
 import shlex
+import subprocess
+import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.test_detection import (
@@ -667,8 +669,8 @@ def test_inline_python_import_stays_fail_closed(tmp_path) -> None:
 
 def test_inline_python_text_that_only_mentions_an_import_anchors_nothing(tmp_path) -> None:
     """``python -c "print('import app')"`` never
-    imports ``app``. Only parsed top-level import statements of the ``-c``
-    program anchor a module, so a touched ``app.py`` and a correlated zero exit
+    imports ``app``. Only the parsed first import statement of the ``-c``
+    program anchors a module, so a touched ``app.py`` and a correlated zero exit
     do not make the printed text a ``tests_passed`` check."""
     (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     inert = "python -c \"print('import app')\""
@@ -683,6 +685,9 @@ def test_inline_python_text_that_only_mentions_an_import_anchors_nothing(tmp_pat
         'python3 -c "import app(("',
         'python3 -m json.tool -c "import app"',
         'echo "python3 -c import app"',
+        'python3 -c "raise SystemExit(0); import app"',
+        'python3 -c "import os; os._exit(0); import app"',
+        'python3 -c "import os, app"',
     ):
         assert "app.py" not in _functional_command_invoked_files(command), command
 
@@ -700,3 +705,21 @@ def test_inline_python_real_imports_still_anchor(tmp_path) -> None:
     claim = 'python3 -c "import app; assert app.run() == 1"'
     verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
     assert verdict.passed is True, verdict.reasons
+
+
+def test_inline_python_import_after_an_exit_anchors_nothing(tmp_path) -> None:
+    """``raise SystemExit(0); import app`` exits 0 without importing ``app``;
+    only the first import of the program is certain to run."""
+    marker = tmp_path / "imported.marker"
+    (tmp_path / "app.py").write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
+    claim = 'python3 -c "raise SystemExit(0); import app"'
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", "raise SystemExit(0); import app"],
+        cwd=tmp_path,
+        check=False,
+    )
+    assert completed.returncode == 0 and not marker.exists()
+    assert "app.py" not in _functional_command_invoked_files(claim)
+    verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
+    assert verdict.passed is False
+    assert any("tests_passed" in reason for reason in verdict.reasons)

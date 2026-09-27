@@ -30,6 +30,7 @@ from ouroboros.orchestrator.evidence.command_replay import (
     replay_candidate,
     replay_commands,
     select_replay_candidates,
+    transcript_exit_status,
 )
 from ouroboros.orchestrator.evidence.harness_observation import (
     CommandObservation,
@@ -531,6 +532,54 @@ class TestFabricationNegativeControls:
 
         assert observation.command_runs == ()
         assert verdict.passed is False
+
+    @pytest.mark.parametrize(
+        "records",
+        [
+            # A failure recorded only as a status, on the result or its payload.
+            ({}, {"status": "failed"}),
+            ({}, {"tool_result": {"status": "error"}}),
+            ({}, {"runtime_event_type": "tool.failed"}),
+            ({}, {"subtype": "error"}),
+            ({}, {"tool_result": {"is_error": True}}),
+            ({}, {"exit_code": "1"}),
+            # The call and its completion disagree: the failure decides.
+            ({"exit_code": 0}, {"exit_code": 1}),
+            ({"exit_code": 0}, {"status": "failed"}),
+        ],
+    )
+    async def test_any_recorded_failure_of_the_run_vetoes_replay(
+        self, tmp_path: Path, records: tuple[dict[str, object], dict[str, object]]
+    ) -> None:
+        workspace = _workspace(tmp_path / "ws")
+        call_data, result_data = records
+        call = _bash_call("/bin/zsh -lc 'make test'", "c1")
+        call = AgentMessage(
+            type=call.type,
+            content=call.content,
+            tool_name=call.tool_name,
+            data={**call.data, **call_data},
+        )
+        transcript = (call, _bash_result("c1", **result_data))
+
+        assert transcript_exit_status(transcript, 0) not in (None, 0)
+        verdict, observation = await _dispatch_and_verify(
+            workspace, transcript, _evidence("make test")
+        )
+
+        assert observation.command_runs == ()
+        assert verdict.passed is False
+
+    def test_every_correlated_completion_counts(self) -> None:
+        call = _bash_call("make test", "c1")
+        assert transcript_exit_status((call, _bash_result("c1", exit_code=0)), 0) == 0
+        assert (
+            transcript_exit_status(
+                (call, _bash_result("c1", exit_code=0), _bash_result("c1", exit_code=3)), 0
+            )
+            == 3
+        )
+        assert transcript_exit_status((call, _bash_result("c1")), 0) is None
 
     async def test_latest_failed_run_is_not_replaced_by_an_earlier_pass(
         self, tmp_path: Path

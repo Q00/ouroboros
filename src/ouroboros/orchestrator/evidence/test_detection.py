@@ -581,19 +581,21 @@ _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
 
 def _python_imported_module_files(command: str) -> list[str]:
-    """Return workspace file candidates for modules an inline Python program imports.
+    """Return workspace file candidates for the module an inline Python program imports first.
 
     ``python3 -c "from mathutils import clamp; assert ..."`` exercises
     ``mathutils.py`` as directly as ``python3 mathutils.py`` does, but names it
     only as a module. The program is the ``-c`` text of a simple command whose
-    resolved program is a Python interpreter (``python_inline_program``); it
-    is parsed, and only its top-level ``import`` and absolute ``from ...
-    import`` statements count, so text that merely mentions an import
-    (``print('import app')``) or an import that may not run (inside a
-    function or a branch) anchors nothing. Each module ``a.b`` maps to
-    ``a/b.py`` and ``a/b/__init__.py``; the caller still requires one
+    resolved program is a Python interpreter (``python_inline_program``). It is
+    parsed, and only an import that is certain to run anchors a module: the
+    first module of the program's first statement, when that statement is an
+    ``import`` or an absolute ``from ... import``. Any later import may never
+    run (``raise SystemExit(0); import app``, or an earlier module that exits
+    while it is imported), and text that merely mentions an import
+    (``print('import app')``) is not an import at all. The module ``a.b`` maps
+    to ``a/b.py`` and ``a/b/__init__.py``; the caller still requires one
     candidate to be a real workspace file, so a stdlib import (``import os``)
-    anchors nothing either.
+    anchors nothing.
     """
     modules: list[str] = []
     for argv in _simple_commands(command):
@@ -604,13 +606,11 @@ def _python_imported_module_files(command: str) -> list[str]:
             tree = ast.parse(program)
         except (SyntaxError, ValueError):
             continue
-        for statement in tree.body:
-            if isinstance(statement, ast.Import):
-                modules.extend(alias.name for alias in statement.names)
-            elif (
-                isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module
-            ):
-                modules.append(statement.module)
+        first = tree.body[0] if tree.body else None
+        if isinstance(first, ast.Import):
+            modules.append(first.names[0].name)
+        elif isinstance(first, ast.ImportFrom) and first.level == 0 and first.module:
+            modules.append(first.module)
     candidates: list[str] = []
     for module in modules:
         base = module.replace(".", "/")

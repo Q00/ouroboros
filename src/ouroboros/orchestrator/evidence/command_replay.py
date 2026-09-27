@@ -80,8 +80,11 @@ import tempfile
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
+    _runtime_message_has_conflicting_tool_call_ids,
     _runtime_message_is_tool_completion,
+    _runtime_message_recorded_exit_status,
     _runtime_message_tool_call_id,
+    _runtime_message_tool_call_ids,
     _runtime_messages_support_command_claim,
 )
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
@@ -393,58 +396,47 @@ def replayed_command_supports_claim(value: str, messages: tuple[AgentMessage, ..
     return False
 
 
-def _message_exit_status(message: AgentMessage) -> int | None:
-    """Return the exit status a message records, or None when it records none.
-
-    An integer ``exit_code`` (on the message or its ``tool_result``) is the
-    status. A result flagged ``is_error`` or a ``tool.failed`` event without
-    one records a failure, returned as 1.
-    """
-    containers: list[Mapping[str, object]] = [message.data]
-    tool_result = message.data.get("tool_result")
-    if isinstance(tool_result, dict):
-        containers.append(tool_result)
-    for container in containers:
-        exit_code = container.get("exit_code")
-        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-            return exit_code
-    if any(container.get("is_error") is True for container in containers):
-        return 1
-    event = message.data.get("runtime_event_type")
-    if isinstance(event, str) and event.strip().lower().endswith("tool.failed"):
-        return 1
-    return None
-
-
 def transcript_exit_status(messages: Sequence[AgentMessage], index: int) -> int | None:
     """Return the exit status the transcript recorded for the call at ``index``.
 
-    Read from the call itself, else from completions correlated by tool-call
-    id (a non-zero one wins over a zero one), else, for id-less streams, from
-    the next completion before another call. None when nothing is recorded.
+    Every record of the run counts: the call itself and each completion
+    correlated with it (by tool-call id, or for an id-less call the next
+    completion before another call), each read by
+    ``claims._runtime_message_recorded_exit_status``. A failure in any of them,
+    or records that disagree, is a failure (the non-zero status); a completion
+    whose id is ambiguous is a failure too. 0 only when every record that
+    states an outcome states success; None when none states one.
     """
     call = messages[index]
-    status = _message_exit_status(call)
-    if status is not None:
-        return status
+    if _runtime_message_has_conflicting_tool_call_ids(call):
+        return 1
+    records: list[AgentMessage] = [call]
     call_id = _runtime_message_tool_call_id(call)
     if call_id is not None:
-        statuses = [
-            status
-            for candidate in messages
-            if candidate is not call
-            and _runtime_message_is_tool_completion(candidate)
-            and _runtime_message_tool_call_id(candidate) == call_id
-            and (status := _message_exit_status(candidate)) is not None
-        ]
-        nonzero = [status for status in statuses if status != 0]
-        return nonzero[0] if nonzero else (statuses[0] if statuses else None)
-    for candidate in messages[index + 1 :]:
-        if candidate.tool_name is not None and not _runtime_message_is_tool_completion(candidate):
-            break
-        if _runtime_message_is_tool_completion(candidate):
-            return _message_exit_status(candidate)
-    return None
+        for candidate in messages:
+            if candidate is call or not _runtime_message_is_tool_completion(candidate):
+                continue
+            if call_id not in _runtime_message_tool_call_ids(candidate):
+                continue
+            if _runtime_message_has_conflicting_tool_call_ids(candidate):
+                return 1
+            records.append(candidate)
+    else:
+        for candidate in messages[index + 1 :]:
+            if _runtime_message_is_tool_completion(candidate):
+                records.append(candidate)
+                break
+            if candidate.tool_name is not None:
+                break
+    statuses = [
+        status
+        for record in records
+        if (status := _runtime_message_recorded_exit_status(record)) is not None
+    ]
+    nonzero = [status for status in statuses if status != 0]
+    if nonzero:
+        return nonzero[0]
+    return 0 if statuses else None
 
 
 def select_replay_candidates(
