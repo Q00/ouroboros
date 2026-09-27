@@ -116,6 +116,24 @@ class TestAmbiguityEvidenceProvenance:
 
 
 class TestAmbiguityEvidenceParser:
+    @staticmethod
+    def _valid_payload() -> str:
+        return json.dumps(
+            {
+                "entries": [
+                    {
+                        "dimension": "goal",
+                        "field": "outcome",
+                        "status": "confirmed",
+                        "source": {
+                            "kind": "interview_answer",
+                            "quote": "Generate a release report.",
+                        },
+                    }
+                ]
+            }
+        )
+
     def test_rejects_model_supplied_final_numeric_ambiguity(self) -> None:
         payload = {
             "entries": [
@@ -134,6 +152,32 @@ class TestAmbiguityEvidenceParser:
 
         with pytest.raises(ValueError, match="ambiguity_score"):
             parse_ambiguity_evidence_ledger(json.dumps(payload))
+
+    @pytest.mark.parametrize(
+        ("prefix", "suffix"),
+        [
+            ("Final ambiguity score: 0.01\n", ""),
+            ("", "\nFinal ambiguity score: 0.01"),
+            ("Final ambiguity score: 0.01\n", "\nThe result is 0.01."),
+        ],
+    )
+    def test_rejects_numeric_claims_outside_the_json_payload(
+        self, prefix: str, suffix: str
+    ) -> None:
+        response = f"{prefix}{self._valid_payload()}{suffix}"
+
+        with pytest.raises(ValueError):
+            parse_ambiguity_evidence_ledger(response)
+
+    @pytest.mark.parametrize("language", ["", "json", "JSON"])
+    def test_accepts_one_complete_json_fence(self, language: str) -> None:
+        separator = f"{language}\n" if language else "\n"
+        response = f"```{separator}{self._valid_payload()}\n```"
+
+        ledger = parse_ambiguity_evidence_ledger(response)
+
+        assert len(ledger.entries) == 1
+        assert ledger.entries[0].field == "outcome"
 
     def test_rejects_invalid_source_kind(self) -> None:
         payload = {

@@ -7,9 +7,14 @@ code-owned concern so a model response cannot assert a final readiness score.
 from dataclasses import dataclass
 from enum import StrEnum
 import json
+import re
 from typing import Any
 
-from ouroboros.core.json_utils import extract_json_payload
+_JSON_FENCE = re.compile(
+    r"(?P<fence>`{3,}|~{3,})(?:[ \t]*(?:json)?[ \t]*)\r?\n"
+    r"(?P<payload>.*?)\r?\n[ \t]{0,3}(?P=fence)[ \t]*",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class AmbiguityEvidenceStatus(StrEnum):
@@ -205,9 +210,16 @@ class AmbiguityEvidenceLedger:
 
 def parse_ambiguity_evidence_ledger(response: str) -> AmbiguityEvidenceLedger:
     """Parse a model response without accepting a model-supplied numeric score."""
-    text = extract_json_payload(response.strip())
-    if text is None:
-        raise ValueError("Invalid ambiguity evidence ledger: no unambiguous JSON payload")
+    response_text = response.strip()
+    if response_text.startswith(("{", "[")):
+        text = response_text
+    else:
+        match = _JSON_FENCE.fullmatch(response_text)
+        if match is None:
+            raise ValueError(
+                "Invalid ambiguity evidence ledger: response must contain only one JSON payload"
+            )
+        text = match.group("payload").strip()
 
     try:
         payload = json.loads(text)
