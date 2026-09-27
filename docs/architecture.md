@@ -282,6 +282,21 @@ independently-verifiable units.
 - `orchestrator/decomposition_params.py` - Profile-driven decomposition prompts (axis / `min_unit` / branching)
 - `orchestrator/runner.py` - Orchestration entry point and dependency analysis
 
+**Dependency planning:**
+
+For dependency-analyzed AC execution, the analyzer combines structured constraints
+with inferred edges and computes deterministic topological levels. A cycle in the
+resulting graph returns `Result.err(DependencyCycleError)`, including the blocked
+AC indices (which may also contain downstream dependents). The runner must not
+replace this error with an independent parallel plan: it records the planning
+failure through its existing session failure path before dispatching any workers.
+Direct planner callers receive the same `ExecutionPlanningError`-compatible error.
+
+Cycle detection does not add model calls or attempt automatic graph repair.
+Ordinary provider or response-parsing failures still use the existing structured
+fallback, which is checked for cycles too. Explicit sequential execution and
+reuse of a persisted resume plan retain their existing behavior.
+
 **Recursive Decomposition:**
 
 Each AC defaults to **atomic** execution. Preflight splitting is retired: a split
