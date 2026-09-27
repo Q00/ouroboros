@@ -143,3 +143,11 @@ docs/cli-inventory.yaml
 .ouroboros/
 src/ouroboros/opencode/plugin/node_modules/
 src/ouroboros/opencode/plugin/bun.lock
+
+# Vendored security skills (.claude/skills/*): checkpoint state and scan
+# output, which carries exploit detail and must not be committed.
+.threat-model-state/
+.triage-state/
+.vuln-scan-state/
+docs/security/VULN-FINDINGS.*
+docs/security/TRIAGE.*

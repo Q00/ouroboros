@@ -1,0 +1,125 @@
+OUROBOROS-SPECIFIC VULNERABILITY CLASSES (appended to every /vuln-scan brief):
+
+Read this before the generic category list above. In this codebase the
+generic "env vars and CLI flags are operator-controlled — do not report"
+exclusion DOES NOT APPLY to one source: the project-directory `.env`.
+`ouroboros.config.loader` loads `./.env` from the current working directory
+at import time into `os.environ`. That file travels with whatever repository
+the user cloned, so it is ATTACKER-CONTROLLED. Only keys rejected by
+`ouroboros.config.untrusted_env.is_untrusted_env_denied_key` are filtered;
+everything else lands in `os.environ` and is inherited by every child process
+this process spawns. Every published Ouroboros advisory to date
+(CVE-2026-47211, CVE-2026-66065, GHSA-wvgf-hr9x-v3g6, draft GHSA-7j6g-gw2r-mw48)
+is an instance of this one class. Report any new instance as HIGH.
+
+TRUST BOUNDARIES (authoritative for this scan):
+  UNTRUSTED: project-directory `.env`; any file inside the cloned repository
+             (`.ouroboros/*`, `.mcp.json`, seeds, AC text, verify_command
+             strings, config YAML found under cwd); MCP tool arguments;
+             Seed / interview content; anything an LLM wrote.
+  TRUSTED:   the real process environment as inherited from the operator's
+             shell; `~/.ouroboros/.env`; `~/.ouroboros/config.yaml`;
+             `~/.ouroboros/mcp_servers.yaml`; CLI flags typed by the operator.
+  A key is an attack vector iff it can be set from an UNTRUSTED source and is
+  NOT rejected by `is_untrusted_env_denied_key`. Cite the key and the sink.
+
+  E1. UNTRUSTED .env -> os.environ -> CHILD PROCESS ENV INHERITANCE (HIGH VALUE)
+  - Any `subprocess.*`, `asyncio.create_subprocess_*`, `os.exec*`, `os.spawn*`,
+    `os.system` site whose env is `os.environ`, `os.environ.copy()`,
+    `dict(os.environ)`, `{**os.environ, ...}`, or omitted (implicit inherit).
+    For each, ask which NON-denied key the child honours:
+      * executable path: `*_CLI_PATH`, `*_CLI`, `SHELL`, `GIT_SSH_COMMAND`,
+        `GIT_ASKPASS`, `SSH_ASKPASS`, `EDITOR`, `VISUAL`, `PAGER`, `BROWSER`
+      * config / home root: `*_HOME`, `*_CONFIG*`, `*_DIR`, `HOME`,
+        `USERPROFILE`, `XDG_*`, `APPDATA`, `LOCALAPPDATA`
+      * dynamic / module loader: `LD_*`, `DYLD_*`, `PYTHONPATH`, `PYTHONHOME`,
+        `PYTHONSTARTUP`, `PYTHONUSERBASE`, `PYTHONEXECUTABLE`, `PYTHONSAFEPATH`,
+        `NODE_PATH`, `NODE_OPTIONS`, `RUBYOPT`, `PERL5OPT`, `JAVA_TOOL_OPTIONS`
+      * shell startup: `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `ZDOTDIR`, `PROMPT_COMMAND`,
+        `SHELLOPTS`, `BASHOPTS`, `IFS`, `CDPATH`, `PS4`
+      * package-manager configuration: `PIP_*`, `PIPX_*`, `UV_*`,
+        `NPM_CONFIG_*`, `YARN_*`, `PNPM_*`, `COREPACK_*`, `CARGO_*`, `GOFLAGS`
+      * git: any `GIT_*` (`GIT_CONFIG_*`, `GIT_DIR`, `GIT_EXEC_PATH`,
+        `GIT_SSH*`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`)
+  - `sys.executable -m ouroboros.*` workers (detached jobs, dashboard daemon,
+    litellm proof worker) are Python interpreters: `PYTHONPATH` / `PYTHONHOME` /
+    `PYTHONSTARTUP` in the inherited env is code execution unless the child is
+    started with `-I` / `-E` / `-s` or the key is stripped.
+  - Do NOT report a site solely because it inherits `os.environ`; report it
+    when you can name a NON-denied key the spawned program honours.
+
+  E2. BARE-NAME EXECUTABLE RESOLUTION (HIGH VALUE)
+  - `shutil.which("codex")`, `subprocess.run(["git", ...])`, `os.execvp`,
+    `os.execvpe`, or any argv[0] without a directory component resolves via
+    `PATH`. `PATH` itself is denied from the untrusted `.env`, so report only
+    when: the lookup honours a non-denied override (e.g. a bare `X_CLI`
+    alias), the search root is attacker-influenced (`cwd` on `PATH`, `.` in
+    `PATHEXT` handling on Windows), or a repo-local directory is prepended to
+    `PATH` by Ouroboros itself before the lookup.
+  - Repository-relative launchers: any `Path(cwd) / "..."` or `./node_modules/.bin`
+    that ends up in argv[0].
+
+  E3. CONFIG-FILE ROOTS THAT NAME COMMANDS TO SPAWN (HIGH VALUE)
+  - MCP bridge YAML (`mcp/bridge/config.py` -> `orchestrator/mcp_config.py`):
+    server `command` / `args` / `env` are spawned verbatim by `stdio_client`.
+    Report any discovery path that would load a YAML from under cwd, a
+    repo-relative path, or a root selectable by a non-denied env key.
+    `${VAR}` substitution in that YAML reads `os.environ`, which includes
+    non-denied project `.env` keys.
+  - Plugin lockfile / trust root (`plugin_dispatch.py`, `plugin/rewind.py`):
+    manifests dispatched as `ooo <plugin> ...`.
+  - Backend home/config roots the spawned vendor CLI reads on its own:
+    `CODEX_HOME/config.toml` (mcp_servers.*.command, approval_policy,
+    sandbox_mode), `OPENCODE_CONFIG(_DIR)`, `GJC_CONFIG_DIR`, `PI_CONFIG_DIR`,
+    `PI_CODING_AGENT_DIR`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`,
+    `OUROBOROS_AGENTS_DIR`, `OUROBOROS_DSH_CONFIG_PATH`, `OUROBOROS_TOOL_CAPABILITIES`,
+    `OUROBOROS_MCP_CONFIG`. Check that each is denied AND that Ouroboros never
+    derives one of them from cwd.
+  - Any YAML/JSON/TOML under `~/.ouroboros` or the repo whose values become
+    argv, a module name, an import path, or a file that is `exec`'d / `import`ed.
+
+  E4. THE AC VERIFY GATE MUST BE TAMPER-PROOF (HIGH VALUE)
+  - `orchestrator/verify_shell.py` (`sanitized_verify_environment`,
+    `VERIFY_ENV_STRIPPED_KEYS`, `VERIFY_ENV_STRIPPED_PREFIXES`, shell
+    resolution / `OUROBOROS_VERIFY_BASH`), `verify_command_runner.py`, and the
+    callers in `leaf_dispatcher.py` / `parallel_executor.py`.
+  - The gate decides whether an acceptance criterion PASSED by running
+    `bash -c '<verify_command>'` inside the workspace. Anything that can turn a
+    failing command into exit 0 from OUTSIDE the command text is a finding:
+    shell startup files, exported functions, `PYTEST_ADDOPTS`, `PYTHONPATH`
+    (a repo-shipped `pytest/__init__.py`), `PATH` entries under the workspace,
+    `.pth` files, `sitecustomize`, a `conftest.py` is NOT (in-workspace is the
+    design). Also: is the shell path resolved absolutely and validated? Is the
+    sanitized env used on EVERY spawn path (dispatcher, executor, settlement
+    replay)? Can a worker (the LLM) write the env the gate reads?
+
+  E5. MCP TRANSPORT SSRF GUARD (MEDIUM VALUE)
+  - `mcp/types.py` `_validate_transport_url` / `_is_blocked_transport_ip` /
+    `OUROBOROS_ALLOW_LOCAL_TRANSPORT`. Look for bypasses: IPv4-mapped IPv6,
+    decimal/octal IP literals, `0.0.0.0`, DNS rebinding between validation and
+    connect (TOCTOU), redirects followed by the HTTP client after validation,
+    `localhost.` variants, IDNA tricks, schemes accepted case-insensitively,
+    userinfo smuggling, and any transport constructor that skips the check.
+  - Any other outbound HTTP whose URL comes from config/seed/MCP input.
+
+  E6. TELEMETRY / PRIVACY TOGGLES (MEDIUM VALUE)
+  - `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_*`, `DO_NOT_TRACK`, `CI`,
+    `GITHUB_ACTIONS`, `OUROBOROS_FIRST_COMMAND_SURFACE`, the events privacy
+    mode var in `events/io.py`, and any log/preview redaction toggle. A cloned
+    repository must not be able to re-enable collection, redirect the ingest
+    endpoint, or switch redaction off. Report any such toggle NOT covered by
+    `is_untrusted_env_denied_key`, and any code path that reads the toggle
+    from a repo-local file.
+
+  E7. LOADER COMPLETENESS (report as a single finding per gap)
+  - Compare every env key the codebase reads (literal or module-constant) whose
+    value becomes an executable path, a path later executed/imported, or a
+    config root, against `UNTRUSTED_ENV_DENYLIST` / `UNTRUSTED_ENV_DENIED_PREFIXES`.
+    Each uncovered key is one finding: name the key, the read site, the sink.
+  - Note: a sibling PR (`fix/untrusted-env-runtime-loader`) is already adding
+    `PYTHON*`, `NODE_PATH`, `NPM_CONFIG_*`, `YARN_*`, `PNPM_*`, `COREPACK_*`
+    and `GIT_*` to the denylist. Still REPORT those gaps (they must appear in
+    the findings record) but tag the description with "[sibling-PR in flight]".
+
+REPORTING NOTE: cite the exact `file:line` of the env READ and of the spawn /
+open / import SINK. Findings without a sink are LOW at best.

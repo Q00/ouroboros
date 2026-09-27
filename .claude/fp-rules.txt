@@ -1,0 +1,86 @@
+OUROBOROS ORG-SPECIFIC RULES (appended to every /triage verifier prompt):
+
+TRUST-BOUNDARY OVERRIDE (read first; it narrows generic exclusion rule 8):
+  The project-directory `.env` is UNTRUSTED. `ouroboros.config.loader`
+  loads `./.env` from the current working directory into `os.environ` at
+  import time, and that file travels with whatever repository the user
+  cloned. Generic rule 8 ("env vars are operator-controlled") therefore
+  applies ONLY to (a) the real process environment inherited from the
+  operator's shell, (b) `~/.ouroboros/.env`, (c) `~/.ouroboros/config.yaml`
+  and other files under the user's home, and (d) CLI flags. It does NOT
+  apply to a key that can be set from the project `.env` and is NOT rejected
+  by `ouroboros.config.untrusted_env.is_untrusted_env_denied_key`.
+  Verify the key against that function's denylist and prefix list yourself
+  (`src/ouroboros/config/untrusted_env.py`). A key that IS denied there is
+  FALSE_POSITIVE (already_handled) unless the finding shows a second, un-denied
+  route to the same sink. A key that is NOT denied and reaches an executable
+  path / config root / loader control / shell startup sink is TRUE_POSITIVE
+  even though the vector is "just an env var".
+
+  Also untrusted: any file inside the cloned repository (`.ouroboros/*`,
+  `.mcp.json`, seed YAML, acceptance-criteria text, `verify_command` strings),
+  MCP tool arguments, and anything an LLM worker wrote into the workspace.
+  Trusted: files under `~/.ouroboros/`, the operator's shell environment,
+  and CLI arguments the operator typed.
+
+O1. Loader precedence is a mitigation only when the key is ALWAYS set.
+    The loader never overrides an already-set real-environment value, so a
+    project `.env` key only wins when the real process environment lacks it.
+    Do NOT mark a finding FALSE_POSITIVE on the grounds "the operator's shell
+    always sets X" unless X is set by every supported launch path (MCP hosts
+    launched from a GUI, Windows, CI, containers, `uvx` launchers frequently
+    have no `SHELL`, `EDITOR`, `PAGER`, `GIT_*`, or `XDG_*`). Prefer
+    TRUE_POSITIVE with the precondition "key unset in the real environment".
+
+O2. `_OUROBOROS_DEPTH` / `_OUROBOROS_NESTED` / `OUROBOROS_AGENT_RUNTIME`
+    stripping in `runtime/child_env.py::build_child_env` is a recursion
+    guard, NOT an untrusted-key sanitizer. A spawn site that calls it still
+    inherits every non-denied project `.env` key. Do not treat "goes through
+    build_child_env" as a protection against this class.
+
+O3. The verify gate (`orchestrator/verify_shell.py`) is a separate, stricter
+    boundary than the loader denylist: keys stripped there
+    (`VERIFY_ENV_STRIPPED_KEYS` / `_PREFIXES`) protect the AC verdict even from
+    the operator's own shell. A key missing from the loader denylist but
+    stripped by the verify gate is still a finding for every OTHER spawn site;
+    a key stripped by neither is HIGH.
+
+O4. Sibling PR in flight: `fix/untrusted-env-runtime-loader` adds `PYTHON*`,
+    `NODE_PATH`, `NPM_CONFIG_*`, `YARN_*`, `PNPM_*`, `COREPACK_*`, `GIT_*` to
+    the denylist. Verify those findings on the code as it is (they are real
+    on this branch) and keep the verdict; the "[sibling-PR in flight]" tag in
+    the description is routing information, not a reason to drop them.
+
+O5. FALSE_POSITIVE (intentional_behavior) — things that are the design:
+    - A `verify_command`, seed, or AC text executing arbitrary shell inside
+      the user's workspace. The workspace is the sandbox boundary; the gate's
+      job is only to be un-tamperable from OUTSIDE the command text.
+    - An LLM worker (claude/codex/opencode/...) editing files in the workspace,
+      including files the next verify step runs (tests, `conftest.py`).
+    - Reading `~/.ouroboros/**` configuration, including MCP server commands
+      declared in `~/.ouroboros/mcp_servers.yaml`, and CLI-path overrides from
+      `~/.ouroboros/config.yaml`.
+    - `OUROBOROS_ALLOW_LOCAL_TRANSPORT=1` set by the operator for local dev.
+    - Prompt injection into an LLM prompt (generic rule 6).
+
+O6. FALSE_POSITIVE (already_handled) — controls that exist; verify they hold
+    on the path in question before citing them:
+    - `.env` grammar hardening (`interpolate=False`, key validation, placeholder
+      skip) in `config/loader.py::_load_env_file`.
+    - The project `.ouroboros/mcp_servers.yaml` is deliberately NOT
+      auto-discovered (`mcp/bridge/config.py::discover_config`).
+    - `OUROBOROS_VERIFY_BASH` must be absolute and is denied from the project
+      `.env`; the gate strips shell startup keys.
+    - Windows-only sinks are still in scope (Ouroboros supports Windows);
+      "only on Windows" lowers severity by one step, it does not exclude.
+
+O7. Do NOT report as findings:
+    - Missing `env=` on a spawn whose child honours no non-denied key you can
+      name (e.g. `git status --porcelain` with no `GIT_*` in the untrusted
+      set once the sibling PR lands) — say "hardening only" and vote
+      FALSE_POSITIVE rule 13, but name the key gap if the sibling PR is what
+      closes it.
+    - Volumetric DoS from a hostile `.env` (rule 1). Startup DoS that makes
+      the CLI unstartable from a cloned repo IS reportable as MEDIUM.
+    - Test files, fixtures, `docs/`, `scripts/`, `.claude/`, and the vendored
+      security skills themselves.
