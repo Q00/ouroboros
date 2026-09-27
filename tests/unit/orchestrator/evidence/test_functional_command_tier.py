@@ -596,3 +596,107 @@ def test_named_files_touched_on_verification_only_run_is_admitted(tmp_path) -> N
     v = verdict((_observation_message(),), evidence=ghost)
     assert v.passed is False
     assert any("ghost.py" in reason for reason in v.reasons)
+
+
+INLINE_IMPORT_CLAIM = (
+    'python3 -c "from mathutils import clamp; assert clamp(15, 0, 10) == 10; '
+    'assert clamp(-3, 0, 10) == 0; assert clamp(7, 0, 10) == 7"'
+)
+
+
+def _inline_import_verdict(tmp_path, claim: str, *, edited: str = "mathutils.py"):
+    start, result = _codex_bash_pair(claim)
+    return _verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            *_edit_pair(str(tmp_path / edited)),
+            start,
+            result,
+            AgentMessage(type="result", content="done"),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={"files_touched": [edited], "commands_run": [claim], "tests_passed": [claim]}
+        ),
+        ac_content="clamp(value, low, high) returns high when value > high",
+        execution_profile=load_profile("code"),
+        task_cwd=str(tmp_path),
+        adapter_working_directory=None,
+        has_success_contract=False,
+        verify_gate_active=True,
+    )
+
+
+def test_inline_python_import_of_workspace_module_supports_claim(tmp_path) -> None:
+    """Frozen from `ooo run` exec_0b2fef7bc932 (2026-09-25): a correct clamp fix
+    verified with ``python3 -c "from mathutils import clamp; assert ..."`` (exit 0,
+    correlated completion) was rejected twice as an evidence-form mismatch because
+    the inline program names ``mathutils`` only as a module, never as a file."""
+    (tmp_path / "mathutils.py").write_text(
+        "def clamp(value, low, high):\n    return max(low, min(value, high))\n",
+        encoding="utf-8",
+    )
+    assert "mathutils.py" in _functional_command_invoked_files(INLINE_IMPORT_CLAIM)
+    verdict = _inline_import_verdict(tmp_path, INLINE_IMPORT_CLAIM)
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_inline_python_import_stays_fail_closed(tmp_path) -> None:
+    # The imported module is not a workspace file: nothing anchors the claim.
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+    missing = _inline_import_verdict(tmp_path, INLINE_IMPORT_CLAIM, edited="other.py")
+    assert missing.passed is False
+    assert any("tests_passed" in reason for reason in missing.reasons)
+    # A stdlib import anchors nothing either.
+    stdlib_claim = 'python3 -c "import os; assert os.sep"'
+    assert "os.py" in _functional_command_invoked_files(stdlib_claim)
+    stdlib = _inline_import_verdict(tmp_path, stdlib_claim, edited="other.py")
+    assert stdlib.passed is False
+    # A non-zero exit still fails the tier.
+    (tmp_path / "mathutils.py").write_text("def clamp(v, lo, hi):\n    return v\n", "utf-8")
+    start, result = _codex_bash_pair(INLINE_IMPORT_CLAIM, exit_code=1)
+    assert (
+        _functional_command_supports_test_claim(
+            value=INLINE_IMPORT_CLAIM,
+            messages=(*_edit_pair(str(tmp_path / "mathutils.py")), start, result),
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+    # Non-Python interpreters do not gain module anchors.
+    assert _functional_command_invoked_files('node -e "import x from y"') == ()
+
+
+def test_inline_python_text_that_only_mentions_an_import_anchors_nothing(tmp_path) -> None:
+    """``python -c "print('import app')"`` never
+    imports ``app``. Only parsed top-level import statements of the ``-c``
+    program anchor a module, so a touched ``app.py`` and a correlated zero exit
+    do not make the printed text a ``tests_passed`` check."""
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    inert = "python -c \"print('import app')\""
+    assert "app.py" not in _functional_command_invoked_files(inert)
+    verdict = _inline_import_verdict(tmp_path, inert, edited="app.py")
+    assert verdict.passed is False
+    assert any("tests_passed" in reason for reason in verdict.reasons)
+    for command in (
+        "python3 -c \"exec('import app')\"",
+        'python3 -c "if 0: import app"',
+        'python3 -c "def f():\n    import app"',
+        'python3 -c "import app(("',
+        'python3 -m json.tool -c "import app"',
+        'echo "python3 -c import app"',
+    ):
+        assert "app.py" not in _functional_command_invoked_files(command), command
+
+
+def test_inline_python_real_imports_still_anchor(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    for command in (
+        'python3 -c "import app; assert app.run() == 1"',
+        'python3 -B -c "from app import run; assert run() == 1"',
+        'python3 -c"import app"',
+        'timeout 5 uv run python3 -X dev -c "import app, os"',
+        'cd . && python3 -c "import app; assert app.run() == 1" 2>&1 | tail -3',
+    ):
+        assert "app.py" in _functional_command_invoked_files(command), command
+    claim = 'python3 -c "import app; assert app.run() == 1"'
+    verdict = _inline_import_verdict(tmp_path, claim, edited="app.py")
+    assert verdict.passed is True, verdict.reasons
