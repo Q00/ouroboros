@@ -24,7 +24,11 @@ from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
-from ouroboros.evaluation.models import AcceptanceState, derive_acceptance_state
+from ouroboros.evaluation.models import (
+    AcceptanceState,
+    MechanicalDisposition,
+    derive_acceptance_state,
+)
 from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.telemetry_boundary import (
@@ -882,7 +886,10 @@ class EvaluateHandler:
 
             # Detect code changes when Stage 1 fails (presentation concern)
             code_changes: bool | None = None
-            if eval_result.stage1_result and not eval_result.stage1_result.passed:
+            if (
+                eval_result.stage1_result
+                and eval_result.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            ):
                 code_changes = await self._has_code_changes(working_dir)
 
             # Build result text
@@ -1136,7 +1143,10 @@ class EvaluateHandler:
         highest_stage = min(max(1, result.highest_stage_completed) for result in eval_results)
 
         code_changes: bool | None = None
-        if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
+        if any(
+            r.stage1_result and r.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            for r in eval_results
+        ):
             code_changes = await self._has_code_changes(working_dir)
 
         text_parts = [
@@ -1304,7 +1314,10 @@ class EvaluateHandler:
                 ]
             )
             # Contextual annotation for Stage 1 failures
-            stage1_failed = result.stage1_result and not result.stage1_result.passed
+            stage1_failed = (
+                result.stage1_result is not None
+                and result.stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL
+            )
             if stage1_failed and code_changes is True:
                 lines.extend(
                     [

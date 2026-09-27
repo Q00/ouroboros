@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ouroboros.evaluation.models import MechanicalResult
+from ouroboros.evaluation.models import MechanicalDisposition, MechanicalResult
 
 _OUTPUT_TAIL_CHARS = 500
 _DETAIL_FIELDS = (
@@ -43,10 +43,11 @@ def serialize_stage1_result(result: MechanicalResult | None) -> dict[str, Any] |
 
 
 def _stage1_status(result: MechanicalResult) -> str:
-    """Name a Stage 1 that ran no configured check instead of calling it a pass."""
-    if not result.passed:
+    """Name Stage 1 by its evidence disposition, not by the aggregate flag alone."""
+    disposition = result.disposition
+    if disposition is MechanicalDisposition.EXECUTED_FAIL:
         return "FAILED"
-    if not result.has_executed_evidence:
+    if disposition is MechanicalDisposition.NO_EVIDENCE:
         return "NO CHECKS EXECUTED (not verification evidence)"
     return "PASSED"
 

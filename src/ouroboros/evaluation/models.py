@@ -93,6 +93,25 @@ class CheckResult:
     executed: bool = False
 
 
+class MechanicalDisposition(StrEnum):
+    """What a Stage 1 result is evidence of; the one classifier every reader uses.
+
+    Attributes:
+        EXECUTED_PASS: At least one check ran a command and every check passed.
+            The only disposition that can support acceptance.
+        EXECUTED_FAIL: A check that ran a command failed. Authoritative
+            rejection; model review is not consulted.
+        NO_EVIDENCE: No executed check decided anything: every check was
+            skipped, or the only failures were never executed. Not approvable
+            and not a rejection; the outcome is unverified and model review
+            still runs to supply feedback.
+    """
+
+    EXECUTED_PASS = "executed_pass"
+    EXECUTED_FAIL = "executed_fail"
+    NO_EVIDENCE = "no_evidence"
+
+
 @dataclass(frozen=True, slots=True)
 class MechanicalResult:
     """Aggregated result of Stage 1 mechanical verification.
@@ -135,14 +154,29 @@ class MechanicalResult:
         return tuple(c for c in self.checks if c.executed is True)
 
     @property
-    def has_executed_evidence(self) -> bool:
-        """Whether Stage 1 is executed verification evidence for acceptance.
+    def executed_failures(self) -> tuple[CheckResult, ...]:
+        """Return the checks that ran a command and did not pass."""
+        return tuple(c for c in self.failed_checks if c.executed is True)
 
-        ``passed`` alone is not: a check with no configured command is
-        skipped and reported as passed. Evidence requires every check to have
-        passed and at least one of them to have run a command.
+    @property
+    def disposition(self) -> MechanicalDisposition:
+        """Classify this result once, for the pipeline and every projection.
+
+        An executed failure rejects. A pass counts only when every check
+        passed and at least one ran a command (a skipped check reports
+        ``passed`` but is not evidence). Everything else, including a failure
+        that was never executed, is no evidence.
         """
-        return self.passed and bool(self.executed_checks)
+        if self.executed_failures:
+            return MechanicalDisposition.EXECUTED_FAIL
+        if self.passed and self.executed_checks:
+            return MechanicalDisposition.EXECUTED_PASS
+        return MechanicalDisposition.NO_EVIDENCE
+
+    @property
+    def has_executed_evidence(self) -> bool:
+        """Whether Stage 1 is executed verification evidence for acceptance."""
+        return self.disposition is MechanicalDisposition.EXECUTED_PASS
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,10 +570,12 @@ def derive_acceptance_state(
     """Classify an evaluation outcome for callers and feedback loops."""
     if final_approved:
         return AcceptanceState.APPROVED
-    if stage1_result is not None and not stage1_result.passed:
-        return AcceptanceState.REJECTED
-    if stage1_result is None or not stage1_result.has_executed_evidence:
+    if stage1_result is None:
         return AcceptanceState.UNVERIFIED
+    disposition = stage1_result.disposition
+    if disposition is MechanicalDisposition.NO_EVIDENCE:
+        return AcceptanceState.UNVERIFIED
+    # EXECUTED_FAIL, or EXECUTED_PASS that model review withheld.
     return AcceptanceState.REJECTED
 
 
@@ -560,18 +596,22 @@ def build_failure_reason(
     """
     if final_approved:
         return None
-    if stage1_result and not stage1_result.passed:
-        failed = stage1_result.failed_checks
+    disposition = stage1_result.disposition if stage1_result is not None else None
+    if stage1_result is not None and disposition is MechanicalDisposition.EXECUTED_FAIL:
+        failed = stage1_result.executed_failures
         return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
 
     model_reason = model_review_withhold_reason(
         stage2_result=stage2_result,
         stage3_result=stage3_result,
     )
-    if stage1_result is None or not stage1_result.has_executed_evidence:
-        missing = (
-            "Stage 1 did not run" if stage1_result is None else "Stage 1 ran no configured check"
-        )
+    if stage1_result is None or disposition is MechanicalDisposition.NO_EVIDENCE:
+        if stage1_result is None:
+            missing = "Stage 1 did not run"
+        elif stage1_result.failed_checks:
+            missing = "Stage 1 reported failures from no executed check"
+        else:
+            missing = "Stage 1 ran no configured check"
         reason = f"Not approved: unverified. No executed verification evidence ({missing})."
         if model_reason is not None:
             return f"{reason} Advisory model review also withheld approval: {model_reason}"

@@ -22,6 +22,7 @@ from ouroboros.evaluation.models import (
     ConsensusResult,
     EvaluationContext,
     EvaluationResult,
+    MechanicalDisposition,
     MechanicalResult,
     SemanticResult,
     Vote,
@@ -335,3 +336,47 @@ class TestContradictoryStage1Evidence:
         assert result.acceptance_state is AcceptanceState.REJECTED
         assert (result.failure_reason or "").startswith("Stage 1 failed: test")
         pipeline._semantic.evaluate.assert_not_called()
+
+
+class TestStage1Disposition:
+    """One classifier decides what a Stage 1 result is evidence of."""
+
+    def test_dispositions(self) -> None:
+        assert EXECUTED_PASS.disposition is MechanicalDisposition.EXECUTED_PASS
+        assert EXECUTED_FAIL.disposition is MechanicalDisposition.EXECUTED_FAIL
+        assert SKIPPED_ONLY.disposition is MechanicalDisposition.NO_EVIDENCE
+
+    @pytest.mark.asyncio
+    async def test_unexecuted_failure_is_unverified_and_keeps_model_review(self) -> None:
+        """A failure no command produced is not an authoritative rejection."""
+        unexecuted_failure = MechanicalResult(
+            passed=False,
+            checks=(CheckResult(check_type=CheckType.TEST, passed=False, message="x"),),
+        )
+        assert unexecuted_failure.disposition is MechanicalDisposition.NO_EVIDENCE
+
+        pipeline = _pipeline(semantic=_semantic(approve=True))
+        result = await _evaluate(pipeline, stage1=unexecuted_failure)
+
+        pipeline._semantic.evaluate.assert_awaited_once()
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.UNVERIFIED
+        reason = result.failure_reason or ""
+        assert reason.startswith("Not approved: unverified.")
+        assert "Stage 1 reported failures from no executed check" in reason
+
+    @pytest.mark.asyncio
+    async def test_executed_failure_beside_unexecuted_one_still_rejects(self) -> None:
+        mixed = MechanicalResult(
+            passed=False,
+            checks=(
+                CheckResult(check_type=CheckType.LINT, passed=False, message="x"),
+                CheckResult(check_type=CheckType.TEST, passed=False, message="x", executed=True),
+            ),
+        )
+        pipeline = _pipeline(semantic=_semantic(approve=True))
+        result = await _evaluate(pipeline, stage1=mixed)
+
+        pipeline._semantic.evaluate.assert_not_called()
+        assert result.acceptance_state is AcceptanceState.REJECTED
+        assert result.failure_reason == "Stage 1 failed: test"

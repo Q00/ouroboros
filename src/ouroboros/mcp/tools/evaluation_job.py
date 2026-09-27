@@ -247,7 +247,11 @@ async def run_evaluation_job(
     job_manager: Any,
     start_ralph_handler: Any | None,
 ) -> MCPToolResult:
-    """Run formal evaluation and, on explicit rejection, enqueue Ralph."""
+    """Run formal evaluation and, when it does not approve, enqueue Ralph.
+
+    Any ``final_approved=False`` result chains, including an unverified one
+    (no executed evidence), so its advisory review seeds the next generation.
+    """
 
     evaluation_arguments = (
         {**arguments, "_force_in_process": True} if force_in_process else arguments

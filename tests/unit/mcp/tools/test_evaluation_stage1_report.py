@@ -173,6 +173,7 @@ def test_single_ac_existing_stage1_presentation_is_preserved() -> None:
                         "stdout_tail": "build output",
                         "stderr_tail": "actual failure",
                     },
+                    executed=True,
                 ),
             ),
         ),
@@ -210,7 +211,7 @@ def test_serializer_keeps_only_known_details_and_bounds_oversized_tails() -> Non
     }
     stage1 = MechanicalResult(
         passed=False,
-        checks=(CheckResult(CheckType.BUILD, False, "failed", details),),
+        checks=(CheckResult(CheckType.BUILD, False, "failed", details, executed=True),),
     )
     serialized = serialize_stage1_result(stage1)
     assert serialized is not None

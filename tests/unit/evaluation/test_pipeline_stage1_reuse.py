@@ -48,7 +48,11 @@ def _passing_stage1() -> MechanicalResult:
 def _failing_stage1() -> MechanicalResult:
     return MechanicalResult(
         passed=False,
-        checks=(CheckResult(check_type=CheckType.LINT, passed=False, message="lint failed"),),
+        checks=(
+            CheckResult(
+                check_type=CheckType.LINT, passed=False, message="lint failed", executed=True
+            ),
+        ),
     )
 
 

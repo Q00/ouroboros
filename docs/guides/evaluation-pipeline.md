@@ -69,7 +69,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 | `static` | `static_command` in config | Non-zero exit code |
 | `coverage` | `coverage_command` in config | Exit code != 0, OR parsed coverage < `coverage_threshold` (default **70%**) |
 
-**Pipeline behavior:** If **any** check fails, Stage 2 and Stage 3 are skipped entirely and the artifact is rejected immediately.
+**Pipeline behavior:** If **any** executed check fails, Stage 2 and Stage 3 are skipped entirely and the artifact is rejected immediately. `MechanicalResult.disposition` is the one classifier every reader uses: `executed_fail` (a check that ran a command failed) rejects; `executed_pass` (every check passed and at least one ran) is the only disposition that can support approval; `no_evidence` (every check skipped, or a failure no command produced, which only a hand-built result can carry) is unverified, and Stage 2 still runs for feedback.
 
 **Skipped checks:** If a check has no command configured (`None`), it is skipped and reported as **passed** (`CheckResult.executed=False`) so it does not fail Stage 1. A skipped check is not evidence: when every check is skipped, Stage 1 grants nothing and the result is **unverified**. This is the default when you have not set commands in `PipelineConfig.mechanical`.
 

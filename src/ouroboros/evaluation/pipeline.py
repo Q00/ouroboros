@@ -27,6 +27,7 @@ from ouroboros.evaluation.models import (
     ConsensusResult,
     EvaluationContext,
     EvaluationResult,
+    MechanicalDisposition,
     MechanicalResult,
     SemanticResult,
     build_failure_reason,
@@ -140,7 +141,7 @@ class EvaluationPipeline:
         # When a pre-computed result is injected, skip re-running the
         # AC-agnostic lint/build/test checks.
         if stage1_result is not None:
-            if not stage1_result.passed:
+            if stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL:
                 return self._build_result(
                     context.execution_id,
                     events,
@@ -163,8 +164,10 @@ class EvaluationPipeline:
             stage1_result, stage1_events = result.value
             events.extend(stage1_events)
 
-            # If Stage 1 fails, stop here
-            if not stage1_result.passed:
+            # Only an executed failure stops here. A result with no executed
+            # evidence continues so the advisory review can supply feedback;
+            # the acceptance gate still refuses to approve it.
+            if stage1_result.disposition is MechanicalDisposition.EXECUTED_FAIL:
                 return self._build_result(
                     context.execution_id,
                     events,
