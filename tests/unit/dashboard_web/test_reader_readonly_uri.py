@@ -2820,6 +2820,58 @@ async def test_event_tail_reads_only_explicitly_linked_interview_from_real_sqlit
 
 
 @pytest.mark.asyncio
+async def test_event_tail_backfills_interview_when_link_appears_after_first_fetch(
+    tmp_path,
+) -> None:
+    """A newly discovered link can still return lifecycle rows older than the run cursor."""
+    db = tmp_path / "late-linked-interview.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    try:
+        await store.append(
+            BaseEvent(
+                type="interview.started",
+                aggregate_type="interview",
+                aggregate_id="interview-late-link",
+                data={"initial_context": "historic lifecycle"},
+            )
+        )
+        await _append_linked_run(
+            store,
+            execution_id="exec-late-link",
+            session_id="orch-legacy",
+            include_link=False,
+        )
+        tails = (EventTail(db, "exec-late-link"), EventTail(db, "orch-legacy"))
+        for tail in tails:
+            first_events = tail.fetch_new()
+            assert [event["event_type"] for event in first_events] == [
+                "orchestrator.session.started"
+            ]
+
+        await _append_linked_run(
+            store,
+            execution_id="exec-late-link",
+            session_id="orch-linked",
+            interview_id="interview-late-link",
+        )
+
+        for tail in tails:
+            events = tail.fetch_new()
+            assert [event["event_type"] for event in events] == [
+                "interview.started",
+                "orchestrator.session.started",
+            ]
+            assert [event["aggregate_id"] for event in events] == [
+                "interview-late-link",
+                "orch-linked",
+            ]
+            assert tail.fetch_new() == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_event_tail_allows_one_interview_to_feed_multiple_isolated_runs(
     tmp_path,
 ) -> None:

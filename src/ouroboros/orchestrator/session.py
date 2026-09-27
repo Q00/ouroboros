@@ -815,7 +815,6 @@ class SessionRepository:
         execution_id: str,
         seed_id: str,
         session_id: str | None = None,
-        interview_id: str | None = None,
         seed_goal: str | None = None,
         runtime_backend: str | None = None,
         llm_backend: str | None = None,
@@ -825,6 +824,7 @@ class SessionRepository:
         project_identity: ProjectIdentity | None = None,
         project_workspace: str | None = None,
         project_task_workspace: TaskWorkspace | None = None,
+        interview_id: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
