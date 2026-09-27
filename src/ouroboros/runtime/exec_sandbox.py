@@ -300,6 +300,47 @@ def _hard_linked_file(root: str) -> str | None:
     return failures[0] if failures else None
 
 
+# Launchers run before confinement, so they never come from ``PATH``: only
+# from these system directories, as canonical absolute paths, and only when
+# the file and its directory are owned by root and writable by no one else.
+_TRUSTED_LAUNCHER_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def _root_owned_and_unwritable(path: str) -> bool:
+    try:
+        status = os.stat(path)
+    except OSError:
+        return False
+    return status.st_uid == 0 and not status.st_mode & 0o022
+
+
+def _trusted_launcher(
+    name: str, directories: Sequence[str] = _TRUSTED_LAUNCHER_DIRECTORIES
+) -> str | None:
+    """The canonical absolute path of system executable ``name``, or None.
+
+    ``PATH`` is never consulted. A candidate counts only if its resolved
+    file and that file's directory are root-owned and not group- or
+    other-writable, so no user-controlled program can take its place.
+    """
+    for directory in directories:
+        real = os.path.realpath(os.path.join(directory, name))
+        if (
+            os.path.isabs(real)
+            and os.path.isfile(real)
+            and os.access(real, os.X_OK)
+            and _root_owned_and_unwritable(real)
+            and _root_owned_and_unwritable(os.path.dirname(real))
+        ):
+            return real
+    return None
+
+
+def _interpreter() -> str:
+    """This controller's own interpreter, as an absolute path (never ``PATH``)."""
+    return os.path.abspath(sys.executable)
+
+
 def _backend_argv(
     backend: SandboxBackend,
     argv: Sequence[str],
@@ -314,10 +355,12 @@ def _backend_argv(
     that its namespace has only ``lo`` (``--require-loopback-only``): the
     plan is a parent-side choice, never the final proof.
     """
-    helper = (sys.executable, "-I", "-S", "-B", str(_CONFINE_HELPER))
+    helper = (_interpreter(), "-I", "-S", "-B", str(_CONFINE_HELPER))
     claims = [part for path, dev, ino in roots for part in ("--root", path, str(dev), str(ino))]
     if backend is SandboxBackend.SANDBOX_EXEC:
-        executable = shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"
+        executable = _trusted_launcher("sandbox-exec")
+        if executable is None:  # pragma: no cover - the backend was probed with it
+            raise RuntimeError("sandbox-exec is not available")
         profile = _darwin_profile(len(roots), deny_network=network is NetworkPlan.PROFILE)
         params = [
             part for index, (path, _, _) in enumerate(roots) for part in ("-D", f"W{index}={path}")
@@ -361,7 +404,7 @@ def _probe_matrix(argv_prefix: Sequence[str] | None, root: Path) -> dict[str, An
     outside.mkdir()
     probe_module.prepare(str(outside))
     before = probe_module.snapshot(str(outside))
-    command = (sys.executable, "-I", "-S", "-B", str(_PROBE), str(inside), str(outside))
+    command = (_interpreter(), "-I", "-S", "-B", str(_PROBE), str(inside), str(outside))
     argv = command if argv_prefix is None else (*argv_prefix, *command)
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -408,6 +451,8 @@ def filesystem_backend() -> SandboxBackend | None:
     can perform unconfined on this host, and leave the outside unchanged.
     """
     if sys.platform == "darwin":
+        if _trusted_launcher("sandbox-exec") is None:
+            return None
         candidate = SandboxBackend.SANDBOX_EXEC
     elif sys.platform.startswith("linux"):
         candidate = SandboxBackend.LANDLOCK
@@ -467,15 +512,23 @@ def _network_plan(backend: SandboxBackend, deny_network: bool) -> NetworkPlan | 
 
 @functools.cache
 def _unshare_prefix() -> tuple[str, ...] | None:
-    """``unshare --user --map-root-user --net`` if it works here; probed once."""
-    executable = shutil.which("unshare") or ""
-    if not executable:
+    """``unshare --user --map-root-user --net`` if it works here; probed once.
+
+    The ``unshare`` found by ``_trusted_launcher`` is both the one probed and
+    the one every command's argv uses; the probe runs this controller's own
+    interpreter under the fixed bootstrap environment.
+    """
+    executable = _trusted_launcher("unshare")
+    if executable is None:
         return None
     prefix = (executable, "--user", "--map-root-user", "--net", "--")
-    probe = shutil.which("true") or "/bin/true"
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [*prefix, probe], capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS, check=False
+            [*prefix, _interpreter(), "-I", "-S", "-c", "pass"],
+            env=_bootstrap_environment({"PATH": os.defpath}),
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None

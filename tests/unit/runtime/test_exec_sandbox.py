@@ -559,6 +559,68 @@ class TestNetworkPlan:
         assert result == _confine_exec.EXIT_SANDBOX_FAILED
 
 
+class TestLaunchers:
+    """Launchers run before confinement, so they never come from ``PATH``."""
+
+    @staticmethod
+    def _fake(directory: Path, name: str) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        fake = directory / name
+        fake.write_text("#!/bin/sh\ntouch /tmp/launcher-hijacked\n", encoding="utf-8")
+        fake.chmod(0o755)
+        return fake
+
+    def test_path_is_never_consulted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("unshare", "sandbox-exec", "true"):
+            self._fake(tmp_path / "bin", name)
+        monkeypatch.setenv("PATH", f"bin{os.pathsep}{tmp_path / 'bin'}")
+        monkeypatch.chdir(tmp_path)
+
+        for name in ("unshare", "sandbox-exec"):
+            found = exec_sandbox._trusted_launcher(name)
+            assert found is None or (
+                os.path.isabs(found) and not found.startswith(str(tmp_path.resolve()))
+            )
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root owns every file it creates")
+    def test_a_user_owned_or_relative_launcher_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake(tmp_path / "bin", "unshare")
+        monkeypatch.chdir(tmp_path)
+
+        assert exec_sandbox._trusted_launcher("unshare", (str(tmp_path / "bin"),)) is None
+        assert exec_sandbox._trusted_launcher("unshare", ("bin",)) is None
+
+    def test_a_symlink_resolves_to_its_canonical_root_owned_target(self, tmp_path: Path) -> None:
+        target = os.path.realpath("/bin/sh")
+        if not exec_sandbox._root_owned_and_unwritable(target):
+            pytest.skip("/bin/sh is not root-owned here")
+        (tmp_path / "sh").symlink_to(target)
+
+        assert exec_sandbox._trusted_launcher("sh", (str(tmp_path),)) == target
+
+    def test_the_confined_argv_starts_with_an_absolute_trusted_launcher(
+        self, layout: dict[str, Path]
+    ) -> None:
+        _require_backend(deny_network=True)
+        command = confine(
+            ("true",),
+            cwd=str(layout["copy"]),
+            writable_roots=(str(layout["copy"]),),
+            temp_dir=str(layout["temp"]),
+            deny_network=True,
+        )
+
+        assert isinstance(command, ConfinedCommand)
+        assert os.path.isabs(command.argv[0])
+        assert command.argv[0] in {
+            exec_sandbox._trusted_launcher("sandbox-exec"),
+            exec_sandbox._trusted_launcher("unshare"),
+            exec_sandbox._interpreter(),
+        }
+
+
 class TestOffSwitch:
     def test_disabled_runs_unconfined_and_says_so(
         self, layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch
