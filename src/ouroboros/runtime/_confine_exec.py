@@ -341,9 +341,20 @@ _UNIFIED_METADATA_SYSCALLS = {
     "io_uring_setup": 425,
 }
 _IOCTL_SYSCALL = {"x86_64": 16, "aarch64": 29}
-# ioctl requests that set inode flags (chattr) or fsxattr on an fd opened for
-# reading: _IOW('f', 2, long), _IOW('f', 2, int), _IOW('X', 32, struct fsxattr).
-_METADATA_IOCTLS = (0x40086602, 0x40046602, 0x401C5820)
+# ioctl is an allowlist: Landlock does not mediate ioctls on regular files or
+# directories, and some change an inode opened only for reading (chattr
+# flags, fsxattr, fs-verity, fscrypt policies). Only these fd and terminal
+# queries pass; every other request gets EPERM. The request numbers are the
+# asm-generic ones, the same on x86_64 and aarch64.
+ALLOWED_IOCTLS: dict[str, int] = {
+    "TCGETS": 0x5401,  # isatty(), tcgetattr()
+    "TIOCGPGRP": 0x540F,
+    "TIOCGWINSZ": 0x5413,  # terminal size
+    "FIONREAD": 0x541B,  # bytes available to read
+    "FIONBIO": 0x5421,  # non-blocking flag
+    "FIONCLEX": 0x5450,
+    "FIOCLEX": 0x5451,  # close-on-exec flag
+}
 _AUDIT_ARCH = {"x86_64": 0xC000003E, "aarch64": 0xC00000B7}
 _X32_SYSCALL_BIT = 0x40000000
 _PR_SET_SECCOMP = 22
@@ -376,14 +387,18 @@ class _SockFprog(ctypes.Structure):
 def metadata_filter(machine: str) -> list[tuple[int, int, int, int]]:
     """The BPF program denying metadata changes on ``machine``, as (code, jt, jf, k).
 
+    Denied with EPERM: the metadata syscall families above, and every ioctl
+    request not in ``ALLOWED_IOCTLS``.
+
     Any other architecture in ``seccomp_data.arch`` (a 32-bit compat call) and,
     on x86_64, any x32 call is denied outright.
     """
     if machine not in _METADATA_SYSCALLS:
         raise SandboxError(f"no metadata syscall table for {machine}")
     denied = sorted({*_METADATA_SYSCALLS[machine].values(), *_UNIFIED_METADATA_SYSCALLS.values()})
-    # Laid out so every check jumps forward to one of the three returns at the
-    # end: [.., ioctl checks, ALLOW, DENY]. ``_to`` computes the offset.
+    # Laid out so every check jumps forward to one of the two returns at the
+    # end: [.., ioctl allowlist, DENY, ALLOW]. -1 targets DENY and -2 ALLOW;
+    # an ioctl request that matches no allowlist entry falls through to DENY.
     body: list[tuple[int, int, int, int | str]] = [
         (_BPF_LD_W_ABS, 0, 0, _SECCOMP_ARCH),
         (_BPF_JEQ_K, 1, 0, _AUDIT_ARCH[machine]),
@@ -395,17 +410,18 @@ def metadata_filter(machine: str) -> list[tuple[int, int, int, int]]:
     body.extend((_BPF_JEQ_K, -1, 0, number) for number in denied)
     body.append((_BPF_JEQ_K, 0, -2, _IOCTL_SYSCALL[machine]))
     body.append((_BPF_LD_W_ABS, 0, 0, _SECCOMP_ARG1_LOW))
-    body.extend((_BPF_JEQ_K, -1, 0, request) for request in _METADATA_IOCTLS)
-    allow = len(body)
-    deny = allow + 1
+    body.extend((_BPF_JEQ_K, -2, 0, request) for request in sorted(ALLOWED_IOCTLS.values()))
+    deny = len(body)
+    allow = deny + 1
     body.extend(
-        [(_BPF_RET_K, 0, 0, _SECCOMP_RET_ALLOW), (_BPF_RET_K, 0, 0, _SECCOMP_RET_ERRNO_EPERM)]
+        [(_BPF_RET_K, 0, 0, _SECCOMP_RET_ERRNO_EPERM), (_BPF_RET_K, 0, 0, _SECCOMP_RET_ALLOW)]
     )
+    targets = {-1: deny, -2: allow}
     program: list[tuple[int, int, int, int]] = []
     for index, (code, jt, jf, k) in enumerate(body):
-        # -1 jumps to DENY, -2 jumps to ALLOW; offsets count from the next instruction.
-        jt = deny - index - 1 if jt == -1 else jt
-        jf = allow - index - 1 if jf == -2 else jf
+        # Offsets count from the next instruction.
+        jt = targets[jt] - index - 1 if jt in targets else jt
+        jf = targets[jf] - index - 1 if jf in targets else jf
         program.append((code, jt, jf, int(k)))
     return program
 

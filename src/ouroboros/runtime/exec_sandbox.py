@@ -72,7 +72,9 @@ Backends:
   cannot be denied) plus a seccomp filter, both applied by the helper
   ``_confine_exec.py`` before it execs the command. Landlock does not mediate
   metadata changes, so the filter denies the chmod, chown, utime and xattr
-  syscall families, the inode-flag ioctls and io_uring. It cannot see paths,
+  syscall families and io_uring, and admits ``ioctl`` only for an allowlist
+  of fd and terminal queries (every other request, such as chattr flags,
+  fs-verity or fscrypt policies, is denied). It cannot see paths,
   so on Linux metadata changes are denied inside the writable roots too
   (``touch`` on an existing file, ``shutil.copy2``/``copystat``, cargo's
   fingerprint timestamps, tar extraction that restores modes); such a

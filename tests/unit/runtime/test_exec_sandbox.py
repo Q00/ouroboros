@@ -704,13 +704,52 @@ class TestMetadataFilter:
     def test_every_jump_lands_on_a_return(self, machine: str) -> None:
         program = _confine_exec.metadata_filter(machine)
         ret = 0x06
-        allow, deny = program[-2], program[-1]
+        deny, allow = program[-2], program[-1]
 
         assert allow == (ret, 0, 0, 0x7FFF0000) and deny == (ret, 0, 0, 0x00050001)
         for index, (code, jt, jf, _k) in enumerate(program):
             if code in (0x15, 0x35):
                 for offset in (jt, jf):
                     assert index + 1 + offset < len(program)
+
+    @staticmethod
+    def _evaluate(program: list[tuple[int, int, int, int]], data: dict[int, int]) -> int:
+        """Run the classic-BPF program on a seccomp_data given as {offset: u32}."""
+        accumulator, pc = 0, 0
+        while True:
+            code, jt, jf, k = program[pc]
+            if code == 0x20:
+                accumulator = data.get(k, 0)
+                pc += 1
+            elif code in (0x15, 0x35):
+                taken = accumulator == k if code == 0x15 else accumulator >= k
+                pc += 1 + (jt if taken else jf)
+            elif code == 0x06:
+                return k
+            else:  # pragma: no cover - the builder emits no other opcode
+                raise AssertionError(hex(code))
+
+    @pytest.mark.parametrize(
+        ("machine", "arch", "ioctl", "fchmod", "read"),
+        [("x86_64", 0xC000003E, 16, 91, 0), ("aarch64", 0xC00000B7, 29, 52, 63)],
+    )
+    def test_ioctl_is_an_allowlist(
+        self, machine: str, arch: int, ioctl: int, fchmod: int, read: int
+    ) -> None:
+        program = _confine_exec.metadata_filter(machine)
+        allow, eperm = 0x7FFF0000, 0x00050001
+
+        def verdict(nr: int, arg1: int = 0, audit_arch: int = arch) -> int:
+            return self._evaluate(program, {0: nr, 4: audit_arch, 24: arg1})
+
+        for request in _confine_exec.ALLOWED_IOCTLS.values():
+            assert verdict(ioctl, request) == allow
+        # fs-verity, fscrypt policy, chattr flags, fsxattr, and an arbitrary request.
+        for request in (0x40806685, 0x800C6613, 0x40086602, 0x401C5820, 0x12345678):
+            assert verdict(ioctl, request) == eperm
+        assert verdict(fchmod) == eperm
+        assert verdict(read) == allow
+        assert verdict(read, audit_arch=0x40000003) == eperm  # i386 compat call
 
     def test_unknown_architecture_is_refused(self) -> None:
         with pytest.raises(_confine_exec.SandboxError):
