@@ -34,6 +34,10 @@ from ouroboros.mcp.errors import (
 )
 from ouroboros.mcp.host_context import from_sdk_context, subagent_capability_extensions
 from ouroboros.mcp.server.auth import current_auth_context, resolve_network_security
+from ouroboros.mcp.server.evolution_pipeline_evaluation import (
+    evaluate_generation_with_pipeline,
+    evolve_stage1_enabled,
+)
 
 # Re-exported: split out in #1754, still imported from here by evaluation tests.
 from ouroboros.mcp.server.project_dir import (  # noqa: F401
@@ -1572,12 +1576,6 @@ def create_ouroboros_server(
         load_config,
     )
     from ouroboros.core.errors import ConfigError
-    from ouroboros.evaluation import (
-        EvaluationContext,
-        EvaluationPipeline,
-        PipelineConfig,
-        SemanticConfig,
-    )
     from ouroboros.mcp.job_manager import JobManager
     from ouroboros.mcp.resources.handlers import (
         EventsResourceHandler,
@@ -1803,7 +1801,6 @@ def create_ouroboros_server(
 
     # Create evolution engines for evolve_step
     from ouroboros.core.lineage import EvaluationSummary
-    from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
@@ -1841,22 +1838,13 @@ def create_ouroboros_server(
         execution_model = DEFAULT_SONNET_MODEL
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
-    # Stage 1 (mechanical checks: lint/build/test) can be enabled via env var.
-    # Disabled by default to reduce latency per generation step.
-    evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
-    evolution_eval_pipeline = EvaluationPipeline(
-        llm_adapter=evolution_evaluation_llm_adapter,
-        config=PipelineConfig(
-            stage1_enabled=evolve_stage1,
-            stage2_enabled=True,
-            stage3_enabled=False,
-            semantic=SemanticConfig(
-                model=get_llm_model_for_role(
-                    "semantic_evaluation",
-                    backend=evaluate_llm_backend,
-                )
-            ),
-        ),
+    # Stage 1 (mechanical lint/build/test) is the only executed evidence on the
+    # unmarked-output fallback, so it is on unless OUROBOROS_EVOLVE_STAGE1
+    # disables it; semantic review there is advisory only.
+    evolve_stage1 = evolve_stage1_enabled()
+    evolve_semantic_model = get_llm_model_for_role(
+        "semantic_evaluation",
+        backend=evaluate_llm_backend,
     )
     evolution_store_initialized = False
     evolution_store_init_lock = asyncio.Lock()
@@ -2040,63 +2028,31 @@ def create_ouroboros_server(
                 return verified
             return mechanical
 
-        # Fallback: LLM-based evaluation when no structured AC results
+        # Fallback when the worker report has no ``### Task N`` markers: the
+        # strict per-AC spec-verifier path is unavailable, so approval can only
+        # come from executed Stage 1 checks. The one semantic review over all
+        # ACs is advisory feedback for the next generation, never a verdict.
         acs = getattr(seed, "acceptance_criteria", None)
-
-        # The mechanical path needs ``### Task N: [COMPLETED]`` markers in the
-        # worker's report.  When they are absent this silently degrades to a
-        # single model verdict covering every AC at once, and on this path
-        # Stage 1 is off by default and Stage 3 is disabled, so nothing else
-        # intervenes.  Say so rather than letting every generation look the
-        # same from the outside.
         log.warning(
             "evolution.evaluation.mechanical_skipped",
             reason="no '### Task N: [COMPLETED|FAILED]' markers in execution output",
             seed_id=getattr(seed.metadata, "seed_id", None),
             acceptance_criteria=len(acs) if acs else 0,
             artifact_chars=len(artifact),
-            consequence=("falling back to one LLM verdict over all acceptance criteria combined"),
+            stage1_enabled=evolve_stage1,
+            consequence=(
+                "approval requires executed Stage 1 checks; semantic review over all "
+                "acceptance criteria is attached as advisory feedback"
+            ),
         )
-
-        if acs:
-            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(ac_texts(acs)))
-        else:
-            current_ac = "Verify execution output meets requirements"
-
-        # Collect file-based artifacts for richer evaluation
-        project_dir = _extract_project_dir(artifact, seed=seed)
-        artifact_bundle = ArtifactCollector().collect(artifact, project_dir)
-
-        eval_context = EvaluationContext(
-            execution_id=f"eval_{seed.metadata.seed_id}",
-            seed_id=seed.metadata.seed_id,
-            current_ac=current_ac,
+        return await evaluate_generation_with_pipeline(
+            seed=seed,
             artifact=artifact,
-            artifact_type="code",
-            goal=seed.goal,
-            constraints=tuple(seed.constraints),
-            artifact_bundle=artifact_bundle,
-        )
-
-        eval_result = await evolution_eval_pipeline.evaluate(eval_context)
-        if eval_result.is_err:
-            return EvaluationSummary(
-                final_approved=False,
-                highest_stage_passed=1,
-                score=0.0,
-                drift_score=1.0,
-                failure_reason=str(eval_result.error),
-            )
-
-        result = eval_result.value
-        stage2 = result.stage2_result
-        return EvaluationSummary(
-            final_approved=result.final_approved,
-            highest_stage_passed=max(1, result.highest_stage_completed),
-            score=stage2.score if stage2 else None,
-            drift_score=stage2.drift_score if stage2 else None,
-            reward_hacking_risk=stage2.reward_hacking_risk if stage2 else None,
-            failure_reason=result.failure_reason,
+            project_dir=_extract_project_dir(artifact, seed=seed),
+            llm_adapter=evolution_evaluation_llm_adapter,
+            semantic_model=evolve_semantic_model,
+            detector_backend=evaluate_llm_backend,
+            stage1_enabled=evolve_stage1,
         )
 
     async def _evolution_validator(seed: Any, execution_output: str | None) -> str:

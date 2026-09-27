@@ -24,6 +24,7 @@ from ouroboros.core.errors import ConfigError, ProviderError, ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
+from ouroboros.evaluation.models import AcceptanceState, derive_acceptance_state
 from ouroboros.mcp.errors import MCPAuthError, MCPServerError, MCPTimeoutError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.telemetry_boundary import (
@@ -77,6 +78,14 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+# Unverified is not a rejection: no executed check ran, so model review could
+# only be attached as feedback. Rendering it as REJECTED would misstate that.
+_ACCEPTANCE_LABELS: dict[AcceptanceState, str] = {
+    AcceptanceState.APPROVED: "APPROVED",
+    AcceptanceState.REJECTED: "REJECTED",
+    AcceptanceState.UNVERIFIED: "NOT APPROVED (unverified: no executed verification evidence)",
+}
 
 
 def _direct_evaluation_failure_reason(error: object) -> str | None:
@@ -777,10 +786,11 @@ class EvaluateHandler:
                 artifact_bundle = None
 
             # Stage 1 trusts .ouroboros/mechanical.toml only. When the file is
-            # absent we run the AI detector once to author it — silent
-            # best-effort, so a failed detect simply leaves Stage 1 empty and
-            # the pipeline falls through to Stage 2 instead of phantom-failing
-            # on hardcoded preset guesses.
+            # absent we run the AI detector once to author it (best-effort).
+            # A failed detect leaves Stage 1 with no configured check, which
+            # is not executed evidence: the pipeline still runs the advisory
+            # Stage 2 review, and the result is reported as unverified rather
+            # than phantom-failing on hardcoded preset guesses.
             if not has_mechanical_toml(working_dir):
                 try:
                     await ensure_mechanical_toml(
@@ -882,6 +892,9 @@ class EvaluateHandler:
             meta = {
                 "session_id": session_id,
                 "final_approved": eval_result.final_approved,
+                "acceptance_state": eval_result.acceptance_state.value,
+                "executed_evidence": eval_result.has_executed_evidence,
+                "failure_reason": eval_result.failure_reason,
                 "highest_stage": eval_result.highest_stage_completed,
                 "stage1_passed": eval_result.stage1_result.passed
                 if eval_result.stage1_result
@@ -1137,6 +1150,11 @@ class EvaluateHandler:
         meta = {
             "session_id": session_id,
             "final_approved": checklist.all_passed,
+            "acceptance_state": derive_acceptance_state(
+                final_approved=checklist.all_passed,
+                stage1_result=shared_stage1,
+            ).value,
+            "executed_evidence": bool(shared_stage1 and shared_stage1.has_executed_evidence),
             "highest_stage": highest_stage,
             "multi_ac": True,
             "ac_count": checklist.total,
@@ -1213,7 +1231,7 @@ class EvaluateHandler:
             "Evaluation Results",
             "=" * 60,
             f"Execution ID: {result.execution_id}",
-            f"Final Approval: {'APPROVED' if result.final_approved else 'REJECTED'}",
+            f"Final Approval: {_ACCEPTANCE_LABELS[result.acceptance_state]}",
             f"Highest Stage Completed: {result.highest_stage_completed}",
             "",
         ]

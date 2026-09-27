@@ -9,6 +9,16 @@ doc_metadata:
 
 Ouroboros Phase 4 runs every execution result through a **three-stage progressive evaluation pipeline** before assigning formal acceptance-criterion (AC) verdicts. Cheaper checks gate the expensive ones: Stage 1 is free, Stage 2 uses one LLM call, and Stage 3 (multi-model consensus) runs only when specifically triggered.
 
+### Acceptance Authority
+
+Model judgment may clarify, construct checks, and withhold approval. It cannot grant acceptance; acceptance comes from executed verification (#2449).
+
+- **Only Stage 1 can grant.** `final_approved` is `true` only when Stage 1 ran at least one configured check and every check passed (`MechanicalResult.has_executed_evidence`).
+- **Stage 2 and Stage 3 are advisory.** Each stage that ran may withhold approval: Stage 2 `ac_compliance=false`, a Stage 2 score below `0.8`, a Stage 3 rejection, or the [reward-hacking veto](#reward-hacking-veto). None of them can grant it, and a Stage 3 approval does not lift a Stage 2 block.
+- **No executed evidence means unverified, not approved.** When Stage 1 did not run or ran no configured check, the result is `final_approved=false` with `acceptance_state="unverified"`. The model review is still produced and attached as feedback; it is neither a crash nor a silent pass.
+
+`EvaluationResult.acceptance_state` (`approved` / `rejected` / `unverified`) and the `evaluation.pipeline.completed` event's `acceptance_state` field expose the outcome. `ouroboros_evaluate` returns it as `meta.acceptance_state` together with `meta.executed_evidence`, and renders an unverified result as `NOT APPROVED (unverified: no executed verification evidence)` rather than `REJECTED`. The single gate is `decide_final_approval()` in `evaluation/models.py`; `EvaluationPipeline._build_result()` is its only caller in the pipeline.
+
 > **Terminology boundary:** worker task completion is not a formal AC verdict, and task failure is not semantic drift. See [Execution vs. Evaluation Contract](./execution-vs-evaluation.md) for the shared `TaskResult` / `ACResult` distinction.
 
 ```
@@ -17,38 +27,31 @@ Artifact ready
       ▼
 ┌─────────────────────────────┐
 │  Stage 1: Mechanical ($0)   │ lint / build / test / static / coverage
-│  All checks must pass       │
+│  All checks must pass       │ any failure → REJECTED (stop)
 └────────────┬────────────────┘
-             │ passed
+             │ passed (with or without an executed check)
              ▼
 ┌─────────────────────────────┐
-│  Stage 2: Semantic ($$)     │ LLM evaluates AC compliance, goal
-│  score ≥ 0.8 + ac_compliance│ alignment, drift, uncertainty
-└────────────┬────────────────┘
-             │ passed
+│  Stage 2: Semantic ($$)     │ advisory: may withhold
+│  score ≥ 0.8 + ac_compliance│ (non-compliance stops here unless
+└────────────┬────────────────┘  trigger_consensus=true)
+             │
              ▼
         ┌────┴────┐
         │ Trigger │ ← 7 conditions checked
         │ matrix  │
         └────┬────┘
-             │ triggered?
-        ┌────┴────────────────────────────┐
-       YES                               NO
-        │                                 │
-        ▼                                 ▼
-┌───────────────────────┐          ┌───────────────┐
-│  Stage 3: Consensus   │          │   APPROVED    │
-│  ($$$, ratio ≥ 0.66)  │          └───────────────┘
-└───────────┬───────────┘
-            │
-   ┌────────┴────────┐
-  YES               NO
-   │                 │
-   ▼                 ▼
-APPROVED          REJECTED
+             │ triggered? → Stage 3: Consensus ($$$, ratio ≥ 0.66), advisory: may withhold
+             ▼
+┌──────────────────────────────────────────────┐
+│  Acceptance gate (decide_final_approval)     │
+│  no executed Stage 1 check  → UNVERIFIED     │
+│  a model stage withheld     → REJECTED       │
+│  otherwise                  → APPROVED       │
+└──────────────────────────────────────────────┘
 ```
 
-> The diagram shows the happy path. Two things sit outside it: `trigger_consensus=true` jumps straight to Stage 3 from either the trigger matrix or a Stage 2 AC failure, and the [reward-hacking veto](#reward-hacking-veto) can flip any `APPROVED` above back to `REJECTED`.
+> `trigger_consensus=true` sends a Stage 2 AC failure on to Stage 3 as a second opinion. The votes are reported, but a consensus approval cannot lift the Stage 2 block. The [reward-hacking veto](#reward-hacking-veto) is one of the withholding gates.
 
 ---
 
@@ -68,7 +71,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 
 **Pipeline behavior:** If **any** check fails, Stage 2 and Stage 3 are skipped entirely and the artifact is rejected immediately.
 
-**Skipped checks:** If a check has no command configured (`None`), it is silently skipped and treated as **passed**. This is the default when you have not set commands in `PipelineConfig.mechanical`.
+**Skipped checks:** If a check has no command configured (`None`), it is skipped and reported as **passed** (`CheckResult.executed=False`) so it does not fail Stage 1. A skipped check is not evidence: when every check is skipped, Stage 1 grants nothing and the result is **unverified**. This is the default when you have not set commands in `PipelineConfig.mechanical`.
 
 ### Stage 1 Failure Modes
 
@@ -101,7 +104,7 @@ ouroboros detect --backend codex   # use a specific LLM backend for the detect c
 
 It returns `False` for the failures it handles: no manifests, a provider error surfaced as a returned `Result`, an unparseable proposal, an empty validated proposal, or an `OSError` while writing. Validation is per command, not all-or-nothing — one invalid proposal is dropped while the remaining valid commands can still be persisted, and validation returns `False` only when none remain. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443-489`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). The `run` artifact builder and MCP evaluation handler catch unexpected auto-detection exceptions as best-effort work (`evaluation/verification_artifacts.py:119-122`, `mcp/tools/evaluation_handlers.py:729-742`), leaving Stage 1 with no commands. Treat the direct function's fail-closed contract as covering handled failures, not every thrown exception.
 
-> **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
+> **If every result is unverified, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped. Stage 1 then reports `passed` but `NO CHECKS EXECUTED`, and because only executed checks can grant acceptance, no result can be approved; each one is unverified with the Stage 2 review attached.
 >
 > Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both author the file before reading it, by different routes: `run` calls `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:437`), while the MCP evaluation handler checks `has_mechanical_toml()` and calls `ensure_mechanical_toml()` followed by `build_mechanical_config()` directly (`mcp/tools/evaluation_handlers.py:724`). The auto-detection behavior is the same; the call path is not. Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
 
@@ -158,7 +161,7 @@ mechanical:
   coverage_command: ["pytest", "--cov=src", "--cov-report=term-missing", "tests/"]
 ```
 
-> **Important:** These fields are the programmatic escape hatch. In the normal `ouroboros run` path the commands come from `.ouroboros/mechanical.toml`, which that path authors for you when it is missing. Stage 1 silently skips every check (treating it as passed) when the file is absent **and** that automatic detection failed **and** no explicit commands are configured.
+> **Important:** These fields are the programmatic escape hatch. In the normal `ouroboros run` path the commands come from `.ouroboros/mechanical.toml`, which that path authors for you when it is missing. Stage 1 skips every check when the file is absent **and** that automatic detection failed **and** no explicit commands are configured; the result is then unverified, never approved.
 
 ### Diagnosing Stage 1 Failures
 
@@ -228,26 +231,29 @@ Stage 2 calls a Standard-tier LLM (default: `OUROBOROS_SEMANTIC_MODEL` / config 
 
 ### Approval Logic
 
+Stage 2 is advisory. It never approves; it can only withhold an approval that executed Stage 1 evidence would otherwise grant.
+
 ```
-if ac_compliance == False and not trigger_consensus  → REJECTED (Stage 3 not attempted)
-if score < 0.8                    → REJECTED (unless Stage 3 is triggered and approves)
-if score >= 0.8 and no trigger    → APPROVED
-if reward_hacking_risk >= 0.7     → REJECTED (final veto, overrides any approval)
+if ac_compliance == False and not trigger_consensus  → withheld (Stage 3 not attempted)
+if ac_compliance == False and trigger_consensus      → withheld (Stage 3 runs as a reported second opinion)
+if score < 0.8                                       → withheld (a Stage 3 approval does not lift this)
+if reward_hacking_risk >= 0.7                        → withheld (veto)
+otherwise                                            → no objection; approval still requires executed Stage 1 evidence
 ```
 
 > **The score gate is hardcoded at `0.8`.** `SemanticConfig.satisfaction_threshold` (default `0.8`) exists and is validated, but the pipeline compares against a literal `0.8` and never reads the field. Changing it has no effect on approval today — do not rely on it to loosen or tighten the gate.
 
-> **`ac_compliance=False` is not always final.** When the evaluation context sets `trigger_consensus=True`, the pipeline continues to the trigger matrix instead of rejecting, so Stage 3 can deliver a second opinion on an AC the Stage 2 model failed.
+> **`ac_compliance=False` with `trigger_consensus=True`.** The pipeline continues to the trigger matrix so Stage 3 can deliver a second opinion, whose votes and disagreements are reported. The Stage 2 withhold still stands: model review is advisory, so a consensus approval cannot overturn it.
 
 > Scores are clamped to 0.0–1.0 after parsing; out-of-range model responses are corrected automatically.
 
 ### Reward-Hacking Veto
 
-`_build_result()` applies one final gate that every approval path funnels through: if Stage 2 reported `reward_hacking_risk >= 0.7` (`REWARD_HACKING_VETO_THRESHOLD`), an otherwise-approved result is flipped to rejected. The threshold is deliberately high so that mild suspicion never blocks a genuine pass.
+The acceptance gate (`decide_final_approval()`) treats a Stage 2 `reward_hacking_risk >= 0.7` (`REWARD_HACKING_VETO_THRESHOLD`) as one of the model-review withholds: it blocks an approval that executed Stage 1 evidence would otherwise grant. The threshold is deliberately high so that mild suspicion never blocks a genuine pass.
 
-The veto only turns approve into reject — it never rescues an already-rejected result, so a Stage 3 consensus rejection stays a rejection.
+Like every model gate, the veto only withholds; it never rescues a rejected or unverified result.
 
-`failure_reason` names the veto explicitly only when no earlier branch matched. `_build_result()` tests Stage 1, then Stage 3, then Stage 2 AC non-compliance, and reaches the veto branch last (`evaluation/pipeline.py:307-326`). So when `trigger_consensus=True` carries an `ac_compliance=False` result to an approving Stage 3 and the veto then rejects it, the reported reason is Stage 2 AC non-compliance, not the veto. Read `stage2_result.reward_hacking_risk` directly when you need to know whether the veto fired.
+`failure_reason` names the first withholding gate in this order: Stage 3 rejection, Stage 2 AC non-compliance, Stage 2 score below `0.8`, then the veto (`model_review_withhold_reason()` in `evaluation/models.py`). So a vetoed result that also had `ac_compliance=False` reports the AC non-compliance. Read `stage2_result.reward_hacking_risk` directly when you need to know whether the veto fired.
 
 ### Stage 2 Failure Modes
 
@@ -282,9 +288,9 @@ If `ac_compliance` is `false` but `score` seems high, the LLM may have found a p
 
 ## Consensus Trigger Matrix (Stage 2 → Stage 3 Gate)
 
-After a **compliant** Stage 2 result (`ac_compliance=True`), trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. If none match, the `score >= 0.8` gate decides and the artifact is approved immediately when it clears.
+After a **compliant** Stage 2 result (`ac_compliance=True`), trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. Whether or not Stage 3 runs, the acceptance gate then decides, and approval still requires executed Stage 1 evidence.
 
-Note the ordering: triggers are not gated on the score. The pipeline returns early only for `ac_compliance=False` without `trigger_consensus` (`evaluation/pipeline.py:178`). A compliant result scoring 0.7 with high drift still reaches Stage 3, and Stage 3 can approve it.
+Note the ordering: triggers are not gated on the score. The pipeline returns early only for `ac_compliance=False` without `trigger_consensus`. A compliant result scoring 0.7 with high drift still reaches Stage 3, but the Stage 2 score withhold stands even if Stage 3 approves.
 
 | Priority | Trigger | Condition |
 |----------|---------|-----------|
@@ -365,7 +371,9 @@ Cross-vendor independence requires the active LLM backend to be one that can act
 
 Each successful vote call returns `{ approved, confidence, reasoning }`.
 
-**Approval rule:** `approving_votes / successfully_collected_votes >= majority_threshold` (default `0.66`). The denominator is the successful responses from the post-filter roster, not the configured or pre-filter roster size. “Two of three” is only the common three-success example, not an invariant — see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
+> **Stage 3 is advisory.** A consensus rejection withholds approval; a consensus approval grants nothing on its own. The pipeline result is approved only when executed Stage 1 evidence exists and no model stage withheld.
+
+**Consensus rule:** `approving_votes / successfully_collected_votes >= majority_threshold` (default `0.66`). The denominator is the successful responses from the post-filter roster, not the configured or pre-filter roster size. “Two of three” is only the common three-success example, not an invariant; see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
 
 > **Single-model fallback.** When the configured roster contains an `openrouter/*` entry but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those perspectives vote. The same `majority_threshold` comparison is applied over the successfully collected perspective votes, and fewer than two successes is an error. The reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. A roster with no `openrouter/*` entry skips the credential check and uses the multi-model code path, still through the same adapter.
 
@@ -479,7 +487,8 @@ Ouroboros distinguishes between **failures** (the artifact does not meet criteri
 
 | Outcome | Type | What happens |
 |---------|------|-------------|
-| Stage 1 check fails | Failure | `EvaluationResult.final_approved=False`, `failure_reason` set |
+| Stage 1 check fails | Failure | `EvaluationResult.final_approved=False`, `acceptance_state="rejected"`, `failure_reason` set |
+| No executed Stage 1 check (Stage 1 disabled, or every check skipped) | Unverified | `final_approved=False`, `acceptance_state="unverified"`; `failure_reason` starts `Not approved: unverified.` and appends the model review |
 | Stage 2 AC non-compliance | Failure | Same — `EvaluationResult.final_approved=False` |
 | Stage 3 minority vote | Failure | Same — `EvaluationResult.final_approved=False` |
 | LLM API error (Stage 2/3) | Error | `Result.err(ProviderError)` propagated up — the runner receives the error, not a failed result |
@@ -504,7 +513,7 @@ config = PipelineConfig(stage3_enabled=False)
 
 These are direct-Python runtime controls. The same-named top-level `evaluation.stage1_enabled`, `stage2_enabled`, and `stage3_enabled` keys in `~/.ouroboros/config.yaml` are currently schema-validated but are not copied into `PipelineConfig` by runtime builders. Likewise, top-level `evaluation.uncertainty_threshold` does not populate `TriggerConfig.uncertainty_threshold`.
 
-> **Warning:** Disabling Stage 1 means that broken code can pass through to semantic evaluation. Disabling Stage 3 means that high-drift or high-uncertainty outputs will never be submitted to multi-model review.
+> **Warning:** Disabling Stage 1 removes the only source of executed evidence, so every result is unverified and none can be approved; Stage 2 still runs and its review is returned as feedback. Disabling Stage 3 means that high-drift or high-uncertainty outputs will never be submitted to multi-model review.
 
 > **Stage 2 disabled does not disable Stage 3.** The trigger context is built outside the Stage 2 block precisely so that `trigger_consensus=True` still works when `stage2_enabled=False` — it fires the `manual_request` trigger and Stage 3 runs on its own. What does silently disable Stage 3 is the combination of `stage2_enabled=False`, `trigger_consensus=False`, and no external `trigger_context`: every trigger field is left at its default, so nothing matches. To reach Stage 3 without Stage 2, either set `trigger_consensus=True` or pass a pre-populated `TriggerContext` to `EvaluationPipeline.evaluate()`.
 
@@ -515,11 +524,12 @@ These are direct-Python runtime controls. The same-named top-level `evaluation.s
 | Condition | `failure_reason` value |
 |-----------|------------------------|
 | Stage 1 failed | `"Stage 1 failed: lint, test"` (comma-separated failed check names) |
-| Stage 2 AC non-compliance (`ac_compliance=False`) | `"Stage 2 failed: AC non-compliance (score=0.62)"` |
-| Stage 2 score below threshold (`ac_compliance=True` but `score < 0.8`) | `"Unknown failure"` — the score check runs after Stage 2 but the `failure_reason` property only tests `ac_compliance`. Inspect `stage2_result.score` directly to distinguish this case. |
+| No executed Stage 1 check | `"Not approved: unverified. No executed verification evidence (Stage 1 did not run)."` or `(... Stage 1 ran no configured check).`, followed by `Advisory model review also withheld approval: <gate>` or `Advisory model review raised no objection, but cannot grant acceptance.` |
+| Stage 2 AC non-compliance (`ac_compliance=False`) | `"Stage 2 failed: AC non-compliance (ac_compliance=false; semantic score 0.62 did not gate this)"` |
+| Stage 2 score below threshold (`ac_compliance=True` but `score < 0.8`) | `"Stage 2 failed: semantic score 0.72 < 0.80 (ac_compliance=true; the score gate decided this)"` |
 | Stage 3 consensus not reached | `"Stage 3 failed: Consensus not reached (44%)"` |
-| Reward-hacking veto (`reward_hacking_risk >= 0.7`) | A message naming the risk score and the 0.70 threshold, **as long as no earlier branch matched**. The order is Stage 1, Stage 3, Stage 2 AC non-compliance, then the veto, so a vetoed result that also had `ac_compliance=False` reports the AC failure instead. Read `stage2_result.reward_hacking_risk` to be sure. |
-| All stages passed/skipped but `final_approved=False` | `"Unknown failure"` |
+| Reward-hacking veto (`reward_hacking_risk >= 0.7`) | A message naming the risk score and the 0.70 threshold, **as long as no earlier model gate withheld**. The order is Stage 3, Stage 2 AC non-compliance, Stage 2 score, then the veto. Read `stage2_result.reward_hacking_risk` to be sure. |
+| Executed checks passed, no model gate withheld, but `final_approved=False` | `"Unknown failure"` (only reachable for a hand-built `EvaluationResult`) |
 
 ---
 

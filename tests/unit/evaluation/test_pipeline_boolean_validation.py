@@ -47,7 +47,9 @@ def _context(*, trigger_consensus: bool = False) -> EvaluationContext:
 def passing_stage1() -> MechanicalResult:
     return MechanicalResult(
         passed=True,
-        checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="Passed"),),
+        checks=(
+            CheckResult(check_type=CheckType.LINT, passed=True, message="Passed", executed=True),
+        ),
     )
 
 

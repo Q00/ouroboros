@@ -367,12 +367,13 @@ Three-stage progressive evaluation ensures quality while minimizing cost.
 1. **Mechanical ($0)** — Lint, build, test, static analysis, coverage (threshold: 70%)
    - Auto-detects project language from marker files (e.g., `uv.lock` → Python/uv, `Cargo.toml` → Rust, `go.mod` → Go, `package-lock.json` → Node). Supported: Python, Rust, Go, Zig, Node (npm/pnpm/bun/yarn).
    - Projects can override or extend commands via `.ouroboros/mechanical.toml`. Overrides are validated against an executable allowlist for security in CI/CD environments.
-   - If no language is detected, Stage 1 checks are skipped and evaluation proceeds to Stage 2.
+   - If no command is configured, Stage 1 checks are skipped and evaluation proceeds to Stage 2, but a skipped check is not evidence: the result is unverified, never approved.
    - If any check fails → pipeline stops, returns failure
+   - Stage 1 is the only stage that can grant acceptance: approval requires at least one executed check and every check passing.
 2. **Semantic ($$)** — AC compliance, goal alignment, drift, uncertainty scoring
-   - If score >= 0.8 and no trigger → approved without consensus
+   - Advisory: non-compliance, a score below 0.8, or reward-hacking risk >= 0.7 withholds approval; a favorable review grants nothing on its own and is attached as feedback
    - Uses Standard tier model (temperature: 0.2)
-3. **Consensus ($$$)** — Multi-model voting, only when triggered by 1 of 6 conditions
+3. **Consensus ($$$)**: Multi-model voting, only when triggered by 1 of 6 conditions; advisory like Stage 2 (a rejection withholds, an approval cannot lift a Stage 2 block or grant acceptance)
    - Simple mode: 3 models vote (GPT-4o, Claude Sonnet 4, Gemini 2.5 Pro), 2/3 majority required
    - Deliberative mode: Advocate/Devil's Advocate/Judge roles with ontological questioning
 

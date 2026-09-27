@@ -267,6 +267,7 @@ class MechanicalVerifier:
                             passed=False,
                             message=f"Coverage {coverage_score:.1%} below threshold {self.config.coverage_threshold:.1%}",
                             details=cr.details,
+                            executed=cr.executed,
                         )
                     )
                 else:
@@ -315,6 +316,7 @@ class MechanicalVerifier:
                 passed=True,
                 message=f"Check {check_type.value} skipped (no command configured)",
                 details={"skipped": True},
+                executed=False,
             )
 
         cmd_result = await run_command(
@@ -328,6 +330,7 @@ class MechanicalVerifier:
                 check_type=check_type,
                 passed=False,
                 message=f"Check {check_type.value} timed out after {self.config.timeout_seconds}s",
+                executed=True,
                 details={
                     "timed_out": True,
                     "command": list(command),
@@ -372,6 +375,7 @@ class MechanicalVerifier:
             passed=passed,
             message=message,
             details=details,
+            executed=True,
         )
 
     def _get_command_for_check(self, check_type: CheckType) -> tuple[str, ...] | None:

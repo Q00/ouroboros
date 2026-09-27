@@ -6,6 +6,11 @@ Orchestrates the three-stage evaluation pipeline:
 3. Stage 3: Multi-Model Consensus (Frontier tier, if triggered)
 
 The pipeline respects configuration flags and trigger conditions.
+
+Acceptance authority: only executed Stage 1 evidence can grant approval.
+Stage 2 and Stage 3 are advisory; they can withhold approval and supply
+feedback, never grant it. Without executed evidence the result is
+unverified (see ``AcceptanceState``).
 """
 
 from dataclasses import dataclass
@@ -18,13 +23,15 @@ from ouroboros.evaluation.mechanical import (
     MechanicalVerifier,
 )
 from ouroboros.evaluation.models import (
-    REWARD_HACKING_VETO_THRESHOLD,
-    SEMANTIC_APPROVAL_SCORE,
     CheckType,
+    ConsensusResult,
     EvaluationContext,
     EvaluationResult,
     MechanicalResult,
+    SemanticResult,
     build_failure_reason,
+    decide_final_approval,
+    derive_acceptance_state,
 )
 from ouroboros.evaluation.semantic import SemanticConfig, SemanticEvaluator
 from ouroboros.evaluation.trigger import (
@@ -138,7 +145,6 @@ class EvaluationPipeline:
                     context.execution_id,
                     events,
                     stage1_result=stage1_result,
-                    final_approved=False,
                 )
         elif self._config.stage1_enabled:
             result = await self._mechanical.verify(
@@ -163,10 +169,11 @@ class EvaluationPipeline:
                     context.execution_id,
                     events,
                     stage1_result=stage1_result,
-                    final_approved=False,
                 )
 
-        # Stage 2: Semantic Evaluation
+        # Stage 2: Semantic Evaluation (advisory). It still runs when Stage 1
+        # produced no executed evidence: its review becomes the feedback that
+        # accompanies an unverified result, not a verdict.
         if self._config.stage2_enabled:
             result = await self._semantic.evaluate(context)
             if result.is_err:
@@ -175,15 +182,15 @@ class EvaluationPipeline:
             stage2_result, stage2_events = result.value
             events.extend(stage2_events)
 
-            # Check if Stage 2 failed on compliance — but allow override
-            # via trigger_consensus for a second opinion from Stage 3.
+            # Stage 2 withheld on compliance. trigger_consensus still asks
+            # Stage 3 for a second opinion that is reported, but a consensus
+            # approval cannot lift this block.
             if not stage2_result.ac_compliance and not context.trigger_consensus:
                 return self._build_result(
                     context.execution_id,
                     events,
                     stage1_result=stage1_result,
                     stage2_result=stage2_result,
-                    final_approved=False,
                 )
 
         # Build or enrich trigger context — outside Stage 2 block so that
@@ -231,44 +238,29 @@ class EvaluationPipeline:
                 stage3_result, stage3_events = result.value
                 events.extend(stage3_events)
 
-                # Final approval based on consensus
-                return self._build_result(
-                    context.execution_id,
-                    events,
-                    stage1_result=stage1_result,
-                    stage2_result=stage2_result,
-                    stage3_result=stage3_result,
-                    final_approved=stage3_result.approved,
-                )
-
-        # No consensus triggered - approve based on Stage 2.
-        # The reward-hacking veto is applied uniformly in ``_build_result``
-        # (the single final gate), so it is intentionally NOT duplicated
-        # here — this branch only decides the Stage 2 pass conditions.
-        final_approved = True
-        if stage2_result:
-            final_approved = (
-                stage2_result.ac_compliance and stage2_result.score >= SEMANTIC_APPROVAL_SCORE
-            )
-
         return self._build_result(
             context.execution_id,
             events,
             stage1_result=stage1_result,
             stage2_result=stage2_result,
-            final_approved=final_approved,
+            stage3_result=stage3_result,
         )
 
     def _build_result(
         self,
         execution_id: str,
         events: list[BaseEvent],
-        stage1_result=None,
-        stage2_result=None,
-        stage3_result=None,
-        final_approved: bool = False,
+        stage1_result: MechanicalResult | None = None,
+        stage2_result: SemanticResult | None = None,
+        stage3_result: ConsensusResult | None = None,
     ) -> Result[EvaluationResult, ValidationError]:
         """Build the final evaluation result.
+
+        Approval is decided here and nowhere else, by
+        ``decide_final_approval``: executed Stage 1 evidence grants it, and
+        any model review that ran (Stage 2 compliance or score, Stage 3
+        consensus, the reward-hacking veto) may withhold it. No caller passes
+        an approval in, so no branch can mint one from a model verdict.
 
         Args:
             execution_id: Execution identifier
@@ -276,23 +268,15 @@ class EvaluationPipeline:
             stage1_result: Stage 1 result if completed
             stage2_result: Stage 2 result if completed
             stage3_result: Stage 3 result if triggered
-            final_approved: Overall approval status
 
         Returns:
             Result containing EvaluationResult
         """
-        # Single reward-hacking veto gate.  Applied here — the one place
-        # every approval source funnels through — so no approval branch
-        # (no-consensus Stage 2 pass OR Stage 3 consensus approval) can
-        # launder a high-confidence gaming signal.  The veto only flips
-        # approve→reject; it never rescues an already-rejected result, so
-        # consensus rejections stay rejections.
-        if (
-            final_approved
-            and stage2_result is not None
-            and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
-        ):
-            final_approved = False
+        final_approved = decide_final_approval(
+            stage1_result=stage1_result,
+            stage2_result=stage2_result,
+            stage3_result=stage3_result,
+        )
 
         # Calculate highest stage before creating immutable result
         highest_stage = 0
@@ -319,6 +303,10 @@ class EvaluationPipeline:
             final_approved=final_approved,
             highest_stage=highest_stage,
             failure_reason=failure_reason,
+            acceptance_state=derive_acceptance_state(
+                final_approved=final_approved,
+                stage1_result=stage1_result,
+            ).value,
         )
 
         # Build complete event list before creating frozen result

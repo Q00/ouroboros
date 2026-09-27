@@ -71,7 +71,9 @@ def _eval_result(execution_id: str, *, final_approved: bool) -> EvaluationResult
         execution_id=execution_id,
         stage1_result=MechanicalResult(
             passed=True,
-            checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok"),),
+            checks=(
+                CheckResult(check_type=CheckType.LINT, passed=True, message="ok", executed=True),
+            ),
         ),
         stage2_result=_semantic_result(
             ac_compliance=final_approved, score=0.9 if final_approved else 0.3

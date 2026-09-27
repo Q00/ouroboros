@@ -1060,3 +1060,24 @@ def test_gen1_summary_missing_stage_falls_back_conservatively() -> None:
     summary = evaluation_summary_from_eval_meta(seed, meta)
 
     assert summary.highest_stage_passed == 1
+
+
+def test_gen1_summary_carries_single_ac_unverified_reason() -> None:
+    """A single-AC unverified result feeds its reason, not a generic rejection."""
+    seed = _seed()
+    reason = (
+        "Not approved: unverified. No executed verification evidence (Stage 1 ran no "
+        "configured check). Advisory model review raised no objection, but cannot grant "
+        "acceptance."
+    )
+    meta = {
+        "final_approved": False,
+        "acceptance_state": "unverified",
+        "failure_reason": reason,
+        "highest_stage": 2,
+    }
+
+    summary = evaluation_summary_from_eval_meta(seed, meta)
+
+    assert summary.final_approved is False
+    assert summary.failure_reason == reason

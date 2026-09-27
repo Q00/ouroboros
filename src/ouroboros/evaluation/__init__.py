@@ -56,6 +56,7 @@ from ouroboros.evaluation.mechanical import (
     run_mechanical_verification,
 )
 from ouroboros.evaluation.models import (
+    AcceptanceState,
     CheckResult,
     CheckType,
     ConsensusResult,
@@ -91,6 +92,7 @@ from ouroboros.evaluation.trigger import (
 
 __all__ = [
     # Models
+    "AcceptanceState",
     "CheckResult",
     "CheckType",
     "ConsensusResult",

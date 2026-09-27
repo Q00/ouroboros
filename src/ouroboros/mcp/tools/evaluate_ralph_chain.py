@@ -123,6 +123,12 @@ def evaluation_summary_from_eval_meta(
         if rendered:
             failure_reason = "; ".join(rendered)
     if not approved and failure_reason is None:
+        # Single-AC evaluation carries its reason (including an unverified
+        # result's advisory model review) instead of a per-AC feedback list.
+        single_reason = meta.get("failure_reason")
+        if isinstance(single_reason, str) and single_reason.strip():
+            failure_reason = single_reason.strip()
+    if not approved and failure_reason is None:
         failure_reason = "formal evaluation rejected the run"
     raw_highest_stage = meta.get("highest_stage")
     highest_stage = (
