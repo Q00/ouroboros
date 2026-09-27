@@ -21,11 +21,12 @@ Only positive support is granted: a path that did not change stays unsupported,
 so a stale file in the workspace still cannot prove that this run touched it,
 and a truncated snapshot (workspace over budget) can only withhold support.
 
-The same message also carries :class:`CommandObservation` records: test
-commands the harness re-executed itself in the workspace when the transcript
-could not prove a ``tests_passed`` claim (see ``evidence/test_reexecution.py``).
-The exit status and output there are the harness's own, so they can back a
-``tests_passed`` or ``commands_run`` claim the same way the transcript would.
+The same message also carries :class:`CommandObservation` records: commands
+the transcript shows the leaf running, replayed by the harness in an isolated
+copy of the workspace when the transcript could not prove a ``tests_passed``
+or ``commands_run`` claim (see ``evidence/command_replay.py``). The exit status
+and output there are the harness's own, so they can back those claims the same
+way the transcript would.
 """
 
 from __future__ import annotations
@@ -81,16 +82,43 @@ class WorkspaceSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class CommandObservation:
-    """One command the harness ran itself in the workspace after the leaf."""
+    """One command the harness ran itself after the leaf.
+
+    ``command`` is what ran (for a replayed output-filter pipeline, the command
+    in front of the filters); ``transcript_command`` is the command as the
+    transcript recorded it and ``argv`` the argv that ran, before workspace
+    paths were pointed at the replay copy. ``mutated`` means the run changed
+    or deleted a pre-existing file, or changed a live path the copy links to,
+    which is never success. ``network_isolated`` records whether network
+    access was denied. ``transcript_returncode`` is the exit status the
+    transcript recorded for the original run, when it recorded one; a replay
+    whose exit differs from it is never success. ``env_delta`` holds the
+    environment assignments the command itself made (``NAME=value`` before
+    the program), and ``scrubbed_environment`` the names of the narrowing
+    variables the replay removed from the environment it inherited
+    (``replay_policy.narrowing_variable``), sorted.
+    """
 
     command: str
     returncode: int
     output_tail: str
     timed_out: bool = False
+    transcript_command: str = ""
+    argv: tuple[str, ...] = ()
+    mutated: bool = False
+    network_isolated: bool = False
+    transcript_returncode: int | None = None
+    env_delta: tuple[tuple[str, str], ...] = ()
+    scrubbed_environment: tuple[str, ...] = ()
 
     @property
     def succeeded(self) -> bool:
-        return self.returncode == 0 and not self.timed_out
+        return (
+            self.returncode == 0
+            and not self.timed_out
+            and not self.mutated
+            and self.transcript_returncode in (None, self.returncode)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +128,16 @@ class WorkspaceObservation:
     ``changed_paths`` are workspace-relative paths that appeared or changed
     between the pre- and post-leaf snapshots; ``deleted_paths`` are paths the
     complete post-snapshot no longer contains. ``command_runs`` are commands
-    the harness re-executed in the workspace, with their real exit status.
+    the harness replayed in a copy of the workspace, with their real exit status.
+    ``replay_skipped`` names why replay did not run although a claim needed it
+    (``network_isolation_unavailable``), or is None.
     """
 
     changed_paths: frozenset[str]
     truncated: bool = False
     command_runs: tuple[CommandObservation, ...] = ()
     deleted_paths: frozenset[str] = frozenset()
+    replay_skipped: str | None = None
 
     def supports_file_claim(self, claim: str) -> bool:
         """Return True when the claimed workspace-relative path changed."""
@@ -222,7 +253,11 @@ def build_observation_message(observation: WorkspaceObservation) -> AgentMessage
     count = len(observation.changed_paths)
     suffix = " (snapshot truncated)" if observation.truncated else ""
     runs = len(observation.command_runs)
-    runs_note = f"; re-executed {runs} test command(s)" if runs else ""
+    runs_note = f"; replayed {runs} transcript command(s)" if runs else ""
+    if any(not run.network_isolated for run in observation.command_runs):
+        runs_note += " (network not isolated)"
+    if observation.replay_skipped is not None:
+        runs_note += f"; replay skipped: {observation.replay_skipped}"
     return AgentMessage(
         type=HARNESS_OBSERVATION_MESSAGE_TYPE,
         content=f"Harness observed {count} changed workspace file(s){suffix}{runs_note}",
