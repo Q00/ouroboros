@@ -110,10 +110,24 @@ class MechanicalResult:
     checks: tuple[CheckResult, ...]
     coverage_score: float | None = None
 
+    def __post_init__(self) -> None:
+        """Reconcile the aggregate verdict with its checks, fail-closed.
+
+        ``passed`` duplicates what the checks already say, and a directly
+        constructed or rehydrated result can make the two disagree. The
+        aggregate may only claim a pass that every check confirms with a
+        literal ``True``; any disagreement resolves to not passed, so no
+        reader (the pipeline's Stage 1 gate, the acceptance gate, failure
+        reasons) can see an executed failing check as a pass.
+        """
+        reconciled = self.passed is True and all(c.passed is True for c in self.checks)
+        if reconciled is not self.passed:
+            object.__setattr__(self, "passed", reconciled)
+
     @property
     def failed_checks(self) -> tuple[CheckResult, ...]:
-        """Return only the checks that failed."""
-        return tuple(c for c in self.checks if not c.passed)
+        """Return only the checks that did not report a literal pass."""
+        return tuple(c for c in self.checks if c.passed is not True)
 
     @property
     def executed_checks(self) -> tuple[CheckResult, ...]:

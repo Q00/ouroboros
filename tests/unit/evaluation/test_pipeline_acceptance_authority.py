@@ -286,3 +286,52 @@ def test_check_result_defaults_to_not_executed() -> None:
     check = CheckResult(check_type=CheckType.TEST, passed=True, message="ok")
     assert check.executed is False
     assert MechanicalResult(passed=True, checks=(check,)).has_executed_evidence is False
+
+
+class TestContradictoryStage1Evidence:
+    """The aggregate verdict cannot outvote an executed failing check."""
+
+    def test_aggregate_pass_with_failing_child_is_reconciled_to_fail(self) -> None:
+        contradictory = MechanicalResult(
+            passed=True,
+            checks=(
+                CheckResult(check_type=CheckType.TEST, passed=False, message="x", executed=True),
+            ),
+        )
+
+        assert contradictory.passed is False
+        assert contradictory.has_executed_evidence is False
+        assert [c.check_type for c in contradictory.failed_checks] == [CheckType.TEST]
+
+    def test_non_boolean_child_verdict_is_not_a_pass(self) -> None:
+        coerced = MechanicalResult(
+            passed=True,
+            checks=(
+                CheckResult(
+                    check_type=CheckType.TEST,
+                    passed="false",  # type: ignore[arg-type]
+                    message="x",
+                    executed=True,
+                ),
+            ),
+        )
+
+        assert coerced.passed is False
+        assert coerced.has_executed_evidence is False
+
+    @pytest.mark.asyncio
+    async def test_injected_contradictory_stage1_is_rejected(self) -> None:
+        pipeline = _pipeline(semantic=_semantic(approve=True))
+        contradictory = MechanicalResult(
+            passed=True,
+            checks=(
+                CheckResult(check_type=CheckType.TEST, passed=False, message="x", executed=True),
+            ),
+        )
+
+        result = await _evaluate(pipeline, stage1=contradictory)
+
+        assert result.final_approved is False
+        assert result.acceptance_state is AcceptanceState.REJECTED
+        assert (result.failure_reason or "").startswith("Stage 1 failed: test")
+        pipeline._semantic.evaluate.assert_not_called()
