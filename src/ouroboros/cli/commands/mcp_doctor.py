@@ -608,24 +608,49 @@ def register_doctor_command(app: typer.Typer) -> None:
         ] = False,
     ) -> None:
         """Show bounded, read-only runtime facts for local MCP diagnostics."""
+        from ouroboros.cli.commands.mcp import _PID_REGISTRY_DIR
         from ouroboros.mcp.machine_runtime import collect_runtime_snapshot
 
-        snapshot = collect_runtime_snapshot()
+        snapshot = collect_runtime_snapshot(registry_dir=_PID_REGISTRY_DIR)
         if as_json:
             print(json.dumps(snapshot.to_dict(), indent=2))
             return
 
         console = Console()
         console.print("[bold]Ouroboros MCP Runtime Facts[/bold]")
-        console.print(f"  PATH candidates: {len(snapshot.path.candidates)}")
-        console.print(f"  PATH truncated: {snapshot.path.truncated}")
+        path = snapshot.path
+        console.print(
+            f"  PATH: {escape(path.status)}; entries {path.entries_seen}/{path.entries_limit}; "
+            f"truncated={path.truncated}"
+        )
+        if path.reason is not None:
+            console.print(f"  PATH unavailable reason: {escape(path.reason)}")
+        for candidate in path.candidates:
+            console.print(
+                f"  PATH candidate: {escape(candidate.name)} -> {escape(candidate.path)} "
+                f"(executable={candidate.executable})"
+            )
+        for name, paths in path.collisions.items():
+            collision_paths = ", ".join(escape(value) for value in paths)
+            console.print(f"  PATH collision: {escape(name)} -> {collision_paths}")
         for probe in snapshot.loopback:
             port = "-" if probe.port is None else str(probe.port)
             reason = "" if probe.reason is None else f", {probe.reason}"
             console.print(f"  loopback {probe.family}: {probe.status} (port {port}{reason})")
+        registry = snapshot.registry
         console.print(
-            f"  registry records: {len(snapshot.registry.records)} ({snapshot.registry.status})"
+            f"  registry: {escape(registry.status)} at {escape(registry.directory)}; "
+            f"entries {registry.entries_seen}/{registry.entries_limit}; "
+            f"records={len(registry.records)}; truncated={registry.truncated}"
         )
+        if registry.reason is not None:
+            console.print(f"  registry unavailable reason: {escape(registry.reason)}")
+        for record in registry.records:
+            console.print(
+                f"  registry record: pid={record.pid}, name={escape(record.name)}, "
+                f"size={record.size}, mtime_ns={record.mtime_ns}, "
+                f"identity_verified={record.identity_verified}, liveness={escape(record.liveness)}"
+            )
 
 
 __all__ = [
