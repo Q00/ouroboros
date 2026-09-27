@@ -25,7 +25,8 @@ a check package exchanges frames over stdin and stdout). Under confinement:
   refuses to run the command unless it is still that directory (on Linux the
   Landlock rule is bound to that very descriptor). A root holding a regular
   file with another hard link is refused: the other link may be outside, and
-  writing through the root would change it. ``confine`` reports that early as
+  writing through the root would change it; so is one holding a character or
+  block device node, and creating one beneath a root is denied. ``confine`` reports that early as
   ``aliased_writable_root``; the helper checks again from the verified
   descriptors after the restriction is in place, immediately before exec, and
   runs nothing if a link appeared in between.
@@ -170,7 +171,10 @@ _CONFINE_HELPER = Path(__file__).with_name("_confine_exec.py")
 _COMMAND_ENV_VARIABLE = "OUROBOROS_SANDBOX_COMMAND_ENV"
 
 # macOS: profile parameters ``W0``..``Wn`` carry the writable roots.
+# Writing through any device node is denied (a node inside a root would alias
+# a device), then the few harmless devices are allowed again.
 _DARWIN_DEVICE_RULES = (
+    "(deny file-write* (vnode-type CHARACTER-DEVICE BLOCK-DEVICE))"
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero")'
     ' (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty")'
     ' (literal "/dev/dtracehelper") (subpath "/dev/fd"))'
@@ -277,7 +281,8 @@ def _claim_root(path: str) -> _RootClaim:
 
 
 def _hard_linked_file(root: str) -> str | None:
-    """A regular file beneath ``root`` with more than one link, or None.
+    """A regular file beneath ``root`` with more than one link, or a character
+    or block device node (both alias storage outside the root), or None.
 
     Symlinks and linked directories are not followed. A directory that cannot
     be listed or an entry that cannot be examined is returned as well: it may
@@ -296,6 +301,8 @@ def _hard_linked_file(root: str) -> str | None:
             except OSError as exc:
                 return f"{path}: {exc.strerror}"
             if stat.S_ISREG(status.st_mode) and status.st_nlink > 1:
+                return path
+            if stat.S_ISCHR(status.st_mode) or stat.S_ISBLK(status.st_mode):
                 return path
     return failures[0] if failures else None
 

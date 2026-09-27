@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 
@@ -256,6 +257,70 @@ class TestRealBackend:
         assert refused.reason is SandboxUnavailableReason.ALIASED_WRITABLE_ROOT
         assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
         assert victim.read_text(encoding="utf-8") == "KEEP"
+
+    @staticmethod
+    def _can_make_device_nodes(directory: Path) -> bool:
+        try:
+            os.mknod(directory / "device-probe", stat.S_IFCHR | 0o600, os.makedev(1, 3))
+        except (PermissionError, OSError):
+            return False
+        (directory / "device-probe").unlink()
+        return True
+
+    def test_a_device_node_cannot_be_created_in_a_root(self, layout: dict[str, Path]) -> None:
+        _require_backend()
+        if not self._can_make_device_nodes(layout["outside"]):
+            pytest.skip("this process cannot create device nodes (no CAP_MKNOD)")
+        copy = layout["copy"].resolve()
+        code = (
+            "import os, stat, sys\n"
+            "try:\n"
+            "    os.mknod('null2', stat.S_IFCHR | 0o666, os.makedev(1, 3))\n"
+            "except OSError:\n"
+            "    sys.exit(0)\n"
+            "sys.exit(3)\n"
+        )
+        command = confine(
+            _python(code),
+            cwd=str(copy),
+            writable_roots=(str(copy),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand)
+
+        result = _run(command)
+
+        assert result.returncode == 0, result.stderr
+        assert not (copy / "null2").exists()
+
+    def test_a_root_holding_a_device_node_is_refused(self, layout: dict[str, Path]) -> None:
+        _require_backend()
+        if not self._can_make_device_nodes(layout["outside"]):
+            pytest.skip("this process cannot create device nodes (no CAP_MKNOD)")
+        copy = layout["copy"].resolve()
+        command = confine(
+            _python("pass"),
+            cwd=str(copy),
+            writable_roots=(str(copy),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        assert isinstance(command, ConfinedCommand)
+        os.mknod(copy / "disk", stat.S_IFCHR | 0o600, os.makedev(1, 3))
+
+        refused = confine(
+            ("true",),
+            cwd=str(copy),
+            writable_roots=(str(copy),),
+            temp_dir=str(layout["temp"]),
+            deny_network=False,
+        )
+        result = _run(command)
+
+        assert isinstance(refused, SandboxUnavailable)
+        assert refused.reason is SandboxUnavailableReason.ALIASED_WRITABLE_ROOT
+        assert result.returncode == _confine_exec.EXIT_SANDBOX_FAILED, result.stderr
 
     def test_writable_root_with_quote_and_backslash_in_its_name(self, tmp_path: Path) -> None:
         _require_backend()
@@ -831,6 +896,15 @@ class TestLandlockAccessMask:
         # Reading and executing are never handled.
         read_rights = (1 << 0) | (1 << 2) | (1 << 3)
         assert not _confine_exec.handled_write_access(8) & read_rights
+
+    def test_device_node_creation_is_never_granted_beneath_a_root(self) -> None:
+        make_char, make_block = 1 << 6, 1 << 11
+        for abi in (3, 5, 8):
+            handled = _confine_exec.handled_write_access(abi)
+            granted = _confine_exec.root_write_access(abi)
+            assert handled & make_char and handled & make_block
+            assert not granted & (make_char | make_block)
+            assert granted == handled & ~(make_char | make_block)
 
     def test_helper_refuses_an_abi_that_cannot_deny_truncation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

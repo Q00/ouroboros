@@ -124,6 +124,12 @@ def handled_write_access(abi: int) -> int:
     return access
 
 
+def root_write_access(abi: int) -> int:
+    """The rights granted beneath a writable root: every handled right except
+    creating a character or block device node, which would alias a device."""
+    return handled_write_access(abi) & ~(_ACCESS_FS_MAKE_CHAR | _ACCESS_FS_MAKE_BLOCK)
+
+
 def device_write_access(abi: int) -> int:
     """The rights granted on a writable device (file rights only)."""
     return _ACCESS_FS_WRITE_FILE | (_ACCESS_FS_TRUNCATE if abi >= 3 else 0)
@@ -211,8 +217,12 @@ def open_verified_roots(roots: list[tuple[str, int, int]]) -> list[int]:
     return opened
 
 
-def refuse_hard_linked_files(root_fds: list[int]) -> None:
-    """Refuse to run when any regular file beneath a verified root has another link.
+def refuse_root_aliases(root_fds: list[int]) -> None:
+    """Refuse to run when anything beneath a verified root aliases outside storage.
+
+    Aliases: a regular file with another hard link (the other link may be
+    outside the roots) and a character or block device node (writing it
+    writes the device).
 
     The walk must be complete: a directory that cannot be listed or an entry
     that cannot be examined refuses too, since it may hold such a link.
@@ -226,7 +236,7 @@ def refuse_hard_linked_files(root_fds: list[int]) -> None:
 
     def unreadable(error: OSError) -> None:
         raise SandboxError(
-            f"a writable root cannot be fully inspected for hard links: {error}"
+            f"a writable root cannot be fully inspected for aliases: {error}"
         ) from None
 
     for fd in root_fds:
@@ -241,6 +251,10 @@ def refuse_hard_linked_files(root_fds: list[int]) -> None:
                     raise SandboxError(
                         f"{os.path.join(dirpath, name)} in a writable root has "
                         f"{status.st_nlink} hard links"
+                    )
+                if stat.S_ISCHR(status.st_mode) or stat.S_ISBLK(status.st_mode):
+                    raise SandboxError(
+                        f"{os.path.join(dirpath, name)} in a writable root is a device node"
                     )
 
 
@@ -266,7 +280,7 @@ def restrict_writes(root_fds: list[int]) -> int:
     )
     try:
         for fd in root_fds:
-            _add_rule_fd(syscall, ruleset, fd, handled, f"root fd {fd}")
+            _add_rule_fd(syscall, ruleset, fd, root_write_access(abi), f"root fd {fd}")
         for device in WRITABLE_DEVICES:
             if os.path.exists(device):
                 _add_rule(syscall, ruleset, device, device_write_access(abi))
@@ -538,7 +552,7 @@ def main(arguments: list[str]) -> int:
             if landlock:
                 restrict_writes(root_fds)
                 deny_metadata_changes()
-            refuse_hard_linked_files(root_fds)
+            refuse_root_aliases(root_fds)
         finally:
             for fd in root_fds:
                 os.close(fd)
