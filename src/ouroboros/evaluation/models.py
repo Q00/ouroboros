@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.events.base import BaseEvent
 
@@ -421,24 +422,6 @@ class EvaluationContext:
     # consensus keep the executor's own vendor out of the reviewer jury. ``None``
     # (the default) means "unknown" — today's behavior, no independence binding.
     executor_backend: str | None = None
-
-
-class AcceptanceState(StrEnum):
-    """Outcome of the acceptance decision for one evaluation.
-
-    Attributes:
-        APPROVED: Executed verification passed and no model review withheld.
-        REJECTED: An executed check failed, or executed checks passed and a
-            model review withheld approval.
-        UNVERIFIED: No executed verification evidence exists (Stage 1 did not
-            run, or ran no configured check). Model review may have been
-            favorable; it cannot grant acceptance, so it is attached as
-            feedback instead.
-    """
-
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    UNVERIFIED = "unverified"
 
 
 @dataclass(frozen=True, slots=True)
