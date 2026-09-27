@@ -1467,6 +1467,68 @@ def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
     return success_signal
 
 
+def _runtime_message_recorded_exit_status(message: AgentMessage) -> int | None:
+    """Return the exit status one message records, or None when it records none.
+
+    The same fields ``_runtime_message_has_success_signal`` reads, on the
+    message and on its ``tool_result``, plus the runtime's authoritative
+    ``meta.exit_status``. An integer ``exit_code`` or ``exit_status`` is the
+    status, and a non-integer one is a failure.
+    Any failure marker records a failure, returned as the non-zero exit code
+    when there is one and as 1 otherwise: ``is_error`` true or not a boolean,
+    ``is_error_invalid``, a non-integer ``exit_code``, a ``status`` of
+    ``failed`` or ``error``, a ``subtype`` of ``error``, or a runtime event
+    ending in ``.failed`` or ``.error``. A message with no failure marker and a
+    success signal records 0.
+    """
+    containers: list[dict[str, object]] = [message.data]
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        containers.append(tool_result)
+    elif tool_result is not None:
+        return 1
+    exit_codes: list[int] = []
+    failed = message.is_error
+    for container in containers:
+        if "exit_code" in container:
+            exit_code = container["exit_code"]
+            if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                failed = True
+            else:
+                exit_codes.append(exit_code)
+        if "is_error" in container and container["is_error"] is not False:
+            failed = True
+        if container.get("is_error_invalid") is True:
+            failed = True
+        status = container.get("status")
+        if isinstance(status, str) and status.strip().lower() in {"failed", "error"}:
+            failed = True
+        if container.get("subtype") == "error":
+            failed = True
+        event = container.get("runtime_event_type")
+        if isinstance(event, str) and event.strip().lower().endswith((".failed", ".error")):
+            failed = True
+    # ``meta.exit_status`` (on the message or its ``tool_result``) is the
+    # runtime's authoritative exit status; ``reported_exit_status`` is an
+    # audit-only copy and never counts.
+    for container in containers:
+        meta = container.get("meta")
+        if isinstance(meta, dict) and "exit_status" in meta:
+            exit_status = meta["exit_status"]
+            if isinstance(exit_status, bool) or not isinstance(exit_status, int):
+                failed = True
+            else:
+                exit_codes.append(exit_status)
+    nonzero = [code for code in exit_codes if code != 0]
+    if nonzero:
+        return nonzero[0]
+    if failed:
+        return 1
+    if exit_codes or _runtime_message_has_success_signal(message):
+        return 0
+    return None
+
+
 def _runtime_message_tool_call_ids(message: AgentMessage) -> frozenset[str]:
     """Return every normalized correlation-id alias carried by a message."""
     values: set[str] = set()

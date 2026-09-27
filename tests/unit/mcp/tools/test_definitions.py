@@ -2852,6 +2852,7 @@ class TestEvaluateHandlerCodeChanges:
             passed=passed,
             message="tests passed" if passed else "tests failed",
             details=details,
+            executed=True,
         )
         return MechanicalResult(passed=passed, checks=(check,), coverage_score=None)
 

@@ -1,6 +1,8 @@
 """Unit tests for ouroboros.core.lineage module."""
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.lineage import (
+    ACAuthorityState,
     ACResult,
     EvaluationSummary,
     FeedbackMetadata,
@@ -450,3 +452,74 @@ class TestACResult:
         ).model_copy(update={"rendered_verdict": "PASS"})
 
         assert result.verdict_label == "FAIL"
+
+
+class TestEvaluationSummaryAcceptanceState:
+    """The persisted approval status is exposed as the one acceptance tri-state."""
+
+    def test_approved(self) -> None:
+        summary = EvaluationSummary(final_approved=True, highest_stage_passed=1)
+
+        assert summary.acceptance_state is AcceptanceState.APPROVED
+
+    def test_rejected(self) -> None:
+        summary = EvaluationSummary(final_approved=False, highest_stage_passed=1)
+
+        assert summary.acceptance_state is AcceptanceState.REJECTED
+
+    def test_not_evaluated_is_unverified_not_rejected(self) -> None:
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            approval_status="not_evaluated",
+        )
+
+        assert summary.acceptance_state is AcceptanceState.UNVERIFIED
+
+    def test_not_evaluated_ac_rows_keep_generation_unverified(self) -> None:
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            approval_status="not_evaluated",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Ship feature",
+                    passed=False,
+                    ac_verdict_state="not_evaluated",
+                    verification_method="formal_evaluation",
+                ),
+            ),
+        )
+
+        assert summary.acceptance_state is AcceptanceState.UNVERIFIED
+        assert summary.ac_results[0].authority_state is ACAuthorityState.UNRESOLVED
+
+    def test_approval_flag_without_approved_status_is_not_approved(self) -> None:
+        unverified = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=1,
+            approval_status="not_evaluated",
+        )
+        rejected = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=1,
+            approval_status="rejected",
+        )
+
+        assert unverified.acceptance_state is AcceptanceState.UNVERIFIED
+        assert rejected.acceptance_state is AcceptanceState.REJECTED
+
+    def test_unrecognized_status_reads_rejected(self) -> None:
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            approval_status="pending",
+        )
+
+        assert summary.acceptance_state is AcceptanceState.REJECTED
+
+    def test_evaluation_package_reexports_the_same_enum(self) -> None:
+        from ouroboros.evaluation import AcceptanceState as EvaluationAcceptanceState
+
+        assert EvaluationAcceptanceState is AcceptanceState

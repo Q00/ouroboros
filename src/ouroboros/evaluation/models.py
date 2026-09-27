@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ouroboros.core.acceptance import AcceptanceState
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.events.base import BaseEvent
 
@@ -31,9 +32,10 @@ from ouroboros.events.base import BaseEvent
 # without a models<->pipeline import cycle.  pipeline.py imports this.
 REWARD_HACKING_VETO_THRESHOLD = 0.7
 
-# Minimum Stage 2 score for approval when no consensus ran.  Shared with
-# ``pipeline.py`` so the gate and the failure reason that has to name it
-# cannot drift apart.
+# Below this Stage 2 score, semantic review withholds approval.  It never
+# grants approval above it: acceptance requires executed Stage 1 evidence.
+# Shared with ``pipeline.py`` so the gate and the failure reason that has to
+# name it cannot drift apart.
 SEMANTIC_APPROVAL_SCORE = 0.8
 
 
@@ -78,12 +80,37 @@ class CheckResult:
         passed: Whether the check passed
         message: Human-readable result message
         details: Additional check-specific details
+        executed: Whether a configured command was attempted, so that
+            ``passed`` reports its outcome. An unconfigured check is reported
+            as ``passed`` so it does not fail Stage 1, but it is not evidence.
+            Defaults to ``False`` so a check that does not declare execution
+            never counts as evidence.
     """
 
     check_type: CheckType
     passed: bool
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+    executed: bool = False
+
+
+class MechanicalDisposition(StrEnum):
+    """What a Stage 1 result is evidence of; the one classifier every reader uses.
+
+    Attributes:
+        EXECUTED_PASS: At least one check ran a command and every check passed.
+            The only disposition that can support acceptance.
+        EXECUTED_FAIL: A check that ran a command failed. Authoritative
+            rejection; model review is not consulted.
+        NO_EVIDENCE: No executed check decided anything: every check was
+            skipped, or the only failures were never executed. Not approvable
+            and not a rejection; the outcome is unverified and model review
+            still runs to supply feedback.
+    """
+
+    EXECUTED_PASS = "executed_pass"
+    EXECUTED_FAIL = "executed_fail"
+    NO_EVIDENCE = "no_evidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +130,54 @@ class MechanicalResult:
     checks: tuple[CheckResult, ...]
     coverage_score: float | None = None
 
+    def __post_init__(self) -> None:
+        """Reconcile the aggregate verdict with its checks, fail-closed.
+
+        ``passed`` duplicates what the checks already say, and a directly
+        constructed or rehydrated result can make the two disagree. The
+        aggregate may only claim a pass that every check confirms with a
+        literal ``True``; any disagreement resolves to not passed, so no
+        reader (the pipeline's Stage 1 gate, the acceptance gate, failure
+        reasons) can see an executed failing check as a pass.
+        """
+        reconciled = self.passed is True and all(c.passed is True for c in self.checks)
+        if reconciled is not self.passed:
+            object.__setattr__(self, "passed", reconciled)
+
     @property
     def failed_checks(self) -> tuple[CheckResult, ...]:
-        """Return only the checks that failed."""
-        return tuple(c for c in self.checks if not c.passed)
+        """Return only the checks that did not report a literal pass."""
+        return tuple(c for c in self.checks if c.passed is not True)
+
+    @property
+    def executed_checks(self) -> tuple[CheckResult, ...]:
+        """Return only the checks whose configured command actually ran."""
+        return tuple(c for c in self.checks if c.executed is True)
+
+    @property
+    def executed_failures(self) -> tuple[CheckResult, ...]:
+        """Return the checks that ran a command and did not pass."""
+        return tuple(c for c in self.failed_checks if c.executed is True)
+
+    @property
+    def disposition(self) -> MechanicalDisposition:
+        """Classify this result once, for the pipeline and every projection.
+
+        An executed failure rejects. A pass counts only when every check
+        passed and at least one ran a command (a skipped check reports
+        ``passed`` but is not evidence). Everything else, including a failure
+        that was never executed, is no evidence.
+        """
+        if self.executed_failures:
+            return MechanicalDisposition.EXECUTED_FAIL
+        if self.passed and self.executed_checks:
+            return MechanicalDisposition.EXECUTED_PASS
+        return MechanicalDisposition.NO_EVIDENCE
+
+    @property
+    def has_executed_evidence(self) -> bool:
+        """Whether Stage 1 is executed verification evidence for acceptance."""
+        return self.disposition is MechanicalDisposition.EXECUTED_PASS
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +459,19 @@ class EvaluationResult:
         return 0
 
     @property
+    def has_executed_evidence(self) -> bool:
+        """Whether Stage 1 produced executed verification evidence."""
+        return self.stage1_result is not None and self.stage1_result.has_executed_evidence
+
+    @property
+    def acceptance_state(self) -> AcceptanceState:
+        """Return whether this result is approved, rejected, or unverified."""
+        return derive_acceptance_state(
+            final_approved=self.final_approved,
+            stage1_result=self.stage1_result,
+        )
+
+    @property
     def failure_reason(self) -> str | None:
         """Return the reason for failure, if any."""
         return build_failure_reason(
@@ -398,6 +482,86 @@ class EvaluationResult:
         )
 
 
+def model_review_withhold_reason(
+    *,
+    stage2_result: SemanticResult | None,
+    stage3_result: ConsensusResult | None,
+) -> str | None:
+    """Return why model review withheld approval, or ``None`` if it did not.
+
+    Model review (Stage 2 semantic, Stage 3 consensus, and the reward-hacking
+    veto) is advisory: it can withhold approval and explain why, but it can
+    never grant acceptance. Every stage that ran is consulted and any one of
+    them withholding settles it; a Stage 3 approval does not lift a Stage 2
+    block. The first withholding gate is named, in the order below.
+    """
+    if stage3_result is not None and not stage3_result.approved:
+        return f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+    if stage2_result is not None and not stage2_result.ac_compliance:
+        return (
+            "Stage 2 failed: AC non-compliance "
+            f"(ac_compliance=false; semantic score {stage2_result.score:.2f} "
+            "did not gate this)"
+        )
+    if stage2_result is not None and stage2_result.score < SEMANTIC_APPROVAL_SCORE:
+        return (
+            "Stage 2 failed: semantic score "
+            f"{stage2_result.score:.2f} < {SEMANTIC_APPROVAL_SCORE:.2f} "
+            "(ac_compliance=true; the score gate decided this)"
+        )
+    if (
+        stage2_result is not None
+        and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
+    ):
+        return (
+            "Stage 2 veto: reward-hacking risk "
+            f"{stage2_result.reward_hacking_risk:.2f} >= "
+            f"{REWARD_HACKING_VETO_THRESHOLD:.2f}; artifact appears optimized to game the "
+            "evaluator rather than solve the real task"
+        )
+    return None
+
+
+def decide_final_approval(
+    *,
+    stage1_result: MechanicalResult | None,
+    stage2_result: SemanticResult | None,
+    stage3_result: ConsensusResult | None,
+) -> bool:
+    """The single acceptance gate: executed evidence grants, model review withholds.
+
+    Approval requires Stage 1 to have run at least one configured check with
+    every check passing. Model review that ran may withhold that approval;
+    no model verdict can supply it.
+    """
+    if stage1_result is None or not stage1_result.has_executed_evidence:
+        return False
+    return (
+        model_review_withhold_reason(
+            stage2_result=stage2_result,
+            stage3_result=stage3_result,
+        )
+        is None
+    )
+
+
+def derive_acceptance_state(
+    *,
+    final_approved: bool,
+    stage1_result: MechanicalResult | None,
+) -> AcceptanceState:
+    """Classify an evaluation outcome for callers and feedback loops."""
+    if final_approved:
+        return AcceptanceState.APPROVED
+    if stage1_result is None:
+        return AcceptanceState.UNVERIFIED
+    disposition = stage1_result.disposition
+    if disposition is MechanicalDisposition.NO_EVIDENCE:
+        return AcceptanceState.UNVERIFIED
+    # EXECUTED_FAIL, or EXECUTED_PASS that model review withheld.
+    return AcceptanceState.REJECTED
+
+
 def build_failure_reason(
     *,
     final_approved: bool,
@@ -405,65 +569,38 @@ def build_failure_reason(
     stage2_result: SemanticResult | None,
     stage3_result: ConsensusResult | None,
 ) -> str | None:
-    """Return why an evaluation was rejected, or ``None`` when it passed.
+    """Return why an evaluation was not approved, or ``None`` when it was.
 
-    Branches are ordered by which gate actually decided, not by stage number.
-
-    The reward-hacking veto is applied last in the pipeline and only ever
-    flips approve to reject, so it is the deciding gate exactly when the
-    result would otherwise have been approved.  That has to be reconstructed
-    here because this function sees ``final_approved`` after the veto has
-    already been applied.  Without it, a run that Stage 3 approved and the
-    veto then rejected reports Stage 2 non-compliance, naming a gate that
-    did not decide anything.
-
-    Stage 3 is checked before Stage 2 because when Stage 3 ran, it is the
-    authoritative verdict (Stage 2 may have been bypassed via
-    ``trigger_consensus``).
-
-    The Stage 2 branches name their predicate.  ``ac_compliance`` is a
-    boolean and the semantic score is a separate gate, so a run can be
-    rejected by either while the other reads fine.
+    A failed executed check is named first because it is the decisive
+    evidence. Without executed evidence the result is unverified, and the
+    reason says so before appending whatever model review concluded, so the
+    feedback is not mistaken for a verdict. With executed evidence that
+    passed, the withholding model gate is named.
     """
     if final_approved:
         return None
-    if stage1_result and not stage1_result.passed:
-        failed = stage1_result.failed_checks
+    disposition = stage1_result.disposition if stage1_result is not None else None
+    if stage1_result is not None and disposition is MechanicalDisposition.EXECUTED_FAIL:
+        failed = stage1_result.executed_failures
         return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
 
-    # What approval would have been, had the veto not run.
-    if stage3_result is not None:
-        approved_before_veto = stage3_result.approved
-    elif stage2_result is not None:
-        approved_before_veto = (
-            stage2_result.ac_compliance and stage2_result.score >= SEMANTIC_APPROVAL_SCORE
-        )
-    else:
-        approved_before_veto = True
-
-    if (
-        stage2_result
-        and approved_before_veto
-        and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
-    ):
-        return (
-            "Stage 2 veto: reward-hacking risk "
-            f"{stage2_result.reward_hacking_risk:.2f} >= "
-            f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game the "
-            "evaluator rather than solve the real task"
-        )
-    if stage3_result and not stage3_result.approved:
-        return f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
-    if stage2_result and not stage2_result.ac_compliance:
-        return (
-            "Stage 2 failed: AC non-compliance "
-            f"(ac_compliance=false; semantic score {stage2_result.score:.2f} "
-            "did not gate this)"
-        )
-    if stage2_result and stage2_result.score < SEMANTIC_APPROVAL_SCORE:
-        return (
-            "Stage 2 failed: semantic score "
-            f"{stage2_result.score:.2f} < {SEMANTIC_APPROVAL_SCORE:.2f} "
-            "(ac_compliance=true; the score gate decided this)"
-        )
-    return "Unknown failure"
+    model_reason = model_review_withhold_reason(
+        stage2_result=stage2_result,
+        stage3_result=stage3_result,
+    )
+    if stage1_result is None or disposition is MechanicalDisposition.NO_EVIDENCE:
+        if stage1_result is None:
+            missing = "Stage 1 did not run"
+        elif stage1_result.failed_checks:
+            missing = "Stage 1 reported failures from no executed check"
+        else:
+            missing = "Stage 1 ran no configured check"
+        reason = f"Not approved: unverified. No executed verification evidence ({missing})."
+        if model_reason is not None:
+            return f"{reason} Advisory model review also withheld approval: {model_reason}"
+        if stage2_result is not None or stage3_result is not None:
+            return (
+                f"{reason} Advisory model review raised no objection, but cannot grant acceptance."
+            )
+        return reason
+    return model_reason or "Unknown failure"

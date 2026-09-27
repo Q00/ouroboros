@@ -53,7 +53,9 @@ def _passing_eval(execution_id: str) -> EvaluationResult:
         execution_id=execution_id,
         stage1_result=MechanicalResult(
             passed=True,
-            checks=(CheckResult(check_type=CheckType.LINT, passed=True, message="ok"),),
+            checks=(
+                CheckResult(check_type=CheckType.LINT, passed=True, message="ok", executed=True),
+            ),
         ),
         stage2_result=_semantic_result(
             ac_compliance=True,
@@ -92,7 +94,9 @@ def _stage3_failing_eval(execution_id: str) -> EvaluationResult:
         execution_id=execution_id,
         stage1_result=MechanicalResult(
             passed=True,
-            checks=(CheckResult(check_type=CheckType.TEST, passed=True, message="ok"),),
+            checks=(
+                CheckResult(check_type=CheckType.TEST, passed=True, message="ok", executed=True),
+            ),
         ),
         stage2_result=_semantic_result(
             ac_compliance=True,

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import ast
+from collections.abc import Sequence
+import os
+from pathlib import Path, PurePosixPath
 import re
+import shlex
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
@@ -19,17 +23,38 @@ from ouroboros.orchestrator.evidence.claims import (
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.harness_observation import (
+    CommandObservation,
     observation_from_message,
 )
+from ouroboros.orchestrator.evidence.replay_policy import (
+    alters_configuration,
+    claim_target_operands,
+    excludes_tests,
+    inline_python_alters_imports,
+    narrowing_assignments,
+    run_may_back_test_claim,
+)
 from ouroboros.orchestrator.evidence.shell_parsing import (
+    _changes_directory,
+    _command_lists,
+    _commands_implied_by_success,
     _has_trailing_output_filter_pipeline,
+    _is_django_test_subcommand,
     _is_python_executable,
+    _is_workspace_relative_directory,
     _looks_like_test_command,
     _looks_like_unittest_command,
     _normalized_command_claim_aliases,
+    _output_filter_pipeline_is_pipefail_protected,
+    _peel_shell_wrappers,
+    _project_test_runner_script,
     _runtime_command_evidence_aliases,
+    _split_leading_cd,
+    _strip_env_prefix,
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
+    _top_level_shell_character_positions,
+    python_inline_program,
 )
 
 
@@ -381,8 +406,13 @@ def _test_command_targets_claim(
     chunk_test_proof_text: str,
     messages: tuple[AgentMessage, ...],
     task_cwd: str | None,
+    inherited_environment: tuple[str, ...] = (),
 ) -> bool:
-    """Return True when a successful test command can cover a test claim."""
+    """Return True when a successful test command can cover a test claim.
+
+    ``inherited_environment`` names narrowing variables an earlier call of the
+    same leaf exported (``_exported_narrowing_variables``).
+    """
     needle = claim.strip().lower()
     if _claim_contains_command_success_summary(command=command, claim=claim):
         return _claim_summary_matches_runtime_chunk(
@@ -390,6 +420,13 @@ def _test_command_targets_claim(
             claim=claim,
             chunk_text=chunk_test_proof_text,
         )
+    argv = _command_invocation_argv(command)
+    environment = (*_command_invocation_environment(command), *inherited_environment)
+    if alters_configuration(argv, environment):
+        # ``PYTHONPATH=stubs pytest -v``, ``pytest -c alt.ini`` or ``manage.py
+        # test --settings=alt``: output naming the test does not show that it
+        # passed against the workspace's code.
+        return False
     normalized_proof_text = chunk_test_proof_text.lower()
     if needle and needle in normalized_proof_text:
         return True
@@ -399,8 +436,34 @@ def _test_command_targets_claim(
         return False
     normalized_file = file_part.lower()
     normalized_command = command.lower()
-    if normalized_file in normalized_proof_text or normalized_file in normalized_command:
+    if excludes_tests(argv, environment):
+        # ``pytest --ignore tests/x.py``, ``pytest -k "not x"`` or
+        # ``PYTEST_ADDOPTS=--deselect=... pytest``: the named test file may
+        # not have run, whatever the output says.
+        return False
+    if normalized_file in normalized_proof_text:
         return True
+    if normalized_file in normalized_command:
+        if any(character.isspace() for character in normalized_file) or (
+            argv and normalized_file == argv[0].lower()
+        ):
+            # The claim is command text contained in the recorded command, or
+            # its program, not a test file or node id.
+            return True
+        if not any(marker in normalized_file for marker in ("/", ".", "::")):
+            # A bare word (``pytest``, ``test_add``) links only as a whole
+            # word of the command: ``test_add`` is not in ``test_address.py``.
+            return (
+                re.search(rf"(?<![\w-]){re.escape(normalized_file)}(?![\w-])", normalized_command)
+                is not None
+            )
+        # A test file or node id named in the command links only as a
+        # positional operand the runner executes (not ``--rootdir
+        # tests/x.py``, not ``cat tests/x.py``).
+        return any(
+            operand.split("::", 1)[0].lower() == normalized_file
+            for operand in claim_target_operands(argv, environment)
+        )
     if _claim_summary_matches_runtime_chunk(
         command=command,
         claim=claim,
@@ -436,9 +499,15 @@ def _runtime_messages_support_test_claim(
         return False
     if _harness_reexecution_supports_test_claim(value=value, messages=messages, task_cwd=task_cwd):
         return True
+    # A runtime's shell may keep exports across calls, so a narrowing variable
+    # an earlier call exported may still apply to a later test run.
+    exported: set[str] = set()
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
+        inherited = tuple(sorted(exported))
+        for recorded in _runtime_message_command_values(message):
+            exported.update(_exported_narrowing_variables(recorded))
         if _runtime_message_has_conflicting_tool_call_ids(message):
             continue
         # Candidate test commands are drawn from two transcript-grounded
@@ -492,6 +561,7 @@ def _runtime_messages_support_test_claim(
                 chunk_test_proof_text=chunk_test_proof_text,
                 messages=messages,
                 task_cwd=task_cwd,
+                inherited_environment=inherited,
             )
             for command in matching_commands
         ):
@@ -515,8 +585,79 @@ _FUNCTIONAL_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh"
 _FILE_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+")
 
 
-def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
+def _python_imported_module_files(
+    command: str, inherited_environment: tuple[str, ...] = ()
+) -> list[str]:
+    """Return workspace file candidates for the module an inline Python program imports first.
+
+    ``python3 -c "from mathutils import clamp; assert ..."`` exercises
+    ``mathutils.py`` as directly as ``python3 mathutils.py`` does, but names it
+    only as a module. The program is the ``-c`` text of a command whose
+    success the line's zero exit implies (``_commands_implied_by_success``:
+    not ``python3 -c "import app"; true``) and whose resolved program is a
+    Python interpreter (``python_inline_program``). It is parsed, and only an
+    import that is certain to run anchors a module: the first module of the
+    program's first statement, when that statement is an ``import`` or an
+    absolute ``from ... import``. Any later import may never run (``raise
+    SystemExit(0); import app``, or an earlier module that exits while it is
+    imported), and text that merely mentions an import (``print('import
+    app')``) is not an import at all.
+
+    The module resolves against the working directory, so it anchors nothing
+    when the import path is not the default (``replay_policy.
+    inline_python_alters_imports``: ``PYTHONPATH=...``, ``-P``, ``-I``, from
+    the command or ``inherited_environment``, the narrowing variables earlier
+    calls exported), and when the line changes directory other than by one
+    leading ``cd <workspace-relative dir> &&``, whose directory prefixes the
+    candidates. The module ``a.b`` maps to ``a/b.py`` and ``a/b/__init__.py``;
+    the caller still requires one candidate to be a real workspace file, so a
+    stdlib import (``import os``) anchors nothing.
+    """
+    lists = _command_lists(command)
+    base = "."
+    directory_changes = [
+        (list_index, position, argv)
+        for list_index, commands in enumerate(lists)
+        for position, (argv, _) in enumerate(commands)
+        if _changes_directory(argv)
+    ]
+    if directory_changes:
+        (list_index, position, argv), *others = directory_changes
+        leading = list_index == 0 and position == 0 and not others and len(lists) == 1
+        if not leading or len(argv) != 2 or not _is_workspace_relative_directory(argv[1]):
+            return []
+        if len(lists[0]) < 2 or lists[0][1][1] != "&&":
+            return []
+        base = argv[1]
+    environment = (*narrowing_assignments(command), *inherited_environment)
+    modules: list[str] = []
+    for argv in _commands_implied_by_success(command):
+        inline = python_inline_program(argv)
+        if inline is None or inline_python_alters_imports(argv, environment):
+            continue
+        try:
+            tree = ast.parse(inline.program)
+        except (SyntaxError, ValueError):
+            continue
+        first = tree.body[0] if tree.body else None
+        if isinstance(first, ast.Import):
+            modules.append(first.names[0].name)
+        elif isinstance(first, ast.ImportFrom) and first.level == 0 and first.module:
+            modules.append(first.module)
+    candidates: list[str] = []
+    for module in modules:
+        path = PurePosixPath(os.path.normpath(os.path.join(base, *module.split("."))))
+        candidates.extend((f"{path}.py", f"{path}/__init__.py"))
+    return candidates
+
+
+def _functional_command_invoked_files(
+    command: str, inherited_environment: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """Return workspace file tokens a verification command exercises.
+
+    ``inherited_environment`` names narrowing variables earlier calls of the
+    leaf exported (see ``_python_imported_module_files``).
 
     The anchor is not the token itself but the backing requirement layered on
     top: at least one referenced file must be proven authored by this run (or
@@ -556,6 +697,8 @@ def _functional_command_invoked_files(command: str) -> tuple[str, ...]:
         # Skip pure version-ish tokens such as ``2.0`` (no letter anywhere).
         if any(ch.isalpha() for ch in match.group(0))
     ]
+    if any(_is_python_executable(token) for token in tokens):
+        invoked.extend(_python_imported_module_files(command, inherited_environment))
     return tuple(dict.fromkeys(invoked))
 
 
@@ -583,7 +726,20 @@ def _functional_command_supports_test_claim(
     """
     if _looks_like_test_command(value):
         return False
-    invoked_files = _functional_command_invoked_files(value)
+    # A runtime's shell may keep exports across calls; any narrowing variable
+    # the leaf exported may apply to this command's imports.
+    exported = tuple(
+        sorted(
+            {
+                name
+                for message in messages
+                if message.tool_name == "Bash"
+                for recorded in _runtime_message_command_values(message)
+                for name in _exported_narrowing_variables(recorded)
+            }
+        )
+    )
+    invoked_files = _functional_command_invoked_files(value, exported)
     if not invoked_files:
         return False
     if not any(
@@ -615,9 +771,28 @@ def _functional_command_supports_test_claim(
             continue
         if not _runtime_message_supports_command_claim(value, message):
             continue
+        if _recorded_status_belongs_to_a_pipeline(message):
+            # ``./run_tests.sh | tail -5``: the recorded exit is the last
+            # filter's, not the script's. Only replay can corroborate it.
+            continue
         if _runtime_message_has_success_evidence(
             message, messages=messages, index=index
         ) and _functional_command_has_authoritative_zero_exit(messages, index=index):
+            return True
+    return False
+
+
+def _recorded_status_belongs_to_a_pipeline(message: AgentMessage) -> bool:
+    """Return True when a recorded command's exit is a pipeline's, not its core's.
+
+    A top-level ``|`` without ``pipefail`` enabled before it means the
+    recorded status is the last pipeline stage's.
+    """
+    for recorded in _runtime_message_command_values(message):
+        body = _peel_shell_wrappers(recorded)
+        if not _top_level_shell_character_positions(body, "|"):
+            continue
+        if not _output_filter_pipeline_is_pipefail_protected(body):
             return True
     return False
 
@@ -681,6 +856,59 @@ def _functional_command_has_authoritative_zero_exit(
     return False
 
 
+def _command_invocation_argv(command: str) -> tuple[str, ...]:
+    """Return the argv of the test invocation in ``command``, or ``()``.
+
+    Shell wrappers, a leading ``cd`` and output plumbing are peeled the way
+    the recognizer peels them; environment assignments are dropped.
+    """
+    invocation = _test_command_invocation(command) or command
+    try:
+        parts = shlex.split(invocation)
+    except ValueError:
+        return ()
+    return tuple(_strip_env_prefix(parts))
+
+
+def _command_invocation_environment(command: str) -> tuple[str, ...]:
+    """Return the narrowing variables ``command`` assigns
+    (``replay_policy.narrowing_variable``).
+
+    ``_command_invocation_argv`` drops environment assignments, and a preamble
+    (``export PYTEST_ADDOPTS=... &&``) is not part of the invocation at all,
+    so the whole command text is searched.
+    """
+    return narrowing_assignments(command)
+
+
+# Shell forms that export a variable to later commands of the same shell.
+_EXPORT_FORM_RE = re.compile(r"(?<![\w-])(?:export|declare|typeset|set\s+-a|allexport)(?![\w-])")
+
+
+def _exported_narrowing_variables(command: str) -> tuple[str, ...]:
+    """Return the narrowing variables ``command`` may export to later calls.
+
+    Conservative: any narrowing assignment in a command that also uses an
+    export form (``export PYTHONPATH=stubs``, ``PYTHONPATH=x; export
+    PYTHONPATH``, ``set -a``) counts.
+    """
+    if _EXPORT_FORM_RE.search(command) is None:
+        return ()
+    return narrowing_assignments(command)
+
+
+def _replayed_environment(run: CommandObservation) -> tuple[str, ...]:
+    """Return the names of the environment assignments a replayed run's command made."""
+    names = {name for name, _ in run.env_delta}
+    names.update(_command_invocation_environment(run.transcript_command or run.command))
+    return tuple(sorted(names))
+
+
+def _replayed_argv(run: CommandObservation) -> tuple[str, ...]:
+    """Return the argv a replayed run executed; empty (no linkage) when unrecorded."""
+    return run.argv
+
+
 def _harness_reexecution_supports_test_claim(
     *,
     value: str,
@@ -693,7 +921,15 @@ def _harness_reexecution_supports_test_claim(
     own subprocess (``evidence/test_reexecution.py``), so they are held to the
     same tests: a zero exit, runtime output that proves tests ran and passed,
     and a command that targets the claimed test.
+
+    A unittest-style dotted test label (``migrations.test_writer``, optionally
+    followed by a ``(N tests)`` count) is its own claim form, matched against
+    the labels a re-executed unittest-style runner was given (see
+    ``_reexecuted_runner_label_covers``); it is not a file claim.
     """
+    label = None if _looks_like_test_command(value) else _dotted_test_label_claim(value)
+    if label is not None and _reexecuted_runner_label_covers(label, messages):
+        return True
     # A node-id or file claim (rather than the command itself) must name a
     # test file this run actually produced or touched. Re-running a suite the
     # harness found in the workspace proves those tests pass, not that the
@@ -712,12 +948,178 @@ def _harness_reexecution_supports_test_claim(
                 continue
             if not _text_proves_test_execution_success(run.output_tail):
                 continue
+            if not run_may_back_test_claim(
+                _replayed_argv(run), claimed_file, _replayed_environment(run)
+            ):
+                # An excluding option, or the claimed file named in the command
+                # without being executed (``--ignore tests/test_x.py``).
+                continue
             if _test_command_targets_claim(
                 command=run.command,
                 claim=value,
                 chunk_test_proof_text=run.output_tail,
                 messages=messages,
                 task_cwd=task_cwd,
+            ):
+                return True
+    return False
+
+
+# A trailing, parenthesised test count that workers copy from a runner's
+# "Ran N tests" summary, as in ``migrations.test_writer (49 tests)``. Only a
+# trailing annotation is stripped; anything else keeps the claim unrecognized.
+_TEST_COUNT_ANNOTATION_RE = re.compile(r"\s*\(\s*\d+\s+tests?\s*\)$")
+_DOTTED_TEST_LABEL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# Shell meaning in a re-executed command's text; label extraction refuses it.
+_LABEL_COMMAND_FORBIDDEN_CHARACTERS = frozenset("`$;|&<>(){}\n\r")
+# Options of unittest-style runners (Django ``runtests.py``, ``manage.py
+# test``, ``django-admin test``, ``python -m unittest``) that neither take a
+# non-numeric value nor narrow which tests run. A numeric value (``-v 2``,
+# ``--parallel 4``) is never a label, so it needs no special handling.
+_LABEL_RUNNER_FLAG_OPTIONS = frozenset(
+    {
+        "-v",
+        "--verbosity",
+        "-b",
+        "--buffer",
+        "-c",
+        "--catch",
+        "-f",
+        "--failfast",
+        "--locals",
+        "--durations",
+        "-q",
+        "--quiet",
+        "--noinput",
+        "--no-input",
+        "--keepdb",
+        "-r",
+        "--reverse",
+        "-d",
+        "--debug-sql",
+        "--debug-mode",
+        "--parallel",
+        "--shuffle",
+        "--timing",
+        "--no-faulthandler",
+        "--force-color",
+        "--no-color",
+        "--traceback",
+        "--pdb",
+    }
+)
+# Options whose (non-label) value is the next argument unless given as ``=``.
+_LABEL_RUNNER_VALUE_OPTIONS = frozenset({"--settings", "--pythonpath", "--testrunner"})
+
+
+def _dotted_test_label_claim(value: str) -> str | None:
+    """Return the unittest-style dotted test label a claim names, or None.
+
+    ``migrations``, ``migrations.test_writer (49 tests)`` and
+    ``migrations.test_writer.WriterTests.test_x`` are labels. A path, a pytest
+    node id, a ``.py`` file name, or text around the label is not.
+    """
+    text = _TEST_COUNT_ANNOTATION_RE.sub("", value.strip(), count=1)
+    if not _DOTTED_TEST_LABEL_RE.fullmatch(text):
+        return None
+    if text.rsplit(".", 1)[-1].lower() == "py":
+        return None
+    return text
+
+
+def _unittest_style_runner_arguments(parts: Sequence[str]) -> Sequence[str] | None:
+    """Return the arguments after a unittest-style runner, or None.
+
+    Recognized runners take dotted test labels: Django's ``runtests.py``,
+    ``manage.py test``, ``django-admin test``, ``python -m django test``, and
+    ``python -m unittest`` (not ``discover``, which takes none). SymPy's
+    ``bin/test`` and ``bin/doctest`` take file paths and keywords, not dotted
+    labels, so they are not label runners.
+    """
+    if _is_django_test_subcommand(parts):
+        return parts[2:] if parts[0] == "django-admin" else parts[4:]
+    script = _project_test_runner_script(parts)
+    if script is not None:
+        index = 1 if _is_python_executable(parts[0]) else 0
+        name = PurePosixPath(script).name
+        if name == "runtests.py":
+            return parts[index + 1 :]
+        if name == "manage.py":
+            return parts[index + 2 :]
+        return None
+    if len(parts) >= 3 and _is_python_executable(parts[0]) and parts[1:3] == ["-m", "unittest"]:
+        arguments = parts[3:]
+        if arguments and arguments[0] == "discover":
+            return None
+        return arguments
+    return None
+
+
+def _unittest_style_runner_labels(command: str) -> tuple[str, ...]:
+    """Return the dotted test labels a unittest-style runner command was given.
+
+    Empty when the command is not such a runner, carries shell syntax, has an
+    option that narrows the selection (``-k``, ``--tag``, ``--start-at``, ...)
+    or one this parser does not know, or names no dotted label. Positional
+    paths are not labels and are ignored.
+    """
+    leading_cd = _split_leading_cd(command)
+    text = leading_cd[1] if leading_cd is not None else command.strip()
+    if any(char in _LABEL_COMMAND_FORBIDDEN_CHARACTERS for char in text):
+        return ()
+    try:
+        parts = _strip_env_prefix(shlex.split(text))
+    except ValueError:
+        return ()
+    if not parts:
+        return ()
+    arguments = _unittest_style_runner_arguments(parts)
+    if arguments is None:
+        return ()
+    labels: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument.startswith("-"):
+            name = argument.split("=", 1)[0]
+            if re.fullmatch(r"-v\d", name):
+                continue
+            if name in _LABEL_RUNNER_FLAG_OPTIONS:
+                continue
+            if name in _LABEL_RUNNER_VALUE_OPTIONS:
+                skip_value = "=" not in argument
+                continue
+            return ()
+        if _DOTTED_TEST_LABEL_RE.fullmatch(argument):
+            labels.append(argument)
+    return tuple(labels)
+
+
+def _reexecuted_runner_label_covers(label: str, messages: tuple[AgentMessage, ...]) -> bool:
+    """Return True when a re-executed unittest-style runner run covers ``label``.
+
+    The run must have exited 0 (not timed out), its output must prove tests
+    ran and passed, and one of its test labels must equal ``label`` or be a
+    dotted-prefix ancestor of it: a passing ``migrations.test_writer`` run
+    covers ``migrations.test_writer.WriterTests.test_x``, never the reverse
+    and never ``migrations.test_writer2``.
+    """
+    for message in messages:
+        observation = observation_from_message(message)
+        if observation is None:
+            continue
+        for run in observation.command_runs:
+            if not run.succeeded or not _looks_like_test_command(run.command):
+                continue
+            if not _text_proves_test_execution_success(run.output_tail):
+                continue
+            if not run_may_back_test_claim(_replayed_argv(run), None, _replayed_environment(run)):
+                continue
+            if any(
+                label == run_label or label.startswith(run_label + ".")
+                for run_label in _unittest_style_runner_labels(run.command)
             ):
                 return True
     return False

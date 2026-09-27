@@ -10230,21 +10230,21 @@ class OrchestratorRunner:
 
             analyzer = self._build_dependency_analyzer()
             dep_result = await analyzer.analyze(seed.acceptance_criteria)
-
             if dep_result.is_err:
+                from ouroboros.orchestrator.dependency_analyzer import DependencyCycleError
+
+                if isinstance(dep_result.error, DependencyCycleError):
+                    raise dep_result.error
                 log.warning(
                     "orchestrator.runner.dependency_analysis_failed",
                     execution_id=exec_id,
                     error=str(dep_result.error),
                 )
                 # Fallback: run all ACs in a single parallel level
-                all_indices = tuple(range(len(seed.acceptance_criteria)))
+                acs = tuple(ACNode(i, ac_text(ac)) for i, ac in enumerate(seed.acceptance_criteria))
                 dependency_graph = DependencyGraph(
-                    nodes=tuple(
-                        ACNode(index=i, content=ac_text(ac), depends_on=())
-                        for i, ac in enumerate(seed.acceptance_criteria)
-                    ),
-                    execution_levels=(all_indices,) if all_indices else (),
+                    nodes=acs,
+                    execution_levels=(tuple(node.index for node in acs),) if acs else (),
                 )
             else:
                 dependency_graph = dep_result.value

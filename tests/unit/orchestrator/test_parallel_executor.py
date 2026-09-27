@@ -8191,6 +8191,10 @@ class TestParallelACExecutor:
         assert "never absolute paths" in runtime.last_prompt
         assert "omit exploratory" in runtime.last_prompt
         assert "rg, grep, sed, cat, ls, find, or pwd" in runtime.last_prompt
+        assert (
+            "For tests_passed and commands_run, list the exact command strings you "
+            "executed, one command per item, with no annotations"
+        ) in runtime.last_prompt
         assert "Auto Recursion Guard" in runtime.last_prompt
         assert "ouroboros_auto" in runtime.last_prompt
         assert "nested auto session" in runtime.last_prompt
@@ -10507,7 +10511,7 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tests_pass", [True, False])
     async def test_fat_harness_exit_code_only_test_output_is_settled_by_harness_reexecution(
-        self, tmp_path, tests_pass: bool
+        self, tmp_path, monkeypatch, tests_pass: bool
     ) -> None:
         """A zero exit without execution output cannot prove that tests ran.
 
@@ -10515,6 +10519,11 @@ class TestParallelACExecutor:
         claimed test command in the workspace and the verdict follows what
         that run actually produced.
         """
+        # Replay runs only with network isolation; stand in for an isolated
+        # host so the verdict does not depend on whether this one can isolate.
+        from ouroboros.orchestrator.evidence import command_replay
+
+        monkeypatch.setattr(command_replay, "network_isolation_prefix", lambda: ())
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")
