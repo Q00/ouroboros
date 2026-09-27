@@ -616,6 +616,15 @@ async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
         session_id="interview_diagnostics00001",
         question="What is the primary user persona?",
     )
+    advisory = outcome.value.meta["question_advisory_request"]
+    assert advisory["research_subject"] == "Build a CLI"
+    prompts = {
+        payload["context"]["lane_id"]: payload["prompt"]
+        for payload in outcome.value.meta["question_advisory_subagents"]
+    }
+    assert "## Research Subject\nBuild a CLI" in prompts["code_context"]
+    assert "## Web Reference Contract" in prompts["web_context"]
+    assert "Build a CLI" in prompts["web_context"]
     assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
     assert outcome.value.meta["interview_reasoning"]["question_chars"] == len(
         "What is the primary user persona?"
@@ -713,6 +722,13 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
         session_id=pending_state.interview_id,
         question="What is the main goal?",
     )
+    resume_advisory = outcome.value.meta["question_advisory_request"]
+    assert resume_advisory["research_subject"] == "ctx"
+    resume_prompts = {
+        payload["context"]["lane_id"]: payload["prompt"]
+        for payload in outcome.value.meta["question_advisory_subagents"]
+    }
+    assert "## Research Subject\nctx" in resume_prompts["web_context"]
     assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
     await _drain_bg_tasks(handler)
 
@@ -857,6 +873,13 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
         session_id=pending_state.interview_id,
         question="Who uses it first?",
     )
+    answer_advisory = outcome.value.meta["question_advisory_request"]
+    assert answer_advisory["research_subject"] == "ctx"
+    answer_prompts = {
+        payload["context"]["lane_id"]: payload["prompt"]
+        for payload in outcome.value.meta["question_advisory_subagents"]
+    }
+    assert "## Research Subject\nctx" in answer_prompts["web_context"]
     assert outcome.value.meta["interview_reasoning"]["answered_rounds"] == 1
     # Everything before the advisory marker is the question envelope; the
     # directive after it is addressed to the host, not to the interviewee.

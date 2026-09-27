@@ -1168,46 +1168,40 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    question_advisory: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
-    """Build subagent payload for Socratic interview.
-
-    Supports start (with initial_context), answer (with user answer),
-    and resume (session_id only) actions.
-
-    Args:
-        transcript: Full conversation history (Q&A pairs) for context
-            continuity across subagent invocations.
-    """
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = bounded_system_prompt(load_agent_prompt("socratic-interviewer"))
     seed_closer_summary = _load_seed_closer_summary()
-    plugin_question_advisory = """
-## Question-first Advisory Fanout
-1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+
+    from ouroboros.mcp.tools.interview_subagent_context import (
+        FACTUAL_RESEARCH_SNAPSHOT,
+        render_adapter_section,
+        render_interview_subagent_context,
+    )
+
+    bounded_initial_context = _truncate_head(
+        initial_context,
+        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
+    )
+    plugin_question_advisory_contract, research_subject_section = render_interview_subagent_context(
+        action=action,
+        initial_context=bounded_initial_context,
+        question_advisory=question_advisory,
+    )
+    plugin_question_advisory = FACTUAL_RESEARCH_SNAPSHOT
 
     transcript_section = ""
     if transcript:
         bounded_transcript = _compact_interview_transcript(transcript)
         transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
 
-    adapter_section = ""
-    if action != "start" and adapter_question:
-        adapter_section = (
-            "\n## Required Reference/Glossary Adapter Turn\n"
-            "Ask the following question exactly before any general Socratic question. "
-            "Treat glossary/reference material as vocabulary or contrast only, never "
-            "as a requirement or acceptance criterion.\n\n"
-            f"{adapter_question}\n"
-        )
-
-    bounded_initial_context = _truncate_head(
-        initial_context,
-        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
+    adapter_section = render_adapter_section(
+        action=action,
+        adapter_question=adapter_question,
     )
+
     bounded_answer = _truncate_tail(answer, _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS)
 
     seed_ready_guard = f"""
@@ -1228,6 +1222,7 @@ Start a Socratic interview to clarify requirements for the following project ide
 Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 
 ## Initial Context
 {bounded_initial_context}
@@ -1249,10 +1244,12 @@ Analyze their answer, update your understanding, score current ambiguity,
 and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 
 ## Session ID
 {session_id}
 {transcript_section}
+{research_subject_section}
 ## User's Latest Answer
 {bounded_answer}
 {adapter_section}
@@ -1269,8 +1266,10 @@ Continue the interview."""
 Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
 {transcript_section}
+{research_subject_section}
 {seed_ready_guard}
 {plugin_question_advisory}
+{plugin_question_advisory_contract}
 {adapter_section}
 
 ## Action: {action}
@@ -1289,7 +1288,8 @@ Continue the interview."""
             else turn_context
         ),
         "adapter_question": adapter_question,
-        "question_advisory_strategy": "plugin_child_question_first_advisory",
+        "question_advisory_strategy": "plugin_child_factual_snapshot",
+        "question_advisory": dict(question_advisory or {}),
     }
 
     return build_subagent_payload(

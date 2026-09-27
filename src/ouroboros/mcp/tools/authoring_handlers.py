@@ -69,6 +69,7 @@ from ouroboros.mcp.tools.interview_advisory import (
     _attach_question_assist_requests,
     _milestone_for_score,
 )
+from ouroboros.mcp.tools.interview_plugin_advisory import build_plugin_question_advisory_meta
 from ouroboros.mcp.tools.question_advisory import (
     build_question_advisory_request,
 )
@@ -2324,15 +2325,37 @@ class InterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
 
+        research_subject = (
+            plugin_state.initial_context if plugin_state is not None else str(initial_context or "")
+        )
+        fallback_question = (
+            plugin_state.rounds[-1].question
+            if plugin_state is not None and plugin_state.rounds
+            else ""
+        )
+        plugin_advisory_meta = build_plugin_question_advisory_meta(
+            session_id=str(real_session_id or "new"),
+            action=action,
+            last_question=last_question,
+            fallback_question=fallback_question,
+            research_subject=research_subject,
+            score=(_load_state_ambiguity_score(plugin_state) if plugin_state is not None else None),
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            fanout_registry=self._resolved_fanout_registry(),
+            findings_store=self.findings_store,
+        )
+
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
-            initial_context=initial_context,
+            initial_context=research_subject,
             answer=answer,
             cwd=arguments.get("cwd"),
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            question_advisory=plugin_advisory_meta,
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2343,8 +2366,8 @@ class InterviewHandler:
                 "action": action,
                 "status": DELEGATED_TO_SUBAGENT,
                 "dispatch_mode": "plugin",
-                "question_advisory_strategy": "plugin_child_question_first_advisory",
-                "question_advisory_recommended": True,
+                "question_advisory_strategy": "plugin_child_factual_snapshot",
+                **plugin_advisory_meta,
                 **_interview_reasoning_meta(
                     state=plugin_state,
                     session_id=real_session_id,
@@ -2717,6 +2740,7 @@ class InterviewHandler:
                             question=question,
                             phase="start",
                             score=live_score,
+                            research_subject=resolved_context.value,
                             dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
@@ -3365,6 +3389,7 @@ class InterviewHandler:
                             question=pending_question,
                             phase="resume_pending",
                             score=_load_state_ambiguity_score(state),
+                            research_subject=state.initial_context,
                             dispatch_mode=resolve_request_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
@@ -3644,6 +3669,7 @@ class InterviewHandler:
                     question=question,
                     phase="answer",
                     score=live_score,
+                    research_subject=state.initial_context,
                     dispatch_mode=resolve_request_subagent_dispatch(
                         self.agent_runtime_backend, self.opencode_mode
                     ),
