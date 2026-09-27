@@ -480,10 +480,12 @@ def bring_loopback_up() -> None:
 
 
 def require_loopback_only() -> None:
-    """Refuse unless this process's network namespace has only ``lo``.
+    """Refuse unless this namespace has only ``lo`` and loopback actually works.
 
     Checked at activation, in the process that execs the command, so a
-    decision made earlier in the controller cannot go stale.
+    decision made earlier in the controller cannot go stale. An interface
+    named ``lo`` is not proof that loopback works (a fresh namespace has it
+    down), so a real listener and client exchange a byte over 127.0.0.1.
     """
     import socket
 
@@ -493,6 +495,18 @@ def require_loopback_only() -> None:
         raise SandboxError(f"network interfaces cannot be listed: {exc}") from None
     if not names or any(name != "lo" for name in names):
         raise SandboxError(f"network is not isolated: interfaces {sorted(names)}")
+    try:
+        with socket.create_server(("127.0.0.1", 0)) as server:
+            server.settimeout(5)
+            with socket.create_connection(server.getsockname(), timeout=5) as client:
+                peer, _ = server.accept()
+                with peer:
+                    client.sendall(b"\x01")
+                    received = peer.recv(1)
+    except OSError as exc:
+        raise SandboxError(f"loopback does not work in this namespace: {exc}") from None
+    if received != b"\x01":
+        raise SandboxError("loopback does not work in this namespace")
 
 
 def _parse(

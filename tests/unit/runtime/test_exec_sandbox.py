@@ -609,6 +609,49 @@ class TestNetworkPlan:
         assert "network is not isolated" in result.stderr
         assert not marker.exists()
 
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux network namespaces")
+    def test_network_loopback_down_in_the_current_namespace_runs_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh outer namespace has only ``lo``, and it is down: nothing may run."""
+        _require_backend()
+        unshare = exec_sandbox._trusted_launcher("unshare")
+        if unshare is None:
+            pytest.skip("no trusted unshare on this host")
+        for name in ("copy", "temp"):
+            (tmp_path / name).mkdir()
+        marker = tmp_path / "copy" / "ran"
+        src = str(Path(exec_sandbox.__file__).resolve().parents[2])
+        inner = (sys.executable, "-c", f"open({str(marker)!r}, 'w').close()")
+        copy, temp = str(tmp_path / "copy"), str(tmp_path / "temp")
+        script = (
+            "import subprocess, sys\n"
+            f"sys.path.insert(0, {src!r})\n"
+            "from ouroboros.runtime import exec_sandbox as e\n"
+            f"command = e.confine({inner!r}, cwd={copy!r}, writable_roots=({copy!r},),\n"
+            f"    temp_dir={temp!r}, deny_network=True)\n"
+            "if not isinstance(command, e.ConfinedCommand):\n"
+            "    print('unavailable', command.reason); sys.exit(0)\n"
+            "print('plan', command.argv.count('--loopback-up'))\n"
+            "result = subprocess.run(list(command.argv), cwd=command.cwd, env=dict(command.env))\n"
+            "print('returncode', result.returncode)\n"
+        )
+        outer = subprocess.run(  # noqa: S603 - fixed argv
+            [unshare, "--user", "--map-root-user", "--net", "--", sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if outer.returncode != 0 and "unshare" in outer.stderr:
+            pytest.skip(f"cannot create an outer namespace here: {outer.stderr.strip()}")
+
+        assert outer.returncode == 0, outer.stderr
+        assert "unavailable" in outer.stdout or (
+            f"returncode {_confine_exec.EXIT_SANDBOX_FAILED}" in outer.stdout
+        ), outer.stdout + outer.stderr
+        assert not marker.exists()
+
     def test_network_final_check_refuses_other_interfaces(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
