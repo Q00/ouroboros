@@ -688,6 +688,12 @@ def test_inline_python_text_that_only_mentions_an_import_anchors_nothing(tmp_pat
         'python3 -c "raise SystemExit(0); import app"',
         'python3 -c "import os; os._exit(0); import app"',
         'python3 -c "import os, app"',
+        # The line's zero exit does not imply the inline program's.
+        'python3 -c "import app"; true',
+        'python3 -c "import app" || true',
+        'python3 -c "import app" | tail -3',
+        'python3 -c "import app" &',
+        '(python3 -c "import app")',
     ):
         assert "app.py" not in _functional_command_invoked_files(command), command
 
@@ -699,7 +705,8 @@ def test_inline_python_real_imports_still_anchor(tmp_path) -> None:
         'python3 -B -c "from app import run; assert run() == 1"',
         'python3 -c"import app"',
         'timeout 5 uv run python3 -X dev -c "import app, os"',
-        'cd . && python3 -c "import app; assert app.run() == 1" 2>&1 | tail -3',
+        'cd . && python3 -c "import app; assert app.run() == 1" 2>&1',
+        'true && python3 -c "import app"',
     ):
         assert "app.py" in _functional_command_invoked_files(command), command
     claim = 'python3 -c "import app; assert app.run() == 1"'

@@ -1363,29 +1363,67 @@ def python_inline_program(argv: Sequence[str]) -> str | None:
 
 
 # Shell control operators that end one simple command in a compound line.
-_SHELL_COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", ";;", "|&"})
+def _command_list_tail(command: str) -> list[tuple[tuple[str, ...], str | None]]:
+    """Return the last command list of a shell line: ``(argv, operator before it)`` pairs.
 
-
-def _simple_commands(command: str) -> list[list[str]]:
-    """Split a shell line into the argv of each simple command, or [] if unparsable.
-
-    Operators inside quotes stay in their token; anything that is not a
-    separator but consists only of shell punctuation (redirections, subshell
-    parentheses) ends the current command as well, so no argv spans it.
+    The line is tokenized with shell quoting; ``;``, ``&``, a newline and
+    parentheses end a list, so only the list after the last of them decides
+    the line's exit status. Inside that list ``&&``, ``||`` and ``|`` join
+    commands and are recorded as the operator before each command. A
+    redirection (``> out``, ``2>&1``, ``<<EOF``) and its target stay with
+    their command. [] when the line cannot be tokenized.
     """
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+        lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
         return []
-    commands: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SHELL_COMMAND_SEPARATORS or (token and set(token) <= set("();<>|&")):
-            commands.append([])
-        else:
-            commands[-1].append(token)
-    return [argv for argv in commands if argv]
+    commands: list[tuple[tuple[str, ...], str | None]] = []
+    argv: list[str] = []
+    operator: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token or not set(token) <= set("();<>|&\n"):
+            argv.append(token)
+            continue
+        if "<" in token or ">" in token:
+            index += 1  # the redirection's target
+            continue
+        joined = token.replace("\n", "")
+        if joined in {"&&", "||", "|", "|&"}:
+            if argv:
+                commands.append((tuple(argv), operator))
+            argv, operator = [], "|" if joined == "|&" else joined
+            continue
+        commands, argv, operator = [], [], None
+    if argv:
+        commands.append((tuple(argv), operator))
+    return commands
+
+
+def _commands_implied_by_success(command: str) -> tuple[tuple[str, ...], ...]:
+    """Return the argv of each command whose success a zero exit of ``command`` implies.
+
+    The last command of the last list, unless ``||`` precedes it (``a || b``
+    exits 0 when ``a`` succeeds and ``b`` never runs); then, walking back,
+    each command joined to an implied one by ``&&``, under the same ``||``
+    condition. A pipeline stage before ``|`` is not implied: without
+    ``pipefail`` the pipeline's status is its last stage's. ``a; b`` implies
+    only ``b``.
+    """
+    tail = _command_list_tail(command)
+    implied: list[tuple[str, ...]] = []
+    for argv, operator in reversed(tail):
+        if operator == "||":
+            break
+        implied.append(argv)
+        if operator != "&&":
+            break
+    return tuple(implied)
 
 
 _MAX_SHELL_WRAPPER_DEPTH = 4

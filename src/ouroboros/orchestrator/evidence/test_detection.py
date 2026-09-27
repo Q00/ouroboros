@@ -33,6 +33,7 @@ from ouroboros.orchestrator.evidence.replay_policy import (
     run_may_back_test_claim,
 )
 from ouroboros.orchestrator.evidence.shell_parsing import (
+    _commands_implied_by_success,
     _has_trailing_output_filter_pipeline,
     _is_django_test_subcommand,
     _is_python_executable,
@@ -43,7 +44,6 @@ from ouroboros.orchestrator.evidence.shell_parsing import (
     _peel_shell_wrappers,
     _project_test_runner_script,
     _runtime_command_evidence_aliases,
-    _simple_commands,
     _split_leading_cd,
     _strip_env_prefix,
     _test_command_invocation,
@@ -585,8 +585,10 @@ def _python_imported_module_files(command: str) -> list[str]:
 
     ``python3 -c "from mathutils import clamp; assert ..."`` exercises
     ``mathutils.py`` as directly as ``python3 mathutils.py`` does, but names it
-    only as a module. The program is the ``-c`` text of a simple command whose
-    resolved program is a Python interpreter (``python_inline_program``). It is
+    only as a module. The program is the ``-c`` text of a command whose
+    success the line's zero exit implies (``_commands_implied_by_success``:
+    not ``python3 -c "import app"; true``) and whose resolved program is a
+    Python interpreter (``python_inline_program``). It is
     parsed, and only an import that is certain to run anchors a module: the
     first module of the program's first statement, when that statement is an
     ``import`` or an absolute ``from ... import``. Any later import may never
@@ -598,7 +600,7 @@ def _python_imported_module_files(command: str) -> list[str]:
     anchors nothing.
     """
     modules: list[str] = []
-    for argv in _simple_commands(command):
+    for argv in _commands_implied_by_success(command):
         program = python_inline_program(argv)
         if program is None:
             continue

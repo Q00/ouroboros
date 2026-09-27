@@ -300,7 +300,10 @@ anchors a workspace module only through the import that is certain to run:
 the first module of the parsed `-c` program's first statement, when that
 statement is an `import` or an absolute `from ... import`. Text that mentions
 an import (`python -c "print('import app')"`) and a later import that may
-never run (`raise SystemExit(0); import app`) anchor nothing.
+never run (`raise SystemExit(0); import app`) anchor nothing, and so does a
+`python -c` whose success the line's zero exit does not imply
+(`python3 -c "import app"; true`, `... || true`, a pipeline stage before the
+last).
 
 ## Failure class semantics
 
