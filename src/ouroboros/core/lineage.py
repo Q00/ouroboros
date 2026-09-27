@@ -248,7 +248,14 @@ class EvaluationSummary(BaseModel, frozen=True):
                 and ac_passed
                 and execution_completed
             )
-            expected_status = "approved" if final_approved else "rejected"
+            # A non-approval keeps "not_evaluated" (no executed verification
+            # minted a verdict); every other non-approval reads "rejected".
+            if final_approved:
+                expected_status = "approved"
+            elif self.approval_status == "not_evaluated":
+                expected_status = "not_evaluated"
+            else:
+                expected_status = "rejected"
             if self.approval_status != expected_status:
                 object.__setattr__(self, "approval_status", expected_status)
             if self.final_approved != final_approved:
