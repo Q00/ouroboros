@@ -50,6 +50,8 @@ For Codex-backed Ouroboros workflows:
 | Consensus simple voting | `consensus.models` |
 | Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
 
+`execution.default_model` covers the EXECUTE-stage planning roles (`atomicity`, `decomposition`, `agent_runtime_implementation`) alongside Execute-stage runtime calls. When it is unset, those roles fall back to `evaluation.semantic_model`; pinning an explicit model id (or `OUROBOROS_EXECUTION_MODEL`) keeps a heterogeneous execute backend from receiving an evaluate-stage model id it cannot run.
+
 > **Recommended baseline:** use **Use Codex default model**. Setup assigns each Ouroboros role a per-invocation reasoning effort (fast: low, standard: medium, deep: high, frontier: xhigh) without pinning a Codex model, so Codex's current default remains in control.
 
 ### Portable Task Profiles

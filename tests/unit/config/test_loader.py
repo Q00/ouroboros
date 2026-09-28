@@ -1629,6 +1629,80 @@ class TestLLMHelperLookups:
             assert get_llm_model_for_role("dependency_analysis") == "evaluate-model"
             assert get_llm_model_for_role("wonder") == "reflect-model"
 
+    def test_get_llm_model_for_role_execute_stage_uses_execution_pin(self) -> None:
+        """EXECUTE-stage roles honor execution.default_model over the evaluate model (#2300)."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "gpt-5-codex"
+            assert get_llm_model_for_role("atomicity") == "gpt-5-codex"
+            assert get_llm_model_for_role("agent_runtime_implementation") == "gpt-5-codex"
+            # Evaluate-stage roles keep their own stage model.
+            assert get_llm_model_for_role("qa") == "claude-fable-5"
+            # The pin also applies when the caller pre-resolves the backend.
+            assert get_llm_model_for_role("decomposition", backend="codex") == "gpt-5-codex"
+
+    def test_get_llm_model_for_role_execute_stage_env_pin_wins(self) -> None:
+        """OUROBOROS_EXECUTION_MODEL outranks the config file pin."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="config-exec-model"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_EXECUTION_MODEL": "env-exec-model"}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "env-exec-model"
+
+    def test_get_llm_model_for_role_execute_stage_falls_back_to_evaluate_model(self) -> None:
+        """Without an execution pin, EXECUTE-stage roles keep the evaluate model."""
+        config = OuroborosConfig(
+            evaluation=EvaluationConfig(semantic_model="evaluate-model"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "evaluate-model"
+            assert get_llm_model_for_role("atomicity") == "evaluate-model"
+
+    def test_get_llm_model_for_role_execute_stage_ignores_default_sentinel(self) -> None:
+        """The UI's ``default``/``current`` sentinel means "let the runtime pick"."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="default"),
+            evaluation=EvaluationConfig(semantic_model="evaluate-model"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("decomposition") == "evaluate-model"
+
+    def test_get_llm_model_for_role_execute_stage_explicit_model_beats_pin(self) -> None:
+        """A caller-supplied explicit_model remains the highest-precedence override."""
+        config = OuroborosConfig(
+            execution=ExecutionConfig(default_model="gpt-5-codex"),
+            evaluation=EvaluationConfig(semantic_model="claude-fable-5"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert (
+                get_llm_model_for_role("decomposition", explicit_model="explicit-model")
+                == "explicit-model"
+            )
+
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""
         monkeypatch.setenv("OUROBOROS_LLM_PERMISSION_MODE", "acceptEdits")
