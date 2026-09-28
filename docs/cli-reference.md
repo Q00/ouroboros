@@ -1162,6 +1162,27 @@ ouroboros tui monitor --backend slt
 
 MCP (Model Context Protocol) server commands for Claude Desktop and other MCP-compatible clients.
 
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
+The command reads no registry contents, process arguments, credentials, or
+environment values other than `PATH`; it does not execute commands, connect to
+the network, or mutate the machine. PATH and registry scans have fixed bounds.
+Loopback probes only bind an ephemeral socket and close it immediately.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
