@@ -50,6 +50,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo update` | Check for updates + upgrade to latest | Plugin |
 | `ooo brownfield` | Scan and manage brownfield repo defaults | MCP |
 | `ooo publish` | Publish Seed as GitHub Issues for teams | Plugin |
+| `ooo maintain` | Triage and resolve maintainer issues and PRs | Plugin |
 
 ### Evolutionary Loop
 
@@ -85,6 +86,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "open settings", "change model", "change agent", "configure backend" | `ooo config` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
 | "publish to github", "create issues from seed", "seed to issues" | `ooo publish` |
+| "ooo maintain" | `ooo maintain` |
 
 ### Loop Triggers
 
@@ -118,6 +120,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:update` | Check for updates + upgrade to latest | Plugin |
 | `/ouroboros:brownfield` | Scan and manage brownfield repo defaults | MCP |
 | `/ouroboros:publish` | Publish Seed as GitHub Issues for teams | Plugin |
+| `/ouroboros:maintain` | Triage and resolve maintainer issues and PRs | Plugin |
 
 ### Loop Skills
 

@@ -11,7 +11,8 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 
-CURRENT_EXECUTION_SEMANTICS_VERSION = 7
+CURRENT_EXECUTION_SEMANTICS_VERSION = 8
+PRE_EXEC_SANDBOX_EXECUTION_SEMANTICS_VERSION = 7
 PRE_VERIFY_SHELL_EXECUTION_SEMANTICS_VERSION = 4
 PRE_ADAPTIVE_EXECUTION_SEMANTICS_VERSION = 3
 
@@ -27,6 +28,7 @@ _CURRENT_KEYS = frozenset(
     {
         "version",
         "run_verify_commands",
+        "exec_sandbox_enabled",
         "verify_command_timeout_seconds",
         "verify_shell_identity",
         "ac_retry_attempts",
@@ -53,6 +55,7 @@ _CURRENT_KEYS = frozenset(
 )
 _BOOLEAN_KEYS = (
     "run_verify_commands",
+    "exec_sandbox_enabled",
     "cross_harness_redispatch",
     "enable_decomposition",
     "fat_harness_mode",
@@ -191,6 +194,32 @@ def migrated_pre_verify_shell_execution_semantics(
     migrated.pop("verify_shell_path", None)
     migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
     migrated["verify_shell_identity"] = None
+    migrated["exec_sandbox_enabled"] = True
+    if valid_execution_semantics_contract(
+        migrated
+    ) or valid_legacy_preflight_execution_semantics_contract(migrated):
+        return migrated
+    return None
+
+
+def migrated_pre_exec_sandbox_execution_semantics(
+    value: object,
+) -> dict[str, object] | None:
+    """Migrate the exact v7 shape, which predates the execution sandbox policy.
+
+    A v7 run never recorded a sandbox choice, so it resumes with the confined
+    policy (``True``); a controller whose sandbox is switched off then sees
+    drift and refuses the resume instead of silently running unconfined.
+    """
+    if (
+        not isinstance(value, Mapping)
+        or value.get("version") != PRE_EXEC_SANDBOX_EXECUTION_SEMANTICS_VERSION
+        or "exec_sandbox_enabled" in value
+    ):
+        return None
+    migrated = dict(value)
+    migrated["version"] = CURRENT_EXECUTION_SEMANTICS_VERSION
+    migrated["exec_sandbox_enabled"] = True
     if valid_execution_semantics_contract(
         migrated
     ) or valid_legacy_preflight_execution_semantics_contract(migrated):
@@ -235,6 +264,7 @@ def pre_adaptive_execution_semantics_rejection(
         max_limit=max_limit,
     )
     candidate["verify_shell_identity"] = None
+    candidate["exec_sandbox_enabled"] = True
     if not valid_execution_semantics_contract(candidate):
         return None
     if not isinstance(persisted_fingerprint, str) or persisted_fingerprint != fingerprint(
@@ -258,6 +288,7 @@ def pre_adaptive_execution_semantics_rejection(
 __all__ = [
     "CURRENT_EXECUTION_SEMANTICS_VERSION",
     "ExecutionSemanticsRejection",
+    "migrated_pre_exec_sandbox_execution_semantics",
     "migrated_pre_verify_shell_execution_semantics",
     "pre_adaptive_execution_semantics_rejection",
     "valid_execution_semantics_contract",

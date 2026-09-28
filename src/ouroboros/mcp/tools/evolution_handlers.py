@@ -48,6 +48,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import (
     BackgroundJobAcceptanceState,
+    job_work_error,
     start_background_tool_job,
 )
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
@@ -1711,7 +1712,7 @@ class StartEvolveStepHandler:
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
-                raise RuntimeError(str(result.error))
+                raise job_work_error(result.error)
             return result.value
 
         background_acceptance = BackgroundJobAcceptanceState()

@@ -615,6 +615,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Oh My Pi (``omp``) is a Pi-family coding agent speaking the same
+        # JSON event protocol as Pi, so it drives the same generic runtime /
+        # LLM adapter surfaces. Runtime-only differences (``--resume`` for
+        # session resume, ``glob`` instead of ``find``) live in
+        # ``orchestrator/omp_runtime.py``.
+        name="omp",
+        aliases=("omp_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=True,
+        switchable_runtime=True,
+        cli_name="omp",
+        cli_config_key="omp_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="gjc",
         aliases=("gajae-code", "gajae_code"),
         supports_runtime=True,
@@ -750,30 +767,32 @@ def render_mcp_server_instructions() -> str:
         "migration. Unclear request → "
         "`ouroboros_interview`; substantial end-to-end task → "
         "`ouroboros_start_auto`; existing Seed → "
-        "`ouroboros_start_execute_seed`; stuck or repeated failures → "
-        "`ouroboros_lateral_think`. Do not wait for the literal word "
-        '"ooo". '
+        "`ouroboros_start_execute_seed`; stuck, repeated failures, or a "
+        "consequential choice with no clear winner → `ouroboros_lateral_think`; "
+        "goal, constraints, and success criteria already settled → "
+        "`ouroboros_generate_seed` (no interview). Do not "
+        'wait for the literal word "ooo". '
         "Do not route simple questions or small unambiguous edits.\n"
         "\n"
-        "TOOL DISCOVERY: these tools may be DEFERRED — the tool exists but its "
-        "schema is not loaded, so it is not in your immediate tool list. Do NOT "
+        "TOOL DISCOVERY: tools may be DEFERRED (schema not loaded, absent "
+        "from your immediate tool list). Do NOT "
         "conclude a tool is unavailable from its absence. Load it through your "
         "runtime's own tool-discovery mechanism using the query "
-        "`+ouroboros <skill>` (e.g. `+ouroboros evaluate`), then call it by its "
-        "full `...ouroboros_*` name. A deferred schema can unload between turns, "
-        "so re-run discovery immediately before each call. If a tool is already "
-        "exposed, call it directly — discovery is a no-op then, and an empty "
-        "discovery result is expected, not a failure. Never surface this "
+        "`+ouroboros <skill>`, then call it by its "
+        "full `...ouroboros_*` name. Schemas can unload between turns — re-run "
+        "discovery right before each call. If a tool is already "
+        "exposed, call it directly — discovery is then a no-op and an empty "
+        "result is expected, not a failure. Never surface this "
         "tool-discovery plumbing to the user.\n"
         "\n"
         "SUBAGENT FAN-OUT: when a tool result carries a payload array, obey its "
         "dispatch contract. `host_action=spawn_subagents` means the host declared "
-        "parallel support: spawn ONE child per payload using your runtime's native "
-        "primitive, give each the payload `prompt`, await all, correlate by "
+        "parallel support: spawn ONE child per payload with your native "
+        "primitive, give each its `prompt`, await all, correlate by "
         "`result_correlation_key`, then synthesize. "
-        "`host_action=dispatch_subagents_if_supported` means host capability was "
-        "not declared: use the host's native parallel primitive when available, "
-        "otherwise process the same payloads sequentially. A passive plugin bridge "
+        "`host_action=dispatch_subagents_if_supported` means capability was "
+        "undeclared: use the native parallel primitive if available, else "
+        "process the payloads sequentially. A passive plugin bridge "
         "consumes `_subagents` itself. Preserve user-facing content while assistive "
         "work runs. During background execution, keep pumping `ouroboros_job_wait` "
         "with bounded timeouts: spawn each `pending_host_dispatches` entry the same "

@@ -28,6 +28,8 @@ RUNTIME_HANDLE_BACKEND_ALIASES: dict[str, str] = {
     "goose_cli": "goose",
     "pi": "pi",
     "pi_cli": "pi",
+    "omp": "omp",
+    "omp_cli": "omp",
     "gjc": "gjc",
     "gjc_cli": "gjc",
     "gemini": "gemini_cli",

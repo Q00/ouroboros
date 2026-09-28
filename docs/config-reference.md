@@ -165,7 +165,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
+  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "omp" | "gjc" | "antigravity" | "grok" | "zcode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3       # Maximum concurrent AC workers
@@ -174,13 +174,14 @@ orchestrator:
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   copilot_cli_path: null        # Path to Copilot CLI binary; null = resolve from PATH
   pi_cli_path: null             # Path to Pi CLI binary; null = resolve from PATH
+  omp_cli_path: null            # Path to OMP (Oh My Pi) CLI binary; null = resolve from PATH
   zcode_cli_path: null          # Path to zcode.cjs or a zcode executable
   default_max_turns: 10
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"omp"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
@@ -189,6 +190,7 @@ orchestrator:
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
+| `omp_cli_path` | `string \| null` | `null` | Absolute path to the OMP (Oh My Pi) CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OMP_CLI_PATH`. |
 | `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
 | `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
 | `dsh_cli_path` | `string \| null` | `null` | Absolute path to the DeepSeek Harness ACP server binary `dsh-acp-demo` (`~` is expanded). Used by the LLM-only `dsh` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_DSH_CLI_PATH`. |
@@ -214,7 +216,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). The runtime alias `deepseek_harness` is **not** accepted here — this field is validated against the literals above, so persist `dsh`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"omp"` \| `"ourocode"` \| `"gjc"` \| `"zcode"` \| `"dsh"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` and `dsh` are LLM-only and are not valid for `orchestrator.runtime_backend`. `dsh` additionally requires `orchestrator.dsh_config_path`; see [the DeepSeek Harness guide](guides/deepseek-harness.md). The runtime alias `deepseek_harness` is **not** accepted here — this field is validated against the literals above, so persist `dsh`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-6"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -374,6 +376,9 @@ execution:
 | `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. |
 | `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. |
 | `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
+| `run_verify_commands` | `bool` | `true` | Check an AC's success contract (expected artifacts and `verify_command`) before accepting it. While on, the evidence verifier may also replay allowlisted commands the worker ran, in a copy of the workspace under the execution sandbox (writes only inside the copy, no network; nothing is replayed where the sandbox is unavailable), to corroborate `tests_passed` and `commands_run` claims the transcript alone cannot prove (see [Verifier Evidence Policy](contributing/verifier-evidence-policy.md#replay-first-corroboration)). Off: nothing is executed by the harness. |
+| `verify_command_timeout_seconds` | `int >= 1` | `600` | Timeout for each `verify_command` run and each replayed command. |
+| `exec_sandbox` | `bool` | `true` | Confine the commands the controller runs on its own authority (verifier replay) with the execution sandbox: writes (content, names and metadata) only beneath the workspace copy and a per-run temp directory, no non-loopback network, an allowlisted environment (`sandbox-exec` on macOS; Landlock plus a seccomp metadata filter on Linux, where metadata inside the copy is read-only too). Where no backend works, nothing is run and the outcome is indeterminate (`sandbox_unavailable`). **Unsafe when `false`:** those commands run unconfined, able to write anywhere the user can and to use the network. `OUROBOROS_EXEC_SANDBOX` overrides it; a project `.env` cannot. The effective value is sealed when a run starts, and resuming it with a different value is refused. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
 | `default_policy` | `"ask"` \| `"efficient"` \| `"quality_first"` | `"ask"` | Persistent default execution policy for fresh runs. `ask` preserves the host's interactive efficiency prompt exactly. `efficient` resolves omitted arguments to `adaptive`/`observe` and `quality_first` to `quality_first`/`off` without asking. Explicit invocation arguments always win, resumed sessions keep their persisted immutable contract, and `strict` frugality assurance never derives from this setting. |
@@ -632,6 +637,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime). |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored permission preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches on approval-aware backends. Pi and GJC have no separate approval flag. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Stored OpenCode preference. Seed execution still forces `bypassPermissions`, translated to `--dangerously-skip-permissions`. |
+| `OUROBOROS_EXEC_SANDBOX` | `execution.exec_sandbox` | Execution sandbox for controller-run commands; on by default. `off` (or `0`, `false`, `no`) is **unsafe**: verifier replay then runs unconfined, able to write outside its workspace copy and to use the network. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
 | `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
@@ -643,6 +649,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
 | `OUROBOROS_PI_CLI_PATH` | `orchestrator.pi_cli_path` | Path to the Pi CLI binary. |
+| `OUROBOROS_OMP_CLI_PATH` | `orchestrator.omp_cli_path` | Path to the OMP (Oh My Pi) CLI binary. |
 | `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_DSH_CLI_PATH` | `orchestrator.dsh_cli_path` | Path to the `dsh-acp-demo` binary used by the LLM-only `dsh` backend. |
 | `OUROBOROS_DSH_CONFIG_PATH` | `orchestrator.dsh_config_path` | Absolute path to the trusted Cordis composition the `dsh` backend loads. Required by that backend. |
@@ -679,7 +686,7 @@ All environment variables have higher priority than the corresponding `config.ya
 |----------|---------|-------------|
 | `OUROBOROS_EXECUTION_MODEL` | `null` (runtime default) | Model used for agent execution inside the MCP evolve loop. Applies to runtimes that expose a per-call model override; unset it to preserve automatic runtime selection. |
 | `OUROBOROS_VALIDATION_MODEL` | `null` (runtime default) | Model used for import/validation fix passes during MCP evolution. Applies to runtimes that expose a per-call model override; unset it to preserve automatic runtime selection. |
-| `OUROBOROS_EVOLVE_STAGE1` | `"false"` | Set to `"true"` to enable Stage 1 mechanical checks (lint/build/test) during MCP evolution. |
+| `OUROBOROS_EVOLVE_STAGE1` | `"true"` | Stage 1 mechanical checks (lint/build/test from `.ouroboros/mechanical.toml`, authored by the detector when missing) for an evolve generation whose output has no `### Task N` markers. On by default because these executed checks are the only thing that can approve such a generation; semantic review there is advisory feedback. Set to `"false"` (or `"0"`) to skip them: every such generation is then unverified, never approved. Accepted values are `true`/`1` and `false`/`0`; any other value is logged and ignored. Honored only from trusted sources (process environment, `~/.ouroboros/.env`); a project `.env` cannot set it. |
 | `OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS` | `runtime_controls.mcp_tool_timeout_seconds` | Adapter-level MCP timeout for progress-aware tools. `0` disables the wall-clock cap. |
 | `OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS` | `runtime_controls.generation_idle_timeout_seconds` | Idle timeout when no generation/execution activity is observed. |
 | `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Timeout when activity continues without material progress. |
@@ -880,6 +887,20 @@ llm:
 
 Pi is available as an agent runtime backend and, when the Pi LLM adapter is installed, an LLM-only backend for interview, ambiguity scoring, seed-extraction, and structured JSON flows. `ouroboros setup --runtime pi` records the Pi executable and installs a managed Pi extension at `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`, so interactive Pi/roach-pi sessions can route exact-prefix `ooo ...` input back into Ouroboros after Pi restart or `/reload`. The Pi LLM adapter supports structured `response_format` requests through prompt-level JSON/schema instructions plus adapter-side extraction and validation; Pi does not expose a Codex-style native `--output-schema` hard-enforcement flag. The runtime uses documented JSON mode (`pi --mode json <prompt>`) and preserves Pi native session IDs for targeted resume.
 
+### OMP CLI Runtime
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: omp
+  omp_cli_path: null                      # omit if `omp` is already on PATH
+
+llm:
+  backend: omp
+```
+
+OMP (Oh My Pi) is available as an agent runtime backend and an LLM-only backend for interview, ambiguity scoring, seed-extraction, and structured JSON flows. `ouroboros setup --runtime omp` records the OMP executable and installs a managed OMP extension at `~/.omp/agent/extensions/ouroboros-ooo-bridge.ts`, so interactive OMP sessions can route exact-prefix `ooo ...` input back into Ouroboros after an OMP restart (dispatch timeout: `OUROBOROS_OMP_BRIDGE_TIMEOUT_MS`). The OMP LLM adapter supports structured `response_format` requests through prompt-level JSON/schema instructions plus adapter-side extraction and validation; OMP does not expose a hard `--output-schema` flag. The runtime uses documented JSON mode (`omp --mode json <prompt>`) and resumes prior sessions natively with `--resume <id>`. OMP selects its own model (roles `smol`/`slow`/`plan`) unless an explicit `--model` override is passed; the generic `default` sentinel is never forwarded. See the [OMP CLI runtime guide](runtime-guides/omp.md).
+
 ### Full Config Skeleton
 
 ```yaml
@@ -892,6 +913,7 @@ orchestrator:
   codex_cli_path: null
   opencode_cli_path: null
   pi_cli_path: null
+  omp_cli_path: null
   ourocode_cli_path: null
   default_max_turns: 10
 

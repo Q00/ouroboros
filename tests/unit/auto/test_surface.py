@@ -47,6 +47,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "goose",
         "kiro",
         "pi",
+        "omp",
         "gjc",
         "antigravity",
         "grok",

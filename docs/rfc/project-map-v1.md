@@ -297,6 +297,18 @@ Project identity is an indexing and attribution contract only:
    instead of returning an unmarked recent window; and
 7. projection performs no EventStore write and grants no execution authority.
 
+Each distinct `seed_id` also contributes one ambiguity-gate classification:
+`gated_seed_count`, `forced_seed_count`, or `unknown_seed_count`. Repeated runs
+of the same Seed do not increment these counts, and conflicting observations
+for one Seed resolve to unknown. `override_rate` is
+`forced_seed_count / (forced_seed_count + gated_seed_count)`; unknown Seeds are
+excluded and a zero denominator produces `null` (`n/a` in text output).
+
+The classification comes from `metadata.gate_forced`, stamped at Gen-1
+generation. Seeds without the field (pre-existing, hand-authored without it,
+or Gen-2) are classified as unknown; the current ambiguity threshold is never
+inferred retrospectively.
+
 ## V1 query surfaces
 
 `ouroboros_project_status` and `ouroboros status project` share the same

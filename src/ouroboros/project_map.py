@@ -86,6 +86,7 @@ class ProjectRunSummary(BaseModel, frozen=True):
     execution_id: str
     seed_id: str
     seed_goal: str | None = None
+    gate_forced: bool | None = None
     runtime_backend: str | None = None
     llm_backend: str | None = None
     status: SessionStatus
@@ -135,6 +136,41 @@ class ProjectRunSummary(BaseModel, frozen=True):
         return self
 
 
+def _gate_counts(
+    runs: tuple[ProjectRunSummary, ...] | list[ProjectRunSummary],
+) -> tuple[int, int, int, float | None]:
+    """Summarize one ambiguity-gate decision per distinct Seed.
+
+    A Seed can be executed more than once, so run-attempt cardinality must not
+    inflate the project-level Seed statistics. Known and unknown observations
+    are merged conservatively: a known decision wins over an unknown repeat,
+    while conflicting known decisions are treated as unknown.
+    """
+    decisions: dict[str, bool | None] = {}
+    conflicts: set[str] = set()
+    for run in runs:
+        seed_id = run.seed_id
+        current = run.gate_forced
+        if seed_id not in decisions:
+            decisions[seed_id] = current
+            continue
+        if seed_id in conflicts:
+            continue
+        previous = decisions[seed_id]
+        if previous is None:
+            decisions[seed_id] = current
+        elif current is not None and previous != current:
+            decisions[seed_id] = None
+            conflicts.add(seed_id)
+
+    gated = sum(decision is False for decision in decisions.values())
+    forced = sum(decision is True for decision in decisions.values())
+    unknown = sum(decision is None for decision in decisions.values())
+    known = gated + forced
+    rate = forced / known if known else None
+    return gated, forced, unknown, rate
+
+
 class ProjectRecord(BaseModel, frozen=True):
     """Complete immutable run projection for one project and optional workspace."""
 
@@ -146,6 +182,10 @@ class ProjectRecord(BaseModel, frozen=True):
     workspace_path: str | None = None
     run_count: int
     runs: tuple[ProjectRunSummary, ...]
+    gated_seed_count: int = 0
+    forced_seed_count: int = 0
+    unknown_seed_count: int = 0
+    override_rate: float | None = None
 
     @field_validator("project_id")
     @classmethod
@@ -162,6 +202,22 @@ class ProjectRecord(BaseModel, frozen=True):
     def _validate_workspace_path(cls, value: object) -> str | None:
         return None if value is None else _path_string(value, field="workspace_path")
 
+    @field_validator("gated_seed_count", "forced_seed_count", "unknown_seed_count")
+    @classmethod
+    def _validate_gate_counts(cls, value: object, info) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{info.field_name} must be a non-negative integer")
+        return value
+
+    @field_validator("override_rate")
+    @classmethod
+    def _validate_override_rate(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+            raise ValueError("override_rate must be between 0 and 1")
+        return float(value)
+
     @model_validator(mode="after")
     def _validate_population(self) -> ProjectRecord:
         scope = self.workspace_path or "."
@@ -172,6 +228,26 @@ class ProjectRecord(BaseModel, frozen=True):
         )
         if self.run_count != len(self.runs):
             raise ValueError("run_count must equal the complete run population")
+        expected_counts = _gate_counts(self.runs)
+        actual_counts = (
+            self.gated_seed_count,
+            self.forced_seed_count,
+            self.unknown_seed_count,
+            self.override_rate,
+        )
+        stats_fields = {
+            "gated_seed_count",
+            "forced_seed_count",
+            "unknown_seed_count",
+            "override_rate",
+        }
+        if not stats_fields.intersection(self.model_fields_set):
+            object.__setattr__(self, "gated_seed_count", expected_counts[0])
+            object.__setattr__(self, "forced_seed_count", expected_counts[1])
+            object.__setattr__(self, "unknown_seed_count", expected_counts[2])
+            object.__setattr__(self, "override_rate", expected_counts[3])
+        elif actual_counts != expected_counts:
+            raise ValueError("gate statistics must match the complete run population")
         for run in self.runs:
             if run.project_id != self.project_id or run.project_root != self.project_root:
                 raise ValueError("every run must belong to the ProjectRecord identity")
@@ -317,12 +393,17 @@ class ProjectMapBuilder:
 
         runs = [await self._run_summary(start) for start in starts]
         runs.sort(key=lambda run: (run.started_at, run.session_id, run.source_start_event_id))
+        gated, forced, unknown, override_rate = _gate_counts(runs)
         return ProjectRecord(
             project_id=project.project_id,
             project_root=project.project_root,
             workspace_path=workspace_path,
             run_count=len(runs),
             runs=tuple(runs),
+            gated_seed_count=gated,
+            forced_seed_count=forced,
+            unknown_seed_count=unknown,
+            override_rate=override_rate,
         )
 
     async def _run_summary(self, start: _AttributedStart) -> ProjectRunSummary:
@@ -366,6 +447,7 @@ class ProjectMapBuilder:
                 execution_id=tracker.execution_id,
                 seed_id=tracker.seed_id,
                 seed_goal=event.data.get("seed_goal"),
+                gate_forced=event.data.get("gate_forced"),
                 runtime_backend=event.data.get("runtime_backend"),
                 llm_backend=event.data.get("llm_backend"),
                 status=tracker.status,

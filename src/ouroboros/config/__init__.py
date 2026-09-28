@@ -68,6 +68,7 @@ from ouroboros.config.loader import (
     get_mechanical_detector_model,
     get_n_version_tournament_enabled,
     get_native_session_index_enabled,
+    get_omp_cli_path,
     get_ontology_analysis_model,
     get_opencode_cli_path,
     get_opencode_mode,
@@ -86,6 +87,7 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
+    resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
     ClarificationConfig,
@@ -188,6 +190,8 @@ __all__ = [
     "get_ourocode_cli_path",
     "get_dsh_cli_path",
     "get_dsh_config_path",
+    "get_omp_cli_path",
+    "resolve_omp_cli_path",
     "get_pi_cli_path",
     "get_zcode_cli_path",
     "get_qa_model",

@@ -46,6 +46,7 @@ from ouroboros.config import (
     get_llm_model_for_role,
     get_usage_limit_pause_seconds,
 )
+from ouroboros.config.exec_sandbox import exec_sandbox_enabled
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
@@ -153,6 +154,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.execution_semantics import (
     CURRENT_EXECUTION_SEMANTICS_VERSION,
+    migrated_pre_exec_sandbox_execution_semantics,
     migrated_pre_verify_shell_execution_semantics,
     pre_adaptive_execution_semantics_rejection,
     valid_execution_semantics_contract,
@@ -1069,6 +1071,8 @@ class OrchestratorRunner:
         self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
+        # Sealed in the execution-semantics contract; replay confines with it.
+        self._exec_sandbox_enabled = exec_sandbox_enabled()
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         verify_shell = resolve_verify_shell() if self._run_verify_commands else None
         self._verify_shell_identity = (
@@ -3926,6 +3930,7 @@ class OrchestratorRunner:
         return {
             "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
+            "exec_sandbox_enabled": self._exec_sandbox_enabled,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "verify_shell_identity": (
                 dict(self._verify_shell_identity)
@@ -6151,6 +6156,25 @@ class OrchestratorRunner:
             raw_proof = migrated_proof
             raw_execution_semantics = migrated_verify_shell_semantics
             self._verify_shell_identity = None
+
+        migrated_sandbox_semantics = migrated_pre_exec_sandbox_execution_semantics(
+            raw_execution_semantics
+        )
+        if migrated_sandbox_semantics is not None:
+            if raw_proof.get("execution_semantics_fingerprint") != (
+                self._execution_semantics_fingerprint(raw_execution_semantics)
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid pre-exec-sandbox contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            raw_contract = deepcopy(dict(raw_contract))
+            raw_proof = raw_contract["frugality_proof"]
+            raw_contract["execution_semantics"] = migrated_sandbox_semantics
+            raw_proof["execution_semantics_fingerprint"] = self._execution_semantics_fingerprint(
+                migrated_sandbox_semantics
+            )
+            raw_execution_semantics = migrated_sandbox_semantics
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
             raw_execution_semantics
@@ -8639,6 +8663,8 @@ class OrchestratorRunner:
                 "project_identity": project_identity,
                 "project_workspace": self._effective_cwd(),
             }
+            if seed.metadata.gate_forced is not None:
+                create_session_kwargs["gate_forced"] = seed.metadata.gate_forced
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:
@@ -10228,21 +10254,21 @@ class OrchestratorRunner:
 
             analyzer = self._build_dependency_analyzer()
             dep_result = await analyzer.analyze(seed.acceptance_criteria)
-
             if dep_result.is_err:
+                from ouroboros.orchestrator.dependency_analyzer import DependencyCycleError
+
+                if isinstance(dep_result.error, DependencyCycleError):
+                    raise dep_result.error
                 log.warning(
                     "orchestrator.runner.dependency_analysis_failed",
                     execution_id=exec_id,
                     error=str(dep_result.error),
                 )
                 # Fallback: run all ACs in a single parallel level
-                all_indices = tuple(range(len(seed.acceptance_criteria)))
+                acs = tuple(ACNode(i, ac_text(ac)) for i, ac in enumerate(seed.acceptance_criteria))
                 dependency_graph = DependencyGraph(
-                    nodes=tuple(
-                        ACNode(index=i, content=ac_text(ac), depends_on=())
-                        for i, ac in enumerate(seed.acceptance_criteria)
-                    ),
-                    execution_levels=(all_indices,) if all_indices else (),
+                    nodes=acs,
+                    execution_levels=(tuple(node.index for node in acs),) if acs else (),
                 )
             else:
                 dependency_graph = dep_result.value
@@ -10328,6 +10354,7 @@ class OrchestratorRunner:
             model_router=self._model_router,
             route_economics=self._route_economics,
             run_verify_commands=execution_semantics["run_verify_commands"],
+            exec_sandbox_enabled=execution_semantics["exec_sandbox_enabled"],
             verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
             verify_shell_identity=cast(
                 Mapping[str, object] | None,

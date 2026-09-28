@@ -24,17 +24,22 @@ The evaluation pipeline runs three progressive stages:
    - Lint checks, build validation, test execution
    - Static analysis, coverage measurement
    - Fails fast if mechanical checks don't pass
+   - The only stage that can grant approval: at least one configured check must run and all must pass
 
-2. **Stage 2: Semantic Evaluation** (Standard tier)
+2. **Stage 2: Semantic Evaluation** (Standard tier, advisory)
    - AC compliance assessment
    - Goal alignment scoring
    - Drift measurement
    - Reasoning explanation
+   - Can withhold approval and supply feedback; cannot grant it
 
-3. **Stage 3: Multi-Model Consensus** (Frontier tier, optional)
+3. **Stage 3: Multi-Model Consensus** (Frontier tier, optional, advisory)
    - Multiple models vote on approval
    - Only triggered by uncertainty or manual request
-   - Majority ratio determines outcome
+   - A rejection withholds approval; an approval cannot grant it or lift a Stage 2 block
+
+Without an executed Stage 1 check the outcome is `acceptance_state: unverified`
+(not approved), with the model review attached as feedback.
 
 ## Instructions
 
@@ -125,6 +130,7 @@ fallback instead of retrying the failing call.
      - **REJECTED at Stage 1** (mechanical, `code_changes_detected: false`): `◆ Current state → next: Run ooo run first to produce code, then ooo evaluate`
      - **REJECTED at Stage 2** (semantic): `◆ Current state → next: ooo run to re-execute with fixes — or ooo evolve for iterative refinement`
      - **REJECTED at Stage 3** (consensus): `◆ Current state → next: ooo interview to re-examine requirements — or ooo unstuck to challenge assumptions`
+     - **NOT APPROVED (unverified)** (`acceptance_state: unverified`, no executed check): `◆ Current state → next: add executable checks to .ouroboros/mechanical.toml (or run ouroboros detect), then ooo evaluate; the semantic review above is feedback, not a verdict`
 
 ## Fallback (No MCP Server)
 

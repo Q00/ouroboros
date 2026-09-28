@@ -249,6 +249,16 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
             )
         )
 
+    ac_compliance = data["ac_compliance"]
+    if not isinstance(ac_compliance, bool):
+        return Result.err(
+            ValidationError(
+                "'ac_compliance' must be a boolean",
+                field="ac_compliance",
+                value=ac_compliance,
+            )
+        )
+
     if "reward_hacking_risk" not in data:
         data["reward_hacking_risk"] = 0.0
 
@@ -279,7 +289,7 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         return Result.ok(
             SemanticResult(
                 score=score,
-                ac_compliance=bool(data["ac_compliance"]),
+                ac_compliance=ac_compliance,
                 goal_alignment=goal_alignment,
                 drift_score=drift_score,
                 uncertainty=uncertainty,

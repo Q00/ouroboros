@@ -342,6 +342,69 @@ def compare_cli_executable_version_attestations(
     return CliExecutableVersionState.CHANGED
 
 
+def verify_cli_executable_identity_unchanged(
+    *,
+    display_name: str,
+    cli_path: str,
+    codex_native: bool,
+    path_identity_snapshot: str | None,
+    content_identity_snapshot: str | None,
+    version_attestation_snapshot: CliExecutableVersionAttestation | None,
+    current_path_identity: Callable[[], str | None],
+    current_content_identity: Callable[[], str | None],
+    current_version_attestation: Callable[
+        [CliExecutableVersionAttestation | None], CliExecutableVersionAttestation
+    ],
+) -> None:
+    """Raise on executable drift or unavailable version-attestation evidence.
+
+    Pure policy over the runtime's initialization snapshots; the runtime
+    decides what to do with the error (observe and re-attest).
+    """
+    if path_identity_snapshot is None:
+        cli_candidate = Path(cli_path).expanduser()
+        if not cli_candidate.is_absolute():
+            if codex_native:
+                raise RuntimeError(
+                    "Codex CLI executable was unresolved at runtime initialization; "
+                    "start a new execution session"
+                )
+        elif cli_candidate.exists():
+            raise RuntimeError(
+                f"{display_name} executable appeared after runtime initialization; "
+                "start a new execution session"
+            )
+        require_unchanged_cli_version_attestation(
+            display_name,
+            version_attestation_snapshot,
+            lambda: current_version_attestation(None),
+        )
+        return
+    if current_path_identity() != path_identity_snapshot:
+        raise RuntimeError(
+            f"{display_name} executable changed after runtime initialization; "
+            "start a new execution session"
+        )
+    if current_content_identity() != content_identity_snapshot:
+        raise RuntimeError(
+            f"{display_name} executable changed after runtime initialization; "
+            "start a new execution session"
+        )
+    require_unchanged_cli_version_attestation(
+        display_name,
+        version_attestation_snapshot,
+        lambda: current_version_attestation(version_attestation_snapshot),
+    )
+
+
+_UNAVAILABLE_ATTESTATION_MARKERS = ("without claiming executable drift", "was not captured")
+
+
+def is_unavailable_attestation_error(message: str) -> bool:
+    """True when a verification error reports missing evidence, not a changed binary."""
+    return any(marker in message for marker in _UNAVAILABLE_ATTESTATION_MARKERS)
+
+
 def require_unchanged_cli_version_attestation(
     display_name: str,
     initialized: CliExecutableVersionAttestation | None,

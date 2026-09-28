@@ -36,6 +36,7 @@ def _start(
     session_id: str,
     workspace_path: str = ".",
     nested_workspace_path: str | None = None,
+    gate_forced: bool | None = None,
 ) -> BaseEvent:
     scoped = ProjectIdentity(
         project_id=project.project_id,
@@ -55,6 +56,8 @@ def _start(
                 "workspace_path": nested_workspace_path,
             }
         }
+    if gate_forced is not None:
+        data["gate_forced"] = gate_forced
     return BaseEvent(
         id=f"event-{session_id}",
         type="orchestrator.session.started",
@@ -81,6 +84,10 @@ async def test_handler_returns_structured_record_without_writing(tmp_path: Path)
     assert isinstance(payload, dict)
     assert payload["project_id"] == project.project_id
     assert payload["run_count"] == 1
+    assert payload["gated_seed_count"] == 0
+    assert payload["forced_seed_count"] == 0
+    assert payload["unknown_seed_count"] == 1
+    assert payload["override_rate"] is None
     assert payload["runs"][0]["status"] == "running"
     assert result.value.meta == {
         "read_only": True,
@@ -89,6 +96,27 @@ async def test_handler_returns_structured_record_without_writing(tmp_path: Path)
     }
     assert await store.get_current_rowid() == rowid_before
     assert result.value.text_content.startswith("Project Status\n")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_handler_formats_ambiguity_gate_statistics(tmp_path: Path) -> None:
+    project = _project(tmp_path / "project")
+    store = EventStore(sqlite_database_url(tmp_path / "events.db"))
+    await store.initialize()
+    await store.append(_start(project, session_id="gated", gate_forced=False))
+    await store.append(_start(project, session_id="forced", gate_forced=True))
+
+    result = await ProjectStatusHandler(event_store=store).handle(
+        {"project_dir": project.project_root, "limit": 10}
+    )
+
+    assert result.is_ok
+    text = result.value.text_content
+    assert "Gated Seeds: 1" in text
+    assert "Forced Seeds: 1" in text
+    assert "Unknown Seeds: 0" in text
+    assert "Override rate: 50.0%" in text
     await store.close()
 
 

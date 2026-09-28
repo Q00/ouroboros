@@ -181,6 +181,11 @@ class TestDetectKeywords:
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:publish"
 
+    def test_ooo_maintain_with_issue(self):
+        result = detect_keywords("ooo maintain #2308")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:maintain"
+
     def test_ooo_resume_session_detected(self):
         result = detect_keywords("ooo resume-session")
         assert result["detected"] is True
@@ -264,6 +269,16 @@ class TestMainGate:
         out = capsys.readouterr().out
         assert "/ouroboros:setup" not in out
         assert "/ouroboros:qa" in out
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_maintain_bypasses_setup_gate(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = "ooo maintain"
+            main()
+        out = capsys.readouterr().out
+        assert "/ouroboros:setup" not in out
+        assert "/ouroboros:maintain" in out
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)

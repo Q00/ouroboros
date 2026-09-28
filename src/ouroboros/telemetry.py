@@ -34,7 +34,11 @@ import urllib.request
 import uuid
 
 from ouroboros import __version__
-from ouroboros.mcp.failure_taxonomy import classify_failure
+from ouroboros.mcp.failure_taxonomy import (
+    RUN_FAILURE_CAUSES,
+    UNKNOWN_RUN_FAILURE_CAUSE,
+    classify_failure,
+)
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
@@ -245,6 +249,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "service",
         "status",
         "error_type",
+        "origin",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -252,6 +257,12 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "ci",
     }
 )
+# ``origin`` exists for exactly one question -- is the interview-less Seed
+# path (``ouroboros_generate_seed`` with ``session_context``) being used, and
+# does it produce a Seed or bounce back gap questions? It is stamped only on
+# ``command=seed`` rows and only from this closed set; any other value or
+# command drops it before the properties dict is built.
+_SEED_ORIGINS = frozenset({"interview", "session_context", "session_context_gap"})
 _COMMAND_RUN_CLI_KEYS = frozenset(
     {
         "command",
@@ -269,6 +280,7 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "terminal_status",
         "verified",
         "failure_reason_code",
+        "failure_cause",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -351,6 +363,32 @@ _AC_VERIFY_CAUSES = frozenset(
     }
 )
 _UNKNOWN_VERIFY_CAUSE = "unknown"
+# A frozen runtime authority input (CLI config, executable, dispatch registry,
+# profile routing) changed after a runtime initialized. SSOT pairing with
+# orchestrator/codex_cli_runtime.py `_RUNTIME_DRIFT_KINDS` — edit both
+# together. The run continues; this counts how often the world moves under it.
+_RUNTIME_DRIFT_KEYS = frozenset(
+    {
+        "kind",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+)
+_RUNTIME_DRIFT_KINDS = frozenset(
+    {
+        "codex_config",
+        "cli_executable",
+        "skill_dispatcher",
+        "mcp_handler_registry",
+        "skill_dispatch_registry",
+        "profile_routing",
+        "baseline_unavailable",
+        "attestation_timeout",
+    }
+)
+_UNKNOWN_DRIFT_KIND = "unknown"
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -896,6 +934,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _SUBAGENT_DISPATCH_KEYS
     if event == "ac_verify_failed":
         return _AC_VERIFY_FAILED_KEYS
+    if event == "runtime_drift":
+        return _RUNTIME_DRIFT_KEYS
     return None
 
 
@@ -915,6 +955,7 @@ def _daily_insert_id(
         properties.get("transport"),
         properties.get("phase"),
         properties.get("fanout_kind"),
+        properties.get("origin"),
     )
     material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
     return hashlib.sha256(material.encode()).hexdigest()
@@ -977,8 +1018,13 @@ def capture_tool_call(
     error_type: str | None = None,
     blocked: bool = False,
     registered: bool = True,
+    origin: str | None = None,
 ) -> None:
-    """Capture service activity plus retained lifecycle/failure commands."""
+    """Capture service activity plus retained lifecycle/failure commands.
+
+    ``origin`` is honoured only for ``command=seed`` and only when it is one
+    of ``_SEED_ORIGINS``; every other combination is dropped silently.
+    """
     del duration_ms
     try:
         if not registered:
@@ -995,15 +1041,16 @@ def capture_tool_call(
             status = "accepted" if ok else "rejected"
         else:
             status = "succeeded" if ok else "failed"
-        capture(
-            "command_run",
-            {
-                "command": command or name.removeprefix("ouroboros_"),
-                "service": "mcp",
-                "status": status,
-                "error_type": error_type,
-            },
-        )
+        command_value = command or name.removeprefix("ouroboros_")
+        properties: dict[str, Any] = {
+            "command": command_value,
+            "service": "mcp",
+            "status": status,
+            "error_type": error_type,
+        }
+        if command_value == "seed" and origin in _SEED_ORIGINS:
+            properties["origin"] = origin
+        capture("command_run", properties)
     except Exception:
         pass
 
@@ -1020,6 +1067,21 @@ def capture_ac_verify_failed(cause: str | None) -> None:
         capture(
             "ac_verify_failed",
             {"cause": cause if cause in _AC_VERIFY_CAUSES else _UNKNOWN_VERIFY_CAUSE},
+        )
+    except Exception:
+        pass
+
+
+def capture_runtime_drift(kind: str | None) -> None:
+    """Capture one observed mid-run change of a frozen runtime authority input.
+
+    Folds anything outside the audited ``_RUNTIME_DRIFT_KINDS`` vocabulary to
+    a fixed ``unknown`` literal; never a path, config value, or message.
+    """
+    try:
+        capture(
+            "runtime_drift",
+            {"kind": kind if kind in _RUNTIME_DRIFT_KINDS else _UNKNOWN_DRIFT_KIND},
         )
     except Exception:
         pass
@@ -1118,6 +1180,14 @@ def capture_job_outcome(
         }
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
+            # The fine-grained run cause (SSOT: orchestrator/run_failure_cause.py)
+            # is producer-owned but folded to the closed vocabulary here anyway
+            # so a replayed or spoofed value is counted, never forwarded.
+            raw_cause = meta.get("failure_cause")
+            if isinstance(raw_cause, str):
+                properties["failure_cause"] = (
+                    raw_cause if raw_cause in RUN_FAILURE_CAUSES else UNKNOWN_RUN_FAILURE_CAUSE
+                )
         capture("workflow_outcome", properties)
     except Exception:
         pass
@@ -1270,6 +1340,7 @@ def _reset_for_tests() -> None:
 __all__ = [
     "capture",
     "capture_ac_verify_failed",
+    "capture_runtime_drift",
     "capture_cli_command",
     "capture_job_outcome",
     "capture_mcp_serve_started",

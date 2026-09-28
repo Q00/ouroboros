@@ -128,7 +128,7 @@ documented fallback / Path B instead of retrying the failing call.
 ### Path B: Plugin-only (no MCP tools available)
 
 If MCP tools are not available, explain the evolutionary loop concept and
-suggest installing the Ouroboros MCP server. See [Getting Started](docs/getting-started.md) for install options, then run:
+suggest installing the Ouroboros MCP server. See [Getting Started](https://github.com/Q00/ouroboros/blob/main/docs/getting-started.md) for install options, then run:
 
 ```
 ouroboros mcp serve --runtime claude-cli

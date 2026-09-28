@@ -424,6 +424,13 @@ reconstruction failures, and limits below the complete matching population fail
 the request without returning a partial record. Project status is attribution
 only: it cannot authorize execution, alter evidence, or declare acceptance.
 
+The returned `ProjectRecord` includes ambiguity-gate statistics for the Seeds
+associated with the project's recorded runs: `gated_seed_count`,
+`forced_seed_count`, `unknown_seed_count`, and `override_rate`. The rate is
+`forced_seed_count / (forced_seed_count + gated_seed_count)`; it is `null` when
+there are no known decisions, and unknown/legacy entries are excluded from the
+denominator.
+
 ### `ouroboros_brownfield` Scan Boundaries
 
 The brownfield MCP tool registers existing codebases for PM/interview context.
@@ -554,6 +561,11 @@ class MCPClientAdapter:
 ##### `async connect(config: MCPServerConfig) -> Result[MCPServerInfo, MCPClientError]`
 
 Connect to an MCP server.
+
+If the task is cancelled during SDK connection establishment, the adapter clears
+its connection state and attempts to close its SDK client and any HTTP client
+it owns before propagating `asyncio.CancelledError`. Ordinary cleanup errors
+are logged without replacing cancellation or triggering a connection retry.
 
 ```python
 async with MCPClientAdapter() as client:
