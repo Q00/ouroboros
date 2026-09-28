@@ -330,8 +330,28 @@ async def test_transient_indeterminate_checks_are_rerun_once(
         result = await real(*args, **kwargs)
         calls.append(kwargs.get("only_checks"))
         if len(calls) == 1:
+            # What the product records for an oracle run that timed out
+            # before the target answered (``oracle_run``): no exit code, no
+            # signature, an undecided result in which no case passed.
             checks = tuple(
-                check.model_copy(update={"status": CheckStatus.INDETERMINATE, "reason": "timeout"})
+                check.model_copy(
+                    update={
+                        "status": CheckStatus.INDETERMINATE,
+                        "reason": "timeout",
+                        "timed_out": True,
+                        "return_code": None,
+                        "signature_seen": False,
+                        "oracle_result": check.oracle_result.model_copy(
+                            update={
+                                "resolve": "setup_timeout",
+                                "cases": tuple(
+                                    case.model_copy(update={"passed": False, "detail": ""})
+                                    for case in check.oracle_result.cases
+                                ),
+                            }
+                        ),
+                    }
+                )
                 for check in result.checks
             )
             return result.model_copy(
