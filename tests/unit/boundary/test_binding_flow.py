@@ -47,6 +47,7 @@ from ouroboros.boundary.run_wiring import (
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.persistence.event_store import EventStore
 
+from .journal_fixtures import settled_verification
 from .test_acceptance import admission_on_base
 from .test_oracle import CASES, _package, _repo
 from .test_oracle import _seed as _oracle_seed
@@ -354,9 +355,11 @@ async def test_transient_indeterminate_checks_are_rerun_once(
                 )
                 for check in result.checks
             )
-            return result.model_copy(
-                update={"checks": checks, "verdict": CandidateVerdict.INDETERMINATE}
-            )
+            # The receipt-level fields (verdict, reasons, mutation flag) as
+            # ``verify_candidate`` derives them from those checks.
+            settled = settled_verification(result.model_copy(update={"checks": checks}))
+            assert settled.verdict is CandidateVerdict.INDETERMINATE
+            return settled
         return result
 
     monkeypatch.setattr(binding_flow, "verify_candidate", flaky)
